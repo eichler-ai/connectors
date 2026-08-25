@@ -1,0 +1,39 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- See MCPBridge.RevitAdapter.csproj for the multi-target rationale (PRD §11). -->
+    <TargetFrameworks>net10.0-windows</TargetFrameworks>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>MCPBridge.AddIn</RootNamespace>
+    <AssemblyName>MCPBridge.AddIn</AssemblyName>
+    <UseWindowsForms>false</UseWindowsForms>
+    <RevitVersion>2027</RevitVersion>
+    <RevitInstallDir>C:\Program Files\Autodesk\Revit $(RevitVersion)</RevitInstallDir>
+    <!-- Unsigned dev build per PRD §12 / roadmap phase 01; signing is phase 05. -->
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="RevitAPI">
+      <HintPath>$(RevitInstallDir)\RevitAPI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="RevitAPIUI">
+      <HintPath>$(RevitInstallDir)\RevitAPIUI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\MCPBridge.Core\MCPBridge.Core.csproj" />
+    <ProjectReference Include="..\MCPBridge.RevitAdapter\MCPBridge.RevitAdapter.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="MCPBridge.addin">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+</Project>

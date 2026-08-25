@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <IsPackable>false</IsPackable>
+    <RootNamespace>MCPBridge.Discovery.Tests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      Empty shell for now: API discovery (list_functions/search_functions/describe_function)
+      is phase 03 per PRD §15. No tests here yet; this project exists so the
+      solution/test layout matches the README from day one.
+    -->
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\MCPBridge.Core\MCPBridge.Core.csproj" />
+    <ProjectReference Include="..\..\src\MCPBridge.RevitAdapter\MCPBridge.RevitAdapter.csproj" />
+  </ItemGroup>
+
+</Project>

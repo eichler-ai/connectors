@@ -1,0 +1,42 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!--
+      Multi-target structure per PRD §11: v1 needs only 2027, but the plural
+      <TargetFrameworks> element (rather than singular) is used deliberately so
+      that adding 2025/2026 support later is a matter of adding TFM entries, not
+      restructuring the project.
+
+      DEVIATION FROM PRD §11: the PRD specifies net8.0-windows for 2027. This
+      dev environment's actual installed Revit 2027 build (RevitAPI.dll/
+      RevitAPIUI.dll, version 27.0.4.0) references System.Runtime 10.0.0.0,
+      and compiling against it under net8.0-windows fails with a hard CS1705
+      error (not suppressible via NoWarn; it is a true compiler error, not a
+      promotable warning). Targeting net10.0-windows here resolves it. See the
+      phase-01 implementation report for the full explanation and a
+      recommendation to reconcile this with PRD §11: it's possible this
+      dev-environment Revit 2027 build is simply ahead of the PRD's assumption,
+      or that the PRD's "2025-2027 all on .NET 8" premise no longer holds.
+    -->
+    <TargetFrameworks>net10.0-windows</TargetFrameworks>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>MCPBridge.RevitAdapter</RootNamespace>
+    <AssemblyName>MCPBridge.RevitAdapter</AssemblyName>
+    <RevitVersion>2027</RevitVersion>
+    <RevitInstallDir>C:\Program Files\Autodesk\Revit $(RevitVersion)</RevitInstallDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="RevitAPI">
+      <HintPath>$(RevitInstallDir)\RevitAPI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="RevitAPIUI">
+      <HintPath>$(RevitInstallDir)\RevitAPIUI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+</Project>
