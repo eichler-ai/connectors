@@ -42,19 +42,27 @@ func New() *Registry {
 	return &Registry{instances: make(map[string]*Instance)}
 }
 
+// cloneInstance returns a copy of inst with its own backing Documents
+// slice, so callers can't mutate the registry's internal state through a
+// returned pointer.
+func cloneInstance(inst *Instance) *Instance {
+	cp := *inst
+	cp.Documents = append([]Document(nil), inst.Documents...)
+	return &cp
+}
+
 // Register records or replaces the entry for inst.InstanceID. A second
 // register for an already-known instance_id (e.g. after a reconnect, per
 // PRD §05) overwrites the prior entry outright rather than merging it.
 func (r *Registry) Register(inst *Instance) {
-	cp := *inst
-	cp.Documents = append([]Document(nil), inst.Documents...)
+	cp := cloneInstance(inst)
 	if cp.RegisteredAt.IsZero() {
 		cp.RegisteredAt = time.Now().UTC()
 	}
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.instances[cp.InstanceID] = &cp
+	r.instances[cp.InstanceID] = cp
 }
 
 // Get returns the current record for instanceID, if any.
@@ -65,9 +73,7 @@ func (r *Registry) Get(instanceID string) (*Instance, bool) {
 	if !ok {
 		return nil, false
 	}
-	cp := *inst
-	cp.Documents = append([]Document(nil), inst.Documents...)
-	return &cp, true
+	return cloneInstance(inst), true
 }
 
 // Remove drops instanceID from the registry. Removing an instance that
@@ -84,9 +90,7 @@ func (r *Registry) List() []*Instance {
 	defer r.mu.RUnlock()
 	out := make([]*Instance, 0, len(r.instances))
 	for _, inst := range r.instances {
-		cp := *inst
-		cp.Documents = append([]Document(nil), inst.Documents...)
-		out = append(out, &cp)
+		out = append(out, cloneInstance(inst))
 	}
 	return out
 }

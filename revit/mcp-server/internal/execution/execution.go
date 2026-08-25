@@ -64,18 +64,6 @@ type Result struct {
 	ErrorDetail *diag.Record  `json:"error,omitempty"`
 }
 
-// wireResult is the shape the add-in is expected to respond with over the
-// TCP connection for execute_script/poll_execution/cancel_execution — the
-// same fields as Result, decoded independently so a malformed wire payload
-// doesn't corrupt Result's own JSON tags.
-type wireResult struct {
-	Status      Status        `json:"status"`
-	ExecutionID string        `json:"execution_id"`
-	Output      string        `json:"output,omitempty"`
-	Notices     []diag.Record `json:"notices,omitempty"`
-	ErrorDetail *diag.Record  `json:"error,omitempty"`
-}
-
 type record struct {
 	instanceID string
 	status     Status
@@ -213,10 +201,12 @@ func (m *Manager) ExecuteScript(ctx context.Context, instanceID, documentID, scr
 	return res, nil
 }
 
-// PollExecution forwards a poll to the owning instance, per PRD §06. An
-// unknown execution_id is an explicit error, never a hang, per §05's
-// "Recovering state, not just the socket."
-func (m *Manager) PollExecution(ctx context.Context, executionID string, timeoutMs int) (*Result, *diag.Record) {
+// forwardExisting looks up executionID, returns its cached terminal result
+// if it's already settled, otherwise forwards wireMethod to the owning
+// instance's connection with the given timeout/params and settles the
+// result. Shared by PollExecution and CancelExecution, which differ only in
+// wire method, params, and timeout.
+func (m *Manager) forwardExisting(ctx context.Context, executionID, wireMethod string, timeoutMs int, params map[string]any) (*Result, *diag.Record) {
 	m.mu.Lock()
 	rec, ok := m.executions[executionID]
 	if !ok {
@@ -235,15 +225,22 @@ func (m *Manager) PollExecution(ctx context.Context, executionID string, timeout
 		return nil, errInstanceDisconnected(instanceID, executionID)
 	}
 
-	res, drec := m.callWire(ctx, conn, "poll_execution", executionID, timeoutMs, map[string]any{
-		"execution_id": executionID,
-		"timeout_ms":   timeoutMs,
-	})
+	res, drec := m.callWire(ctx, conn, wireMethod, executionID, timeoutMs, params)
 	if drec != nil {
 		return nil, drec
 	}
 	m.settle(instanceID, executionID, res)
 	return res, nil
+}
+
+// PollExecution forwards a poll to the owning instance, per PRD §06. An
+// unknown execution_id is an explicit error, never a hang, per §05's
+// "Recovering state, not just the socket."
+func (m *Manager) PollExecution(ctx context.Context, executionID string, timeoutMs int) (*Result, *diag.Record) {
+	return m.forwardExisting(ctx, executionID, "poll_execution", timeoutMs, map[string]any{
+		"execution_id": executionID,
+		"timeout_ms":   timeoutMs,
+	})
 }
 
 // CancelExecution forwards a cancellation signal to the owning add-in
@@ -252,33 +249,10 @@ func (m *Manager) PollExecution(ctx context.Context, executionID string, timeout
 // immediately, or a still-non-terminal status if the add-in's own grace
 // period hasn't lapsed yet.
 func (m *Manager) CancelExecution(ctx context.Context, executionID string) (*Result, *diag.Record) {
-	m.mu.Lock()
-	rec, ok := m.executions[executionID]
-	if !ok {
-		m.mu.Unlock()
-		return nil, errUnknownExecution(executionID)
-	}
-	if IsTerminal(rec.status) {
-		result := rec.result
-		m.mu.Unlock()
-		return result, nil
-	}
-	conn, connOK := m.conns[rec.instanceID]
-	instanceID := rec.instanceID
-	m.mu.Unlock()
-	if !connOK {
-		return nil, errInstanceDisconnected(instanceID, executionID)
-	}
-
 	const cancelTimeoutMs = 10_000 // grace-period ceiling per PRD §06; not caller-configurable.
-	res, drec := m.callWire(ctx, conn, "cancel_execution", executionID, cancelTimeoutMs, map[string]any{
+	return m.forwardExisting(ctx, executionID, "cancel_execution", cancelTimeoutMs, map[string]any{
 		"execution_id": executionID,
 	})
-	if drec != nil {
-		return nil, drec
-	}
-	m.settle(instanceID, executionID, res)
-	return res, nil
 }
 
 // callWire performs one JSON-RPC round trip for method against conn,
@@ -297,17 +271,12 @@ func (m *Manager) callWire(ctx context.Context, conn *transport.Conn, method, ex
 		return nil, fromRPCError(executionID, rpcErr)
 	}
 
-	var wr wireResult
-	if err := json.Unmarshal(raw, &wr); err != nil {
+	var res Result
+	if err := json.Unmarshal(raw, &res); err != nil {
 		return nil, errWireDecodeFailed(executionID, method, err)
 	}
-	return &Result{
-		Status:      wr.Status,
-		ExecutionID: executionID,
-		Output:      wr.Output,
-		Notices:     wr.Notices,
-		ErrorDetail: wr.ErrorDetail,
-	}, nil
+	res.ExecutionID = executionID
+	return &res, nil
 }
 
 // settle updates the manager's bookkeeping for executionID based on the

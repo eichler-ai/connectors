@@ -8,7 +8,6 @@ import (
 	"io"
 	"strconv"
 	"sync"
-	"sync/atomic"
 )
 
 // ErrClosed is returned by Conn operations attempted after Close.
@@ -77,7 +76,7 @@ func (c *Conn) Serve() error {
 	for {
 		msg, err := c.framer.ReadMessage()
 		if err != nil {
-			c.failPending(err)
+			c.failPending()
 			return err
 		}
 
@@ -138,7 +137,7 @@ func (c *Conn) handleRequest(msg *Message) {
 	}()
 }
 
-func (c *Conn) failPending(err error) {
+func (c *Conn) failPending() {
 	c.mu.Lock()
 	c.closed = true
 	pending := c.pending
@@ -148,7 +147,6 @@ func (c *Conn) failPending(err error) {
 	for _, ch := range pending {
 		close(ch)
 	}
-	_ = err
 }
 
 // Call sends a JSON-RPC request and blocks until a response arrives, ctx is
@@ -162,7 +160,8 @@ func (c *Conn) Call(ctx context.Context, method string, params any) (result json
 		c.mu.Unlock()
 		return nil, nil, ErrClosed
 	}
-	idStr := strconv.FormatInt(atomic.AddInt64(&c.nextID, 1), 10)
+	c.nextID++
+	idStr := strconv.FormatInt(c.nextID, 10)
 	idRaw := json.RawMessage(strconv.Quote(idStr))
 	key := string(idRaw)
 	ch := make(chan *Message, 1)

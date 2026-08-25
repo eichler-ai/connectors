@@ -20,6 +20,7 @@ import (
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/diag"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/execution"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/registry"
+	"github.com/eichler-ai/connectors/revit/mcp-server/internal/singleton"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/transport"
 )
 
@@ -136,7 +137,7 @@ func (b *Broker) handleConn(ctx context.Context, conn net.Conn) {
 		return
 	}
 
-	if !validateToken(b.Token, params.Token) {
+	if !singleton.ValidateToken(b.Token, params.Token) {
 		writeAuthRejection(fr, msg.ID, "auth_invalid_token", "the presented token does not match the broker's current token")
 		conn.Close()
 		return
@@ -169,24 +170,6 @@ func writeAuthRejection(fr *transport.Framer, id *json.RawMessage, code, message
 		idRaw = *id
 	}
 	_ = fr.WriteMessage(transport.NewErrorResponse(idRaw, transport.ErrCodeUnauthorized, message, rec))
-}
-
-func validateToken(expected, presented string) bool {
-	// Delegates to singleton.ValidateToken's constant-time comparison, but
-	// broker doesn't import singleton to avoid a dependency cycle risk as
-	// the two packages grow; the comparison itself is intentionally
-	// duplicated as a one-line constant-time check instead.
-	if expected == "" || presented == "" {
-		return false
-	}
-	if len(expected) != len(presented) {
-		return false
-	}
-	var diffAcc byte
-	for i := 0; i < len(expected); i++ {
-		diffAcc |= expected[i] ^ presented[i]
-	}
-	return diffAcc == 0
 }
 
 // serveAddIn handles a connection authenticated with role add-in: it

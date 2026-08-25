@@ -44,7 +44,7 @@ func TestExecuteScriptCompletesInline(t *testing.T) {
 	fi, conn := newFakeInstance(t, func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
 		var p map[string]any
 		json.Unmarshal(params, &p)
-		return wireResult{Status: StatusSuccess, ExecutionID: p["execution_id"].(string), Output: "42"}, nil
+		return Result{Status: StatusSuccess, ExecutionID: p["execution_id"].(string), Output: "42"}, nil
 	})
 	m := NewManager()
 	m.AttachInstance("inst-1", conn)
@@ -68,7 +68,7 @@ func TestExecuteScriptReturnsPendingOnSlowScript(t *testing.T) {
 	_, conn := newFakeInstance(t, func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
 		var p map[string]any
 		json.Unmarshal(params, &p)
-		return wireResult{Status: StatusPending, ExecutionID: p["execution_id"].(string)}, nil
+		return Result{Status: StatusPending, ExecutionID: p["execution_id"].(string)}, nil
 	})
 	m := NewManager()
 	m.AttachInstance("inst-1", conn)
@@ -91,7 +91,7 @@ func TestExecuteScriptSecondCallReturnsBusy(t *testing.T) {
 		<-block
 		var p map[string]any
 		json.Unmarshal(params, &p)
-		return wireResult{Status: StatusRunning, ExecutionID: p["execution_id"].(string)}, nil
+		return Result{Status: StatusRunning, ExecutionID: p["execution_id"].(string)}, nil
 	})
 	m := NewManager()
 	m.AttachInstance("inst-1", conn)
@@ -159,12 +159,12 @@ func TestPollExecutionResolvesToTerminal(t *testing.T) {
 		id := p["execution_id"].(string)
 		n := atomic.AddInt32(&callCount, 1)
 		if method == "execute_script" {
-			return wireResult{Status: StatusRunning, ExecutionID: id}, nil
+			return Result{Status: StatusRunning, ExecutionID: id}, nil
 		}
 		if n < 3 {
-			return wireResult{Status: StatusRunning, ExecutionID: id}, nil
+			return Result{Status: StatusRunning, ExecutionID: id}, nil
 		}
-		return wireResult{Status: StatusSuccess, ExecutionID: id, Output: "done"}, nil
+		return Result{Status: StatusSuccess, ExecutionID: id, Output: "done"}, nil
 	})
 	m := NewManager()
 	m.AttachInstance("inst-1", conn)
@@ -210,7 +210,7 @@ func TestPollExecutionAfterTerminalReturnsCachedResultWithoutWireCall(t *testing
 	fi, conn := newFakeInstance(t, func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
 		var p map[string]any
 		json.Unmarshal(params, &p)
-		return wireResult{Status: StatusSuccess, ExecutionID: p["execution_id"].(string), Output: "ok"}, nil
+		return Result{Status: StatusSuccess, ExecutionID: p["execution_id"].(string), Output: "ok"}, nil
 	})
 	m := NewManager()
 	m.AttachInstance("inst-1", conn)
@@ -239,10 +239,10 @@ func TestCancelExecutionForwardsAndSettles(t *testing.T) {
 		json.Unmarshal(params, &p)
 		id := p["execution_id"].(string)
 		if method == "execute_script" {
-			return wireResult{Status: StatusRunning, ExecutionID: id}, nil
+			return Result{Status: StatusRunning, ExecutionID: id}, nil
 		}
 		if method == "cancel_execution" {
-			return wireResult{Status: StatusCancelled, ExecutionID: id}, nil
+			return Result{Status: StatusCancelled, ExecutionID: id}, nil
 		}
 		t.Fatalf("unexpected method %q", method)
 		return nil, nil
@@ -306,7 +306,7 @@ func TestInstanceDisconnectedDuringPoll(t *testing.T) {
 	_, conn := newFakeInstance(t, func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
 		var p map[string]any
 		json.Unmarshal(params, &p)
-		return wireResult{Status: StatusRunning, ExecutionID: p["execution_id"].(string)}, nil
+		return Result{Status: StatusRunning, ExecutionID: p["execution_id"].(string)}, nil
 	})
 	m := NewManager()
 	m.AttachInstance("inst-1", conn)
