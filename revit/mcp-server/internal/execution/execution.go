@@ -105,15 +105,21 @@ func (m *Manager) AttachInstance(instanceID string, conn *transport.Conn) {
 }
 
 // DetachInstance drops the wire connection for instanceID. Also clears the
-// instance's busy/unrecoverable bookkeeping: a disconnected instance can't
-// still be "busy" once its connection is gone (otherwise every reconnect
-// would permanently wedge execute_script behind an execution that will
-// never complete), and any unrecoverable latch is scoped to a since-dead
-// connection — a real recovery is a Revit restart, which mints a fresh
-// instance_id per PRD §05, so this instanceID's entry is simply stale
-// afterward. In-flight execution *records* are left as-is (a subsequent
+// instance's busy bookkeeping: a disconnected instance can't still be
+// "busy" once its connection is gone (otherwise every reconnect would
+// permanently wedge execute_script behind an execution that will never
+// complete). In-flight execution *records* are left as-is (a subsequent
 // poll/cancel against them will surface an "instance disconnected"
 // diagnostic rather than silently vanishing).
+//
+// The unrecoverable latch is deliberately NOT cleared here. PRD §05: an
+// instance_id is stable for the life of the Revit *process*, independent of
+// any particular connection — a reconnect under the same instance_id is a
+// network blip, the same wedged Revit process reappearing, not a recovery.
+// A genuine recovery (a Revit restart) mints a brand-new instance_id per
+// §05, a different map key this latch never touches — so leaving a stale
+// instance_id's entry here forever is harmless, and clearing it on a
+// same-id reconnect would silently un-latch a still-wedged instance.
 func (m *Manager) DetachInstance(instanceID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -121,7 +127,6 @@ func (m *Manager) DetachInstance(instanceID string) {
 	if m.activeByInstance[instanceID] != "" {
 		delete(m.activeByInstance, instanceID)
 	}
-	delete(m.unrecoverable, instanceID)
 }
 
 const source = "mcp-server.internal.execution"
@@ -220,7 +225,18 @@ func (m *Manager) ExecuteScript(ctx context.Context, instanceID, documentID, scr
 	}
 	res, drec := m.callWire(ctx, conn, "execute_script", executionID, timeoutMs, params)
 	if drec != nil {
-		m.settleError(instanceID, executionID, drec)
+		// A wire-level failure (network hiccup, context timeout) doesn't
+		// tell us whether the add-in actually received or ran the script —
+		// it may genuinely still be in flight. Leave the execution record
+		// and busy state exactly as they are rather than guessing: a still-
+		// live connection lets a later poll_execution retry and get the
+		// real answer, and a truly dead connection gets cleaned up by
+		// DetachInstance (which frees the instance) once the broker
+		// actually notices — neither path needs this call to assert an
+		// outcome it doesn't know. Asserting one anyway would be worse: a
+		// premature terminal error here would also permanently block the
+		// add-in's own ring-buffer replay (PRD §05) from ever correcting it
+		// after a reconnect.
 		return nil, drec
 	}
 	m.settle(instanceID, executionID, res)
@@ -274,12 +290,12 @@ func (m *Manager) forwardExisting(ctx context.Context, executionID, wireMethod s
 
 	res, drec := m.callWire(ctx, conn, wireMethod, executionID, timeoutMs, params)
 	if drec != nil {
-		// A failed wire round trip must still settle the execution to a
-		// terminal state — otherwise it stays "non-terminal" forever,
-		// keeping the instance permanently marked busy with no way to
-		// start a new execute_script against it (PRD §06's busy state is
-		// meant to be temporary, not a stuck door).
-		m.settleError(instanceID, executionID, drec)
+		// Same reasoning as ExecuteScript's own wire-failure path: don't
+		// assert a terminal outcome the broker doesn't actually know.
+		// Leaving the record non-terminal lets a retry against a still-live
+		// connection recover the real answer, and DetachInstance — not this
+		// call — is what frees the instance once the connection is
+		// genuinely gone.
 		return nil, drec
 	}
 	m.settle(instanceID, executionID, res)
@@ -363,25 +379,5 @@ func (m *Manager) settle(instanceID, executionID string, res *Result) {
 		if m.activeByInstance[instanceID] == executionID {
 			delete(m.activeByInstance, instanceID)
 		}
-	}
-}
-
-// settleError is settle's counterpart for a wire-level failure (the round
-// trip itself didn't complete, so there's no add-in-reported Result) —
-// it settles the execution to a terminal error with drec as the detail, so
-// a failed poll/cancel round trip doesn't leave the execution (and the
-// instance's busy state) stuck non-terminal forever. Same regression guard
-// as settle: a no-op if the execution is already terminal.
-func (m *Manager) settleError(instanceID, executionID string, drec *diag.Record) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	rec, ok := m.executions[executionID]
-	if !ok || IsTerminal(rec.status) {
-		return
-	}
-	rec.status = StatusError
-	rec.result = &Result{Status: StatusError, ExecutionID: executionID, ErrorDetail: drec}
-	if m.activeByInstance[instanceID] == executionID {
-		delete(m.activeByInstance, instanceID)
 	}
 }

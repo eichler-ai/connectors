@@ -103,14 +103,19 @@ func Register(s *mcp.Server, mgr *execution.Manager) {
 	})
 }
 
+// isErrorStatus reports whether status is one the agent must see flagged as
+// IsError:true, per PRD §01's shared record and the MCP tools/call
+// convention that a failed call surfaces as a normal result with IsError
+// set (not a bare JSON-RPC error) so the calling model can see and react to
+// it. "cancelled" is deliberately excluded: the agent asked for that one.
+func isErrorStatus(s execution.Status) bool {
+	return s == execution.StatusError || s == execution.StatusUnrecoverable
+}
+
 func toolResult(res *execution.Result, drec *diag.Record) (*mcp.CallToolResult, ExecutionOut, error) {
 	if drec != nil {
 		out := ExecutionOut{Status: "error", Error: drec}
-		b, _ := json.MarshalIndent(out, "", "  ")
-		return &mcp.CallToolResult{
-			IsError: true,
-			Content: []mcp.Content{&mcp.TextContent{Text: string(b)}},
-		}, out, nil
+		return errorCallToolResult(out), out, nil
 	}
 	out := ExecutionOut{
 		Status:      string(res.Status),
@@ -119,5 +124,21 @@ func toolResult(res *execution.Result, drec *diag.Record) (*mcp.CallToolResult, 
 		Notices:     res.Notices,
 		Error:       res.ErrorDetail,
 	}
+	if isErrorStatus(res.Status) {
+		// The wire round trip itself succeeded, but the add-in reported a
+		// terminal error/unrecoverable outcome (out.Error carries the
+		// detail) — this must be flagged IsError:true exactly like a
+		// wire-level failure, or the agent sees a "successful" tool call
+		// that actually failed.
+		return errorCallToolResult(out), out, nil
+	}
 	return nil, out, nil
+}
+
+func errorCallToolResult(out ExecutionOut) *mcp.CallToolResult {
+	b, _ := json.MarshalIndent(out, "", "  ")
+	return &mcp.CallToolResult{
+		IsError: true,
+		Content: []mcp.Content{&mcp.TextContent{Text: string(b)}},
+	}
 }

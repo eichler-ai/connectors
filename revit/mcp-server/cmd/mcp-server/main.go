@@ -42,6 +42,84 @@ const serverName = "revit-mcp-server"
 // version is overridable at build time via -ldflags.
 var version = "dev"
 
+// stdinRelay owns the single physical read of os.Stdin for the life of the
+// process. Reading os.Stdin can't be portably cancelled once a call is
+// blocked waiting for the next byte, so instead of letting more than one
+// piece of code ever call os.Stdin.Read() directly — which is exactly how a
+// promotion from secondary to primary could race an orphaned copy-goroutine
+// against the newly-primary's own stdio transport for the same descriptor,
+// silently dropping whichever message the orphan wins — exactly one
+// goroutine ever does that raw read; every consumer instead reads from a
+// channel, which (unlike a blocking syscall) is select-able and so
+// genuinely can be walked away from.
+type stdinRelay struct {
+	chunks chan []byte
+}
+
+func newStdinRelay() *stdinRelay {
+	r := &stdinRelay{chunks: make(chan []byte)}
+	go func() {
+		buf := make([]byte, 32*1024)
+		for {
+			n, err := os.Stdin.Read(buf)
+			if n > 0 {
+				chunk := make([]byte, n)
+				copy(chunk, buf[:n])
+				r.chunks <- chunk
+			}
+			if err != nil {
+				close(r.chunks)
+				return
+			}
+		}
+	}()
+	return r
+}
+
+// turnReader adapts one "turn" of consuming the shared stdinRelay — one
+// role (primary or secondary), for as long as it's active — into a plain
+// io.Reader. Read returns io.EOF, a clean/expected stop rather than an
+// error, the instant stop is closed, even if the relay itself still has
+// more data queued for whichever role reads next. This is what lets a
+// role's own copy-loop actually exit promptly on a role change, instead of
+// staying orphaned in a blocking read the way a direct os.Stdin.Read()
+// would.
+type turnReader struct {
+	relay    *stdinRelay
+	stop     <-chan struct{}
+	leftover []byte
+}
+
+func (r *turnReader) Read(p []byte) (int, error) {
+	if len(r.leftover) > 0 {
+		n := copy(p, r.leftover)
+		r.leftover = r.leftover[n:]
+		return n, nil
+	}
+	select {
+	case <-r.stop:
+		return 0, io.EOF
+	case chunk, ok := <-r.relay.chunks:
+		if !ok {
+			return 0, io.EOF // physical stdin itself closed/EOF'd
+		}
+		n := copy(p, chunk)
+		if n < len(chunk) {
+			r.leftover = chunk[n:]
+		}
+		return n, nil
+	}
+}
+
+// nopCloseWriter adapts an io.Writer (os.Stdout) into an io.WriteCloser
+// with a no-op Close — what mcp.StdioTransport does internally, but
+// unexported there. Needed here because runPrimary uses mcp.IOTransport
+// directly instead of StdioTransport, so it can share the stdin relay with
+// runSecondary rather than reading os.Stdin on its own.
+type nopCloseWriter struct{ io.Writer }
+
+func (nopCloseWriter) Close() error { return nil }
+
 func main() {
 	mode := flag.String("mode", envOr("REVIT_MCP_MODE", "local"), "connection topology: \"local\" (127.0.0.1 only, default) or \"remote\" (bind a configured non-loopback interface) — PRD §05")
 	bindAddr := flag.String("bind", envOr("REVIT_MCP_BIND", ""), "non-loopback bind address, required when -mode=remote (e.g. the Parallels shared-network host adapter address)")
@@ -80,7 +158,11 @@ func run(mode, bindAddr string, port int, appDataDirOverride string, logger *log
 		if bindAddr == "" {
 			return fmt.Errorf("-bind is required in remote mode (PRD §05: a specific configured non-loopback interface, never 0.0.0.0)")
 		}
-		if bindAddr == "0.0.0.0" || bindAddr == "::" {
+		// Parsed, not string-compared: 0.0.0.0, ::, and ::0 are all the same
+		// "every interface" address, and a bare string check misses forms
+		// like ::0 that IsUnspecified() catches correctly regardless of how
+		// the address was spelled.
+		if ip := net.ParseIP(bindAddr); ip != nil && ip.IsUnspecified() {
 			return fmt.Errorf("-bind %q is not allowed (PRD §05/§10: never bind every interface — pass the specific configured non-loopback address instead)", bindAddr)
 		}
 	}
@@ -105,6 +187,11 @@ func run(mode, bindAddr string, port int, appDataDirOverride string, logger *log
 
 	lockPath := filepath.Join(dataDir, "broker.lock")
 
+	// One stdin relay for the whole process lifetime (see its own doc
+	// comment) — both branches below read through it via a fresh
+	// turnReader per role-attempt, never os.Stdin directly.
+	relay := newStdinRelay()
+
 	// PRD §05 "Broker singleton & port contention": whichever process wins
 	// the lock is primary; everyone else proxies as secondary. If a
 	// secondary's upstream connection to the primary drops for any reason
@@ -121,13 +208,18 @@ func run(mode, bindAddr string, port int, appDataDirOverride string, logger *log
 			return fmt.Errorf("acquiring singleton lock: %w", err)
 		}
 
+		stop := make(chan struct{})
+		reader := &turnReader{relay: relay, stop: stop}
+
 		if primary {
-			err := runPrimary(ctx, bindAddr, port, dataDir, logger)
+			err := runPrimary(ctx, bindAddr, port, dataDir, logger, reader)
+			close(stop)
 			lock.Release()
 			return err // this process's own session ending is a real shutdown, not something to retry
 		}
 
-		err = runSecondary(ctx, dataDir, logger)
+		err = runSecondary(ctx, dataDir, logger, reader)
+		close(stop) // unblocks the upload goroutine's turnReader.Read even if it's mid-select with nothing to copy yet
 		if ctx.Err() != nil {
 			return nil // clean shutdown (signal), not a dropped-primary retry case
 		}
@@ -136,7 +228,7 @@ func run(mode, bindAddr string, port int, appDataDirOverride string, logger *log
 	}
 }
 
-func runPrimary(ctx context.Context, bindAddr string, port int, dataDir string, logger *log.Logger) error {
+func runPrimary(ctx context.Context, bindAddr string, port int, dataDir string, logger *log.Logger, stdin io.Reader) error {
 	ln, err := net.Listen("tcp", net.JoinHostPort(bindAddr, strconv.Itoa(port)))
 	if err != nil {
 		return fmt.Errorf("binding TCP listener on %s:%d: %w", bindAddr, port, err)
@@ -183,8 +275,12 @@ func runPrimary(ctx context.Context, bindAddr string, port int, dataDir string, 
 	// The primary's own MCP session runs over its own stdio, exactly like
 	// every secondary's proxied session runs over TCP (PRD §05: "From the
 	// agent's point of view behavior is identical regardless of which
-	// broker process it happens to be talking to").
-	err = mcpServer.Run(ctx, &mcp.StdioTransport{})
+	// broker process it happens to be talking to"). IOTransport, not
+	// StdioTransport, deliberately — it reads through the shared stdin
+	// relay (via stdin) rather than os.Stdin directly, so a promotion from
+	// secondary never races two independent physical stdin readers.
+	stdioTransport := &mcp.IOTransport{Reader: io.NopCloser(stdin), Writer: nopCloseWriter{os.Stdout}}
+	err = mcpServer.Run(ctx, stdioTransport)
 	stop := ctx.Err() != nil
 	if err != nil && !stop {
 		return fmt.Errorf("stdio MCP session ended: %w", err)
@@ -192,7 +288,7 @@ func runPrimary(ctx context.Context, bindAddr string, port int, dataDir string, 
 	return nil
 }
 
-func runSecondary(ctx context.Context, dataDir string, logger *log.Logger) error {
+func runSecondary(ctx context.Context, dataDir string, logger *log.Logger, stdin io.Reader) error {
 	var info singleton.BrokerInfo
 	var err error
 	// The primary listens before anything else (PRD §05), but there's still
@@ -233,10 +329,16 @@ func runSecondary(ctx context.Context, dataDir string, logger *log.Logger) error
 	}
 
 	br := bufio.NewReader(conn)
+	// Bounded, matching the broker's own pre-auth read deadline (broker.go)
+	// — our own just-dialed primary should answer almost immediately, and a
+	// hung/misbehaving one shouldn't be able to block this secondary
+	// forever waiting for an auth response that never comes.
+	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	line, err := br.ReadBytes('\n')
 	if err != nil {
 		return fmt.Errorf("reading auth response from primary: %w", err)
 	}
+	_ = conn.SetReadDeadline(time.Time{})
 	var resp transport.Message
 	if err := json.Unmarshal(line, &resp); err != nil {
 		return fmt.Errorf("decoding auth response from primary: %w", err)
@@ -255,7 +357,7 @@ func runSecondary(ctx context.Context, dataDir string, logger *log.Logger) error
 	// means there's nothing left to proxy either way.
 	errCh := make(chan error, 2)
 	go func() {
-		_, err := io.Copy(conn, os.Stdin)
+		_, err := io.Copy(conn, stdin)
 		errCh <- err
 	}()
 	go func() {

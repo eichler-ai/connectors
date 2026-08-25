@@ -87,6 +87,48 @@ func TestExecuteScriptToolSuccess(t *testing.T) {
 	}
 }
 
+// TestExecuteScriptToolAddInReportedErrorIsToolError is a regression test:
+// a script that fails on the add-in side (a real wire round trip, reported
+// back as a normal Result with status:"error") must surface as IsError:true
+// exactly like a wire-level failure — not as a "successful" tool call whose
+// structured content just happens to say status:"error", which the calling
+// agent has no MCP-level signal to notice.
+func TestExecuteScriptToolAddInReportedErrorIsToolError(t *testing.T) {
+	mgr := execution.NewManager()
+	attachFakeInstance(t, mgr, "inst-1", func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
+		var p map[string]any
+		json.Unmarshal(params, &p)
+		return map[string]any{
+			"status":       "error",
+			"execution_id": p["execution_id"],
+			"error": map[string]any{
+				"severity": "error",
+				"code":     "script_exception",
+				"source":   "mcp-bridge.core.execution",
+				"message":  "System.NullReferenceException: Object reference not set",
+			},
+		}, nil
+	})
+	cs := connectClient(t, mgr)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	res, err := cs.CallTool(ctx, &mcp.CallToolParams{
+		Name: "execute_script",
+		Arguments: map[string]any{
+			"instance_id": "inst-1",
+			"document_id": "doc-1",
+			"script":      "throw new Exception();",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !res.IsError {
+		t.Fatalf("expected IsError=true for an add-in-reported script error, got a normal result")
+	}
+}
+
 func TestExecuteScriptToolUnknownInstanceIsToolError(t *testing.T) {
 	mgr := execution.NewManager()
 	cs := connectClient(t, mgr)

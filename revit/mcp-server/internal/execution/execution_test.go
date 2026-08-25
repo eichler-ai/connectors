@@ -365,11 +365,17 @@ func TestReconnectClearsStaleBusyState(t *testing.T) {
 	}
 }
 
-// TestForwardExistingSettlesOnWireError is a regression test: a failed wire
-// round trip (not a clean instance-disconnect, which has its own path) must
-// still settle the execution to a terminal state, or it stays non-terminal
-// forever, keeping the instance permanently marked busy.
-func TestForwardExistingSettlesOnWireError(t *testing.T) {
+// TestForwardExistingWireErrorDoesNotSettleTerminal is a regression test
+// for a bug introduced by an earlier fix attempt: settling an execution to
+// a terminal error on a bare wire-level failure (network hiccup, context
+// timeout) asserts an outcome the broker doesn't actually know — the add-in
+// may genuinely still be running the script. Falsely settling it would
+// permanently block the add-in's own ring-buffer replay (PRD §05) from
+// ever correcting it after a reconnect. The execution must stay
+// non-terminal on a wire failure; recovery from a permanently-busy instance
+// comes from DetachInstance (see TestReconnectClearsStaleBusyState), not
+// from guessing a terminal status here.
+func TestForwardExistingWireErrorDoesNotSettleTerminal(t *testing.T) {
 	_, conn := newFakeInstance(t, func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
 		var p map[string]any
 		json.Unmarshal(params, &p)
@@ -396,24 +402,11 @@ func TestForwardExistingSettlesOnWireError(t *testing.T) {
 	m.mu.Lock()
 	rec := m.executions[start.ExecutionID]
 	m.mu.Unlock()
-	if rec == nil || !IsTerminal(rec.status) {
-		t.Fatalf("execution status = %+v, want terminal after the wire failure", rec)
+	if rec == nil {
+		t.Fatal("execution record disappeared after a wire failure — it should be left as-is, not deleted or settled")
 	}
-
-	// A fresh execute_script against the same instance must not report busy
-	// anymore — the instance is free again.
-	_, conn2 := newFakeInstance(t, func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
-		var p map[string]any
-		json.Unmarshal(params, &p)
-		return Result{Status: StatusSuccess, ExecutionID: p["execution_id"].(string)}, nil
-	})
-	m.AttachInstance("inst-1", conn2)
-	res3, drec3 := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "retry", 1000, 60000)
-	if drec3 != nil {
-		t.Fatalf("ExecuteScript after wire failure: %+v, want it to succeed (not busy)", drec3)
-	}
-	if res3.Status != StatusSuccess {
-		t.Errorf("Status = %q, want success", res3.Status)
+	if IsTerminal(rec.status) {
+		t.Errorf("status = %q, want it to stay non-terminal — a wire failure doesn't mean the add-in didn't actually run the script", rec.status)
 	}
 }
 
@@ -421,7 +414,14 @@ func TestForwardExistingSettlesOnWireError(t *testing.T) {
 // an execution settles to "unrecoverable" the whole instance must stay
 // rejected for execute_script until a Revit restart — not just free up
 // activeByInstance like any other terminal status, which would forward a
-// new script to a Revit instance already known to be wedged.
+// new script to a Revit instance already known to be wedged. Critically,
+// the latch must survive a same-instance_id reconnect: per PRD §05,
+// instance_id is stable for the life of the Revit *process*, independent of
+// any one connection, so a reconnect under the same id is the same wedged
+// process reappearing after a network blip — not a recovery. An earlier fix
+// attempt cleared the latch on every DetachInstance, which silently
+// un-latched a still-wedged instance the moment its connection blipped;
+// that was wrong and is asserted against explicitly here.
 func TestUnrecoverableLatchesInstance(t *testing.T) {
 	_, conn := newFakeInstance(t, func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
 		var p map[string]any
@@ -444,14 +444,50 @@ func TestUnrecoverableLatchesInstance(t *testing.T) {
 		t.Fatalf("got %+v, want instance_unrecoverable", drec2)
 	}
 
-	// A restart (DetachInstance, then a fresh AttachInstance under a new
-	// instance_id in practice — modeled here as the same ID reconnecting,
-	// which is the worst case for latch cleanup) must clear the latch.
+	// A network blip and reconnect under the SAME instance_id — the latch
+	// must survive this, since it's still the same wedged Revit process.
 	m.DetachInstance("inst-1")
 	m.AttachInstance("inst-1", conn)
-	_, drec3 := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "after restart", 1000, 60000)
-	if drec3 != nil && drec3.Code == "instance_unrecoverable" {
-		t.Errorf("instance still latched unrecoverable after DetachInstance, want the latch cleared")
+	_, drec3 := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "after reconnect", 1000, 60000)
+	if drec3 == nil || drec3.Code != "instance_unrecoverable" {
+		t.Fatalf("got %+v, want instance_unrecoverable to survive a same-id reconnect", drec3)
+	}
+}
+
+// TestUnrecoverableDoesNotAffectADifferentInstanceID confirms the latch is
+// genuinely scoped per instance_id: a real Revit restart mints a brand-new
+// instance_id (PRD §05), a different map key the old latch never touches,
+// so the new "instance" (in practice, the same Revit process post-restart)
+// must not be rejected.
+func TestUnrecoverableDoesNotAffectADifferentInstanceID(t *testing.T) {
+	_, conn := newFakeInstance(t, func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
+		var p map[string]any
+		json.Unmarshal(params, &p)
+		return Result{Status: StatusRunning, ExecutionID: p["execution_id"].(string)}, nil
+	})
+	m := NewManager()
+	m.AttachInstance("inst-1", conn)
+
+	start, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "slow", 50, 60000)
+	if drec != nil {
+		t.Fatalf("ExecuteScript: %+v", drec)
+	}
+	m.settle("inst-1", start.ExecutionID, &Result{Status: StatusUnrecoverable, ExecutionID: start.ExecutionID})
+	m.DetachInstance("inst-1")
+
+	_, conn2 := newFakeInstance(t, func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
+		var p map[string]any
+		json.Unmarshal(params, &p)
+		return Result{Status: StatusSuccess, ExecutionID: p["execution_id"].(string)}, nil
+	})
+	m.AttachInstance("inst-1-restarted", conn2)
+
+	res, drec2 := m.ExecuteScript(context.Background(), "inst-1-restarted", "doc-1", "post-restart", 1000, 60000)
+	if drec2 != nil {
+		t.Fatalf("ExecuteScript against a fresh instance_id: %+v, want it to succeed", drec2)
+	}
+	if res.Status != StatusSuccess {
+		t.Errorf("Status = %q, want success", res.Status)
 	}
 }
 

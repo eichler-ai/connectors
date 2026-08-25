@@ -8,7 +8,11 @@ import (
 	"io"
 	"strconv"
 	"sync"
+
+	"github.com/eichler-ai/connectors/revit/mcp-server/internal/diag"
 )
+
+const source = "mcp-server.internal.transport"
 
 // ErrClosed is returned by Conn operations attempted after Close.
 var ErrClosed = errors.New("transport: connection closed")
@@ -127,7 +131,14 @@ func (c *Conn) handleRequest(msg *Message) {
 		var result any
 		var rpcErr *RPCError
 		if h == nil {
-			rpcErr = &RPCError{Code: ErrCodeMethodNotFound, Message: fmt.Sprintf("no handler registered for method %q", msg.Method)}
+			text := fmt.Sprintf("no handler registered for method %q on this connection", msg.Method)
+			rpcErr = &RPCError{
+				Code:    ErrCodeMethodNotFound,
+				Message: text,
+				Data: diag.New(diag.SeverityError, "no_handler_registered", source, text).
+					WithDetail(map[string]any{"method": msg.Method}).
+					WithRemedy("this is a broker-side wiring bug, not something the caller can retry around — report it"),
+			}
 		} else {
 			result, rpcErr = h(context.Background(), msg.Method, msg.Params)
 		}
@@ -139,7 +150,10 @@ func (c *Conn) handleRequest(msg *Message) {
 			var err error
 			resp, err = NewResultResponse(*msg.ID, result)
 			if err != nil {
-				resp = NewErrorResponse(*msg.ID, ErrCodeInternalError, "encoding result: "+err.Error(), nil)
+				encodeMsg := fmt.Sprintf("encoding the result for method %q as JSON failed: %s", msg.Method, err.Error())
+				resp = NewErrorResponse(*msg.ID, ErrCodeInternalError, encodeMsg,
+					diag.New(diag.SeverityError, "result_encode_failed", source, encodeMsg).
+						WithDetail(map[string]any{"method": msg.Method}))
 			}
 		}
 		_ = c.framer.WriteMessage(resp)
