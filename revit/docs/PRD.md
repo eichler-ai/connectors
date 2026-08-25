@@ -66,6 +66,10 @@ The principle above only holds if every subsystem reports things the same way. O
 - **`message` is a hard rule, not a suggestion.** Must include the concrete identifiers involved (`execution_id`/`instance_id`/`document_id`, whichever apply) and the actual underlying condition — never a generic wrapper like "An error occurred" or "Execution failed" that discards what a wrapped .NET/Go exception actually said. Wrap, don't replace: the original exception's own message/type is part of `message` or `detail`, never swallowed.
 - **`remedy` is expected, not decorative.** "Restart Revit to recover this instance," "call `list_instances` to confirm the new `document_id`, then retry," "dismiss the listed window manually, then reissue `execute_script`." Omit it only when there's genuinely nothing actionable to suggest, not by default.
 
+**Two channels, not one, for the same record.** MCP's `tools/call` contract expects a failed tool call to surface as a normal result with `IsError: true` and readable content — not a JSON-RPC protocol-level error — so the calling agent sees and can react to it as tool output. That's a different shape than the broker↔add-in wire protocol, which is entirely our own design and free to use raw JSON-RPC `error.data` as specified above. Resolution: the shared diagnostic record is the same in both places, just carried differently — literally in `error.data` on the internal wire protocol, and in `CallToolResult`'s structured/text output with `IsError` set at the MCP tool layer. Don't conflate the two when implementing either side.
+
+**`execution_id` is broker-minted.** The broker generates it before forwarding a script to the owning add-in, so it can route `poll_execution`/`cancel_execution` to the right instance without a second round trip; the add-in echoes the same ID back in every response rather than generating its own.
+
 ## 02. Non-goals for v1
 
 - **Not multi-version yet.** Build and validate against 2027 only; the project is structured so 2025/2026 support is an additive multi-target step later, not a rewrite.
