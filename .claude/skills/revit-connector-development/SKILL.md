@@ -48,7 +48,26 @@ Not run on every commit by default (it's slow — VM/Revit lifecycle). Run it:
 - **`revit/test-harness/runner/`** — orchestrates VM/Revit lifecycle plus the corpus run; this is what "re-run the corpus" actually means mechanically.
 - **Shared drive (`Z:` in the dev VM)** — backs remote-mode file exchange and broker discovery (PRD §05, §09). If it stops resolving, check the Parallels shared-folder config before assuming a code bug.
 
+## Per-stage workflow (autonomous)
+
+Each development stage — a roadmap phase (PRD §15) or any other discrete scope of work — runs this pipeline. Once step 1 is resolved, the rest runs without further check-ins; status lives on GitHub (the PR and its review comments), not in a running report back to the user.
+
+1. **Questions up front, once.** Before starting implementation on a new scope of work, batch and ask whatever clarifying questions it actually needs — don't trickle them out mid-implementation. Once answered, proceed through the rest of this pipeline autonomously. The only thing that should interrupt it after this point is a genuine blocker — a decision only the user can make, not a judgment call this skill or the PRD already settles.
+2. **Implement, TDD-first**, per the testing strategy above.
+3. **Classify the work — groundbreaking or additive — and say so in the PR description:**
+   - *Groundbreaking* — introduces a new architectural pattern or subsystem that doesn't already exist in the codebase (the threading/`ExternalEvent` model, the singleton lock-or-proxy, Roslyn ALC isolation, the reflection-based discovery mechanism — most of what roadmap phases 01–03 actually are).
+   - *Additive* — extends or reuses an already-established pattern (a new corpus test case, a new discovery command built on the same reflection mechanism, a new `.addin` manifest for another Revit version once the multi-target pattern already exists).
+4. **Groundbreaking work only: run `/simplify` on the diff before opening the PR.** Additive work skips this step — the change surface is small enough not to need it.
+5. **Open the PR** (`gh pr create`), following this repo's normal git/PR hygiene (see the standing git-safety rules: no force-push, no skipped hooks, no `--amend` on already-pushed commits).
+6. **Deploy an independent code-review agent** — a fresh agent, not a fork, with no shared context from the implementation work, reading the PR diff itself rather than being told what's in it:
+   - *Groundbreaking* → Opus model, reviewing for correctness and robustness.
+   - *Additive* → default model (Sonnet) is sufficient.
+   - The agent posts its findings to the PR on GitHub (a review or summary comment) so they're visible without being relayed manually, and reports back with a short summary of what it found.
+7. **Merging is not automatic.** This pipeline creates and reviews PRs autonomously — it does not merge them. Merge stays a human decision unless explicitly told otherwise later.
+
 ## PR review checklist
+
+This is what the review step above (and any human reviewer) checks the PR against:
 
 - [ ] Unit tests included for any new `Core`/`RevitAdapter` (Bridge) or `internal/*` (Server) logic — written before the implementation if this was done TDD-first, which it should have been.
 - [ ] If the change touches threading, dialogs, failures, discovery, or file exchange, was the live harness actually run (not just unit tests)?
@@ -72,3 +91,4 @@ This file is expected to change as the project learns things — that's the poin
 
 - *(initial version — created alongside the PRD, before any implementation exists yet)*
 - Added the shared diagnostic-record shape (PRD §01) and a PR checklist item enforcing it, after realizing the observability principle had no concrete format standard behind it — several ad hoc reporting shapes existed (Failures API list, window-inventory diagnostic) with nothing tying them together.
+- Added the autonomous per-stage workflow (questions up front → implement → classify groundbreaking/additive → `/simplify` for groundbreaking → open PR → independent Opus (groundbreaking) or Sonnet (additive) code-review agent → report, no auto-merge). This is meant to run without per-step check-ins once the up-front questions are resolved.
