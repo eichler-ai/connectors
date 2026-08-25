@@ -65,22 +65,41 @@ public sealed class ExecutionRingBuffer
         }
     }
 
-    /// <summary>Removes entries older than the retention window as of <paramref name="now"/>. Call periodically, not on every access.</summary>
+    /// <summary>
+    /// Removes terminal entries older than the retention window as of <paramref name="now"/>. Call
+    /// periodically, not on every access.
+    ///
+    /// Second review finding: a still-active (non-terminal) record must never be evicted here, regardless
+    /// of age or capacity pressure -- age-based Prune() running long enough to age out the one execution
+    /// that's actually still in flight would otherwise cause ExecutionManager.Transition()'s finishing-path
+    /// methods (CompleteSuccess/CompleteError/etc.) to find no record for that execution_id when the script
+    /// finally does finish, which without the ExecutionManager-side fix would throw from inside Revit's
+    /// UI-thread Execute() callback -- exactly the crash class the terminal-race fix elsewhere in this
+    /// class already eliminated, just via a different path. So a non-terminal record is skipped (left in
+    /// place) rather than removed even once it's past the retention cutoff.
+    /// </summary>
     public void Prune(DateTimeOffset now)
     {
         lock (_lock)
         {
             var cutoff = now - _retention;
 
-            // _order is insertion-ordered oldest-first (the same invariant Add's
-            // own capacity eviction relies on), so expired entries are always a
-            // prefix -- walk from the front and stop at the first survivor,
-            // rather than scanning/filtering the whole list and then doing an
-            // O(n) LinkedList.Remove search per expired entry.
-            while (_order.First is { } oldest && oldest.Value.CreatedAt <= cutoff)
+            // _order is insertion-ordered oldest-first (the same invariant Add's own capacity eviction
+            // relies on), so once a node's CreatedAt is newer than cutoff, every later node is too --
+            // still safe to stop the whole scan there. Within the expired prefix, though, a non-terminal
+            // node is skipped (not removed) and the scan continues past it to whatever expired node
+            // follows, rather than assuming expired entries are removable as a block.
+            var node = _order.First;
+            while (node is not null && node.Value.CreatedAt <= cutoff)
             {
-                _order.RemoveFirst();
-                _byId.Remove(oldest.Value.ExecutionId);
+                var next = node.Next;
+                if (node.Value.Status.IsTerminal())
+                {
+                    _order.Remove(node);
+                    _byId.Remove(node.Value.ExecutionId);
+                }
+
+                node = next;
             }
         }
     }

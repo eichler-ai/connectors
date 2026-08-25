@@ -16,6 +16,7 @@ public sealed class RevitExternalEventRaiser : IExternalEventRaiser
     public ExternalEventRaiseOutcome Raise() => _externalEvent.Raise() switch
     {
         ExternalEventRequest.Accepted => ExternalEventRaiseOutcome.Accepted,
+        ExternalEventRequest.Pending => ExternalEventRaiseOutcome.Pending,
         ExternalEventRequest.Denied => ExternalEventRaiseOutcome.Denied,
         ExternalEventRequest.TimedOut => ExternalEventRaiseOutcome.TimedOut,
         var other => throw new InvalidOperationException($"Unrecognized ExternalEventRequest value: {other}."),

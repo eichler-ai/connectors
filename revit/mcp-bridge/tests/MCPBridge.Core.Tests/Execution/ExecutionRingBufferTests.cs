@@ -1,4 +1,5 @@
 using System;
+using MCPBridge.Core.Diagnostics;
 using MCPBridge.Core.Execution;
 using Xunit;
 
@@ -8,6 +9,15 @@ public class ExecutionRingBufferTests
 {
     private static ExecutionRecord NewRecord(DateTimeOffset createdAt) =>
         ExecutionRecord.CreatePending(Guid.NewGuid(), "// script", maxDurationMs: 600_000, createdAt: createdAt);
+
+    // Prune() (second review, Fix 5) only ever evicts terminal records -- age-based pruning tests that mean
+    // to exercise actual eviction need a record that has already resolved, not a still-Pending one.
+    private static ExecutionRecord NewTerminalRecord(DateTimeOffset createdAt)
+    {
+        var record = NewRecord(createdAt);
+        record.MarkCompleted(createdAt, result: null, stdOut: null, notices: Array.Empty<DiagnosticRecord>());
+        return record;
+    }
 
     [Fact]
     public void Add_ThenTryGet_ReturnsSameRecord()
@@ -66,8 +76,8 @@ public class ExecutionRingBufferTests
     {
         var buffer = new ExecutionRingBuffer(capacity: 100, retention: TimeSpan.FromMinutes(10));
         var now = DateTimeOffset.UtcNow;
-        var old = NewRecord(now.AddMinutes(-11));
-        var recent = NewRecord(now.AddMinutes(-1));
+        var old = NewTerminalRecord(now.AddMinutes(-11));
+        var recent = NewTerminalRecord(now.AddMinutes(-1));
 
         buffer.Add(old);
         buffer.Add(recent);
@@ -83,11 +93,51 @@ public class ExecutionRingBufferTests
     {
         var buffer = new ExecutionRingBuffer(capacity: 100, retention: TimeSpan.FromMinutes(10));
         var now = DateTimeOffset.UtcNow;
-        var boundary = NewRecord(now.AddMinutes(-10));
+        var boundary = NewTerminalRecord(now.AddMinutes(-10));
 
         buffer.Add(boundary);
         buffer.Prune(now);
 
         Assert.False(buffer.TryGet(boundary.ExecutionId, out _));
+    }
+
+    // --- Second review, Fix 5: a still-active (non-terminal) record must never be evicted by Prune() ---
+
+    [Fact]
+    public void Prune_NeverEvictsANonTerminalRecord_EvenPastRetention()
+    {
+        var buffer = new ExecutionRingBuffer(capacity: 100, retention: TimeSpan.FromMinutes(10));
+        var now = DateTimeOffset.UtcNow;
+        var stillActive = NewRecord(now.AddMinutes(-11)); // Pending -- CreatePending never marks terminal
+        Assert.False(stillActive.Status.IsTerminal());
+
+        buffer.Add(stillActive);
+        buffer.Prune(now);
+
+        Assert.True(buffer.TryGet(stillActive.ExecutionId, out var found));
+        Assert.Same(stillActive, found);
+    }
+
+    [Fact]
+    public void Prune_EvictsAgedOutTerminalRecords_ButSkipsAndKeepsScanningPastANonTerminalOneAheadOfThem()
+    {
+        // A non-terminal record blocking the front of the insertion-ordered list must not stop the scan
+        // from still evicting aged-out terminal records behind it.
+        var buffer = new ExecutionRingBuffer(capacity: 100, retention: TimeSpan.FromMinutes(10));
+        var now = DateTimeOffset.UtcNow;
+        var stillActive = NewRecord(now.AddMinutes(-15));
+        var agedTerminal = NewRecord(now.AddMinutes(-14));
+        agedTerminal.MarkCompleted(now.AddMinutes(-14), result: null, stdOut: null, notices: Array.Empty<DiagnosticRecord>());
+        var recent = NewRecord(now.AddMinutes(-1));
+
+        buffer.Add(stillActive);
+        buffer.Add(agedTerminal);
+        buffer.Add(recent);
+
+        buffer.Prune(now);
+
+        Assert.True(buffer.TryGet(stillActive.ExecutionId, out _), "non-terminal record must survive Prune regardless of age");
+        Assert.False(buffer.TryGet(agedTerminal.ExecutionId, out _), "aged-out terminal record behind a non-terminal one must still be pruned");
+        Assert.True(buffer.TryGet(recent.ExecutionId, out _));
     }
 }

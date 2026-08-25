@@ -76,6 +76,44 @@ public class ExternalEventBridgeTests
     }
 
     [Fact]
+    public async Task RunAsync_RaisePending_IsNotAFailure_WorkItemStaysQueued_OnExecuteStillResolvesIt()
+    {
+        // Second review finding: Pending means "the previous request on this event is still queued", which
+        // under this bridge's single-work-item-at-a-time usage pattern means the request this call just
+        // queued genuinely is still queued and Execute() will still eventually fire for it -- not a failure.
+        var raiser = new FakeExternalEventRaiser { NextOutcome = ExternalEventRaiseOutcome.Pending };
+        var bridge = new ExternalEventBridge<int>(raiser);
+
+        var task = bridge.RunAsync(app => 42);
+        Assert.False(task.IsCompleted);
+        Assert.False(task.IsFaulted);
+
+        bridge.OnExecute(new FakeUiApplicationAdapter());
+
+        var result = await task;
+        Assert.Equal(42, result);
+    }
+
+    [Fact]
+    public async Task RunAsync_RaiseDenied_DoesNotClobberADifferentWorkItem_QueuedByASubsequentCall()
+    {
+        // Compare-and-clear (second review finding): a failure from one RunAsync call must never null out
+        // _pending if a different work item has since been queued there.
+        var raiser = new FakeExternalEventRaiser { NextOutcome = ExternalEventRaiseOutcome.Denied };
+        var bridge = new ExternalEventBridge<int>(raiser);
+
+        var firstTask = bridge.RunAsync(app => 1);
+        await Assert.ThrowsAsync<ExternalEventRaiseDeniedException>(() => firstTask);
+
+        // A second RunAsync after the first failed and cleared _pending should queue and resolve normally.
+        raiser.NextOutcome = ExternalEventRaiseOutcome.Accepted;
+        var secondTask = bridge.RunAsync(app => 2);
+        bridge.OnExecute(new FakeUiApplicationAdapter());
+
+        Assert.Equal(2, await secondTask);
+    }
+
+    [Fact]
     public void OnExecute_WithNothingPending_DoesNotThrow()
     {
         // A spurious Execute() with no queued work (shouldn't happen given ExternalEvent's own one-shot

@@ -41,8 +41,12 @@ public sealed class ExternalEventBridge<TResult> : IScriptExecutionCallback
     /// <summary>
     /// Queues <paramref name="work"/> to run on Revit's UI thread the next time Execute() fires, raises the
     /// external event, and returns a Task that resolves once that happens. Never blocks the calling thread.
-    /// If the raise itself is denied (Fix 5), the returned Task fails immediately with
-    /// <see cref="ExternalEventRaiseDeniedException"/> rather than hanging forever.
+    /// If the raise itself is denied or times out (Fix 5), the returned Task fails immediately with
+    /// <see cref="ExternalEventRaiseDeniedException"/> rather than hanging forever. A Pending outcome
+    /// (second review finding) is NOT a failure -- given this bridge's single-work-item-at-a-time usage
+    /// pattern, it means the request genuinely is still queued in Revit and Execute() will still eventually
+    /// fire for it, so it's treated the same as Accepted: the work item stays queued and this call simply
+    /// returns the still-pending Task.
     /// </summary>
     public Task<TResult> RunAsync(Func<IUiApplicationAdapter, TResult> work)
     {
@@ -66,20 +70,26 @@ public sealed class ExternalEventBridge<TResult> : IScriptExecutionCallback
         }
 
         var outcome = _raiser.Raise();
-        if (outcome != ExternalEventRaiseOutcome.Accepted)
+        if (outcome is ExternalEventRaiseOutcome.Denied or ExternalEventRaiseOutcome.TimedOut)
         {
-            // No concurrent OnExecute() could have consumed _pending in between: that only happens after
-            // a successful Raise(), which this branch by definition didn't get. So the pending work item
-            // is still exactly the one this call queued -- clear it and fail tcs directly rather than
-            // re-fetching it from _pending.
+            // Compare-and-clear rather than an unconditional null-out: verify _pending is still exactly
+            // this call's work item (same TaskCompletionSource) before nulling it out. In this bridge's
+            // current usage a concurrent OnExecute() can't have consumed _pending in between (that only
+            // happens after a successful/Pending Raise(), which this branch by definition didn't get), so
+            // this is defensive rather than load-bearing today -- but it means a failure from this call can
+            // never clobber a different work item a subsequent call may have already queued.
             lock (_lock)
             {
-                _pending = null;
+                if (_pending is { } current && ReferenceEquals(current.CompletionSource, tcs))
+                {
+                    _pending = null;
+                }
             }
 
             tcs.TrySetException(new ExternalEventRaiseDeniedException(outcome));
         }
 
+        // Accepted and Pending both leave _pending queued as-is; OnExecute() will eventually consume it.
         return tcs.Task;
     }
 

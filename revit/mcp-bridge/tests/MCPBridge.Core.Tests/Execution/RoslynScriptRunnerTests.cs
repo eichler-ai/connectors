@@ -1,4 +1,6 @@
 using System;
+using System.Linq;
+using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.Loader;
 using System.Threading;
@@ -148,15 +150,21 @@ public class RoslynScriptRunnerTests
         // -- it just wasn't the one the submission assembly actually loaded into.
         //
         // This test asserts actual reclamation: capture WeakReferences to the run's AssemblyLoadContext
-        // and the runner's ScriptCompilationCache is untouched (the cache intentionally keeps the
-        // compiled Script<object> alive across runs -- see the class doc comment -- so this only
-        // targets per-run state: the ALC used to execute this specific run), then force GC and assert
-        // the weak reference can no longer resolve to a live object.
-        var (weakAlc, outcome) = await RunAndCaptureWeakAlcAsync();
+        // AND (second review, Fix 8) to the assembly Roslyn actually loaded into it, then force GC and
+        // assert BOTH weak references can no longer resolve to a live object. The old version of this
+        // test (before Fix 8) only captured a WeakReference to the ALC itself -- but an ALC that was
+        // created and never actually used to load anything would ALSO become trivially collectible after
+        // Unload(), which is exactly the no-op failure mode this whole rewrite (Fix 2) exists to catch
+        // (see the class doc comment: the original bug was Roslyn silently loading the submission assembly
+        // into a *different*, non-collectible load context, while this runner dutifully created and
+        // unloaded a collectible ALC that nothing was ever actually loaded into). Asserting the assembly's
+        // own WeakReference is unresolvable too proves something was actually loaded into this ALC and
+        // then actually reclaimed, not just that an empty ALC was created and unloaded.
+        var (weakAlc, weakAssembly, outcome) = await RunAndCaptureWeakAlcAsync();
 
         Assert.True(outcome.Success);
 
-        for (var i = 0; i < 10 && weakAlc.IsAlive; i++)
+        for (var i = 0; i < 10 && (weakAlc.IsAlive || weakAssembly.IsAlive); i++)
         {
             GC.Collect();
             GC.WaitForPendingFinalizers();
@@ -164,14 +172,15 @@ public class RoslynScriptRunnerTests
         }
 
         Assert.False(weakAlc.IsAlive, "The per-execution AssemblyLoadContext must become collectible once its run completes and Unload() is called.");
+        Assert.False(weakAssembly.IsAlive, "The assembly actually loaded into the per-execution AssemblyLoadContext must become collectible too -- not just the (possibly empty) ALC itself.");
     }
 
-    // Not inlined, and returns only the WeakReference + outcome (never the ALC or any script-execution
-    // internals) so nothing keeps the ALC rooted on the caller's stack frame once this returns --
-    // otherwise the JIT could keep locals alive for the rest of the enclosing method and the GC
+    // Not inlined, and returns only the WeakReferences + outcome (never the ALC, assembly, or any
+    // script-execution internals) so nothing keeps them rooted on the caller's stack frame once this
+    // returns -- otherwise the JIT could keep locals alive for the rest of the enclosing method and the GC
     // assertion above would be meaningless.
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private static async Task<(WeakReference WeakAlc, ScriptExecutionOutcome Outcome)> RunAndCaptureWeakAlcAsync()
+    private static async Task<(WeakReference WeakAlc, WeakReference WeakAssembly, ScriptExecutionOutcome Outcome)> RunAndCaptureWeakAlcAsync()
     {
         AssemblyLoadContext? captured = null;
         var runner = new RoslynScriptRunner(alcFactory: () =>
@@ -182,9 +191,21 @@ public class RoslynScriptRunnerTests
         });
 
         var outcome = await runner.RunAsync("1 + 1", NewGlobals(), CancellationToken.None);
+
+        // At this point RunAsync's finally block has already called alc.Unload() -- Unload() only requests
+        // unloading (the actual reclamation happens via GC), so the ALC and its loaded assembly are both
+        // still live and readable here. Fix 8: read the actually-loaded assembly off the ALC itself
+        // (rather than trusting that "the ALC became collectible" implies "something was loaded into it")
+        // so the sanity assertion below, and the WeakReference captured from it, are both grounded in what
+        // Roslyn genuinely loaded -- not an assumption.
+        Assembly? loadedAssembly = captured!.Assemblies.SingleOrDefault();
+        Assert.NotNull(loadedAssembly); // sanity: the ALC actually has something loaded into it, not empty
+
         var weakAlc = new WeakReference(captured);
+        var weakAssembly = new WeakReference(loadedAssembly);
         captured = null;
-        return (weakAlc, outcome);
+        loadedAssembly = null;
+        return (weakAlc, weakAssembly, outcome);
     }
 
     [Fact]

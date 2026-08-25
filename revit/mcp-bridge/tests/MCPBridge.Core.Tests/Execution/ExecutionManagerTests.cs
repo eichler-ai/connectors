@@ -124,6 +124,29 @@ public class ExecutionManagerTests
     }
 
     [Fact]
+    public void RequestCancellation_StillPending_ResolvesDirectlyToCancelled_NotGraceFlow()
+    {
+        // Second review, Fix 4: cancelling a Pending execution (e.g. execute_script called while a modal
+        // Revit dialog is blocking the idle loop) must resolve directly to Cancelled -- there's nothing
+        // running that needs to cooperatively/forcibly stop, so it must not merely stamp
+        // CancellationRequestedAt and wait on the grace-timer's "didn't stop -> Unrecoverable" escalation.
+        var manager = NewManager();
+        var now = DateTimeOffset.UtcNow;
+        var record = manager.Start("// script", 600_000, now).Record!;
+        Assert.Equal(ExecutionStatus.Pending, record.Status);
+
+        var result = manager.RequestCancellation(record.ExecutionId, now.AddSeconds(1));
+
+        Assert.Equal(CancellationRequestOutcome.Acknowledged, result);
+        Assert.Equal(ExecutionStatus.Cancelled, record.Status);
+        Assert.False(manager.IsInstanceUnrecoverable);
+
+        // Frees the instance slot immediately -- no need to wait out a grace period for a Pending cancel.
+        var next = manager.Start("// next", 600_000, now.AddSeconds(2));
+        Assert.Equal(ExecuteOutcomeKind.Started, next.Kind);
+    }
+
+    [Fact]
     public void RequestCancellation_Active_Acknowledged_AndRecordsRequestTime()
     {
         var manager = NewManager();
@@ -281,11 +304,16 @@ public class ExecutionManagerTests
     // --- Fix 3: CheckMaxDuration must fire for Pending, not just Running ---
 
     [Fact]
-    public void CheckMaxDuration_ElapsedWhileStillPending_AutoRequestsCancellation()
+    public void CheckMaxDuration_ElapsedWhileStillPending_ResolvesDirectlyToCancelled()
     {
         // PRD §06 headline case for max_duration_ms: a script stuck behind a modal Revit dialog before
         // Execute() ever runs (still Pending) must still time out -- previously CheckMaxDuration only
         // matched { Status: Running }, so a Pending execution could sit forever.
+        //
+        // Second review, Fix 4: a Pending execution has nothing running that needs to cooperatively/
+        // forcibly stop, so it must resolve directly to Cancelled here, not merely stamp
+        // CancellationRequestedAt and escalate through the grace-timer flow to instance-Unrecoverable --
+        // that flow is for a script actually in flight.
         var manager = NewManager();
         var now = DateTimeOffset.UtcNow;
         var record = manager.Start("// script", maxDurationMs: 1000, now).Record!;
@@ -293,7 +321,31 @@ public class ExecutionManagerTests
 
         manager.CheckMaxDuration(now.AddMilliseconds(1500));
 
-        Assert.NotNull(record.CancellationRequestedAt);
+        Assert.Equal(ExecutionStatus.Cancelled, record.Status);
+        Assert.False(manager.IsInstanceUnrecoverable);
+
+        // The instance slot must be free again -- a Pending cancel is a clean resolution, not a busy wait.
+        var next = manager.Start("// next", 600_000, now.AddMilliseconds(1600));
+        Assert.Equal(ExecuteOutcomeKind.Started, next.Kind);
+    }
+
+    [Fact]
+    public void CheckMaxDuration_ElapsedWhileStillPending_GraceExpiryNeverEscalatesIt()
+    {
+        // Even if CheckGraceExpiry is later called against a stale `now`, a Pending-cancelled execution
+        // must never be escalated to Unrecoverable -- it already resolved to Cancelled directly and is
+        // therefore terminal (and, separately, no longer the active execution once a later one starts).
+        var manager = NewManager();
+        var now = DateTimeOffset.UtcNow;
+        var record = manager.Start("// script", maxDurationMs: 1000, now).Record!;
+
+        manager.CheckMaxDuration(now.AddMilliseconds(1500));
+        Assert.Equal(ExecutionStatus.Cancelled, record.Status);
+
+        manager.CheckGraceExpiry(now.AddSeconds(30));
+
+        Assert.Equal(ExecutionStatus.Cancelled, record.Status);
+        Assert.False(manager.IsInstanceUnrecoverable);
     }
 
     [Fact]
@@ -388,21 +440,61 @@ public class ExecutionManagerTests
     }
 
     [Fact]
-    public void MarkRunning_RacedByGraceExpiry_DoesNotThrow()
+    public void CompleteSuccess_UnknownExecutionId_DoesNotThrow_ReturnsDiagnostic()
     {
-        // A Pending execution can be cancelled (and its grace period can expire) before it ever reaches
-        // Execute() -- MarkRunning arriving after that must not throw either.
+        // Second review, Fix 5: an execution_id Transition() can't find at all (e.g. evicted from the ring
+        // buffer) must never throw -- especially since this path can be invoked from Revit's UI thread.
+        var manager = NewManager();
+        var unknownId = Guid.NewGuid();
+
+        var diagnostic = Record.Exception(() =>
+            manager.CompleteSuccess(unknownId, DateTimeOffset.UtcNow, result: 1, stdOut: null, notices: Array.Empty<DiagnosticRecord>()));
+        Assert.Null(diagnostic); // no exception thrown
+
+        var result = manager.CompleteSuccess(unknownId, DateTimeOffset.UtcNow, result: 1, stdOut: null, notices: Array.Empty<DiagnosticRecord>());
+        Assert.NotNull(result);
+        Assert.Equal(DiagnosticSeverity.Warning, result!.Severity);
+        Assert.Equal("execution-transition-unknown-execution-id", result.Code);
+    }
+
+    [Fact]
+    public void MarkRunning_UnknownExecutionId_DoesNotThrow_ReturnsDiagnostic()
+    {
+        var manager = NewManager();
+        var unknownId = Guid.NewGuid();
+
+        var diagnostic = manager.MarkRunning(unknownId, DateTimeOffset.UtcNow);
+
+        Assert.NotNull(diagnostic);
+        Assert.Equal("execution-transition-unknown-execution-id", diagnostic!.Code);
+    }
+
+    [Fact]
+    public void MarkRunning_AfterPendingWasAlreadyCancelled_DoesNotThrow_ReturnsRaceDiagnostic()
+    {
+        // Second review, Fix 4 changed what this race looks like: a Pending execution's cancellation now
+        // resolves directly to Cancelled (terminal) rather than escalating through the grace-timer flow to
+        // Unrecoverable (that escalation is reserved for a script actually in flight, per Fix 4 -- a
+        // Pending execution's own CancellationRequestedAt is never even stamped, so CheckGraceExpiry can no
+        // longer race it into Unrecoverable the way this test previously simulated). What must still hold:
+        // a MarkRunning() call that arrives after that cancellation (e.g. Revit's idle loop finally reaches
+        // Execute() for a request that was already cancelled while queued) must not throw --
+        // Transition()'s terminal check must intercept it before ExecutionRecord.MarkRunning's own
+        // Pending-only precondition (RequireStatus(Pending)) would throw instead.
         var manager = NewManager();
         var now = DateTimeOffset.UtcNow;
         var record = manager.Start("// script", 600_000, now).Record!;
         manager.RequestCancellation(record.ExecutionId, now);
-        manager.CheckGraceExpiry(now.AddSeconds(10));
-        Assert.Equal(ExecutionStatus.Unrecoverable, record.Status);
+        Assert.Equal(ExecutionStatus.Cancelled, record.Status);
 
-        var diagnostic = manager.MarkRunning(record.ExecutionId, now.AddSeconds(10.1));
+        var thrown = Record.Exception(() => manager.MarkRunning(record.ExecutionId, now.AddSeconds(0.1)));
+        Assert.Null(thrown);
+
+        var diagnostic = manager.MarkRunning(record.ExecutionId, now.AddSeconds(0.2));
 
         Assert.NotNull(diagnostic);
-        Assert.Equal(ExecutionStatus.Unrecoverable, record.Status);
+        Assert.Equal("execution-transition-raced-terminal", diagnostic!.Code);
+        Assert.Equal(ExecutionStatus.Cancelled, record.Status);
     }
 
     // --- Cancellation wiring: a real CancellationTokenSource per execution ---
@@ -422,6 +514,25 @@ public class ExecutionManagerTests
         manager.RequestCancellation(record.ExecutionId, now);
 
         Assert.True(token.IsCancellationRequested);
+    }
+
+    [Fact]
+    public void CheckMaxDuration_ElapsedWhileRunning_ActuallyCancelsTheToken()
+    {
+        // Second review, Fix 3: CheckMaxDuration's auto-cancel previously only stamped
+        // CancellationRequestedAt on the record and never touched the CancellationTokenSource, so a
+        // cooperative script polling its token never actually observed a max-duration timeout.
+        var manager = NewManager();
+        var now = DateTimeOffset.UtcNow;
+        var record = manager.Start("// script", maxDurationMs: 1000, now).Record!;
+        manager.MarkRunning(record.ExecutionId, now);
+        var token = manager.GetCancellationToken(record.ExecutionId);
+        Assert.False(token.IsCancellationRequested);
+
+        manager.CheckMaxDuration(now.AddMilliseconds(1500));
+
+        Assert.True(token.IsCancellationRequested);
+        Assert.Equal(ExecutionStatus.Running, record.Status); // still needs to cooperatively stop / hit grace
     }
 
     [Fact]

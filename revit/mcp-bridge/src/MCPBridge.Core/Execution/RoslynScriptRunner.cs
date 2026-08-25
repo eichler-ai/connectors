@@ -180,8 +180,13 @@ public sealed class RoslynScriptRunner
         {
             // A synchronous throw from Invoke() (as opposed to the returned Task faulting) can only happen
             // before the generated async state machine's first await point; unwrap it the same way `await`
-            // would so callers see the real script exception, not a reflection wrapper.
-            throw tie.InnerException;
+            // would so callers see the real script exception, not a reflection wrapper. Second review
+            // finding: a plain `throw tie.InnerException;` here would reset the exception's stack trace to
+            // this line, losing where it actually originated inside the script. ExceptionDispatchInfo
+            // preserves the original stack trace across the rethrow the same way `await`-ing a faulted Task
+            // does.
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(tie.InnerException).Throw();
+            throw tie.InnerException; // unreachable -- ExceptionDispatchInfo.Throw() never returns, but the compiler can't see that; satisfies flow analysis (this method's return type is not void).
         }
 
         return await resultTask.ConfigureAwait(false);

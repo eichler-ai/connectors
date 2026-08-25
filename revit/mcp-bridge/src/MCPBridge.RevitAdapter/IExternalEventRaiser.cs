@@ -18,10 +18,19 @@ public interface IExternalEventRaiser
     ExternalEventRaiseOutcome Raise();
 }
 
-/// <summary>Mirrors Autodesk.Revit.UI.ExternalEventRequest (PRD §06).</summary>
+/// <summary>
+/// Mirrors Autodesk.Revit.UI.ExternalEventRequest (PRD §06), including all four real members. Pending
+/// (second review finding) means "not accepted because the previous request on this same event is still
+/// queued/not-yet-executed" -- it is not a failure. See <see cref="MCPBridge.Core.Execution.ExternalEventBridge{TResult}"/>,
+/// which treats it the same as Accepted given this bridge's own usage pattern (a RunAsync call only ever
+/// calls Raise() once, immediately after atomically setting its pending work item, so a Pending result
+/// under this bridge means the request genuinely is still queued and Execute() will still eventually fire
+/// for it).
+/// </summary>
 public enum ExternalEventRaiseOutcome
 {
     Accepted,
+    Pending,
     Denied,
     TimedOut,
 }

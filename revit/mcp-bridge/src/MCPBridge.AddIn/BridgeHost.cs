@@ -52,6 +52,29 @@ internal sealed class BridgeHost
         // }), which returns a Task the TCP thread can await without blocking, and which already
         // surfaces a Denied/TimedOut Raise() as a failed Task (Fix 5) instead of hanging.
         //
+        // Second review, HARD REQUIREMENTS for this wiring -- do not lose these when this stub is filled in:
+        //
+        // 1. The queued work item MUST check executionManager.GetCancellationToken(executionId)
+        //    .IsCancellationRequested (or equivalent) at its very start, before running the script or
+        //    touching the model, and bail out (resolve straight to Cancelled) if it's already true.
+        //    Reason: ExecutionManager now resolves a still-Pending execution's cancellation directly to
+        //    Cancelled (see ExecutionManager.ApplyCancellation) rather than waiting on the grace-timer
+        //    flow -- but the bridge-side work item queued in ExternalEventBridge._pending for that
+        //    execution is NOT un-queued by that (nothing today can reach into Revit's ExternalEvent queue
+        //    and cancel an already-raised request), so it will still fire later when Revit's idle loop
+        //    gets to it. Without this check, an already-cancelled-while-Pending execution would still run
+        //    its script and mutate the model after the caller has already been told it was cancelled.
+        //
+        // 2. Whatever composes ExternalEventBridge<TResult> and ExecutionManager here MUST attach a
+        //    continuation/catch to bridge.RunAsync(...)'s returned Task that calls
+        //    executionManager.CompleteError(...) on ANY fault -- including ExternalEventRaiseDeniedException
+        //    (a Denied/TimedOut Raise()) -- not just exceptions the work item itself throws. Without this,
+        //    an execution whose bridge Task faults before any Complete*/MarkRunning call ever runs leaves
+        //    ExecutionManager's _active slot and that execution's CancellationTokenSource dangling forever
+        //    (this instance permanently reports Busy). This is out of scope for the second-review bugfix
+        //    pass itself (it requires this not-yet-implemented composition to exist first), but must not be
+        //    forgotten when this TODO is finally implemented.
+        //
         // Also call RoslynAssemblyIsolation.EnsureInitialized() here, before any script
         // ever compiles. It's a partial mitigation, not full isolation (see its own doc
         // comment for why -- true isolation needs a shadow-load bootstrap), and nothing
