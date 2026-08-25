@@ -43,6 +43,21 @@ public class RoslynScriptRunnerTests
     }
 
     [Fact]
+    public async Task RunAsync_CanAccessGlobals_UIApplicationAndUIDocument_ByPrdCasing()
+    {
+        // Fix 7: ScriptGlobals' member names are a public, external contract an agent-authored
+        // script binds to by identifier -- must match PRD §06's published casing (UIApplication/
+        // UIDocument, not UiApplication/UiDocument).
+        var runner = new RoslynScriptRunner();
+        var globals = NewGlobals();
+
+        var outcome = await runner.RunAsync("UIDocument.Document.Title", globals, CancellationToken.None);
+
+        Assert.True(outcome.Success);
+        Assert.Equal("FakeDocument", outcome.ReturnValue);
+    }
+
+    [Fact]
     public async Task RunAsync_CapturesStdOut()
     {
         var runner = new RoslynScriptRunner();

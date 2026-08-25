@@ -248,10 +248,14 @@ func (m *Manager) ExecuteScript(ctx context.Context, instanceID, documentID, scr
 		// real answer, and a truly dead connection gets cleaned up by
 		// DetachInstance (which frees the instance) once the broker
 		// actually notices — neither path needs this call to assert an
-		// outcome it doesn't know. Asserting one anyway would be worse: a
-		// premature terminal error here would also permanently block the
-		// add-in's own ring-buffer replay (PRD §05) from ever correcting it
-		// after a reconnect.
+		// outcome it doesn't know. Asserting one anyway would be worse: it
+		// would rule out the one recovery path that actually works today —
+		// a retry against a still-live connection getting the real answer.
+		// (PRD §05 also describes the add-in replaying its own ring buffer
+		// on reconnect as a further safety net, but that's add-in-side
+		// design intent only: the broker has no wire-protocol counterpart
+		// that consumes or applies such a replay today, so it isn't what's
+		// actually closing this gap yet.)
 		return nil, drec
 	}
 	m.settle(instanceID, executionID, res)
@@ -346,6 +350,14 @@ func (m *Manager) PollExecution(ctx context.Context, executionID string, timeout
 // forwardExisting's own reasoning), but it also must not silently leave the
 // instance wedged busy forever with no operator-visible recovery — the
 // grace-period escalation is what closes that gap.
+//
+// As of this writing, the add-in side (revit/mcp-bridge/) has no RPC
+// dispatcher/handler for cancel_execution wired up at all yet — that's
+// deferred, pending BridgeHost.Start()'s live-wiring work. So today, ANY
+// cancel_execution call hits this "no response" branch of the wire-failure
+// path, not just a genuinely hung/unresponsive one; the grace-period
+// escalation described above still fires correctly either way, but a
+// responsive add-in-side cancel handler isn't reachable yet in practice.
 func (m *Manager) CancelExecution(ctx context.Context, executionID string) (*Result, *diag.Record) {
 	const cancelTimeoutMs = 10_000 // grace-period ceiling per PRD §06; not caller-configurable.
 

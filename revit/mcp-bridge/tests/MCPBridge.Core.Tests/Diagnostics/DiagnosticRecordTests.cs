@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Text.Json;
 using MCPBridge.Core.Diagnostics;
 using Xunit;
 
@@ -6,6 +7,45 @@ namespace MCPBridge.Core.Tests.Diagnostics;
 
 public class DiagnosticRecordTests
 {
+    [Theory]
+    [InlineData(DiagnosticSeverity.Debug, "debug")]
+    [InlineData(DiagnosticSeverity.Info, "info")]
+    [InlineData(DiagnosticSeverity.Warning, "warning")]
+    [InlineData(DiagnosticSeverity.Error, "error")]
+    public void Severity_Serialize_ProducesExactLowercaseGoWireValue(DiagnosticSeverity severity, string expectedWireValue)
+    {
+        var json = JsonSerializer.Serialize(severity);
+
+        Assert.Equal($"\"{expectedWireValue}\"", json);
+    }
+
+    [Fact]
+    public void SerializeThenDeserialize_RoundTrips()
+    {
+        // Fix 5: DiagnosticRecord previously had only a private constructor -- serializable but
+        // not deserializable, so a Server-authored (or any externally-produced) record could
+        // never be read back off the wire. The [JsonConstructor]-annotated public constructor
+        // makes that possible while Create(...) remains the normal construction path.
+        var original = DiagnosticRecord.Create(
+            DiagnosticSeverity.Warning,
+            "execution-transition-raced-terminal",
+            DiagnosticSource.Execution,
+            "execution abc-123 was already terminal",
+            detail: new Dictionary<string, object?> { ["execution_id"] = "abc-123" },
+            remedy: new[] { "call poll_execution again" });
+
+        var json = JsonSerializer.Serialize(original);
+        var roundTripped = JsonSerializer.Deserialize<DiagnosticRecord>(json);
+
+        Assert.NotNull(roundTripped);
+        Assert.Equal(original.Severity, roundTripped!.Severity);
+        Assert.Equal(original.Code, roundTripped.Code);
+        Assert.Equal(original.Source, roundTripped.Source);
+        Assert.Equal(original.Message, roundTripped.Message);
+        Assert.Equal(original.Remedy, roundTripped.Remedy);
+        Assert.True(roundTripped.Detail.ContainsKey("execution_id"));
+    }
+
     [Fact]
     public void Source_ForExecutionArea_MatchesModuleNamingConvention()
     {

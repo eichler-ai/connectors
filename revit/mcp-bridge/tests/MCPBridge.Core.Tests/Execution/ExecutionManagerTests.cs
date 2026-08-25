@@ -11,13 +11,15 @@ public class ExecutionManagerTests
     private static ExecutionManager NewManager() =>
         new(new ExecutionRingBuffer(capacity: 50, retention: TimeSpan.FromMinutes(10)), gracePeriod: TimeSpan.FromSeconds(5));
 
+    private static string NewId() => "exec-" + Guid.NewGuid();
+
     [Fact]
     public void Start_WhenIdle_ReturnsNewPendingExecution()
     {
         var manager = NewManager();
         var now = DateTimeOffset.UtcNow;
 
-        var outcome = manager.Start("// script", maxDurationMs: 600_000, now);
+        var outcome = manager.Start(NewId(), "// script", maxDurationMs: 600_000, now);
 
         Assert.Equal(ExecuteOutcomeKind.Started, outcome.Kind);
         Assert.NotNull(outcome.Record);
@@ -25,13 +27,78 @@ public class ExecutionManagerTests
     }
 
     [Fact]
+    public void Start_EchoesBackTheBrokerMintedExecutionId_DoesNotMintItsOwn()
+    {
+        // Fix 6 / PRD §01: execution_id is broker-minted -- "the add-in echoes the same ID
+        // back rather than generating its own." The Go broker mints ids shaped
+        // "exec-<uuid>", which is not Guid-parseable due to the "exec-" prefix, so this
+        // must be a plain string round-tripped verbatim, not something ExecutionManager
+        // generates itself.
+        var manager = NewManager();
+        var now = DateTimeOffset.UtcNow;
+        const string brokerMintedId = "exec-9c3f9b2e-30e1-4d3f-8f7a-000000000000";
+
+        var outcome = manager.Start(brokerMintedId, "// script", 600_000, now);
+
+        Assert.Equal(brokerMintedId, outcome.Record!.ExecutionId);
+        Assert.Same(outcome.Record, manager.Poll(brokerMintedId));
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void Start_NullOrEmptyExecutionId_Throws(string? executionId)
+    {
+        // Third review finding: unlike a locally-minted Guid, executionId now arrives untrusted from
+        // the wire -- Start is the one boundary that must reject a malformed id loudly rather than
+        // let it corrupt downstream state (e.g. a null key in _cancellationSources).
+        var manager = NewManager();
+
+        Assert.Throws<ArgumentException>(() => manager.Start(executionId!, "// script", 600_000, DateTimeOffset.UtcNow));
+    }
+
+    [Fact]
+    public void Start_DuplicateExecutionId_Throws_DoesNotClobberTheExistingExecution()
+    {
+        var manager = NewManager();
+        var now = DateTimeOffset.UtcNow;
+        var id = NewId();
+        var first = manager.Start(id, "// first", 600_000, now).Record!;
+        first.MarkCompleted(now, result: null, stdOut: null, notices: Array.Empty<DiagnosticRecord>());
+
+        Assert.Throws<ArgumentException>(() => manager.Start(id, "// second", 600_000, now.AddSeconds(1)));
+
+        // The original (now-terminal) record must still be the one on record for this id.
+        Assert.Same(first, manager.Poll(id));
+    }
+
+    [Fact]
+    public void Start_SameIdAsTheCurrentlyActiveExecution_ReturnsBusy_DoesNotThrow()
+    {
+        // Fifth review finding: distinct from the terminal-duplicate case above, retrying the SAME id
+        // as the still-active execution (the realistic scenario -- the broker retrying a timed-out
+        // execute_script call) must be an ordinary, idempotent Busy response, not an exception.
+        var manager = NewManager();
+        var now = DateTimeOffset.UtcNow;
+        var id = NewId();
+        var first = manager.Start(id, "// script", 600_000, now).Record!;
+        Assert.Equal(ExecutionStatus.Pending, first.Status);
+
+        var retry = manager.Start(id, "// script", 600_000, now.AddSeconds(1));
+
+        Assert.Equal(ExecuteOutcomeKind.Busy, retry.Kind);
+        Assert.Same(first, retry.Record);
+    }
+
+    [Fact]
     public void Start_WhileAnExecutionIsActive_ReturnsBusyPointingAtExistingId()
     {
         var manager = NewManager();
         var now = DateTimeOffset.UtcNow;
-        var first = manager.Start("// first", 600_000, now).Record!;
+        var first = manager.Start(NewId(), "// first", 600_000, now).Record!;
 
-        var second = manager.Start("// second", 600_000, now);
+        var second = manager.Start(NewId(), "// second", 600_000, now);
 
         Assert.Equal(ExecuteOutcomeKind.Busy, second.Kind);
         Assert.Equal(first.ExecutionId, second.Record!.ExecutionId);
@@ -44,10 +111,10 @@ public class ExecutionManagerTests
         // but both occupy the instance for the purposes of a second execute_script (PRD §06).
         var manager = NewManager();
         var now = DateTimeOffset.UtcNow;
-        var first = manager.Start("// first", 600_000, now).Record!;
+        var first = manager.Start(NewId(), "// first", 600_000, now).Record!;
         Assert.Equal(ExecutionStatus.Pending, first.Status);
 
-        var second = manager.Start("// second", 600_000, now);
+        var second = manager.Start(NewId(), "// second", 600_000, now);
 
         Assert.Equal(ExecuteOutcomeKind.Busy, second.Kind);
     }
@@ -57,7 +124,7 @@ public class ExecutionManagerTests
     {
         var manager = NewManager();
         var now = DateTimeOffset.UtcNow;
-        var record = manager.Start("// script", 600_000, now).Record!;
+        var record = manager.Start(NewId(), "// script", 600_000, now).Record!;
 
         manager.MarkRunning(record.ExecutionId, now.AddMilliseconds(10));
 
@@ -69,13 +136,13 @@ public class ExecutionManagerTests
     {
         var manager = NewManager();
         var now = DateTimeOffset.UtcNow;
-        var record = manager.Start("// script", 600_000, now).Record!;
+        var record = manager.Start(NewId(), "// script", 600_000, now).Record!;
         manager.MarkRunning(record.ExecutionId, now);
 
         manager.CompleteSuccess(record.ExecutionId, now, result: 42, stdOut: null, notices: Array.Empty<DiagnosticRecord>());
 
         Assert.Equal(ExecutionStatus.Completed, record.Status);
-        var next = manager.Start("// next", 600_000, now);
+        var next = manager.Start(NewId(), "// next", 600_000, now);
         Assert.Equal(ExecuteOutcomeKind.Started, next.Kind);
     }
 
@@ -84,7 +151,7 @@ public class ExecutionManagerTests
     {
         var manager = NewManager();
         var now = DateTimeOffset.UtcNow;
-        var record = manager.Start("// script", 600_000, now).Record!;
+        var record = manager.Start(NewId(), "// script", 600_000, now).Record!;
         manager.MarkRunning(record.ExecutionId, now);
 
         var diagnostic = DiagnosticRecord.Create(
@@ -95,7 +162,7 @@ public class ExecutionManagerTests
         Assert.Equal(ExecutionStatus.Error, record.Status);
         Assert.Same(diagnostic, record.Error);
 
-        var next = manager.Start("// next", 600_000, now);
+        var next = manager.Start(NewId(), "// next", 600_000, now);
         Assert.Equal(ExecuteOutcomeKind.Started, next.Kind);
     }
 
@@ -104,7 +171,7 @@ public class ExecutionManagerTests
     {
         var manager = NewManager();
 
-        var result = manager.RequestCancellation(Guid.NewGuid(), DateTimeOffset.UtcNow);
+        var result = manager.RequestCancellation(NewId(), DateTimeOffset.UtcNow);
 
         Assert.Equal(CancellationRequestOutcome.NotFound, result);
     }
@@ -114,7 +181,7 @@ public class ExecutionManagerTests
     {
         var manager = NewManager();
         var now = DateTimeOffset.UtcNow;
-        var record = manager.Start("// script", 600_000, now).Record!;
+        var record = manager.Start(NewId(), "// script", 600_000, now).Record!;
         manager.MarkRunning(record.ExecutionId, now);
         manager.CompleteSuccess(record.ExecutionId, now, null, null, Array.Empty<DiagnosticRecord>());
 
@@ -132,7 +199,7 @@ public class ExecutionManagerTests
         // CancellationRequestedAt and wait on the grace-timer's "didn't stop -> Unrecoverable" escalation.
         var manager = NewManager();
         var now = DateTimeOffset.UtcNow;
-        var record = manager.Start("// script", 600_000, now).Record!;
+        var record = manager.Start(NewId(), "// script", 600_000, now).Record!;
         Assert.Equal(ExecutionStatus.Pending, record.Status);
 
         var result = manager.RequestCancellation(record.ExecutionId, now.AddSeconds(1));
@@ -142,7 +209,7 @@ public class ExecutionManagerTests
         Assert.False(manager.IsInstanceUnrecoverable);
 
         // Frees the instance slot immediately -- no need to wait out a grace period for a Pending cancel.
-        var next = manager.Start("// next", 600_000, now.AddSeconds(2));
+        var next = manager.Start(NewId(), "// next", 600_000, now.AddSeconds(2));
         Assert.Equal(ExecuteOutcomeKind.Started, next.Kind);
     }
 
@@ -151,7 +218,7 @@ public class ExecutionManagerTests
     {
         var manager = NewManager();
         var now = DateTimeOffset.UtcNow;
-        var record = manager.Start("// script", 600_000, now).Record!;
+        var record = manager.Start(NewId(), "// script", 600_000, now).Record!;
         manager.MarkRunning(record.ExecutionId, now);
 
         var result = manager.RequestCancellation(record.ExecutionId, now.AddSeconds(1));
@@ -165,7 +232,7 @@ public class ExecutionManagerTests
     {
         var manager = NewManager();
         var now = DateTimeOffset.UtcNow;
-        var record = manager.Start("// script", 600_000, now).Record!;
+        var record = manager.Start(NewId(), "// script", 600_000, now).Record!;
         manager.MarkRunning(record.ExecutionId, now);
         manager.RequestCancellation(record.ExecutionId, now);
 
@@ -180,7 +247,7 @@ public class ExecutionManagerTests
     {
         var manager = NewManager();
         var now = DateTimeOffset.UtcNow;
-        var record = manager.Start("// script", maxDurationMs: 1000, now).Record!;
+        var record = manager.Start(NewId(), "// script", maxDurationMs: 1000, now).Record!;
         manager.MarkRunning(record.ExecutionId, now);
 
         manager.CheckMaxDuration(now.AddMilliseconds(1500));
@@ -193,7 +260,7 @@ public class ExecutionManagerTests
     {
         var manager = NewManager();
         var now = DateTimeOffset.UtcNow;
-        var record = manager.Start("// script", maxDurationMs: 10_000, now).Record!;
+        var record = manager.Start(NewId(), "// script", maxDurationMs: 10_000, now).Record!;
         manager.MarkRunning(record.ExecutionId, now);
 
         manager.CheckMaxDuration(now.AddMilliseconds(500));
@@ -206,7 +273,7 @@ public class ExecutionManagerTests
     {
         var manager = NewManager();
         var now = DateTimeOffset.UtcNow;
-        var record = manager.Start("// script", maxDurationMs: 1000, now).Record!;
+        var record = manager.Start(NewId(), "// script", maxDurationMs: 1000, now).Record!;
         manager.MarkRunning(record.ExecutionId, now);
 
         manager.CheckMaxDuration(now.AddMilliseconds(1500));
@@ -221,7 +288,7 @@ public class ExecutionManagerTests
     {
         var manager = NewManager();
         var now = DateTimeOffset.UtcNow;
-        var record = manager.Start("// script", 600_000, now).Record!;
+        var record = manager.Start(NewId(), "// script", 600_000, now).Record!;
         manager.MarkRunning(record.ExecutionId, now);
         manager.RequestCancellation(record.ExecutionId, now);
 
@@ -236,7 +303,7 @@ public class ExecutionManagerTests
     {
         var manager = NewManager();
         var now = DateTimeOffset.UtcNow;
-        var record = manager.Start("// script", 600_000, now).Record!;
+        var record = manager.Start(NewId(), "// script", 600_000, now).Record!;
         manager.MarkRunning(record.ExecutionId, now);
         manager.RequestCancellation(record.ExecutionId, now);
 
@@ -251,7 +318,7 @@ public class ExecutionManagerTests
     {
         var manager = NewManager();
         var now = DateTimeOffset.UtcNow;
-        var record = manager.Start("// script", 600_000, now).Record!;
+        var record = manager.Start(NewId(), "// script", 600_000, now).Record!;
         manager.MarkRunning(record.ExecutionId, now);
         manager.RequestCancellation(record.ExecutionId, now);
         manager.CompleteCancelled(record.ExecutionId, now.AddSeconds(1), stdOut: null);
@@ -267,12 +334,12 @@ public class ExecutionManagerTests
     {
         var manager = NewManager();
         var now = DateTimeOffset.UtcNow;
-        var record = manager.Start("// script", 600_000, now).Record!;
+        var record = manager.Start(NewId(), "// script", 600_000, now).Record!;
         manager.MarkRunning(record.ExecutionId, now);
         manager.RequestCancellation(record.ExecutionId, now);
         manager.CheckGraceExpiry(now.AddSeconds(6));
 
-        var outcome = manager.Start("// another", 600_000, now.AddSeconds(7));
+        var outcome = manager.Start(NewId(), "// another", 600_000, now.AddSeconds(7));
 
         Assert.Equal(ExecuteOutcomeKind.InstanceUnrecoverable, outcome.Kind);
         Assert.NotNull(outcome.Diagnostic);
@@ -284,7 +351,7 @@ public class ExecutionManagerTests
     {
         var manager = NewManager();
         var now = DateTimeOffset.UtcNow;
-        var record = manager.Start("// script", 600_000, now).Record!;
+        var record = manager.Start(NewId(), "// script", 600_000, now).Record!;
         manager.MarkRunning(record.ExecutionId, now);
         manager.CompleteSuccess(record.ExecutionId, now, null, null, Array.Empty<DiagnosticRecord>());
 
@@ -298,7 +365,7 @@ public class ExecutionManagerTests
     public void Poll_UnknownExecutionId_ReturnsNull_NotHang()
     {
         var manager = NewManager();
-        Assert.Null(manager.Poll(Guid.NewGuid()));
+        Assert.Null(manager.Poll(NewId()));
     }
 
     // --- Fix 3: CheckMaxDuration must fire for Pending, not just Running ---
@@ -316,7 +383,7 @@ public class ExecutionManagerTests
         // that flow is for a script actually in flight.
         var manager = NewManager();
         var now = DateTimeOffset.UtcNow;
-        var record = manager.Start("// script", maxDurationMs: 1000, now).Record!;
+        var record = manager.Start(NewId(), "// script", maxDurationMs: 1000, now).Record!;
         Assert.Equal(ExecutionStatus.Pending, record.Status);
 
         manager.CheckMaxDuration(now.AddMilliseconds(1500));
@@ -325,7 +392,7 @@ public class ExecutionManagerTests
         Assert.False(manager.IsInstanceUnrecoverable);
 
         // The instance slot must be free again -- a Pending cancel is a clean resolution, not a busy wait.
-        var next = manager.Start("// next", 600_000, now.AddMilliseconds(1600));
+        var next = manager.Start(NewId(), "// next", 600_000, now.AddMilliseconds(1600));
         Assert.Equal(ExecuteOutcomeKind.Started, next.Kind);
     }
 
@@ -340,7 +407,7 @@ public class ExecutionManagerTests
         // must still report IsCancellationRequested == true once its queued work item finally runs.
         var manager = NewManager();
         var now = DateTimeOffset.UtcNow;
-        var record = manager.Start("// script", maxDurationMs: 1000, now).Record!;
+        var record = manager.Start(NewId(), "// script", maxDurationMs: 1000, now).Record!;
         var token = manager.GetCancellationToken(record.ExecutionId);
         Assert.False(token.IsCancellationRequested);
 
@@ -357,7 +424,7 @@ public class ExecutionManagerTests
     {
         var manager = NewManager();
         var now = DateTimeOffset.UtcNow;
-        var record = manager.Start("// script", maxDurationMs: 600_000, now).Record!;
+        var record = manager.Start(NewId(), "// script", maxDurationMs: 600_000, now).Record!;
         var token = manager.GetCancellationToken(record.ExecutionId);
 
         var outcome = manager.RequestCancellation(record.ExecutionId, now);
@@ -380,7 +447,7 @@ public class ExecutionManagerTests
         // out of RequestCancellation/CheckMaxDuration, both of which can be driven from Revit's UI thread.
         var manager = NewManager();
         var now = DateTimeOffset.UtcNow;
-        var record = manager.Start("// script", maxDurationMs: 600_000, now).Record!;
+        var record = manager.Start(NewId(), "// script", maxDurationMs: 600_000, now).Record!;
         manager.MarkRunning(record.ExecutionId, now);
         var token = manager.GetCancellationToken(record.ExecutionId);
         token.Register(() => throw new InvalidOperationException("script cleanup callback boom"));
@@ -401,7 +468,7 @@ public class ExecutionManagerTests
         // therefore terminal (and, separately, no longer the active execution once a later one starts).
         var manager = NewManager();
         var now = DateTimeOffset.UtcNow;
-        var record = manager.Start("// script", maxDurationMs: 1000, now).Record!;
+        var record = manager.Start(NewId(), "// script", maxDurationMs: 1000, now).Record!;
 
         manager.CheckMaxDuration(now.AddMilliseconds(1500));
         Assert.Equal(ExecutionStatus.Cancelled, record.Status);
@@ -417,7 +484,7 @@ public class ExecutionManagerTests
     {
         var manager = NewManager();
         var now = DateTimeOffset.UtcNow;
-        var record = manager.Start("// script", maxDurationMs: 10_000, now).Record!;
+        var record = manager.Start(NewId(), "// script", maxDurationMs: 10_000, now).Record!;
 
         manager.CheckMaxDuration(now.AddMilliseconds(500));
 
@@ -432,7 +499,7 @@ public class ExecutionManagerTests
         // execute_script call's budget, queue wait included.
         var manager = NewManager();
         var now = DateTimeOffset.UtcNow;
-        var record = manager.Start("// script", maxDurationMs: 1000, now).Record!;
+        var record = manager.Start(NewId(), "// script", maxDurationMs: 1000, now).Record!;
 
         manager.MarkRunning(record.ExecutionId, now.AddMilliseconds(900));
         manager.CheckMaxDuration(now.AddMilliseconds(1100));
@@ -451,7 +518,7 @@ public class ExecutionManagerTests
         // inside Revit's UI-thread Execute() callback, where an uncaught exception is a crash-class bug.
         var manager = NewManager();
         var now = DateTimeOffset.UtcNow;
-        var record = manager.Start("// script", 600_000, now).Record!;
+        var record = manager.Start(NewId(), "// script", 600_000, now).Record!;
         manager.MarkRunning(record.ExecutionId, now);
         manager.RequestCancellation(record.ExecutionId, now);
         manager.CheckGraceExpiry(now.AddSeconds(10));
@@ -474,7 +541,7 @@ public class ExecutionManagerTests
     {
         var manager = NewManager();
         var now = DateTimeOffset.UtcNow;
-        var record = manager.Start("// script", 600_000, now).Record!;
+        var record = manager.Start(NewId(), "// script", 600_000, now).Record!;
         manager.MarkRunning(record.ExecutionId, now);
         manager.RequestCancellation(record.ExecutionId, now);
         manager.CheckGraceExpiry(now.AddSeconds(10));
@@ -492,7 +559,7 @@ public class ExecutionManagerTests
     {
         var manager = NewManager();
         var now = DateTimeOffset.UtcNow;
-        var record = manager.Start("// script", 600_000, now).Record!;
+        var record = manager.Start(NewId(), "// script", 600_000, now).Record!;
         manager.MarkRunning(record.ExecutionId, now);
         manager.RequestCancellation(record.ExecutionId, now);
         manager.CheckGraceExpiry(now.AddSeconds(10));
@@ -509,7 +576,7 @@ public class ExecutionManagerTests
         // Second review, Fix 5: an execution_id Transition() can't find at all (e.g. evicted from the ring
         // buffer) must never throw -- especially since this path can be invoked from Revit's UI thread.
         var manager = NewManager();
-        var unknownId = Guid.NewGuid();
+        var unknownId = NewId();
 
         var diagnostic = Record.Exception(() =>
             manager.CompleteSuccess(unknownId, DateTimeOffset.UtcNow, result: 1, stdOut: null, notices: Array.Empty<DiagnosticRecord>()));
@@ -525,7 +592,7 @@ public class ExecutionManagerTests
     public void MarkRunning_UnknownExecutionId_DoesNotThrow_ReturnsDiagnostic()
     {
         var manager = NewManager();
-        var unknownId = Guid.NewGuid();
+        var unknownId = NewId();
 
         var diagnostic = manager.MarkRunning(unknownId, DateTimeOffset.UtcNow);
 
@@ -547,7 +614,7 @@ public class ExecutionManagerTests
         // Pending-only precondition (RequireStatus(Pending)) would throw instead.
         var manager = NewManager();
         var now = DateTimeOffset.UtcNow;
-        var record = manager.Start("// script", 600_000, now).Record!;
+        var record = manager.Start(NewId(), "// script", 600_000, now).Record!;
         manager.RequestCancellation(record.ExecutionId, now);
         Assert.Equal(ExecutionStatus.Cancelled, record.Status);
 
@@ -570,7 +637,7 @@ public class ExecutionManagerTests
         // CancellationTokenSource to it, so cancel_execution could not stop even a cooperative script.
         var manager = NewManager();
         var now = DateTimeOffset.UtcNow;
-        var record = manager.Start("// script", 600_000, now).Record!;
+        var record = manager.Start(NewId(), "// script", 600_000, now).Record!;
         manager.MarkRunning(record.ExecutionId, now);
         var token = manager.GetCancellationToken(record.ExecutionId);
         Assert.False(token.IsCancellationRequested);
@@ -588,7 +655,7 @@ public class ExecutionManagerTests
         // cooperative script polling its token never actually observed a max-duration timeout.
         var manager = NewManager();
         var now = DateTimeOffset.UtcNow;
-        var record = manager.Start("// script", maxDurationMs: 1000, now).Record!;
+        var record = manager.Start(NewId(), "// script", maxDurationMs: 1000, now).Record!;
         manager.MarkRunning(record.ExecutionId, now);
         var token = manager.GetCancellationToken(record.ExecutionId);
         Assert.False(token.IsCancellationRequested);
@@ -603,7 +670,7 @@ public class ExecutionManagerTests
     public void GetCancellationToken_UnknownExecutionId_ReturnsNone_NotThrow()
     {
         var manager = NewManager();
-        Assert.Equal(CancellationToken.None, manager.GetCancellationToken(Guid.NewGuid()));
+        Assert.Equal(CancellationToken.None, manager.GetCancellationToken(NewId()));
     }
 
     [Fact]
@@ -611,7 +678,7 @@ public class ExecutionManagerTests
     {
         var manager = NewManager();
         var now = DateTimeOffset.UtcNow;
-        var record = manager.Start("// script", 600_000, now).Record!;
+        var record = manager.Start(NewId(), "// script", 600_000, now).Record!;
 
         Assert.False(manager.GetCancellationToken(record.ExecutionId).IsCancellationRequested);
     }
@@ -621,7 +688,7 @@ public class ExecutionManagerTests
     {
         var manager = NewManager();
         var now = DateTimeOffset.UtcNow;
-        var record = manager.Start("// script", 600_000, now).Record!;
+        var record = manager.Start(NewId(), "// script", 600_000, now).Record!;
         manager.MarkRunning(record.ExecutionId, now);
 
         var diagnostic = manager.CompleteSuccess(record.ExecutionId, now, result: 42, stdOut: null, notices: Array.Empty<DiagnosticRecord>());

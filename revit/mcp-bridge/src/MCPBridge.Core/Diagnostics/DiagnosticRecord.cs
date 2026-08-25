@@ -31,20 +31,30 @@ public sealed class DiagnosticRecord
     [JsonPropertyName("remedy")]
     public IReadOnlyList<string> Remedy { get; }
 
-    private DiagnosticRecord(
+    /// <summary>
+    /// Deserialization entry point for System.Text.Json (e.g. reading a Server-authored
+    /// diagnostic record off the wire, per the shared PRD §01 shape). Not intended for
+    /// direct construction from ordinary code -- use <see cref="Create"/> for that, which
+    /// enforces the non-empty code/message invariants; this constructor accepts values
+    /// as-is so a wire payload that happens to be malformed still deserializes into an
+    /// object rather than throwing mid-parse (the same "report, don't hide" posture the
+    /// rest of this codebase's diagnostics take).
+    /// </summary>
+    [JsonConstructor]
+    public DiagnosticRecord(
         DiagnosticSeverity severity,
         string code,
         string source,
         string message,
-        IReadOnlyDictionary<string, object?> detail,
-        IReadOnlyList<string> remedy)
+        IReadOnlyDictionary<string, object?>? detail,
+        IReadOnlyList<string>? remedy)
     {
         Severity = severity;
         Code = code;
         Source = source;
         Message = message;
-        Detail = detail;
-        Remedy = remedy;
+        Detail = detail ?? EmptyDetail;
+        Remedy = remedy ?? Array.Empty<string>();
     }
 
     public static DiagnosticRecord Create(

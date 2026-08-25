@@ -18,7 +18,7 @@ public sealed class ExecutionRingBuffer
 
     // Insertion-ordered so capacity eviction removes the oldest entry first.
     private readonly LinkedList<ExecutionRecord> _order = new();
-    private readonly Dictionary<Guid, LinkedListNode<ExecutionRecord>> _byId = new();
+    private readonly Dictionary<string, LinkedListNode<ExecutionRecord>> _byId = new();
 
     public ExecutionRingBuffer(int capacity, TimeSpan retention)
     {
@@ -36,6 +36,13 @@ public sealed class ExecutionRingBuffer
 
     /// <summary>
     /// Appends a new record and, if that pushes the buffer past capacity, evicts the oldest entry.
+    /// Returns false, and adds nothing, if <paramref name="record"/>'s ExecutionId already has an
+    /// entry (a duplicate execution_id, which should never happen given the broker mints a fresh
+    /// UUID-derived id per execution -- see ExecutionManager.Start's doc comment -- but a duplicate
+    /// silently overwriting the _byId mapping while leaving the old node in _order would corrupt this
+    /// buffer's core invariant: eviction removing the wrong entry's mapping, leaving a live execution
+    /// permanently unreachable via TryGet even though its node is still sitting in _order. Fail loud
+    /// at the boundary instead).
     ///
     /// Unlike <see cref="Prune"/>, capacity eviction here has no non-terminal exemption -- callers of this
     /// class don't need to provide one. A caller that also maintains the single-active-execution invariant
@@ -44,10 +51,15 @@ public sealed class ExecutionRingBuffer
     /// always the most recently added, and nothing else can be appended behind it until it goes terminal
     /// itself.
     /// </summary>
-    public void Add(ExecutionRecord record)
+    public bool Add(ExecutionRecord record)
     {
         lock (_lock)
         {
+            if (_byId.ContainsKey(record.ExecutionId))
+            {
+                return false;
+            }
+
             var node = _order.AddLast(record);
             _byId[record.ExecutionId] = node;
 
@@ -57,10 +69,12 @@ public sealed class ExecutionRingBuffer
                 _order.RemoveFirst();
                 _byId.Remove(oldest.Value.ExecutionId);
             }
+
+            return true;
         }
     }
 
-    public bool TryGet(Guid executionId, out ExecutionRecord? record)
+    public bool TryGet(string executionId, out ExecutionRecord? record)
     {
         lock (_lock)
         {

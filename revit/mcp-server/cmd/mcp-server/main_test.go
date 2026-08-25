@@ -169,6 +169,56 @@ func TestTurnReaderLeftoverNotServedAfterStop(t *testing.T) {
 	}
 }
 
+// TestTurnReaderDeliverOrDonate_StopAlreadyClosed_DonatesRatherThanDelivers is
+// the deterministic unit test for finding (b): the specific case where a
+// reader has already won a chunk off relay.chunks but stop is (by then)
+// closed. This is the exact code path TestTurnReaderStopDoesNotStealFromNextReader
+// originally tried to exercise end-to-end via real goroutine scheduling —
+// which turned out to be unreliable under host CPU contention (see that
+// test's own comment). Calling deliverOrDonate directly sidesteps needing to
+// actually win the real select race: it tests "given a chunk was won and
+// stop is closed, what happens" in isolation, with no dependency on
+// scheduling timing at all.
+func TestTurnReaderDeliverOrDonate_StopAlreadyClosed_DonatesRatherThanDelivers(t *testing.T) {
+	relay := &stdinRelay{chunks: make(chan []byte)}
+	stop := make(chan struct{})
+	close(stop)
+	r := &turnReader{relay: relay, stop: stop}
+
+	buf := make([]byte, 16)
+	n, err := r.deliverOrDonate(buf, []byte{42, 43})
+
+	if n != 0 || err != io.EOF {
+		t.Fatalf("deliverOrDonate with stop closed = (%d, %v), want (0, io.EOF) — the chunk must never reach this reader's caller once it's been told to stop", n, err)
+	}
+	pending := relay.takePending()
+	if string(pending) != string([]byte{42, 43}) {
+		t.Fatalf("relay.pending after a stopped deliverOrDonate = %v, want the donated chunk %v so the next turnReader over this relay picks it up", pending, []byte{42, 43})
+	}
+}
+
+// TestTurnReaderDeliverOrDonate_StopStillOpen_DeliversNormally is the
+// complementary deterministic case: a reader that hasn't been told to stop
+// must deliver a won chunk normally, including the leftover-carryover
+// behavior when the chunk is larger than the caller's buffer.
+func TestTurnReaderDeliverOrDonate_StopStillOpen_DeliversNormally(t *testing.T) {
+	relay := &stdinRelay{chunks: make(chan []byte)}
+	r := &turnReader{relay: relay, stop: make(chan struct{})}
+
+	buf := make([]byte, 2)
+	n, err := r.deliverOrDonate(buf, []byte{1, 2, 3})
+
+	if err != nil {
+		t.Fatalf("deliverOrDonate with stop open: err = %v, want nil", err)
+	}
+	if n != 2 || string(buf[:n]) != string([]byte{1, 2}) {
+		t.Fatalf("deliverOrDonate = (%d, %v), want to fill the 2-byte buffer with the chunk's first 2 bytes", n, buf[:n])
+	}
+	if string(r.leftover) != string([]byte{3}) {
+		t.Fatalf("r.leftover after a short buffer = %v, want the chunk's remaining byte %v carried over", r.leftover, []byte{3})
+	}
+}
+
 // TestTurnReaderStopDoesNotStealFromNextReader is the regression test for
 // findings (a)/(b): two turnReaders constructed over the SAME stdinRelay,
 // simulating a real run() role transition. r1 is parked genuinely blocked in
@@ -190,16 +240,34 @@ func TestTurnReaderLeftoverNotServedAfterStop(t *testing.T) {
 // without consuming it and the byte must show up, undiminished, on r2 — the
 // newly-promoted role's reader — instead (checked every round below).
 //
-// On top of that per-round invariant, this also tracks HOW OFTEN r1 wins
-// the race at all, across many rounds, and asserts it stays a small
-// minority. Empirically, on this fix, r1 wins roughly a quarter of rounds
-// under this harness's deliberately-adversarial timing (an unfixed
-// turnReader — checked by temporarily reverting Read to the pre-fix
-// single-select version — wins closer to 40%, i.e. this specific check
-// would fail against the regression finding (b) describes, even though the
-// per-round invariant above is satisfied either way by construction). The
-// threshold below is set with comfortable margin between those two
-// empirically-measured rates.
+// On top of that per-round invariant, this also LOGS how often r1 wins the
+// race at all, purely as informational context — it is NOT a pass/fail
+// gate. It was originally one (asserting the rate stays under an
+// empirically-calibrated threshold), but that turned out not to hold up.
+//
+// The per-round invariant above genuinely does still catch real regressions
+// in deliverOrDonate -- verified by mutating it to still return (0, io.EOF)
+// on the stop-closed path but skip the actual r.relay.donate(chunk) call: the
+// byte is then truly lost (neither r1 nor r2 ever sees it), and the r2
+// readWithTimeout call below correctly times out and fails the test. What
+// the per-round invariant can NOT catch is deliverOrDonate's stop-recheck
+// being missing ENTIRELY (i.e. this file reverted to the pre-fix behavior of
+// unconditionally delivering whatever chunk was won) -- verified by deleting
+// that whole select block: r1 then simply receives the chunk as normal data
+// (n &gt; 0, err == nil), which is exactly the "r1 legitimately won" case this
+// test already treats as legitimate, so every per-round check still passes.
+// (The precise, deterministic unit tests for that specific code path --
+// TestTurnReaderDeliverOrDonate_StopAlreadyClosed_DonatesRatherThanDelivers
+// and its sibling above -- are what actually cover that gap; this test's
+// real remaining value is exercising the donate/takePending handoff under
+// genuine concurrent scheduling with -race, which those deterministic tests
+// don't.) The rate itself also turned out to be far more sensitive to host
+// CPU contention than its original calibration assumed, on this
+// machine ranging anywhere from ~45% to ~50% under load regardless of
+// whether the mitigation is present. The mitigation's actual correctness is
+// instead covered deterministically, independent of scheduling, by
+// TestTurnReaderDeliverOrDonate_StopAlreadyClosed_DonatesRatherThanDelivers
+// and its sibling above.
 func TestTurnReaderStopDoesNotStealFromNextReader(t *testing.T) {
 	const rounds = 300
 	r1Wins := 0
@@ -223,8 +291,15 @@ func TestTurnReaderStopDoesNotStealFromNextReader(t *testing.T) {
 		// Give r1 a moment to actually enter its blocking select (stop1
 		// open, chunks empty) before racing its close against the send —
 		// otherwise this would just be testing the (already-covered)
-		// trivial case of stop already closed at Read-call time.
-		time.Sleep(time.Millisecond)
+		// trivial case of stop already closed at Read-call time. 1ms
+		// turned out not to be enough headroom under real scheduler
+		// contention (observed: r1's goroutine not yet scheduled into its
+		// select by the time the race fires, so both cases end up ready
+		// simultaneously and select's 50/50 tie-break dominates the
+		// measured rate instead of the actual fix behavior this test
+		// exists to measure) — 10ms gives comfortably more margin without
+		// materially slowing the suite (300 rounds ~= 3s).
+		time.Sleep(10 * time.Millisecond)
 
 		// Release both racers from a single shared gate instead of two
 		// independent `go` statements immediately after each other —
@@ -299,11 +374,14 @@ func TestTurnReaderStopDoesNotStealFromNextReader(t *testing.T) {
 		}
 	}
 
-	if rate := float64(r1Wins) / float64(rounds); rate > 0.35 {
-		t.Errorf("stopped reader r1 still won the chunk race in %d/%d (%.0f%%) rounds, want well under 35%% — "+
-			"this is finding (b): select's lack of priority between its stop and chunks cases letting a "+
-			"stopped reader keep stealing data at roughly the pre-fix rate", r1Wins, rounds, rate*100)
-	}
+	// This rate is informational only now, not a pass/fail gate -- see the function-level doc comment
+	// above for the full story (what the per-round checks above this DO and don't catch, and why the
+	// rate itself turned out to be too sensitive to host CPU contention to threshold reliably: it's
+	// been observed anywhere from ~13% to ~50% on this same machine alone across different runs,
+	// depending on unrelated background load at the time). Kept as a logged data point since it's
+	// still useful context when investigating a real, per-round failure above.
+	rate := float64(r1Wins) / float64(rounds)
+	t.Logf("stopped reader r1 won the chunk race in %d/%d (%.0f%%) rounds (informational; see comment above)", r1Wins, rounds, rate*100)
 }
 
 // TestRunRejectsUnparseableBindAddr is the regression test for finding 3: a
@@ -332,6 +410,26 @@ func TestRunRejectsUnparseableBindAddr(t *testing.T) {
 				t.Errorf("run(mode=remote, bind=%q) error = %q, want it to name the unparseable-IP reason", bindAddr, err)
 			}
 		})
+	}
+}
+
+// TestRunRemoteModeRequiresAppDataDir is the regression test for the fix
+// where -mode=remote with no explicit -app-data-dir used to silently fall
+// back to singleton.AppDataDir() (the local platform app-data directory)
+// instead of failing fast. Per PRD §05, remote mode must write broker.json
+// to the shared drive's agreed root, not the local app-data directory, so
+// omitting -app-data-dir in remote mode must be a loud, actionable error
+// rather than a silent misconfiguration the add-in side can never discover.
+func TestRunRemoteModeRequiresAppDataDir(t *testing.T) {
+	logger := log.New(io.Discard, "", 0)
+	// A valid non-loopback -bind, so the error under test is the
+	// dataDir one, not an earlier -bind validation failure.
+	err := run("remote", "192.0.2.1", 0, "", logger)
+	if err == nil {
+		t.Fatal("run(mode=remote, app-data-dir=\"\") = nil error, want it rejected for missing -app-data-dir")
+	}
+	if !strings.Contains(err.Error(), "-app-data-dir is required in remote mode") {
+		t.Errorf("run(mode=remote, app-data-dir=\"\") error = %q, want it to name the missing -app-data-dir reason", err.Error())
 	}
 }
 

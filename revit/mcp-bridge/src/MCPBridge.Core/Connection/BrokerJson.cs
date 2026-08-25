@@ -17,21 +17,25 @@ public sealed class BrokerJsonParseException : Exception
 }
 
 /// <summary>
-/// The contents of broker.json (PRD §05/§10): port/PID/start-time for discovery, and
-/// the auth token the add-in must present on the TCP handshake (PRD §10).
+/// The contents of broker.json (PRD §05/§10): host/port/PID/start-time for discovery, and
+/// the auth token the add-in must present on the TCP handshake (PRD §10). Field names here
+/// match the Go broker's actual JSON writer (singleton.go's BrokerInfo) verbatim: "host",
+/// "port", "pid", "started_at", "token".
 /// </summary>
 public sealed class BrokerJson
 {
+    public string Host { get; }
     public int Port { get; }
     public int Pid { get; }
-    public DateTimeOffset StartTime { get; }
+    public DateTimeOffset StartedAt { get; }
     public string Token { get; }
 
-    private BrokerJson(int port, int pid, DateTimeOffset startTime, string token)
+    private BrokerJson(string host, int port, int pid, DateTimeOffset startedAt, string token)
     {
+        Host = host;
         Port = port;
         Pid = pid;
-        StartTime = startTime;
+        StartedAt = startedAt;
         Token = token;
     }
 
@@ -51,12 +55,13 @@ public sealed class BrokerJson
         {
             var root = doc.RootElement;
 
+            var host = RequireNonEmptyString(root, "host");
             var port = RequireInt(root, "port");
             var pid = RequireInt(root, "pid");
-            var startTime = RequireDateTimeOffset(root, "start_time");
+            var startedAt = RequireDateTimeOffset(root, "started_at");
             var token = RequireNonEmptyString(root, "token");
 
-            return new BrokerJson(port, pid, startTime, token);
+            return new BrokerJson(host, port, pid, startedAt, token);
         }
     }
 

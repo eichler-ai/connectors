@@ -6,10 +6,13 @@ using System.Text.Json.Serialization;
 namespace MCPBridge.Core.Protocol;
 
 /// <summary>
-/// The `register` notification the add-in sends on every successful connect (first
-/// connect and every reconnect alike, PRD §05), carrying the stable per-process
-/// instance_id plus the auth token read from broker.json, presented on the TCP
-/// handshake per PRD §10.
+/// The `register` notification the add-in sends immediately after a successful `auth`
+/// handshake, on every successful connect (first connect and every reconnect alike,
+/// PRD §05), carrying the stable per-process instance_id, pid, Revit version, and open
+/// documents. The auth token does NOT ride on this message -- it is presented once, up
+/// front, in the separate `auth` request that must be the very first message on the
+/// connection (see <see cref="AuthMessage"/> and PRD §10); the Go broker's registerParams
+/// struct has no token field at all, so embedding one here would be silently ignored.
 /// </summary>
 public sealed class RegisterMessage
 {
@@ -17,15 +20,13 @@ public sealed class RegisterMessage
     private readonly int _pid;
     private readonly string _revitVersion;
     private readonly IReadOnlyList<RegisteredDocument> _documents;
-    private readonly string _authToken;
 
-    public RegisterMessage(Guid instanceId, int pid, string revitVersion, IReadOnlyList<RegisteredDocument> documents, string authToken)
+    public RegisterMessage(Guid instanceId, int pid, string revitVersion, IReadOnlyList<RegisteredDocument> documents)
     {
         _instanceId = instanceId;
         _pid = pid;
         _revitVersion = revitVersion;
         _documents = documents;
-        _authToken = authToken;
     }
 
     private sealed class DocumentDto
@@ -59,9 +60,6 @@ public sealed class RegisterMessage
 
         [JsonPropertyName("documents")]
         public List<DocumentDto> Documents { get; set; } = new();
-
-        [JsonPropertyName("token")]
-        public string Token { get; set; } = "";
     }
 
     private sealed class Envelope
@@ -76,12 +74,6 @@ public sealed class RegisterMessage
         public ParamsDto Params { get; set; } = new();
     }
 
-    private static readonly JsonSerializerOptions SerializerOptions = new()
-    {
-        // Compact, single-line output -- NDJSON framing requires no embedded newlines.
-        WriteIndented = false,
-    };
-
     public string ToJson()
     {
         var envelope = new Envelope
@@ -91,12 +83,11 @@ public sealed class RegisterMessage
                 InstanceId = _instanceId.ToString(),
                 Pid = _pid,
                 RevitVersion = _revitVersion,
-                Token = _authToken,
                 Documents = ToDtoList(_documents),
             },
         };
 
-        return JsonSerializer.Serialize(envelope, SerializerOptions);
+        return JsonSerializer.Serialize(envelope, WireJson.Compact);
     }
 
     private static List<DocumentDto> ToDtoList(IReadOnlyList<RegisteredDocument> documents)

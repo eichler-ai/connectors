@@ -23,9 +23,12 @@ namespace MCPBridge.Core.Execution;
 /// </summary>
 public sealed class ScriptGlobals
 {
+    // Property casing here is a public, external contract (PRD §06): an agent-authored script
+    // binds to these identifiers by name in its scope, so it must match the PRD's published
+    // names -- Document, UIApplication, UIDocument -- exactly.
     public IDocumentAdapter Document { get; }
-    public IUiApplicationAdapter UiApplication { get; }
-    public IUiDocumentAdapter? UiDocument { get; }
+    public IUiApplicationAdapter UIApplication { get; }
+    public IUiDocumentAdapter? UIDocument { get; }
     public CancellationToken CancellationToken { get; }
 
     public ScriptGlobals(
@@ -35,8 +38,8 @@ public sealed class ScriptGlobals
         CancellationToken cancellationToken)
     {
         Document = document;
-        UiApplication = uiApplication;
-        UiDocument = uiDocument;
+        UIApplication = uiApplication;
+        UIDocument = uiDocument;
         CancellationToken = cancellationToken;
     }
 }

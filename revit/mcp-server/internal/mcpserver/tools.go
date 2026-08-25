@@ -96,7 +96,7 @@ func Register(s *mcp.Server, mgr *execution.Manager) {
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "cancel_execution",
-		Description: "Request cooperative cancellation of an in-flight execution. The script must observe its CancellationToken to actually stop; a script that doesn't cooperate resolves to \"unrecoverable\" once the add-in's grace period lapses.",
+		Description: "Request cooperative cancellation of an in-flight execution. The script must observe its CancellationToken to actually stop; a script that doesn't cooperate (or never responds) resolves to \"unrecoverable\" once the broker's own cancellation grace period lapses.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in CancelExecutionIn) (*mcp.CallToolResult, ExecutionOut, error) {
 		res, drec := mgr.CancelExecution(ctx, in.ExecutionID)
 		return toolResult(res, drec)

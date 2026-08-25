@@ -8,23 +8,36 @@ namespace MCPBridge.Core.Execution;
 /// execute_script hits an instance that already has one of these in flight, not a
 /// status stored on the execution itself.
 /// </summary>
+// Wire values must match the Go broker's Status type (execution.go) exactly: lowercase,
+// and "success" rather than "completed" -- JsonStringEnumMemberName lets the wire
+// representation diverge from the C# member name without renaming the identifiers
+// themselves (which would touch a large number of already-reviewed call sites/tests for
+// no behavioral benefit beyond the wire spelling). "busy" is deliberately not a member
+// here -- see the class doc comment above.
 [JsonConverter(typeof(JsonStringEnumConverter))]
 public enum ExecutionStatus
 {
     /// <summary>Queued -- ExternalEvent.Raise() has been called but Execute() hasn't been entered yet (PRD §06).</summary>
+    [JsonStringEnumMemberName("pending")]
     Pending,
 
     /// <summary>Execute() has been entered and the script is actually running on the UI thread.</summary>
+    [JsonStringEnumMemberName("running")]
     Running,
 
+    /// <summary>Wire value "success" (not "completed") -- matches the Go broker's StatusSuccess.</summary>
+    [JsonStringEnumMemberName("success")]
     Completed,
 
+    [JsonStringEnumMemberName("error")]
     Error,
 
     /// <summary>The script observed the cancellation token and unwound cleanly (PRD §06) -- distinct from Error since the agent asked for this.</summary>
+    [JsonStringEnumMemberName("cancelled")]
     Cancelled,
 
     /// <summary>Cancellation's grace period lapsed without the script actually stopping (PRD §06). Sticky until Revit restarts.</summary>
+    [JsonStringEnumMemberName("unrecoverable")]
     Unrecoverable,
 }
 

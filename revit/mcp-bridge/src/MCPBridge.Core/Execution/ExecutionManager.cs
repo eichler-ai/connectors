@@ -48,7 +48,7 @@ public sealed class ExecutionManager
     // ScriptGlobals.CancellationToken synchronously, and a throwing callback surfaces as an
     // AggregateException from Cancel() itself (see SafeCancel, fourth review finding), which is a
     // completely separate hazard from disposal and isn't fixed by anything in this note.
-    private readonly Dictionary<Guid, CancellationTokenSource> _cancellationSources = new();
+    private readonly Dictionary<string, CancellationTokenSource> _cancellationSources = new();
 
     public ExecutionManager(ExecutionRingBuffer ringBuffer, TimeSpan gracePeriod)
     {
@@ -65,8 +65,41 @@ public sealed class ExecutionManager
         get { lock (_lock) { return _instanceUnrecoverable; } }
     }
 
-    public ExecuteOutcome Start(string scriptText, long maxDurationMs, DateTimeOffset now)
+    /// <summary>
+    /// Starts a new execution keyed by <paramref name="executionId"/>. Per PRD §01, execution_id
+    /// is broker-minted ("the add-in echoes the same ID back rather than generating its own") --
+    /// the Go broker mints IDs shaped "exec-&lt;uuid&gt;" and sends one in every execute_script
+    /// call's params, so the caller (the TCP-handling code, once wired) passes that string straight
+    /// through here rather than this class minting its own Guid.
+    ///
+    /// Third review finding: unlike a locally-minted Guid, executionId now arrives from the wire --
+    /// untrusted input, not a value this class controls the shape or uniqueness of. Every other
+    /// public method here is deliberately built never to throw (RequireRecord/Transition return a
+    /// diagnostic instead, since they can run on Revit's UI thread where an uncaught exception is a
+    /// crash-class bug), but Start is the one true entry point where a caller-supplied executionId is
+    /// first accepted -- validating it here, loudly, is what keeps every downstream method able to
+    /// keep assuming a well-formed, unique id. A null/empty/whitespace id or one that collides with
+    /// an existing ring-buffer entry (which should never happen given the broker's uuid-derived ids,
+    /// but would otherwise corrupt ExecutionRingBuffer's _byId mapping -- see its own Add() doc
+    /// comment) is rejected with an ArgumentException rather than silently accepted.
+    ///
+    /// Fifth review finding, worth being explicit about: a duplicate of the CURRENTLY ACTIVE
+    /// execution's id is deliberately NOT treated as this kind of collision -- it takes the ordinary
+    /// Busy branch below (pointing the caller at the very id it just sent), before the ring-buffer
+    /// collision check ever runs. That's intentional, not an oversight: the most realistic way a
+    /// caller re-sends an id it already used is the broker retrying a timed-out execute_script call
+    /// for an execution that's still legitimately in flight, and Busy-pointing-at-the-same-id is
+    /// exactly the right, idempotent answer to that -- not a thrown exception. The ArgumentException
+    /// path is reserved for a duplicate against a DIFFERENT (already-terminal, or otherwise not the
+    /// current _active) execution, which has no such legitimate explanation.
+    /// </summary>
+    public ExecuteOutcome Start(string executionId, string scriptText, long maxDurationMs, DateTimeOffset now)
     {
+        if (string.IsNullOrWhiteSpace(executionId))
+        {
+            throw new ArgumentException("executionId must not be null or empty -- it is broker-minted and must be echoed back exactly, per PRD §01.", nameof(executionId));
+        }
+
         lock (_lock)
         {
             if (_instanceUnrecoverable)
@@ -76,12 +109,19 @@ public sealed class ExecutionManager
 
             if (_active is { Status: var status } && !status.IsTerminal())
             {
+                // See the class doc comment above: a retry of the same id as the current active
+                // execution deliberately lands here (Busy-pointing-at-itself), not the collision
+                // check below.
                 return ExecuteOutcome.Busy(_active);
             }
 
-            var record = ExecutionRecord.CreatePending(Guid.NewGuid(), scriptText, maxDurationMs, now);
+            var record = ExecutionRecord.CreatePending(executionId, scriptText, maxDurationMs, now);
+            if (!_ringBuffer.Add(record))
+            {
+                throw new ArgumentException($"executionId '{executionId}' is already in use by another (possibly still-active) execution.", nameof(executionId));
+            }
+
             _active = record;
-            _ringBuffer.Add(record);
             _cancellationSources[record.ExecutionId] = new CancellationTokenSource();
             return ExecuteOutcome.Started(record);
         }
@@ -93,7 +133,7 @@ public sealed class ExecutionManager
     /// ring-buffer eviction fails softly (the script just won't observe cancellation) instead of taking
     /// down whatever's building the globals.
     /// </summary>
-    public CancellationToken GetCancellationToken(Guid executionId)
+    public CancellationToken GetCancellationToken(string executionId)
     {
         lock (_lock)
         {
@@ -102,19 +142,19 @@ public sealed class ExecutionManager
     }
 
     /// <summary>Pending -&gt; Running. See <see cref="Transition"/> for why this never throws on a terminal race.</summary>
-    public DiagnosticRecord? MarkRunning(Guid executionId, DateTimeOffset now) =>
+    public DiagnosticRecord? MarkRunning(string executionId, DateTimeOffset now) =>
         Transition(executionId, "mark-running", record => record.MarkRunning(now), clearActive: false);
 
     /// <summary>See <see cref="Transition"/> for why this never throws on a terminal race.</summary>
-    public DiagnosticRecord? CompleteSuccess(Guid executionId, DateTimeOffset now, object? result, string? stdOut, IReadOnlyList<DiagnosticRecord> notices) =>
+    public DiagnosticRecord? CompleteSuccess(string executionId, DateTimeOffset now, object? result, string? stdOut, IReadOnlyList<DiagnosticRecord> notices) =>
         Transition(executionId, "complete-success", record => record.MarkCompleted(now, result, stdOut, notices), clearActive: true);
 
     /// <summary>See <see cref="Transition"/> for why this never throws on a terminal race.</summary>
-    public DiagnosticRecord? CompleteError(Guid executionId, DateTimeOffset now, DiagnosticRecord error, string? stdOut) =>
+    public DiagnosticRecord? CompleteError(string executionId, DateTimeOffset now, DiagnosticRecord error, string? stdOut) =>
         Transition(executionId, "complete-error", record => record.MarkError(now, error, stdOut), clearActive: true);
 
     /// <summary>See <see cref="Transition"/> for why this never throws on a terminal race.</summary>
-    public DiagnosticRecord? CompleteCancelled(Guid executionId, DateTimeOffset now, string? stdOut) =>
+    public DiagnosticRecord? CompleteCancelled(string executionId, DateTimeOffset now, string? stdOut) =>
         Transition(executionId, "complete-cancelled", record => record.MarkCancelled(now, stdOut), clearActive: true);
 
     /// <summary>
@@ -130,7 +170,7 @@ public sealed class ExecutionManager
     /// safely return -- centralized here (rather than duplicated per call site) so a future
     /// transition method gets this safety by construction, not by convention.
     /// </summary>
-    private DiagnosticRecord? Transition(Guid executionId, string transitionName, Action<ExecutionRecord> mutate, bool clearActive)
+    private DiagnosticRecord? Transition(string executionId, string transitionName, Action<ExecutionRecord> mutate, bool clearActive)
     {
         lock (_lock)
         {
@@ -160,7 +200,7 @@ public sealed class ExecutionManager
         }
     }
 
-    public CancellationRequestOutcome RequestCancellation(Guid executionId, DateTimeOffset now)
+    public CancellationRequestOutcome RequestCancellation(string executionId, DateTimeOffset now)
     {
         CancellationTokenSource? ctsToCancel;
         CancellationRequestOutcome outcome;
@@ -341,7 +381,7 @@ public sealed class ExecutionManager
                 DiagnosticSource.Execution,
                 $"execution {record.ExecutionId} did not stop within the cancellation grace period; " +
                 "the instance is now unrecoverable.",
-                detail: new Dictionary<string, object?> { ["execution_id"] = record.ExecutionId.ToString() },
+                detail: new Dictionary<string, object?> { ["execution_id"] = record.ExecutionId },
                 remedy: new[] { "Restart Revit to recover this instance; a fresh instance_id will be issued on reconnect." });
 
             record.MarkUnrecoverable(now, diagnostic);
@@ -362,7 +402,7 @@ public sealed class ExecutionManager
         }
     }
 
-    public ExecutionRecord? Poll(Guid executionId)
+    public ExecutionRecord? Poll(string executionId)
     {
         lock (_lock)
         {
@@ -372,7 +412,7 @@ public sealed class ExecutionManager
     }
 
     /// <summary>Caller must already hold <see cref="_lock"/>. Used by a normal terminal completion (the execution is genuinely done, nothing will ever need its token again), so it's safe to stop tracking the source here -- unlike <see cref="ApplyCancellation"/>'s Pending branch, which deliberately leaves it tracked.</summary>
-    private void ClearActiveIfMatches(Guid executionId)
+    private void ClearActiveIfMatches(string executionId)
     {
         if (_active?.ExecutionId == executionId)
         {
@@ -397,7 +437,7 @@ public sealed class ExecutionManager
         "arrived, most likely because the cancellation grace period expired first; the late transition was ignored.",
         detail: new Dictionary<string, object?>
         {
-            ["execution_id"] = record.ExecutionId.ToString(),
+            ["execution_id"] = record.ExecutionId,
             ["attempted_transition"] = attemptedTransition,
             ["actual_status"] = record.Status.ToString(),
         },
@@ -411,7 +451,7 @@ public sealed class ExecutionManager
     /// isn't true). Same treatment as <see cref="RaceDiagnostic"/>: a diagnostic, never a thrown exception,
     /// since this can be invoked from Revit's UI thread.
     /// </summary>
-    private static DiagnosticRecord UnknownExecutionDiagnostic(Guid executionId, string attemptedTransition) => DiagnosticRecord.Create(
+    private static DiagnosticRecord UnknownExecutionDiagnostic(string executionId, string attemptedTransition) => DiagnosticRecord.Create(
         DiagnosticSeverity.Warning,
         "execution-transition-unknown-execution-id",
         DiagnosticSource.Execution,
@@ -419,7 +459,7 @@ public sealed class ExecutionManager
         $"'{attemptedTransition}' arrived; the late transition was ignored.",
         detail: new Dictionary<string, object?>
         {
-            ["execution_id"] = executionId.ToString(),
+            ["execution_id"] = executionId,
             ["attempted_transition"] = attemptedTransition,
         },
         remedy: null);
