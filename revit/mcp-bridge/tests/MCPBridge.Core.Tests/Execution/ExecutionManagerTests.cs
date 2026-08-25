@@ -74,6 +74,24 @@ public class ExecutionManagerTests
     }
 
     [Fact]
+    public void Start_SameIdAsTheCurrentlyActiveExecution_ReturnsBusy_DoesNotThrow()
+    {
+        // Fifth review finding: distinct from the terminal-duplicate case above, retrying the SAME id
+        // as the still-active execution (the realistic scenario -- the broker retrying a timed-out
+        // execute_script call) must be an ordinary, idempotent Busy response, not an exception.
+        var manager = NewManager();
+        var now = DateTimeOffset.UtcNow;
+        var id = NewId();
+        var first = manager.Start(id, "// script", 600_000, now).Record!;
+        Assert.Equal(ExecutionStatus.Pending, first.Status);
+
+        var retry = manager.Start(id, "// script", 600_000, now.AddSeconds(1));
+
+        Assert.Equal(ExecuteOutcomeKind.Busy, retry.Kind);
+        Assert.Same(first, retry.Record);
+    }
+
+    [Fact]
     public void Start_WhileAnExecutionIsActive_ReturnsBusyPointingAtExistingId()
     {
         var manager = NewManager();

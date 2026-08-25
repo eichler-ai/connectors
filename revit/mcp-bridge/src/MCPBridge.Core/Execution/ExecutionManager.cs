@@ -82,6 +82,16 @@ public sealed class ExecutionManager
     /// an existing ring-buffer entry (which should never happen given the broker's uuid-derived ids,
     /// but would otherwise corrupt ExecutionRingBuffer's _byId mapping -- see its own Add() doc
     /// comment) is rejected with an ArgumentException rather than silently accepted.
+    ///
+    /// Fifth review finding, worth being explicit about: a duplicate of the CURRENTLY ACTIVE
+    /// execution's id is deliberately NOT treated as this kind of collision -- it takes the ordinary
+    /// Busy branch below (pointing the caller at the very id it just sent), before the ring-buffer
+    /// collision check ever runs. That's intentional, not an oversight: the most realistic way a
+    /// caller re-sends an id it already used is the broker retrying a timed-out execute_script call
+    /// for an execution that's still legitimately in flight, and Busy-pointing-at-the-same-id is
+    /// exactly the right, idempotent answer to that -- not a thrown exception. The ArgumentException
+    /// path is reserved for a duplicate against a DIFFERENT (already-terminal, or otherwise not the
+    /// current _active) execution, which has no such legitimate explanation.
     /// </summary>
     public ExecuteOutcome Start(string executionId, string scriptText, long maxDurationMs, DateTimeOffset now)
     {
@@ -99,6 +109,9 @@ public sealed class ExecutionManager
 
             if (_active is { Status: var status } && !status.IsTerminal())
             {
+                // See the class doc comment above: a retry of the same id as the current active
+                // execution deliberately lands here (Busy-pointing-at-itself), not the collision
+                // check below.
                 return ExecuteOutcome.Busy(_active);
             }
 

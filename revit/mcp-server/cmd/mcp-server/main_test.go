@@ -243,12 +243,25 @@ func TestTurnReaderDeliverOrDonate_StopStillOpen_DeliversNormally(t *testing.T) 
 // On top of that per-round invariant, this also LOGS how often r1 wins the
 // race at all, purely as informational context — it is NOT a pass/fail
 // gate. It was originally one (asserting the rate stays under an
-// empirically-calibrated threshold), but that turned out not to hold up: the
-// per-round invariant above is satisfied either way by construction — it
-// cannot distinguish "r1 legitimately won before stop was visible" from
-// "the deliverOrDonate mitigation is silently missing entirely" (verified by
-// temporarily deleting that mitigation outright: every per-round check still
-// passed). The rate itself also turned out to be far more sensitive to host
+// empirically-calibrated threshold), but that turned out not to hold up.
+//
+// The per-round invariant above genuinely does still catch real regressions
+// in deliverOrDonate -- verified by mutating it to still return (0, io.EOF)
+// on the stop-closed path but skip the actual r.relay.donate(chunk) call: the
+// byte is then truly lost (neither r1 nor r2 ever sees it), and the r2
+// readWithTimeout call below correctly times out and fails the test. What
+// the per-round invariant can NOT catch is deliverOrDonate's stop-recheck
+// being missing ENTIRELY (i.e. this file reverted to the pre-fix behavior of
+// unconditionally delivering whatever chunk was won) -- verified by deleting
+// that whole select block: r1 then simply receives the chunk as normal data
+// (n &gt; 0, err == nil), which is exactly the "r1 legitimately won" case this
+// test already treats as legitimate, so every per-round check still passes.
+// (The precise, deterministic unit tests for that specific code path --
+// TestTurnReaderDeliverOrDonate_StopAlreadyClosed_DonatesRatherThanDelivers
+// and its sibling above -- are what actually cover that gap; this test's
+// real remaining value is exercising the donate/takePending handoff under
+// genuine concurrent scheduling with -race, which those deterministic tests
+// don't.) The rate itself also turned out to be far more sensitive to host
 // CPU contention than its original calibration assumed, on this
 // machine ranging anywhere from ~45% to ~50% under load regardless of
 // whether the mitigation is present. The mitigation's actual correctness is
@@ -361,20 +374,12 @@ func TestTurnReaderStopDoesNotStealFromNextReader(t *testing.T) {
 		}
 	}
 
-	// The real regression gate is above (every round, unconditionally): a stopped r1 must never
-	// duplicate-deliver or lose the byte, whether it happens to win the race or not. This rate is
-	// informational only, not a second pass/fail gate -- it turned out to be far more sensitive to
-	// host scheduler contention than originally assumed. The mitigation in turnReader.Read (the
-	// non-blocking re-check of stop immediately after winning the chunk case) only has a window to
-	// catch a wrongly-chosen case when close(stop) has already become visible by the time the outer
-	// select fires; how often that's true depends entirely on real-world goroutine scheduling
-	// latency, which varies with host CPU contention (verified: under load on this dev machine, the
-	// measured rate rose from an original ~24% calibration to ~45-49%, and even temporarily
-	// reverting the mitigation entirely only measured ~50% under the same load -- i.e. this
-	// environment's contention compresses the gap between "mitigated" and "unmitigated" enough that
-	// the rate alone can't reliably distinguish a real regression in the mitigation from ordinary
-	// scheduler noise). Kept as a logged data point since it's still useful context when investigating
-	// a real, per-round failure above.
+	// This rate is informational only now, not a pass/fail gate -- see the function-level doc comment
+	// above for the full story (what the per-round checks above this DO and don't catch, and why the
+	// rate itself turned out to be too sensitive to host CPU contention to threshold reliably: it's
+	// been observed anywhere from ~13% to ~50% on this same machine alone across different runs,
+	// depending on unrelated background load at the time). Kept as a logged data point since it's
+	// still useful context when investigating a real, per-round failure above.
 	rate := float64(r1Wins) / float64(rounds)
 	t.Logf("stopped reader r1 won the chunk race in %d/%d (%.0f%%) rounds (informational; see comment above)", r1Wins, rounds, rate*100)
 }

@@ -106,6 +106,16 @@ internal sealed class BridgeHost
         //    alongside ExecutionManager.ApplyCancellation, so a stale queued raise can't wedge the bridge for
         //    the life of the process.
         //
+        // 4. Fifth review finding: ExecutionManager.Start(executionId, ...) now validates its
+        //    broker-sourced executionId and throws ArgumentException for a null/empty id or one that
+        //    collides with an existing (possibly still-terminal) ring-buffer entry -- deliberately, since
+        //    it's the one entry point where untrusted wire input first reaches this class (every other
+        //    public method here is built to never throw, since they can run on Revit's UI thread; Start
+        //    is the documented exception, since it's meant to be called from the TCP-handling thread, not
+        //    the UI thread). Whatever wires the wire-level execute_script handler to Start(...) MUST catch
+        //    that ArgumentException and convert it into a proper JSON-RPC error response back to the
+        //    broker, not let it propagate and kill the TCP-handling thread/connection.
+        //
         // Also call RoslynAssemblyIsolation.EnsureInitialized() here, before any script
         // ever compiles. It's a partial mitigation, not full isolation (see its own doc
         // comment for why -- true isolation needs a shadow-load bootstrap), and nothing

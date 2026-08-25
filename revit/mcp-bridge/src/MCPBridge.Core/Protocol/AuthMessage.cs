@@ -47,10 +47,14 @@ public sealed class AuthMessage
         // A default(JsonElement) (ValueKind.Undefined) would otherwise pass silently here and only
         // surface as an opaque InvalidOperationException from deep inside JsonSerializer.Serialize
         // when ToJson() is eventually called -- fail immediately, at construction, with a message
-        // that actually names the problem.
-        if (id.ValueKind == JsonValueKind.Undefined)
+        // that actually names the problem. ValueKind.Null is the same failure class one step later:
+        // it serializes fine here (emits "id":null), but the Go broker's IsRequest() treats a JSON-RPC
+        // message with a null id as NOT a request (broker.go's authParams path requires msg.ID != nil),
+        // so it gets rejected with "auth_required" and the connection closed -- an equally opaque
+        // failure far from this constructor, for a value this guard can catch just as easily.
+        if (id.ValueKind is JsonValueKind.Undefined or JsonValueKind.Null)
         {
-            throw new ArgumentException("id must be a real JSON value (e.g. from JsonSerializer.SerializeToElement), not a default/uninitialized JsonElement.", nameof(id));
+            throw new ArgumentException("id must be a real, non-null JSON value (e.g. from JsonSerializer.SerializeToElement) -- the Go broker requires every request's id to be non-null.", nameof(id));
         }
 
         _id = id;

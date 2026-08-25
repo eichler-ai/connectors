@@ -18,6 +18,17 @@ public class AuthMessageTests
     }
 
     [Fact]
+    public void Constructor_NullJsonElement_ThrowsImmediately_NotAsAnOpaqueConnectionClose()
+    {
+        // Same failure class as the Undefined case, one step later: a JSON-RPC id of `null`
+        // serializes without error here, but the Go broker's IsRequest() treats a null id as "not a
+        // request" and rejects it with auth_required, closing the connection -- catch it here instead.
+        var nullElement = JsonSerializer.SerializeToElement<object?>(null);
+
+        Assert.Throws<ArgumentException>(() => new AuthMessage(nullElement, "tok", AuthRole.AddIn));
+    }
+
+    [Fact]
     public void ToJson_IsARequest_WithIdMethodTokenAndRole()
     {
         // Fix 3: the very first message on any new connection must be a JSON-RPC 2.0
