@@ -12,6 +12,7 @@ This is the living process doc for building the Revit connector. It's meant to b
 - **Design source of truth:** `revit/docs/PRD.md`. Read it (or at least the sections relevant to what you're touching) before implementing anything — this skill covers *how* to build, the PRD covers *what* and *why*.
 - **Naming/terminology conventions:** `CONVENTIONS.md` at the repo root. Get the Bridge/Server naming right (see PRD §04) — it's easy to accidentally call the whole connector "MCP Bridge" when you mean the add-in specifically, or vice versa.
 - **Repo layout:** `revit/mcp-bridge/` (the add-in, C#/.NET), `revit/mcp-server/` (the broker, Go), `revit/install/` (deployment scripts), `revit/test-harness/` (live integration harness + corpus). Each has its own README with its planned internal layout.
+- **Error/log/notice format:** every JSON-RPC `error.data`, every `notices[]` entry, and every NDJSON log line uses the one diagnostic-record shape in PRD §01 (`severity`, `code`, `source`, `message`, `detail`, `remedy`) — see that section before writing anything that reports an error or diagnostic. `source` values are the module names below (`mcp-bridge.core.execution`, `mcp-server.internal.registry`, etc.), not invented per-feature.
 
 ## Testing strategy
 
@@ -53,6 +54,7 @@ Not run on every commit by default (it's slow — VM/Revit lifecycle). Run it:
 - [ ] If the change touches threading, dialogs, failures, discovery, or file exchange, was the live harness actually run (not just unit tests)?
 - [ ] Does the change match the naming conventions (`CONVENTIONS.md`) — MCP Bridge vs. MCP Server, short vs. full name for the doc's context?
 - [ ] Does the change follow the observability-over-silence principle (PRD §01) if it adds any new automatic-resolution behavior?
+- [ ] **Every new error/notice/log record uses the shared diagnostic-record shape (PRD §01)** — `message` names concrete identifiers and the actual underlying condition (no generic "an error occurred" wrappers, no swallowed exception detail), `source` matches a real module name, and `remedy` is present wherever there's an actual next step to suggest.
 - [ ] **If the change diverges from or refines a decision in `revit/docs/PRD.md`, is the PRD updated in the same PR** — both the markdown file and the published artifact (see below)? A PR that silently drifts from the PRD without updating it is the kind of thing that makes the doc stop being trustworthy.
 - [ ] If the change adds a new corpus test case, is it added under the right category (tutorial-sourced vs. competitive-coverage-floor, PRD §13)?
 
@@ -69,3 +71,4 @@ This file is expected to change as the project learns things — that's the poin
 ### Change log
 
 - *(initial version — created alongside the PRD, before any implementation exists yet)*
+- Added the shared diagnostic-record shape (PRD §01) and a PR checklist item enforcing it, after realizing the observability principle had no concrete format standard behind it — several ad hoc reporting shapes existed (Failures API list, window-inventory diagnostic) with nothing tying them together.

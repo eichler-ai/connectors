@@ -46,6 +46,26 @@ Goals for v1:
 
 > **Design principle — observability over silence.** Anywhere the add-in automatically resolves something on the agent's behalf — a suppressed dialog, an auto-dismissed transaction warning, a cancelled execution — that resolution is reported back in the result, never handled invisibly. The agent needs to detect when something was papered over and navigate around it, not just receive a clean-looking success that hides what actually happened. This shapes §07 (non-framework dialogs), §07 (transaction failures), and §06 (cancellation) identically, and should hold for any future automatic-resolution feature, not just the ones specified today.
 
+### Observability & error reporting standard
+
+The principle above only holds if every subsystem reports things the same way. One shared diagnostic-record shape, reused in three places — the `notices` array on any successful result, the `data` field of any JSON-RPC `error`, and every NDJSON log record in §09's `logs/` directory:
+
+```json
+{
+  "severity": "debug" | "info" | "warning" | "error",
+  "code": "<stable machine-readable identifier>",
+  "source": "<component tag — matches the repo's module layout>",
+  "message": "<specific, concrete — see requirements below>",
+  "detail": { "...code-specific structured fields...": "..." },
+  "remedy": ["<suggested next step>", "..."]
+}
+```
+
+- **Which channel carries what.** Auto-resolved warnings (the Failures API in §07, and anything later) populate `notices[]` on the successful result — severity there is `warning`/`info`, never `error`. An error-severity condition rolls the transaction back and surfaces through the JSON-RPC `error` path instead, not `notices` — the two channels don't overlap.
+- **`source` is how "find the relevant code" gets satisfied without going stale.** Values match the module names already in the repo layout directly — `mcp-bridge.core.execution`, `mcp-bridge.core.dialogs`, `mcp-server.internal.registry`, and so on — rather than a separately-invented taxonomy or a file:line reference that breaks the moment code moves.
+- **`message` is a hard rule, not a suggestion.** Must include the concrete identifiers involved (`execution_id`/`instance_id`/`document_id`, whichever apply) and the actual underlying condition — never a generic wrapper like "An error occurred" or "Execution failed" that discards what a wrapped .NET/Go exception actually said. Wrap, don't replace: the original exception's own message/type is part of `message` or `detail`, never swallowed.
+- **`remedy` is expected, not decorative.** "Restart Revit to recover this instance," "call `list_instances` to confirm the new `document_id`, then retry," "dismiss the listed window manually, then reissue `execute_script`." Omit it only when there's genuinely nothing actionable to suggest, not by default.
+
 ## 02. Non-goals for v1
 
 - **Not multi-version yet.** Build and validate against 2027 only; the project is structured so 2025/2026 support is an additive multi-target step later, not a rewrite.
@@ -171,7 +191,7 @@ The Revit API is single-threaded and callable only from the main UI thread. The 
 1. TCP thread receives an `execute_script` request, decodes it, and hands the script text to an `IExternalEventHandler`.
 2. `ExternalEvent.Raise()` wakes Revit's idle loop; `Execute(UIApplication)` runs on the correct thread.
 3. Inside `Execute`, the script is compiled/run via Roslyn scripting, with a globals object exposing `Document`, `UIApplication`, and `UIDocument` into script scope. Isolation and memory lifecycle are covered separately below — the naive "cache every compiled `Script<T>` for the session" approach doesn't hold up under real agent usage.
-4. The call is wrapped in a `Transaction`/`TransactionGroup` so failed scripts roll back cleanly; stdout and exceptions are captured into the JSON-RPC result/error payload.
+4. The call is wrapped in a `Transaction`/`TransactionGroup` so failed scripts roll back cleanly; stdout is captured into the result, and any exception populates the JSON-RPC `error` using the shared diagnostic-record shape (§01) — never a bare wrapper message.
 5. The result is signaled back to the waiting TCP thread via a blocking handoff (e.g. `TaskCompletionSource`), never returned directly from `Execute`.
 
 > **Risk.** A script that spins forever, or an API call that genuinely blocks on I/O, occupies Revit's UI thread until it returns — there is no preemption.
@@ -211,7 +231,7 @@ Default policy: auto-answer with the "safe"/non-destructive option (typically Ca
 
 The most common dialog class a script actually triggers doesn't come from `DialogBoxShowing` at all. Commit-time warnings and errors — "Line is slightly off axis," "N elements will be deleted," unjoined geometry — route through a separate mechanism, Revit's Failures API: `IFailuresPreprocessor`, `FailuresProcessing`, `Transaction.SetFailureHandlingOptions`. A preprocessor is registered on every transaction the script wrapper opens (§06 already wraps each script in a `Transaction`/`TransactionGroup` — this hooks into that same wrapper), inspects `FailuresAccessor.GetFailureMessages()` at commit time, and resolves them programmatically instead of letting Revit render anything.
 
-Resolution policy follows the observability principle above directly: **warnings are auto-dismissed, errors are not.** Any error-severity failure rolls the transaction back and surfaces as a normal script failure in the JSON-RPC result — the agent sees a real problem it needs to react to, not a silently-forced outcome it never asked for. Every failure the preprocessor touches, warning or error, is reported back as a structured list on the result (severity, description, what was done about it) even when the script otherwise succeeds — so "this ran, but 3 warnings were auto-dismissed" is always visible, never invisible.
+Resolution policy follows the observability principle above directly: **warnings are auto-dismissed, errors are not.** Any error-severity failure rolls the transaction back and surfaces as a normal script failure in the JSON-RPC result — the agent sees a real problem it needs to react to, not a silently-forced outcome it never asked for. Every failure the preprocessor touches, warning or error, is reported back in `notices[]` using the shared diagnostic-record shape (§01) even when the script otherwise succeeds — so "this ran, but 3 warnings were auto-dismissed" is always visible, never invisible, and always in the same place an agent would check for anything else auto-resolved.
 
 > **Deferred, not designed away.** A more aggressive policy — confidently auto-resolving specific known error cases rather than always rolling back — is plausible later, the same way this section's non-framework-dialog handling (below) plans an allowlist-driven v2. It isn't designed now because it isn't known yet which specific errors recur often enough to justify a confident default; that list gets built from real usage, not guessed in advance.
 
@@ -258,7 +278,7 @@ No established convention exists for CAD-tool-to-agent file exchange — this is
   workspaces\
     <document-id>\
       exports\                # images, IFC, families written by scripts
-      logs\                   # per-execution console + error output, timestamped
+      logs\                   # per-execution NDJSON logs, timestamped — one shared diagnostic-record shape (§01) per line
       scripts\                # history of executed script text, timestamped
       tmp\<instance-id>\      # scratch, per instance sharing this workspace; cleared on document close or age-out
 ```
