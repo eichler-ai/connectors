@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -551,4 +552,178 @@ func TestMaxDurationAutoCancelsUnpolledExecution(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("expected max_duration_ms to trigger an automatic cancel_execution wire call")
+}
+
+// fakeTimer stands in for *time.Timer in tests below: newManagerWithFakeClock
+// replaces Manager.afterFunc with one that records the callback instead of
+// actually scheduling it against the wall clock, and a test fires callbacks
+// itself via fire() — deterministic, no real multi-second sleeps.
+type fakeAfterFunc struct {
+	mu    sync.Mutex
+	calls []func()
+}
+
+func (f *fakeAfterFunc) schedule(_ time.Duration, cb func()) *time.Timer {
+	f.mu.Lock()
+	f.calls = append(f.calls, cb)
+	f.mu.Unlock()
+	return nil
+}
+
+// fireAll synchronously runs every callback scheduled so far, in the order
+// scheduled (simulating every outstanding timer having elapsed). Additional
+// callbacks scheduled *during* a fired callback (e.g. CancelExecution's own
+// grace-escalation timer, scheduled from inside scheduleAutoCancel's fired
+// callback) are also fired, so a single fireAll drains a whole chain.
+func (f *fakeAfterFunc) fireAll() {
+	for {
+		f.mu.Lock()
+		if len(f.calls) == 0 {
+			f.mu.Unlock()
+			return
+		}
+		cb := f.calls[0]
+		f.calls = f.calls[1:]
+		f.mu.Unlock()
+		cb()
+	}
+}
+
+func newManagerWithFakeClock() (*Manager, *fakeAfterFunc) {
+	m := NewManager()
+	fa := &fakeAfterFunc{}
+	m.afterFunc = fa.schedule
+	return m, fa
+}
+
+// TestCancelExecutionEscalatesToUnrecoverableAfterGracePeriod is the
+// regression test for bug 2: a connection that stays open but never
+// responds to a cancel_execution wire call (the add-in is wedged, per PRD
+// §06's "fallback, for scripts that don't cooperate") must not leave the
+// instance permanently reporting busy. Once the cancellation grace period
+// lapses without the execution reaching a terminal state, the broker itself
+// must flip the instance to unrecoverable, via the same settle/latch
+// mechanism used for an add-in-reported StatusUnrecoverable.
+func TestCancelExecutionEscalatesToUnrecoverableAfterGracePeriod(t *testing.T) {
+	// block simulates a live-but-unresponsive add-in: the handler for
+	// cancel_execution never returns on its own. RequestHandler is always
+	// invoked with context.Background() (see transport/conn.go), so it
+	// can't observe the caller's ctx being cancelled — the test itself
+	// unblocks this at cleanup so the handler goroutine doesn't leak past
+	// the end of the test.
+	block := make(chan struct{})
+	_, conn := newFakeInstance(t, func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
+		var p map[string]any
+		json.Unmarshal(params, &p)
+		id := p["execution_id"].(string)
+		if method == "execute_script" {
+			return Result{Status: StatusRunning, ExecutionID: id}, nil
+		}
+		<-block
+		return Result{Status: StatusCancelled, ExecutionID: id}, nil
+	})
+	t.Cleanup(func() { close(block) })
+	m, fa := newManagerWithFakeClock()
+	m.AttachInstance("inst-1", conn)
+
+	// maxDurationMs is 0 (disabled) so ExecuteScript doesn't ALSO register
+	// its own scheduleAutoCancel timer on the fake clock — this test wants
+	// exactly one scheduled callback (CancelExecution's own grace
+	// escalation) so fireAll below doesn't end up synchronously running an
+	// unrelated auto-cancel that blocks for its own full wire budget.
+	start, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "wedge forever", 50, 0)
+	if drec != nil {
+		t.Fatalf("ExecuteScript: %+v", drec)
+	}
+
+	cancelCtx, cancelCause := context.WithCancel(context.Background())
+	cancelDone := make(chan struct{})
+	go func() {
+		// This call will itself hang until cancelCtx is done (the fake
+		// add-in never answers); that's fine, it's meant to model a wire
+		// call that never completes — the escalation must not depend on
+		// this call ever returning.
+		_, _ = m.CancelExecution(cancelCtx, start.ExecutionID)
+		close(cancelDone)
+	}()
+
+	// Give CancelExecution a moment to register its grace-escalation timer
+	// before firing it.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		fa.mu.Lock()
+		n := len(fa.calls)
+		fa.mu.Unlock()
+		if n > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("CancelExecution never scheduled a grace-escalation timer")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// Simulate the grace period lapsing: fire the scheduled callback
+	// directly instead of waiting on a real timer.
+	fa.fireAll()
+	cancelCause()
+	<-cancelDone
+
+	// The instance must now be unrecoverable, not stuck busy forever.
+	_, drec2 := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "another", 1000, 60000)
+	if drec2 == nil || drec2.Code != "instance_unrecoverable" {
+		t.Fatalf("ExecuteScript after grace-period escalation: %+v, want instance_unrecoverable", drec2)
+	}
+
+	m.mu.Lock()
+	rec := m.executions[start.ExecutionID]
+	m.mu.Unlock()
+	if rec == nil || rec.status != StatusUnrecoverable {
+		t.Fatalf("execution status = %+v, want it settled to unrecoverable by the grace-period escalation", rec)
+	}
+}
+
+// TestCancelExecutionGraceEscalationIsNoOpIfAlreadyTerminal confirms the
+// grace-period escalation added for bug 2 doesn't regress a normal,
+// cooperative cancellation: if the add-in answers cancel_execution with a
+// terminal status well before the grace period elapses, firing the
+// (already-obsolete) grace timer afterward must not clobber that result.
+func TestCancelExecutionGraceEscalationIsNoOpIfAlreadyTerminal(t *testing.T) {
+	_, conn := newFakeInstance(t, func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
+		var p map[string]any
+		json.Unmarshal(params, &p)
+		id := p["execution_id"].(string)
+		if method == "execute_script" {
+			return Result{Status: StatusRunning, ExecutionID: id}, nil
+		}
+		return Result{Status: StatusCancelled, ExecutionID: id}, nil
+	})
+	m, fa := newManagerWithFakeClock()
+	m.AttachInstance("inst-1", conn)
+
+	start, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "cooperative", 50, 60000)
+	if drec != nil {
+		t.Fatalf("ExecuteScript: %+v", drec)
+	}
+	res, drec2 := m.CancelExecution(context.Background(), start.ExecutionID)
+	if drec2 != nil {
+		t.Fatalf("CancelExecution: %+v", drec2)
+	}
+	if res.Status != StatusCancelled {
+		t.Fatalf("Status = %q, want cancelled", res.Status)
+	}
+
+	// Fire the grace-escalation timer scheduled by CancelExecution; the
+	// execution already settled to cancelled, so this must be a no-op.
+	fa.fireAll()
+
+	m.mu.Lock()
+	rec := m.executions[start.ExecutionID]
+	m.mu.Unlock()
+	if rec.status != StatusCancelled {
+		t.Errorf("status = %q after firing an obsolete grace timer, want it to stay cancelled", rec.status)
+	}
+	if m.unrecoverable["inst-1"] {
+		t.Error("instance must not be latched unrecoverable when cancellation already resolved cooperatively")
+	}
 }

@@ -24,6 +24,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
@@ -54,6 +55,17 @@ var version = "dev"
 // genuinely can be walked away from.
 type stdinRelay struct {
 	chunks chan []byte
+
+	// pending carries forward data a departing turnReader couldn't finish
+	// consuming — its own buffered leftover, or a chunk it happened to
+	// read from chunks right as it was told to stop — so the NEXT
+	// turnReader constructed over this same relay (by run()'s
+	// role-transition loop) picks up exactly where the previous one left
+	// off. Without this, that data would either be routed into the
+	// departing role's already-dying connection or silently dropped —
+	// exactly the promotion-handoff bug this relay exists to prevent.
+	mu      sync.Mutex
+	pending []byte
 }
 
 func newStdinRelay() *stdinRelay {
@@ -76,6 +88,32 @@ func newStdinRelay() *stdinRelay {
 	return r
 }
 
+// donate pushes data a departing turnReader couldn't finish consuming back
+// onto the relay for the next turnReader to pick up. Safe to call
+// concurrently, though in practice at most one turnReader is ever actively
+// consuming from a given relay at a time (run() waits for a departing
+// secondary's copy goroutines to fully exit before building the next
+// turnReader — see run()), so there's never more than one donor in flight
+// and nothing to reorder against.
+func (r *stdinRelay) donate(b []byte) {
+	if len(b) == 0 {
+		return
+	}
+	r.mu.Lock()
+	r.pending = append(r.pending, b...)
+	r.mu.Unlock()
+}
+
+// takePending drains and returns whatever a previous turnReader over this
+// relay donated back, if anything.
+func (r *stdinRelay) takePending() []byte {
+	r.mu.Lock()
+	p := r.pending
+	r.pending = nil
+	r.mu.Unlock()
+	return p
+}
+
 // turnReader adapts one "turn" of consuming the shared stdinRelay — one
 // role (primary or secondary), for as long as it's active — into a plain
 // io.Reader. Read returns io.EOF, a clean/expected stop rather than an
@@ -91,11 +129,30 @@ type turnReader struct {
 }
 
 func (r *turnReader) Read(p []byte) (int, error) {
+	// Checked first, and non-blocking: once this role has been told to
+	// stop, it must never hand data — buffered leftover included — to its
+	// caller. A stopped reader's leftover is instead donated back to the
+	// relay so the NEXT turnReader constructed over the same relay picks
+	// it up, rather than it either being handed to a caller that's about
+	// to be torn down or silently dropped if nothing calls Read again.
+	select {
+	case <-r.stop:
+		r.donate()
+		return 0, io.EOF
+	default:
+	}
+
+	if len(r.leftover) == 0 {
+		// Pick up anything the previous turnReader over this relay
+		// donated back on being stopped, before pulling anything new.
+		r.leftover = r.relay.takePending()
+	}
 	if len(r.leftover) > 0 {
 		n := copy(p, r.leftover)
 		r.leftover = r.leftover[n:]
 		return n, nil
 	}
+
 	select {
 	case <-r.stop:
 		return 0, io.EOF
@@ -103,11 +160,34 @@ func (r *turnReader) Read(p []byte) (int, error) {
 		if !ok {
 			return 0, io.EOF // physical stdin itself closed/EOF'd
 		}
+		// select has no priority between its cases, so it's entirely
+		// possible to win this chunk race even though stop was also (or
+		// is concurrently being) closed — Go picks pseudo-randomly among
+		// ready cases. Re-check non-blocking: if stop is now closed, this
+		// role is being torn down and this chunk was never meant for it;
+		// donate it back rather than ever handing it to this role's
+		// caller, so it's the newly-promoted role's turnReader that gets
+		// it instead.
+		select {
+		case <-r.stop:
+			r.relay.donate(chunk)
+			return 0, io.EOF
+		default:
+		}
 		n := copy(p, chunk)
 		if n < len(chunk) {
 			r.leftover = chunk[n:]
 		}
 		return n, nil
+	}
+}
+
+// donate pushes back any buffered leftover this reader hasn't yet handed to
+// its caller, on being told to stop.
+func (r *turnReader) donate() {
+	if len(r.leftover) > 0 {
+		r.relay.donate(r.leftover)
+		r.leftover = nil
 	}
 }
 
@@ -161,8 +241,19 @@ func run(mode, bindAddr string, port int, appDataDirOverride string, logger *log
 		// Parsed, not string-compared: 0.0.0.0, ::, and ::0 are all the same
 		// "every interface" address, and a bare string check misses forms
 		// like ::0 that IsUnspecified() catches correctly regardless of how
-		// the address was spelled.
-		if ip := net.ParseIP(bindAddr); ip != nil && ip.IsUnspecified() {
+		// the address was spelled. -bind must itself be a literal IP
+		// address per PRD §05/§10 ("a specific configured non-loopback
+		// address") — a value net.ParseIP can't parse at all (a hostname,
+		// or a malformed literal like "0" or "0x0.0x0.0x0.0x0") is never
+		// valid here, regardless of what net.Listen might later resolve it
+		// to; rejecting only the parseable-and-unspecified case would let
+		// exactly those bypass validation and still end up binding every
+		// interface.
+		ip := net.ParseIP(bindAddr)
+		if ip == nil {
+			return fmt.Errorf("-bind %q is not a valid IP address literal (PRD §05/§10: -bind must be a specific configured non-loopback IP address, not a hostname or malformed literal)", bindAddr)
+		}
+		if ip.IsUnspecified() {
 			return fmt.Errorf("-bind %q is not allowed (PRD §05/§10: never bind every interface — pass the specific configured non-loopback address instead)", bindAddr)
 		}
 	}
@@ -218,8 +309,21 @@ func run(mode, bindAddr string, port int, appDataDirOverride string, logger *log
 			return err // this process's own session ending is a real shutdown, not something to retry
 		}
 
-		err = runSecondary(ctx, dataDir, logger, reader)
-		close(stop) // unblocks the upload goroutine's turnReader.Read even if it's mid-select with nothing to copy yet
+		// runSecondary closes stop itself, as the very first thing it does
+		// on returning — before it closes its upstream connection to the
+		// primary — so its own upload goroutine (still blocked in
+		// turnReader.Read) gets the earliest possible chance to notice and
+		// bail before that connection dies underneath it. wg tracks both
+		// of runSecondary's copy goroutines: wait for them to actually
+		// exit, not just for stop to be closed, before looping around to
+		// build a fresh turnReader over the shared relay — otherwise the
+		// still-running goroutine would be a second live consumer racing
+		// the next role's reader for the same relay.chunks, which is
+		// exactly the "misrouted into an already-closed connection" bug
+		// this whole mechanism exists to prevent.
+		var wg sync.WaitGroup
+		err = runSecondary(ctx, dataDir, logger, reader, stop, &wg)
+		wg.Wait()
 		if ctx.Err() != nil {
 			return nil // clean shutdown (signal), not a dropped-primary retry case
 		}
@@ -288,7 +392,7 @@ func runPrimary(ctx context.Context, bindAddr string, port int, dataDir string, 
 	return nil
 }
 
-func runSecondary(ctx context.Context, dataDir string, logger *log.Logger, stdin io.Reader) error {
+func runSecondary(ctx context.Context, dataDir string, logger *log.Logger, stdin io.Reader, stop chan struct{}, wg *sync.WaitGroup) error {
 	var info singleton.BrokerInfo
 	var err error
 	// The primary listens before anything else (PRD §05), but there's still
@@ -356,19 +460,24 @@ func runSecondary(ctx context.Context, dataDir string, logger *log.Logger, stdin
 	// further responses once it does), and the primary closing its end
 	// means there's nothing left to proxy either way.
 	errCh := make(chan error, 2)
+	wg.Add(2)
 	go func() {
+		defer wg.Done()
 		_, err := io.Copy(conn, stdin)
 		errCh <- err
 	}()
 	go func() {
+		defer wg.Done()
 		_, err := io.Copy(os.Stdout, br)
 		errCh <- err
 	}()
 
 	select {
 	case <-ctx.Done():
+		close(stop)
 		return nil
 	case err := <-errCh:
+		close(stop)
 		return err
 	}
 }

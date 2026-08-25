@@ -81,6 +81,19 @@ type Manager struct {
 
 	newID func() string
 	now   func() time.Time
+
+	// graceMs is how long, per PRD §06 ("Cancellation starts a grace
+	// timer (default ~5-10s)"), a cancelled-but-not-yet-terminal execution
+	// gets before the broker gives up on it and flips the owning instance
+	// to unrecoverable. Overridable (tests only) so the escalation path
+	// can be exercised without a real multi-second wait.
+	graceMs int
+	// afterFunc schedules f to run after d elapses, returning a handle
+	// whose Stop cancels it — the same shape as time.AfterFunc, which is
+	// the default. Overridable in tests to make the grace-period
+	// escalation and max-duration auto-cancel deterministic instead of
+	// depending on real wall-clock timers.
+	afterFunc func(d time.Duration, f func()) *time.Timer
 }
 
 // NewManager builds an empty Manager.
@@ -92,6 +105,8 @@ func NewManager() *Manager {
 		unrecoverable:    make(map[string]bool),
 		newID:            func() string { return "exec-" + uuid.NewString() },
 		now:              time.Now,
+		graceMs:          10_000,
+		afterFunc:        time.AfterFunc,
 	}
 }
 
@@ -250,7 +265,7 @@ func (m *Manager) ExecuteScript(ctx context.Context, instanceID, documentID, scr
 // forever silently occupying the instance." A no-op if the execution has
 // already reached a terminal state by then.
 func (m *Manager) scheduleAutoCancel(executionID string, maxDurationMs int) {
-	time.AfterFunc(time.Duration(maxDurationMs)*time.Millisecond, func() {
+	m.afterFunc(time.Duration(maxDurationMs)*time.Millisecond, func() {
 		m.mu.Lock()
 		rec, ok := m.executions[executionID]
 		alreadyDone := !ok || IsTerminal(rec.status)
@@ -317,11 +332,79 @@ func (m *Manager) PollExecution(ctx context.Context, executionID string, timeout
 // reflects whatever the add-in reports back — typically "cancelled"
 // immediately, or a still-non-terminal status if the add-in's own grace
 // period hasn't lapsed yet.
+//
+// Per PRD §06 ("The fallback, for scripts that don't cooperate"):
+// cancellation starts a grace timer, and if the execution still hasn't
+// reached a terminal state by the time it lapses — the script ignored the
+// cancellation token, or the add-in never even answered the cancel_execution
+// wire call at all (a live-but-unresponsive connection, no heartbeat yet to
+// catch it any other way) — the broker itself flips the owning instance to
+// unrecoverable, exactly like the add-in-reported StatusUnrecoverable path.
+// That escalation is scheduled here unconditionally, independent of whether
+// the wire call below succeeds, fails, or hangs: a wire-level failure on
+// *this* call must not itself assert a terminal outcome (see
+// forwardExisting's own reasoning), but it also must not silently leave the
+// instance wedged busy forever with no operator-visible recovery — the
+// grace-period escalation is what closes that gap.
 func (m *Manager) CancelExecution(ctx context.Context, executionID string) (*Result, *diag.Record) {
 	const cancelTimeoutMs = 10_000 // grace-period ceiling per PRD §06; not caller-configurable.
+
+	m.mu.Lock()
+	rec, ok := m.executions[executionID]
+	var instanceID string
+	var alreadyTerminal bool
+	if ok {
+		instanceID = rec.instanceID
+		alreadyTerminal = IsTerminal(rec.status)
+	}
+	m.mu.Unlock()
+	if ok && !alreadyTerminal {
+		m.scheduleGraceEscalation(instanceID, executionID)
+	}
+
 	return m.forwardExisting(ctx, executionID, "cancel_execution", cancelTimeoutMs, map[string]any{
 		"execution_id": executionID,
 	})
+}
+
+// scheduleGraceEscalation arranges for instanceID to be flipped
+// unrecoverable if executionID still hasn't reached a terminal state once
+// the PRD §06 cancellation grace period lapses. A no-op at fire time if the
+// execution already settled (cooperatively cancelled, completed, or already
+// escalated) by then.
+func (m *Manager) scheduleGraceEscalation(instanceID, executionID string) {
+	m.afterFunc(time.Duration(m.graceMs)*time.Millisecond, func() {
+		m.escalateUnrecoverable(instanceID, executionID)
+	})
+}
+
+// escalateUnrecoverable is the broker-side counterpart to an add-in-reported
+// StatusUnrecoverable: it declares the INSTANCE unusable after the
+// cancellation grace period is exhausted without the execution reaching a
+// terminal state — it does not assert anything about what the script itself
+// did (unlike the old, removed settleError, which wrongly asserted the
+// script had failed on a bare wire hiccup). Uses the same settle-style
+// terminal/latch bookkeeping as a normal StatusUnrecoverable result so
+// list_instances/poll_execution/execute_script all see the instance the same
+// way regardless of which path produced it.
+func (m *Manager) escalateUnrecoverable(instanceID, executionID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rec, ok := m.executions[executionID]
+	if !ok || IsTerminal(rec.status) {
+		return
+	}
+	result := &Result{
+		Status:      StatusUnrecoverable,
+		ExecutionID: executionID,
+		ErrorDetail: errInstanceUnrecoverable(instanceID),
+	}
+	rec.status = StatusUnrecoverable
+	rec.result = result
+	m.unrecoverable[instanceID] = true
+	if m.activeByInstance[instanceID] == executionID {
+		delete(m.activeByInstance, instanceID)
+	}
 }
 
 // callWire performs one JSON-RPC round trip for method against conn,
