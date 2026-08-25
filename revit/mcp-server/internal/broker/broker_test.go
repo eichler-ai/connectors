@@ -10,6 +10,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/eichler-ai/connectors/revit/mcp-server/internal/diag"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/execution"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/mcpserver"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/registry"
@@ -188,6 +189,60 @@ func TestRegisterPopulatesRegistryAndAttachesExecution(t *testing.T) {
 	if res.Status != execution.StatusSuccess || res.Output != "ok" {
 		t.Errorf("res = %+v", res)
 	}
+}
+
+// TestRegisterThenImmediateCloseDetachesCleanly is a regression test for a
+// race between the register notification handler and the connection
+// closing right after: if AttachInstance hadn't reliably completed before
+// Serve() observed the close and ran DetachInstance, the instance would be
+// left permanently attached to a dead connection (a leaked, unroutable
+// registration) instead of cleanly detached.
+func TestRegisterThenImmediateCloseDetachesCleanly(t *testing.T) {
+	b, ln := newTestBroker(t)
+	conn, br, resp := dialAndAuth(t, ln.Addr().String(), testToken, RoleAddIn)
+	if resp.Error != nil {
+		t.Fatalf("auth failed: %+v", resp.Error)
+	}
+
+	rest := &tail{r: br, conn: conn}
+	addinConn := transport.NewConn(rest)
+	go addinConn.Serve()
+
+	if err := addinConn.Notify("register", registerParams{
+		InstanceID:   "inst-fastclose",
+		PID:          1,
+		RevitVersion: "2027",
+	}); err != nil {
+		t.Fatalf("Notify register: %v", err)
+	}
+
+	// Close immediately after sending register.
+	addinConn.Close()
+	conn.Close()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, ok := b.Registry.Get("inst-fastclose"); ok {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, ok := b.Registry.Get("inst-fastclose"); !ok {
+		t.Fatal("instance never appeared in registry")
+	}
+
+	// Confirm it was also detached from the execution manager — not left
+	// attached to the now-closed connection forever.
+	deadline = time.Now().Add(2 * time.Second)
+	var drec *diag.Record
+	for time.Now().Before(deadline) {
+		_, drec = b.Execution.ExecuteScript(context.Background(), "inst-fastclose", "doc-1", "1+1", 500, 60000)
+		if drec != nil && drec.Code == "instance_not_found" {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("expected instance_not_found after the connection closed (attach must have been detached), got %+v", drec)
 }
 
 func TestAgentClientRoleProxiesMCPSession(t *testing.T) {

@@ -323,3 +323,196 @@ func TestInstanceDisconnectedDuringPoll(t *testing.T) {
 		t.Fatalf("got %+v, want instance_disconnected", drec2)
 	}
 }
+
+// TestReconnectClearsStaleBusyState is a regression test: DetachInstance
+// must clear activeByInstance, not just conns, or a reconnect leaves the
+// instance permanently "busy" pointing at an execution that will never
+// complete (its owning connection is gone) — every subsequent
+// execute_script against that instance_id would return {status:"busy"}
+// forever, with no recovery short of restarting the broker.
+func TestReconnectClearsStaleBusyState(t *testing.T) {
+	_, conn := newFakeInstance(t, func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
+		var p map[string]any
+		json.Unmarshal(params, &p)
+		return Result{Status: StatusRunning, ExecutionID: p["execution_id"].(string)}, nil
+	})
+	m := NewManager()
+	m.AttachInstance("inst-1", conn)
+
+	_, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "slow", 50, 60000)
+	if drec != nil {
+		t.Fatalf("ExecuteScript: %+v", drec)
+	}
+
+	// The add-in reconnects: its old connection is detached...
+	m.DetachInstance("inst-1")
+
+	// ...and a fresh execute_script against the same instance_id must
+	// succeed, not report busy against the now-orphaned execution.
+	_, conn2 := newFakeInstance(t, func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
+		var p map[string]any
+		json.Unmarshal(params, &p)
+		return Result{Status: StatusSuccess, ExecutionID: p["execution_id"].(string)}, nil
+	})
+	m.AttachInstance("inst-1", conn2)
+
+	res, drec2 := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "retry", 1000, 60000)
+	if drec2 != nil {
+		t.Fatalf("ExecuteScript after reconnect: %+v, want success (not wedged busy)", drec2)
+	}
+	if res.Status != StatusSuccess {
+		t.Errorf("Status = %q, want success — reconnect must free the instance", res.Status)
+	}
+}
+
+// TestForwardExistingSettlesOnWireError is a regression test: a failed wire
+// round trip (not a clean instance-disconnect, which has its own path) must
+// still settle the execution to a terminal state, or it stays non-terminal
+// forever, keeping the instance permanently marked busy.
+func TestForwardExistingSettlesOnWireError(t *testing.T) {
+	_, conn := newFakeInstance(t, func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
+		var p map[string]any
+		json.Unmarshal(params, &p)
+		return Result{Status: StatusRunning, ExecutionID: p["execution_id"].(string)}, nil
+	})
+	m := NewManager()
+	m.AttachInstance("inst-1", conn)
+
+	start, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "slow", 50, 60000)
+	if drec != nil {
+		t.Fatalf("ExecuteScript: %+v", drec)
+	}
+
+	// Force the next wire call to fail without telling the Manager to
+	// DetachInstance — simulating a genuine wire failure, not a clean
+	// disconnect.
+	conn.Close()
+
+	_, drec2 := m.PollExecution(context.Background(), start.ExecutionID, 100)
+	if drec2 == nil {
+		t.Fatal("expected a diag error from the failed wire call")
+	}
+
+	m.mu.Lock()
+	rec := m.executions[start.ExecutionID]
+	m.mu.Unlock()
+	if rec == nil || !IsTerminal(rec.status) {
+		t.Fatalf("execution status = %+v, want terminal after the wire failure", rec)
+	}
+
+	// A fresh execute_script against the same instance must not report busy
+	// anymore — the instance is free again.
+	_, conn2 := newFakeInstance(t, func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
+		var p map[string]any
+		json.Unmarshal(params, &p)
+		return Result{Status: StatusSuccess, ExecutionID: p["execution_id"].(string)}, nil
+	})
+	m.AttachInstance("inst-1", conn2)
+	res3, drec3 := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "retry", 1000, 60000)
+	if drec3 != nil {
+		t.Fatalf("ExecuteScript after wire failure: %+v, want it to succeed (not busy)", drec3)
+	}
+	if res3.Status != StatusSuccess {
+		t.Errorf("Status = %q, want success", res3.Status)
+	}
+}
+
+// TestUnrecoverableLatchesInstance is a regression test: per PRD §06, once
+// an execution settles to "unrecoverable" the whole instance must stay
+// rejected for execute_script until a Revit restart — not just free up
+// activeByInstance like any other terminal status, which would forward a
+// new script to a Revit instance already known to be wedged.
+func TestUnrecoverableLatchesInstance(t *testing.T) {
+	_, conn := newFakeInstance(t, func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
+		var p map[string]any
+		json.Unmarshal(params, &p)
+		return Result{Status: StatusRunning, ExecutionID: p["execution_id"].(string)}, nil
+	})
+	m := NewManager()
+	m.AttachInstance("inst-1", conn)
+
+	start, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "slow", 50, 60000)
+	if drec != nil {
+		t.Fatalf("ExecuteScript: %+v", drec)
+	}
+
+	// Simulate the add-in's cancellation grace period lapsing.
+	m.settle("inst-1", start.ExecutionID, &Result{Status: StatusUnrecoverable, ExecutionID: start.ExecutionID})
+
+	_, drec2 := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "another", 1000, 60000)
+	if drec2 == nil || drec2.Code != "instance_unrecoverable" {
+		t.Fatalf("got %+v, want instance_unrecoverable", drec2)
+	}
+
+	// A restart (DetachInstance, then a fresh AttachInstance under a new
+	// instance_id in practice — modeled here as the same ID reconnecting,
+	// which is the worst case for latch cleanup) must clear the latch.
+	m.DetachInstance("inst-1")
+	m.AttachInstance("inst-1", conn)
+	_, drec3 := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "after restart", 1000, 60000)
+	if drec3 != nil && drec3.Code == "instance_unrecoverable" {
+		t.Errorf("instance still latched unrecoverable after DetachInstance, want the latch cleared")
+	}
+}
+
+// TestSettleDoesNotRegressAlreadyTerminalStatus is a regression test:
+// concurrent poll_execution/cancel_execution calls can both be in flight
+// against the same execution; a later (possibly stale) response must never
+// overwrite an already-settled terminal result.
+func TestSettleDoesNotRegressAlreadyTerminalStatus(t *testing.T) {
+	_, conn := newFakeInstance(t, func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
+		var p map[string]any
+		json.Unmarshal(params, &p)
+		return Result{Status: StatusRunning, ExecutionID: p["execution_id"].(string)}, nil
+	})
+	m := NewManager()
+	m.AttachInstance("inst-1", conn)
+
+	start, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "slow", 50, 60000)
+	if drec != nil {
+		t.Fatalf("ExecuteScript: %+v", drec)
+	}
+
+	m.settle("inst-1", start.ExecutionID, &Result{Status: StatusSuccess, ExecutionID: start.ExecutionID, Output: "first"})
+	m.settle("inst-1", start.ExecutionID, &Result{Status: StatusCancelled, ExecutionID: start.ExecutionID})
+
+	m.mu.Lock()
+	rec := m.executions[start.ExecutionID]
+	m.mu.Unlock()
+	if rec.status != StatusSuccess {
+		t.Errorf("status = %q, want success — the first settle should win, not regress to cancelled", rec.status)
+	}
+}
+
+// TestMaxDurationAutoCancelsUnpolledExecution is a regression test for PRD
+// §06's max_duration_ms: "the broker auto-issues the same cancellation
+// signal on the agent's behalf, so a script nobody's actively polling
+// doesn't sit forever silently occupying the instance."
+func TestMaxDurationAutoCancelsUnpolledExecution(t *testing.T) {
+	var cancelCalled int32
+	_, conn := newFakeInstance(t, func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
+		var p map[string]any
+		json.Unmarshal(params, &p)
+		if method == "cancel_execution" {
+			atomic.AddInt32(&cancelCalled, 1)
+			return Result{Status: StatusCancelled, ExecutionID: p["execution_id"].(string)}, nil
+		}
+		return Result{Status: StatusRunning, ExecutionID: p["execution_id"].(string)}, nil
+	})
+	m := NewManager()
+	m.AttachInstance("inst-1", conn)
+
+	_, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "slow", 50, 100 /* maxDurationMs */)
+	if drec != nil {
+		t.Fatalf("ExecuteScript: %+v", drec)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if atomic.LoadInt32(&cancelCalled) > 0 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("expected max_duration_ms to trigger an automatic cancel_execution wire call")
+}

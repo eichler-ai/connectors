@@ -77,6 +77,7 @@ type Manager struct {
 	conns            map[string]*transport.Conn
 	executions       map[string]*record
 	activeByInstance map[string]string
+	unrecoverable    map[string]bool
 
 	newID func() string
 	now   func() time.Time
@@ -88,6 +89,7 @@ func NewManager() *Manager {
 		conns:            make(map[string]*transport.Conn),
 		executions:       make(map[string]*record),
 		activeByInstance: make(map[string]string),
+		unrecoverable:    make(map[string]bool),
 		newID:            func() string { return "exec-" + uuid.NewString() },
 		now:              time.Now,
 	}
@@ -102,17 +104,34 @@ func (m *Manager) AttachInstance(instanceID string, conn *transport.Conn) {
 	m.conns[instanceID] = conn
 }
 
-// DetachInstance drops the wire connection for instanceID. In-flight
-// execution records are left as-is (a subsequent poll/cancel against them
-// will surface an "instance disconnected" diagnostic rather than silently
-// vanishing).
+// DetachInstance drops the wire connection for instanceID. Also clears the
+// instance's busy/unrecoverable bookkeeping: a disconnected instance can't
+// still be "busy" once its connection is gone (otherwise every reconnect
+// would permanently wedge execute_script behind an execution that will
+// never complete), and any unrecoverable latch is scoped to a since-dead
+// connection — a real recovery is a Revit restart, which mints a fresh
+// instance_id per PRD §05, so this instanceID's entry is simply stale
+// afterward. In-flight execution *records* are left as-is (a subsequent
+// poll/cancel against them will surface an "instance disconnected"
+// diagnostic rather than silently vanishing).
 func (m *Manager) DetachInstance(instanceID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.conns, instanceID)
+	if m.activeByInstance[instanceID] != "" {
+		delete(m.activeByInstance, instanceID)
+	}
+	delete(m.unrecoverable, instanceID)
 }
 
 const source = "mcp-server.internal.execution"
+
+func errInstanceUnrecoverable(instanceID string) *diag.Record {
+	return diag.New(diag.SeverityError, "instance_unrecoverable", source,
+		fmt.Sprintf("instance %q is unrecoverable: a prior execution didn't respond to cancellation within its grace period (PRD §06)", instanceID)).
+		WithDetail(map[string]any{"instance_id": instanceID}).
+		WithRemedy("restart Revit for this instance; the add-in will register a fresh instance_id on reconnect")
+}
 
 func errInstanceNotFound(instanceID string) *diag.Record {
 	return diag.New(diag.SeverityError, "instance_not_found", source,
@@ -163,9 +182,17 @@ func fromRPCError(executionID string, rpcErr *transport.RPCError) *diag.Record {
 // response is returned so the caller can poll_execution. If instanceID
 // already has a non-terminal execution, ExecuteScript returns
 // {status:"busy", execution_id: <existing>} without forwarding anything —
-// PRD §06's "Instance busy state".
+// PRD §06's "Instance busy state". If instanceID previously latched
+// unrecoverable (a prior execution didn't respond to cancellation), further
+// calls return an explicit error rather than queuing or reporting busy,
+// per §06 — the instance stays unrecoverable until a Revit restart mints a
+// fresh instance_id (§05).
 func (m *Manager) ExecuteScript(ctx context.Context, instanceID, documentID, script string, timeoutMs, maxDurationMs int) (*Result, *diag.Record) {
 	m.mu.Lock()
+	if m.unrecoverable[instanceID] {
+		m.mu.Unlock()
+		return nil, errInstanceUnrecoverable(instanceID)
+	}
 	if existingID, busy := m.activeByInstance[instanceID]; busy {
 		m.mu.Unlock()
 		return &Result{Status: StatusBusy, ExecutionID: existingID}, nil
@@ -180,6 +207,10 @@ func (m *Manager) ExecuteScript(ctx context.Context, instanceID, documentID, scr
 	m.activeByInstance[instanceID] = executionID
 	m.mu.Unlock()
 
+	if maxDurationMs > 0 {
+		m.scheduleAutoCancel(executionID, maxDurationMs)
+	}
+
 	params := map[string]any{
 		"execution_id":    executionID,
 		"document_id":     documentID,
@@ -189,16 +220,32 @@ func (m *Manager) ExecuteScript(ctx context.Context, instanceID, documentID, scr
 	}
 	res, drec := m.callWire(ctx, conn, "execute_script", executionID, timeoutMs, params)
 	if drec != nil {
-		m.mu.Lock()
-		delete(m.executions, executionID)
-		if m.activeByInstance[instanceID] == executionID {
-			delete(m.activeByInstance, instanceID)
-		}
-		m.mu.Unlock()
+		m.settleError(instanceID, executionID, drec)
 		return nil, drec
 	}
 	m.settle(instanceID, executionID, res)
 	return res, nil
+}
+
+// scheduleAutoCancel arranges for executionID to be cancelled on the
+// agent's behalf once maxDurationMs elapses, per PRD §06: "a hard ceiling
+// on total runtime ... the broker auto-issues the same cancellation signal
+// on the agent's behalf, so a script nobody's actively polling doesn't sit
+// forever silently occupying the instance." A no-op if the execution has
+// already reached a terminal state by then.
+func (m *Manager) scheduleAutoCancel(executionID string, maxDurationMs int) {
+	time.AfterFunc(time.Duration(maxDurationMs)*time.Millisecond, func() {
+		m.mu.Lock()
+		rec, ok := m.executions[executionID]
+		alreadyDone := !ok || IsTerminal(rec.status)
+		m.mu.Unlock()
+		if alreadyDone {
+			return
+		}
+		// Best-effort: the agent observes the eventual outcome via its own
+		// poll_execution, so nothing here needs the result/error.
+		_, _ = m.CancelExecution(context.Background(), executionID)
+	})
 }
 
 // forwardExisting looks up executionID, returns its cached terminal result
@@ -227,6 +274,12 @@ func (m *Manager) forwardExisting(ctx context.Context, executionID, wireMethod s
 
 	res, drec := m.callWire(ctx, conn, wireMethod, executionID, timeoutMs, params)
 	if drec != nil {
+		// A failed wire round trip must still settle the execution to a
+		// terminal state — otherwise it stays "non-terminal" forever,
+		// keeping the instance permanently marked busy with no way to
+		// start a new execute_script against it (PRD §06's busy state is
+		// meant to be temporary, not a stuck door).
+		m.settleError(instanceID, executionID, drec)
 		return nil, drec
 	}
 	m.settle(instanceID, executionID, res)
@@ -283,19 +336,52 @@ func (m *Manager) callWire(ctx context.Context, conn *transport.Conn, method, ex
 // wire result: non-terminal statuses stay tracked (and keep the instance
 // marked busy); terminal statuses free the instance for a new
 // execute_script call while the record itself is retained so a later
-// poll_execution can still retrieve the final result.
+// poll_execution can still retrieve the final result. StatusUnrecoverable
+// is the one terminal status that does *not* simply free the instance — it
+// latches (PRD §06: "further calls against that instance return an
+// explicit error ... rather than queuing or reporting busy"), so a
+// subsequent execute_script is rejected outright instead of being forwarded
+// to a Revit instance that's known to be wedged.
+//
+// If rec.status is already terminal, this is a no-op: concurrent
+// poll_execution/cancel_execution calls can both be in flight against the
+// same execution, and a later (possibly stale) response must never regress
+// an already-settled terminal result.
 func (m *Manager) settle(instanceID, executionID string, res *Result) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	rec, ok := m.executions[executionID]
-	if !ok {
+	if !ok || IsTerminal(rec.status) {
 		return
 	}
 	rec.status = res.Status
 	if IsTerminal(res.Status) {
 		rec.result = res
+		if res.Status == StatusUnrecoverable {
+			m.unrecoverable[instanceID] = true
+		}
 		if m.activeByInstance[instanceID] == executionID {
 			delete(m.activeByInstance, instanceID)
 		}
+	}
+}
+
+// settleError is settle's counterpart for a wire-level failure (the round
+// trip itself didn't complete, so there's no add-in-reported Result) —
+// it settles the execution to a terminal error with drec as the detail, so
+// a failed poll/cancel round trip doesn't leave the execution (and the
+// instance's busy state) stuck non-terminal forever. Same regression guard
+// as settle: a no-op if the execution is already terminal.
+func (m *Manager) settleError(instanceID, executionID string, drec *diag.Record) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rec, ok := m.executions[executionID]
+	if !ok || IsTerminal(rec.status) {
+		return
+	}
+	rec.status = StatusError
+	rec.result = &Result{Status: StatusError, ExecutionID: executionID, ErrorDetail: drec}
+	if m.activeByInstance[instanceID] == executionID {
+		delete(m.activeByInstance, instanceID)
 	}
 }

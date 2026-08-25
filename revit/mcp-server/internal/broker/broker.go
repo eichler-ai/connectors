@@ -108,8 +108,47 @@ func (t *tail) Read(p []byte) (int, error)  { return t.r.Read(p) }
 func (t *tail) Write(p []byte) (int, error) { return t.conn.Write(p) }
 func (t *tail) Close() error                { return t.conn.Close() }
 
+// maxAuthLineBytes bounds the unauthenticated first line the same way
+// Framer's Scanner bounds every line post-auth (framing.go's
+// maxLineBytes) — a peer that never sends a newline must not be able to
+// grow bufio.Reader.ReadBytes' accumulated buffer without limit before
+// auth has even succeeded. Small on purpose: a real auth message is a few
+// hundred bytes.
+const maxAuthLineBytes = 64 * 1024
+
+// capReader bounds total bytes read until lifted, then reads through
+// unbounded. Used to cap only the pre-auth line while still handing the
+// same underlying *bufio.Reader off to tail afterward — an io.LimitReader
+// can't do this, since once its budget is spent it stays exhausted for the
+// life of the reader, which would silently truncate all legitimate
+// post-auth traffic through the same buffer.
+type capReader struct {
+	r      io.Reader
+	limit  int
+	n      int
+	lifted bool
+}
+
+func (c *capReader) lift() { c.lifted = true }
+
+func (c *capReader) Read(p []byte) (int, error) {
+	if c.lifted {
+		return c.r.Read(p)
+	}
+	if c.n >= c.limit {
+		return 0, fmt.Errorf("broker: line exceeds %d bytes without a newline", c.limit)
+	}
+	if room := c.limit - c.n; len(p) > room {
+		p = p[:room]
+	}
+	n, err := c.r.Read(p)
+	c.n += n
+	return n, err
+}
+
 func (b *Broker) handleConn(ctx context.Context, conn net.Conn) {
-	br := bufio.NewReader(conn)
+	cr := &capReader{r: conn, limit: maxAuthLineBytes}
+	br := bufio.NewReader(cr)
 	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	line, err := br.ReadBytes('\n')
 	if err != nil {
@@ -118,6 +157,10 @@ func (b *Broker) handleConn(ctx context.Context, conn net.Conn) {
 		return
 	}
 	_ = conn.SetReadDeadline(time.Time{})
+	// The rest of the connection's life (post-auth wire traffic) is
+	// legitimately unbounded per line up to Framer's own maxLineBytes —
+	// only the pre-auth phase needed the tighter cap.
+	cr.lift()
 
 	rest := &tail{r: br, conn: conn}
 	fr := transport.NewFramer(rest, rest)
@@ -176,8 +219,17 @@ func writeAuthRejection(fr *transport.Framer, id *json.RawMessage, code, message
 // expects a `register` notification (PRD §05) and attaches the connection
 // to the execution manager so execute_script/poll_execution/
 // cancel_execution can route to it.
+//
+// instanceID is safe to read after conn.Serve() returns with no extra
+// synchronization: Conn dispatches notifications inline on the same
+// goroutine that's driving Serve's read loop (see transport.Conn.Serve's
+// own comment), so the register handler below has always finished running
+// — including having called AttachInstance — by the time Serve returns.
+// Attach is therefore guaranteed to happen-before the DetachInstance call
+// at the end of this function, never after it.
 func (b *Broker) serveAddIn(rwc io.ReadWriteCloser) {
 	conn := transport.NewConn(rwc)
+	defer conn.Close() // idempotent alongside failPending's own close; belt-and-suspenders against any path that skips it
 	var instanceID string
 
 	conn.SetNotificationHandler(func(method string, params json.RawMessage) {

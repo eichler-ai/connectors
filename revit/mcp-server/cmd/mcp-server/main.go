@@ -76,8 +76,13 @@ func run(mode, bindAddr string, port int, appDataDirOverride string, logger *log
 	if mode != "local" && mode != "remote" {
 		return fmt.Errorf("invalid -mode %q: must be \"local\" or \"remote\"", mode)
 	}
-	if mode == "remote" && bindAddr == "" {
-		return fmt.Errorf("-bind is required in remote mode (PRD §05: a specific configured non-loopback interface, never 0.0.0.0)")
+	if mode == "remote" {
+		if bindAddr == "" {
+			return fmt.Errorf("-bind is required in remote mode (PRD §05: a specific configured non-loopback interface, never 0.0.0.0)")
+		}
+		if bindAddr == "0.0.0.0" || bindAddr == "::" {
+			return fmt.Errorf("-bind %q is not allowed (PRD §05/§10: never bind every interface — pass the specific configured non-loopback address instead)", bindAddr)
+		}
 	}
 	if mode == "local" {
 		bindAddr = "127.0.0.1"
@@ -95,20 +100,40 @@ func run(mode, bindAddr string, port int, appDataDirOverride string, logger *log
 		return fmt.Errorf("creating app-data directory %q: %w", dataDir, err)
 	}
 
-	lockPath := filepath.Join(dataDir, "broker.lock")
-	lock, primary, err := singleton.AcquireLock(lockPath)
-	if err != nil {
-		return fmt.Errorf("acquiring singleton lock: %w", err)
-	}
-
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if primary {
-		defer lock.Release()
-		return runPrimary(ctx, bindAddr, port, dataDir, logger)
+	lockPath := filepath.Join(dataDir, "broker.lock")
+
+	// PRD §05 "Broker singleton & port contention": whichever process wins
+	// the lock is primary; everyone else proxies as secondary. If a
+	// secondary's upstream connection to the primary drops for any reason
+	// other than this process's own shutdown, "a secondary that notices its
+	// upstream connection drop re-runs the same lock-acquisition step — it
+	// may become the new primary, or find another secondary got there
+	// first and keep proxying." This loop is what makes that re-election
+	// actually happen, instead of the secondary process just exiting
+	// (killing whatever MCP client session it was proxying for) the moment
+	// the primary it was following goes away.
+	for {
+		lock, primary, err := singleton.AcquireLock(lockPath)
+		if err != nil {
+			return fmt.Errorf("acquiring singleton lock: %w", err)
+		}
+
+		if primary {
+			err := runPrimary(ctx, bindAddr, port, dataDir, logger)
+			lock.Release()
+			return err // this process's own session ending is a real shutdown, not something to retry
+		}
+
+		err = runSecondary(ctx, dataDir, logger)
+		if ctx.Err() != nil {
+			return nil // clean shutdown (signal), not a dropped-primary retry case
+		}
+		logger.Printf("secondary: upstream connection to primary ended (%v); re-attempting lock acquisition", err)
+		time.Sleep(500 * time.Millisecond) // bound the retry rate if the lock is held by something that never releases it
 	}
-	return runSecondary(ctx, dataDir, logger)
 }
 
 func runPrimary(ctx context.Context, bindAddr string, port int, dataDir string, logger *log.Logger) error {

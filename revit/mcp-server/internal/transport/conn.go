@@ -88,7 +88,16 @@ func (c *Conn) Serve() error {
 			h := c.onNotification
 			c.mu.Unlock()
 			if h != nil {
-				go h(msg.Method, msg.Params)
+				// Dispatched inline, not via `go`, deliberately: callers
+				// (e.g. broker.serveAddIn's register handler) rely on a
+				// notification's handler having fully run by the time a
+				// subsequent read — or Serve itself returning — is
+				// observed. An async dispatch here raced the handler
+				// against Serve's own exit, so a connection that dropped
+				// right after `register` could leave the instance attached
+				// but never detached. Handlers must stay fast/non-blocking,
+				// same as any other code on the read loop's own goroutine.
+				h(msg.Method, msg.Params)
 			}
 		case msg.IsRequest():
 			c.handleRequest(msg)
@@ -137,8 +146,15 @@ func (c *Conn) handleRequest(msg *Message) {
 	}()
 }
 
+// failPending marks the connection closed and unblocks every pending Call.
+// It also closes the underlying resource itself — Serve's only path back
+// to its caller after a read error is through here, and Close() no-ops
+// once c.closed is already true, so without this the fd/socket a Serve
+// loop was reading from would never actually be released (a leak on every
+// disconnect, not just an explicit Close() call).
 func (c *Conn) failPending() {
 	c.mu.Lock()
+	alreadyClosed := c.closed
 	c.closed = true
 	pending := c.pending
 	c.pending = make(map[string]chan *Message)
@@ -146,6 +162,9 @@ func (c *Conn) failPending() {
 
 	for _, ch := range pending {
 		close(ch)
+	}
+	if !alreadyClosed {
+		_ = c.closer.Close()
 	}
 }
 
