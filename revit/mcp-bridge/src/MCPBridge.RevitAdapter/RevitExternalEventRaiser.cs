@@ -1,3 +1,4 @@
+using System;
 using Autodesk.Revit.UI;
 
 namespace MCPBridge.RevitAdapter;
@@ -12,5 +13,11 @@ public sealed class RevitExternalEventRaiser : IExternalEventRaiser
         _externalEvent = externalEvent;
     }
 
-    public void Raise() => _externalEvent.Raise();
+    public ExternalEventRaiseOutcome Raise() => _externalEvent.Raise() switch
+    {
+        ExternalEventRequest.Accepted => ExternalEventRaiseOutcome.Accepted,
+        ExternalEventRequest.Denied => ExternalEventRaiseOutcome.Denied,
+        ExternalEventRequest.TimedOut => ExternalEventRaiseOutcome.TimedOut,
+        var other => throw new InvalidOperationException($"Unrecognized ExternalEventRequest value: {other}."),
+    };
 }

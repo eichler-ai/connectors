@@ -34,6 +34,24 @@ internal sealed class BridgeHost
         // the live-harness wiring step since it needs a live Revit session to exercise
         // (see tests/MCPBridge.Integration.Tests).
         //
+        // PR #2 review, Fix 1's confirmed architecture decision (see MCPBridge.Core.Execution.
+        // ExternalEventBridge<TResult> and RoslynScriptRunner's doc comments for the full
+        // reasoning): when this wiring lands, it composes as
+        //   var externalEvent = ExternalEvent.Create(revitScriptExecutionHandler);
+        //   var raiser = new RevitExternalEventRaiser(externalEvent);
+        //   var bridge = new ExternalEventBridge<ScriptExecutionOutcome>(raiser);
+        //   var handler = new RevitScriptExecutionHandler(bridge); // bridge implements IScriptExecutionCallback
+        // and the TCP-handling thread calls bridge.RunAsync(app => {
+        //   // fully synchronous work item: no await anywhere in here.
+        //   executionManager.MarkRunning(executionId, now);
+        //   var outcome = transactionScriptExecutor.ExecuteAsync(..., executionManager.GetCancellationToken(executionId))
+        //       .GetAwaiter().GetResult(); // deadlock-safe only because RoslynScriptRunner rejects any
+        //                                  // script containing its own top-level `await` before compiling it.
+        //   executionManager.CompleteSuccess/.CompleteError/.CompleteCancelled(...);
+        //   return outcome;
+        // }), which returns a Task the TCP thread can await without blocking, and which already
+        // surfaces a Denied/TimedOut Raise() as a failed Task (Fix 5) instead of hanging.
+        //
         // Also call RoslynAssemblyIsolation.EnsureInitialized() here, before any script
         // ever compiles. It's a partial mitigation, not full isolation (see its own doc
         // comment for why -- true isolation needs a shadow-load bootstrap), and nothing
