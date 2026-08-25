@@ -1,4 +1,5 @@
 using System;
+using System.IO;
 using Autodesk.Revit.UI;
 using MCPBridge.Core.Connection;
 using MCPBridge.Core.Execution;
@@ -37,11 +38,33 @@ public sealed class MCPBridgeApplication : IExternalApplication
 
             return Result.Succeeded;
         }
-        catch (Exception)
+        catch (Exception ex)
         {
             // A failed OnStartup must not take down all of Revit -- report failure to the AddInLoader
-            // instead of letting the exception propagate (PRD §04).
+            // instead of letting the exception propagate (PRD §04). Independent PR review finding: this
+            // used to swallow the exception with zero trace anywhere, reproducing the exact silent-no-load
+            // symptom the "verifying you're actually debugging the binary you just built" skill-file
+            // section (added this same session) exists to make fast to rule out -- a genuinely-thrown
+            // OnStartup exception and a manifest Revit never loaded at all were otherwise indistinguishable
+            // from the outside. Best-effort only (never let a logging failure mask the real one); path is
+            // computed per-machine, not hardcoded to any one developer's username.
+            TryLogStartupFailure(ex);
             return Result.Failed;
+        }
+    }
+
+    private static void TryLogStartupFailure(Exception ex)
+    {
+        try
+        {
+            var directory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "MCPBridge");
+            Directory.CreateDirectory(directory);
+            File.AppendAllText(Path.Combine(directory, "startup-errors.log"), $"{DateTimeOffset.UtcNow:O} OnStartup failed: {ex}\n");
+        }
+        catch
+        {
+            // Best-effort diagnostic only -- a failure here must never mask or replace the original
+            // exception, which is already being reported to the AddInLoader via Result.Failed.
         }
     }
 

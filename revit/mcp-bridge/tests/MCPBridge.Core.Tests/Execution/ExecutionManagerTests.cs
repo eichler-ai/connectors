@@ -399,6 +399,30 @@ public class ExecutionManagerTests
     }
 
     [Fact]
+    public void CheckMaxDuration_ReturnValue_TrueOnlyWhenAPendingExecutionWasAutoCancelled()
+    {
+        // Independent PR review finding: BridgeHost's periodic timer needs to know specifically "did this
+        // call just auto-cancel a still-Pending execution" -- the same signal RequestCancellation reports
+        // via AcknowledgedWasPending -- so it can call ExternalEventBridge.Abandon() the same way
+        // RequestDispatcher.HandleCancelExecution does for a manual cancel_execution. Without this return
+        // value, that wiring silently doesn't exist and a Pending auto-cancel wedges the bridge forever.
+        var manager = NewManager();
+        var now = DateTimeOffset.UtcNow;
+
+        // No active execution at all: false, not an exception.
+        Assert.False(manager.CheckMaxDuration(now));
+
+        var pending = manager.Start(NewId(), "// script", maxDurationMs: 1000, now).Record!;
+        Assert.False(manager.CheckMaxDuration(now.AddMilliseconds(500)), "not yet elapsed -- must not report a cancel that didn't happen.");
+        Assert.True(manager.CheckMaxDuration(now.AddMilliseconds(1500)), "elapsed while still Pending -- Abandon() is required.");
+        Assert.Equal(ExecutionStatus.Cancelled, pending.Status);
+
+        var running = manager.Start(NewId(), "// script", maxDurationMs: 1000, now.AddMilliseconds(1600)).Record!;
+        manager.MarkRunning(running.ExecutionId, now.AddMilliseconds(1600));
+        Assert.False(manager.CheckMaxDuration(now.AddMilliseconds(3200)), "a Running record's raise already fired -- Execute() completes its own TCS, Abandon() must not be called.");
+    }
+
+    [Fact]
     public void CheckMaxDuration_ElapsedWhileStillPending_ActuallyCancelsTheToken()
     {
         // Third review finding: a still-Pending record's CancellationTokenSource was previously left

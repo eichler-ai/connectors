@@ -254,6 +254,42 @@ public class RoslynScriptRunnerTests
     }
 
     [Fact]
+    public async Task RunAsync_ScriptCallsDocumentCreateTransaction_FailsToCompile()
+    {
+        // Independent PR review of the IScriptDocument split (Document no longer exposes
+        // CreateTransaction/CreateTransactionGroup -- TransactionScriptExecutor already wraps every
+        // script run in an ambient Transaction/TransactionGroup, and Revit only allows one open
+        // Transaction per Document, so a script calling CreateTransaction on the same Document always
+        // failed at runtime before this split existed). This is the regression guard that split was
+        // missing entirely.
+        var runner = new RoslynScriptRunner();
+
+        var outcome = await runner.RunAsync(
+            "Document.CreateTransaction(\"x\")", NewGlobals(), CancellationToken.None);
+
+        Assert.False(outcome.Success);
+        Assert.NotNull(outcome.Exception);
+        Assert.Contains("CreateTransaction", outcome.Exception!.Message);
+    }
+
+    [Fact]
+    public async Task RunAsync_ScriptCallsUiDocumentDotDocumentCreateTransaction_FailsToCompile()
+    {
+        // Same bug, reached through UIDocument.Document instead of the top-level Document -- the
+        // narrower IScriptDocument fix must apply to IUiDocumentAdapter's Document too (via
+        // IScriptUiDocument), not just ScriptGlobals' own top-level Document property. Found by
+        // independent PR review: the first version of this fix missed this exact path.
+        var runner = new RoslynScriptRunner();
+
+        var outcome = await runner.RunAsync(
+            "UIDocument.Document.CreateTransaction(\"x\")", NewGlobals(), CancellationToken.None);
+
+        Assert.False(outcome.Success);
+        Assert.NotNull(outcome.Exception);
+        Assert.Contains("CreateTransaction", outcome.Exception!.Message);
+    }
+
+    [Fact]
     public async Task RunAsync_AwaitInsideAStringLiteral_IsNotRejected()
     {
         // Sanity check that the rejection is a real syntax-tree walk (AwaitExpressionSyntax), not a naive

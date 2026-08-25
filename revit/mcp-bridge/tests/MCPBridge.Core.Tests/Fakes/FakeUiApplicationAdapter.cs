@@ -10,4 +10,6 @@ public sealed class FakeUiApplicationAdapter : IUiApplicationAdapter
 public sealed class FakeUiDocumentAdapter : IUiDocumentAdapter
 {
     public IDocumentAdapter Document { get; init; } = new FakeDocumentAdapter();
+
+    IScriptDocument IScriptUiDocument.Document => Document;
 }

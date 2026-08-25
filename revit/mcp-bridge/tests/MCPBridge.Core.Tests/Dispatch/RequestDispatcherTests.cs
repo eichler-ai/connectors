@@ -324,6 +324,33 @@ public class RequestDispatcherTests
     }
 
     [Fact]
+    public async Task PollExecution_TimeoutMsExceedsCeiling_IsClamped_DoesNotThrowOrHang()
+    {
+        // Independent PR review finding: an unbounded caller-supplied timeout_ms (long.MaxValue here)
+        // used to push _now().AddMilliseconds past DateTimeOffset's representable range, throwing
+        // ArgumentOutOfRangeException, instead of the loop ever getting a chance to return a normal
+        // pending/timeout response. The injected clock only advances via the injected _delay (rather than
+        // real Task.Delay), so this also proves the deadline-vs-clock loop genuinely terminates instead of
+        // relying on wall-clock time to eventually catch up to a real clock -- the fix this same PR made
+        // to stop mixing an injectable _now with a non-injectable Task.Delay.
+        var executionManager = NewExecutionManager();
+        var bridge = new ExternalEventBridge<ScriptExecutionOutcome>(new FakeExternalEventRaiser());
+        var now = DateTimeOffset.UtcNow;
+        var dispatcher = new RequestDispatcher(
+            executionManager,
+            bridge,
+            NewScriptExecutor(),
+            now: () => now,
+            delay: _ => { now = now.AddMilliseconds(200); return Task.CompletedTask; });
+
+        executionManager.Start("exec-1", "1 + 1", 600_000, now);
+
+        var json = await dispatcher.DispatchAsync(PollRequest(1, "exec-1", timeoutMs: long.MaxValue));
+
+        Assert.Contains("\"status\":\"pending\"", json);
+    }
+
+    [Fact]
     public async Task UnknownMethod_ReturnsMethodNotFoundError()
     {
         var executionManager = NewExecutionManager();

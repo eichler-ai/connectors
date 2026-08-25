@@ -112,9 +112,31 @@ internal sealed class BridgeHost
         _timeoutTimer = new Timer(
             _ =>
             {
-                var now = DateTimeOffset.UtcNow;
-                _executionManager.CheckMaxDuration(now);
-                _executionManager.CheckGraceExpiry(now);
+                try
+                {
+                    var now = DateTimeOffset.UtcNow;
+
+                    // Independent PR review finding: CheckMaxDuration auto-cancelling a still-Pending
+                    // execution is the exact same situation RequestDispatcher.HandleCancelExecution calls
+                    // scriptBridge.Abandon() for (see its own comment) -- the ExternalEventBridge TCS for
+                    // that execution's raise will otherwise never be completed by anything. Without this,
+                    // the raise eventually fires once whatever blocked Revit's idle loop clears, finds
+                    // nothing awaiting it, and every execute_script after that shares the same wedged
+                    // bridge state for the rest of the process's life.
+                    if (_executionManager.CheckMaxDuration(now))
+                    {
+                        scriptBridge.Abandon();
+                    }
+
+                    _executionManager.CheckGraceExpiry(now);
+                }
+                catch
+                {
+                    // A threadpool Timer callback that throws crashes the process (unhandled exception on
+                    // a threadpool thread) -- this must never take down all of Revit over a periodic
+                    // in-memory state check. Worst case a check is skipped for one interval; the next tick
+                    // tries again.
+                }
             },
             state: null,
             dueTime: TimeoutCheckInterval,

@@ -246,33 +246,49 @@ public sealed class ExecutionManager
     /// case this exists to catch. max_duration_ms is the agent's budget for the whole
     /// execute_script call, queue wait included, not just active running time.
     /// </summary>
-    public void CheckMaxDuration(DateTimeOffset now)
+    /// <summary>
+    /// Returns true iff this call just auto-cancelled a still-<em>Pending</em> execution -- the same
+    /// signal <see cref="RequestCancellation"/> reports via <see cref="CancellationRequestOutcome.AcknowledgedWasPending"/>,
+    /// for the same reason: a Pending execution's ExternalEvent raise is still sitting queued in Revit's
+    /// idle loop and will eventually fire regardless, so the caller (BridgeHost's periodic timer) must
+    /// call ExternalEventBridge.Abandon() to unwedge the TCS nothing else will ever complete. Found by
+    /// independent PR review: the timer-driven auto-cancel path had no equivalent to
+    /// RequestDispatcher.HandleCancelExecution's Abandon() call, so an execution auto-cancelled while
+    /// still Pending (e.g. stuck behind a modal Revit dialog) left ExternalEventBridge._pending wedged,
+    /// faulting every subsequent execute_script for the rest of the process's life once that queued raise
+    /// eventually did fire and found nothing awaiting it. False for a Running record (its raise already
+    /// fired; Execute() will complete/fault the TCS itself when it returns) and for a no-op call.
+    /// </summary>
+    public bool CheckMaxDuration(DateTimeOffset now)
     {
         CancellationTokenSource? ctsToCancel;
+        bool wasPending;
 
         lock (_lock)
         {
             if (_active is not { } record || record.Status is not (ExecutionStatus.Pending or ExecutionStatus.Running))
             {
-                return;
+                return false;
             }
 
             if (record.CancellationRequestedAt is not null)
             {
-                return;
+                return false;
             }
 
             var elapsedMs = (now - record.CreatedAt).TotalMilliseconds;
             if (elapsedMs < record.MaxDurationMs)
             {
-                return;
+                return false;
             }
 
+            wasPending = record.Status == ExecutionStatus.Pending;
             ctsToCancel = ApplyCancellation(record, now);
         }
 
         // Outside the lock, same reasoning as RequestCancellation.
         SafeCancel(ctsToCancel);
+        return wasPending;
     }
 
     /// <summary>

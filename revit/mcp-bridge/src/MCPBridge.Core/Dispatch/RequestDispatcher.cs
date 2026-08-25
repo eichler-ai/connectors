@@ -46,16 +46,25 @@ public sealed class RequestDispatcher
     private readonly TransactionScriptExecutor _scriptExecutor;
     private readonly Func<DateTimeOffset> _now;
 
+    // Independent PR review finding: HandlePollExecutionAsync's wait loop checked its deadline against
+    // the injectable _now() but always slept via the real, non-injectable Task.Delay -- a future test
+    // that freezes _now() to exercise the deadline logic deterministically would spin real-time forever,
+    // since _now() would never reach the deadline. _delay defaults to the real Task.Delay in production;
+    // tests can substitute an instant no-op alongside a frozen/steppable _now.
+    private readonly Func<TimeSpan, Task> _delay;
+
     public RequestDispatcher(
         ExecutionManager executionManager,
         ExternalEventBridge<ScriptExecutionOutcome> bridge,
         TransactionScriptExecutor scriptExecutor,
-        Func<DateTimeOffset>? now = null)
+        Func<DateTimeOffset>? now = null,
+        Func<TimeSpan, Task>? delay = null)
     {
         _executionManager = executionManager;
         _bridge = bridge;
         _scriptExecutor = scriptExecutor;
         _now = now ?? (() => DateTimeOffset.UtcNow);
+        _delay = delay ?? Task.Delay;
     }
 
     /// <summary>How often <see cref="HandlePollExecutionAsync"/> re-checks the record while waiting out timeout_ms.</summary>
@@ -268,7 +277,15 @@ public sealed class RequestDispatcher
             return JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InvalidParams, ex.Message, null);
         }
 
-        var deadline = _now().AddMilliseconds(Math.Max(0, timeoutMs));
+        // Clamped to [0, DefaultMaxDurationMs] -- independent PR review finding: an unbounded caller-
+        // supplied timeout_ms (e.g. accidentally passing a value in the wrong unit) could push
+        // _now().AddMilliseconds past DateTimeOffset's range (throwing) or just hold this dispatch loop
+        // waiting far longer than anything in this system ever legitimately runs for. DefaultMaxDurationMs
+        // (PRD §06's own "default generous, e.g. 10 minutes" ceiling for execute_script) is already the
+        // longest a script is expected to run, so it doubles as a sane upper bound for how long polling
+        // for one to finish should ever be worth waiting.
+        var clampedTimeoutMs = Math.Clamp(timeoutMs, 0, DefaultMaxDurationMs);
+        var deadline = _now().AddMilliseconds(clampedTimeoutMs);
         while (true)
         {
             var record = _executionManager.Poll(executionId);
@@ -282,7 +299,7 @@ public sealed class RequestDispatcher
                 return ExecutionResultMessage.FromRecord(request.Id, record);
             }
 
-            await Task.Delay(PollInterval).ConfigureAwait(false);
+            await _delay(PollInterval).ConfigureAwait(false);
         }
     }
 
