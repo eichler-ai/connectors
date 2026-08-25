@@ -245,50 +245,53 @@ public sealed class ExecutionManager
     /// never reach, so a start-of-Running reference time would never fire for exactly the
     /// case this exists to catch. max_duration_ms is the agent's budget for the whole
     /// execute_script call, queue wait included, not just active running time.
+    ///
+    /// Returns the execution_id iff this call just auto-cancelled a still-<em>Pending</em> execution --
+    /// the same signal <see cref="RequestCancellation"/> reports via
+    /// <see cref="CancellationRequestOutcome.AcknowledgedWasPending"/>, for the same reason: a Pending
+    /// execution's ExternalEvent raise is still sitting queued in Revit's idle loop and will eventually
+    /// fire regardless, so the caller (BridgeHost's periodic timer) must call
+    /// ExternalEventBridge.Abandon(executionId) to unwedge the TCS nothing else will ever complete.
+    /// Returning the id (not just a bool) matters: a second independent PR review found that calling
+    /// Abandon() unconditionally -- with no way to verify it's abandoning the SAME work item that
+    /// motivated the call -- can abandon a DIFFERENT, unrelated execution's legitimately-queued work item
+    /// if a new execute_script starts in the window between this method freeing the ExecutionManager slot
+    /// (inside ApplyCancellation) and the caller's Abandon() call actually running (both happen outside
+    /// any shared lock, on different threads). Handing back the specific execution_id lets Abandon()
+    /// compare-and-clear the same way RunAsync's own Denied branch already does, closing that window.
+    /// Null for a Running record (its raise already fired; Execute() will complete/fault the TCS itself
+    /// when it returns) and for a no-op call.
     /// </summary>
-    /// <summary>
-    /// Returns true iff this call just auto-cancelled a still-<em>Pending</em> execution -- the same
-    /// signal <see cref="RequestCancellation"/> reports via <see cref="CancellationRequestOutcome.AcknowledgedWasPending"/>,
-    /// for the same reason: a Pending execution's ExternalEvent raise is still sitting queued in Revit's
-    /// idle loop and will eventually fire regardless, so the caller (BridgeHost's periodic timer) must
-    /// call ExternalEventBridge.Abandon() to unwedge the TCS nothing else will ever complete. Found by
-    /// independent PR review: the timer-driven auto-cancel path had no equivalent to
-    /// RequestDispatcher.HandleCancelExecution's Abandon() call, so an execution auto-cancelled while
-    /// still Pending (e.g. stuck behind a modal Revit dialog) left ExternalEventBridge._pending wedged,
-    /// faulting every subsequent execute_script for the rest of the process's life once that queued raise
-    /// eventually did fire and found nothing awaiting it. False for a Running record (its raise already
-    /// fired; Execute() will complete/fault the TCS itself when it returns) and for a no-op call.
-    /// </summary>
-    public bool CheckMaxDuration(DateTimeOffset now)
+    public string? CheckMaxDuration(DateTimeOffset now)
     {
         CancellationTokenSource? ctsToCancel;
-        bool wasPending;
+        string? cancelledPendingExecutionId;
 
         lock (_lock)
         {
             if (_active is not { } record || record.Status is not (ExecutionStatus.Pending or ExecutionStatus.Running))
             {
-                return false;
+                return null;
             }
 
             if (record.CancellationRequestedAt is not null)
             {
-                return false;
+                return null;
             }
 
             var elapsedMs = (now - record.CreatedAt).TotalMilliseconds;
             if (elapsedMs < record.MaxDurationMs)
             {
-                return false;
+                return null;
             }
 
-            wasPending = record.Status == ExecutionStatus.Pending;
+            cancelledPendingExecutionId = record.Status == ExecutionStatus.Pending ? record.ExecutionId : null;
             ctsToCancel = ApplyCancellation(record, now);
         }
 
         // Outside the lock, same reasoning as RequestCancellation.
         SafeCancel(ctsToCancel);
-        return wasPending;
+        return cancelledPendingExecutionId;
     }
 
     /// <summary>

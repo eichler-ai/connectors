@@ -20,9 +20,14 @@ public sealed class MCPBridgeApplication : IExternalApplication
 
     public Result OnStartup(UIControlledApplication application)
     {
-        AssemblyResolution.Register();
         try
         {
+            // Second independent PR review finding: this used to sit outside the try block below, so a
+            // throwing Register() (e.g. a future change to it that isn't as defensive as its current
+            // implementation) would propagate out of OnStartup completely unlogged -- the exact silent-
+            // failure symptom TryLogStartupFailure exists to close off, just for a different call.
+            AssemblyResolution.Register();
+
             InstanceId = Guid.NewGuid();
 
             var ringBuffer = ExecutionRingBuffer.CreateDefault();

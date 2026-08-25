@@ -137,7 +137,7 @@ public sealed class RequestDispatcher
         // timer is cancelled as soon as workTask wins the race (the common case -- most scripts finish
         // well under timeout_ms) so it doesn't sit running in the background for the rest of its duration.
         using var timeoutCts = new CancellationTokenSource();
-        var timeoutTask = Task.Delay(TimeSpan.FromMilliseconds(Math.Max(0, timeoutMs)), timeoutCts.Token);
+        var timeoutTask = Task.Delay(TimeSpan.FromMilliseconds(ClampTimeoutMs(timeoutMs)), timeoutCts.Token);
         var first = await Task.WhenAny(workTask, timeoutTask).ConfigureAwait(false);
         if (first == workTask)
         {
@@ -157,7 +157,7 @@ public sealed class RequestDispatcher
 
     private Task RunScriptWorkItemAsync(string executionId, string scriptText)
     {
-        var runTask = _bridge.RunAsync(uiApplication => RunScriptWorkItem(executionId, scriptText, uiApplication));
+        var runTask = _bridge.RunAsync(executionId, uiApplication => RunScriptWorkItem(executionId, scriptText, uiApplication));
 
         // Hard requirement 2: ANY fault on this Task -- including ExternalEventRaiseDeniedException, which
         // RunScriptWorkItem below never gets a chance to observe or react to since it never even ran --
@@ -277,15 +277,7 @@ public sealed class RequestDispatcher
             return JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InvalidParams, ex.Message, null);
         }
 
-        // Clamped to [0, DefaultMaxDurationMs] -- independent PR review finding: an unbounded caller-
-        // supplied timeout_ms (e.g. accidentally passing a value in the wrong unit) could push
-        // _now().AddMilliseconds past DateTimeOffset's range (throwing) or just hold this dispatch loop
-        // waiting far longer than anything in this system ever legitimately runs for. DefaultMaxDurationMs
-        // (PRD §06's own "default generous, e.g. 10 minutes" ceiling for execute_script) is already the
-        // longest a script is expected to run, so it doubles as a sane upper bound for how long polling
-        // for one to finish should ever be worth waiting.
-        var clampedTimeoutMs = Math.Clamp(timeoutMs, 0, DefaultMaxDurationMs);
-        var deadline = _now().AddMilliseconds(clampedTimeoutMs);
+        var deadline = _now().AddMilliseconds(ClampTimeoutMs(timeoutMs));
         while (true)
         {
             var record = _executionManager.Poll(executionId);
@@ -328,10 +320,19 @@ public sealed class RequestDispatcher
         // between this call's RequestCancellation and its own Poll -- re-inferring "was this a Pending
         // cancel" from Poll's snapshot could then call Abandon() and kill THAT unrelated execution's
         // legitimately-queued work item. AcknowledgedWasPending is set inside ExecutionManager's own lock,
-        // at the exact moment of the transition it describes, so there's no such window.
+        // at the exact moment of the transition it describes, so there's no such window for THIS check.
+        //
+        // Second independent PR review finding: passing executionId to Abandon() (rather than an
+        // identity-blind Abandon()) closes a separate, real window -- DispatchAsync's calls are
+        // fire-and-continue (concurrent, not serialized; see the read loop's own comment), so a DIFFERENT
+        // in-flight request can free ExecutionManager's slot and queue its own new RunAsync work item
+        // between this line's RequestCancellation call and the Abandon() call below, with no lock held
+        // across the two. An identity-blind Abandon() would fault that unrelated request's legitimately-
+        // queued work item; the executionId-scoped compare-and-clear in ExternalEventBridge.Abandon()
+        // makes this a no-op instead when that happens.
         if (outcome == CancellationRequestOutcome.AcknowledgedWasPending)
         {
-            _bridge.Abandon();
+            _bridge.Abandon(executionId);
         }
 
         var record = _executionManager.Poll(executionId);
@@ -340,6 +341,20 @@ public sealed class RequestDispatcher
             ? ExecutionResultMessage.FromRecord(request.Id, record)
             : JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InternalError, $"execution_id '{executionId}' vanished mid-cancellation.", null);
     }
+
+    /// <summary>
+    /// Clamps a caller-supplied timeout_ms to [0, DefaultMaxDurationMs] -- shared by both
+    /// HandleExecuteScriptAsync and HandlePollExecutionAsync. Independent PR review finding: an unbounded
+    /// value (e.g. accidentally passed in the wrong unit) could push a deadline computation past
+    /// DateTimeOffset's representable range (throwing) or TimeSpan.FromMilliseconds past its own range
+    /// (also throwing), or just hold a dispatch loop waiting far longer than anything in this system ever
+    /// legitimately runs for. The first version of this fix only applied the clamp to poll_execution;
+    /// execute_script's own wait had the identical unclamped Task.Delay(TimeSpan.FromMilliseconds(...))
+    /// call. DefaultMaxDurationMs (PRD §06's own "default generous, e.g. 10 minutes" ceiling for
+    /// execute_script) is already the longest a script is expected to run, so it doubles as a sane upper
+    /// bound for how long either call should ever be worth waiting.
+    /// </summary>
+    private static long ClampTimeoutMs(long timeoutMs) => Math.Clamp(timeoutMs, 0, DefaultMaxDurationMs);
 
     private static DiagnosticRecord UnknownExecutionDiagnostic(string executionId) => DiagnosticRecord.Create(
         DiagnosticSeverity.Error,

@@ -14,13 +14,17 @@ namespace MCPBridge.AddIn;
 /// MCPBridge.AddIn.dll (see CopyLocalLockFileAssemblies in the csproj) resolve with no help from us.
 /// This class exists only for the case where it does not.
 ///
-/// Deliberately excludes Microsoft.CodeAnalysis* (Roslyn) names: RoslynAssemblyIsolation already owns
-/// resolving those, into its own dedicated, non-Default AssemblyLoadContext (see its own doc comment).
-/// An earlier version of this class had no such exclusion and, since it registers before
+/// Deliberately excludes Microsoft.CodeAnalysis* (Roslyn) names ON AssemblyLoadContext.Default ONLY:
+/// RoslynAssemblyIsolation already owns resolving those there, into its own dedicated, non-Default
+/// AssemblyLoadContext (see its own doc comment) -- but RoslynAssemblyIsolation never hooks the add-in's
+/// own ALC, so this class still handles Roslyn names there via its own deps.json-scoped resolver (second
+/// independent PR review finding: an unconditional exclusion silently dropped the safety net entirely on
+/// Revit 2025+, where MCPBridge.Core loads into the add-in's own ALC rather than Default). An earlier
+/// version of this class had no exclusion at all and, since it registers before
 /// RoslynAssemblyIsolation.EnsureInitialized() runs (this is called from OnStartup; that from
-/// BridgeHost.Start()), always won the race for Roslyn names via its own AssemblyDependencyResolver --
-/// answering the request from Default before RoslynAssemblyIsolation's handler ever got a chance,
-/// defeating the isolation it exists for. Found by independent PR review, not hypothetical.
+/// BridgeHost.Start()), always won the race for Roslyn names on Default via its own
+/// AssemblyDependencyResolver -- defeating the isolation it exists for. Found by independent PR review,
+/// not hypothetical.
 ///
 /// Also deliberately does NOT fall back to an unscoped same-directory probe for names
 /// AssemblyDependencyResolver doesn't resolve: that would serve *any* unresolved assembly name from
@@ -90,10 +94,19 @@ internal static class AssemblyResolution
 
     private static Assembly? OnResolving(AssemblyLoadContext context, AssemblyName name)
     {
-        if (name.Name is null || name.Name.StartsWith("Microsoft.CodeAnalysis", StringComparison.Ordinal))
+        // RoslynAssemblyIsolation only ever hooks AssemblyLoadContext.Default.Resolving (see its own
+        // doc comment/source) -- it has no handler at all on the add-in's own (non-Default) ALC. Second
+        // independent PR review finding: the first version of this exclusion skipped Roslyn names on
+        // BOTH contexts unconditionally, so on Revit 2025+ (where MCPBridge.Core loads into the add-in's
+        // own ALC, not Default) a Roslyn resolution request on THAT context would hit this skip, find no
+        // other handler waiting to pick it up, and fall through to AppDomain-wide resolution -- silently
+        // losing the safety net entirely instead of deferring to anything. Only defer when we're actually
+        // racing RoslynAssemblyIsolation, i.e. on Default.
+        var deferToRoslynIsolation = ReferenceEquals(context, AssemblyLoadContext.Default)
+            && name.Name is not null
+            && name.Name.StartsWith("Microsoft.CodeAnalysis", StringComparison.Ordinal);
+        if (deferToRoslynIsolation)
         {
-            // RoslynAssemblyIsolation's own Resolving handler owns these -- let this request fall
-            // through to it (or to whatever else is registered) rather than racing it.
             return null;
         }
 

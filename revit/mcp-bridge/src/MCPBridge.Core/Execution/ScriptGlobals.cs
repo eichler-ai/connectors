@@ -27,15 +27,18 @@ public sealed class ScriptGlobals
     // binds to these identifiers by name in its scope, so it must match the PRD's published
     // names -- Document, UIApplication, UIDocument -- exactly.
     //
-    // Document/UIDocument are deliberately typed as IScriptDocument/IScriptUiDocument, not
-    // IDocumentAdapter/IUiDocumentAdapter: CreateTransaction/CreateTransactionGroup exist on
-    // IDocumentAdapter for TransactionScriptExecutor's own ambient Transaction/TransactionGroup (which
-    // already wraps every script run), not for the script to call -- Revit only allows one open
-    // Transaction per Document, so a script calling CreateTransaction on the same Document the executor
-    // already opened one on always fails, whether reached via `Document` or `UIDocument.Document`.
-    // Confirmed live, not hypothetical -- see IScriptDocument's doc comment.
+    // Document/UIApplication/UIDocument are deliberately typed as IScriptDocument/IScriptUiApplication/
+    // IScriptUiDocument, not IDocumentAdapter/IUiApplicationAdapter/IUiDocumentAdapter: CreateTransaction/
+    // CreateTransactionGroup exist on IDocumentAdapter for TransactionScriptExecutor's own ambient
+    // Transaction/TransactionGroup (which already wraps every script run), not for the script to call --
+    // Revit only allows one open Transaction per Document, so a script calling CreateTransaction on the
+    // same Document the executor already opened one on always fails, whether reached via `Document`,
+    // `UIDocument.Document`, or `UIApplication.ActiveUiDocument.Document` -- a second independent PR
+    // review found this third path still reachable after the first two were closed, so ALL THREE globals
+    // are narrowed, not just the two that had already been caught. Confirmed live, not hypothetical --
+    // see IScriptDocument's doc comment.
     public IScriptDocument Document { get; }
-    public IUiApplicationAdapter UIApplication { get; }
+    public IScriptUiApplication UIApplication { get; }
     public IScriptUiDocument? UIDocument { get; }
     public CancellationToken CancellationToken { get; }
 

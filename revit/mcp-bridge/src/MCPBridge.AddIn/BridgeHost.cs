@@ -122,10 +122,13 @@ internal sealed class BridgeHost
                     // that execution's raise will otherwise never be completed by anything. Without this,
                     // the raise eventually fires once whatever blocked Revit's idle loop clears, finds
                     // nothing awaiting it, and every execute_script after that shares the same wedged
-                    // bridge state for the rest of the process's life.
-                    if (_executionManager.CheckMaxDuration(now))
+                    // bridge state for the rest of the process's life. Abandon() takes the specific
+                    // execution_id (second independent PR review finding) so it can't abandon a different,
+                    // unrelated execution's work item that started in the window between this check and
+                    // the Abandon() call actually running -- see ExternalEventBridge.Abandon's own comment.
+                    if (_executionManager.CheckMaxDuration(now) is { } cancelledPendingExecutionId)
                     {
-                        scriptBridge.Abandon();
+                        scriptBridge.Abandon(cancelledPendingExecutionId);
                     }
 
                     _executionManager.CheckGraceExpiry(now);

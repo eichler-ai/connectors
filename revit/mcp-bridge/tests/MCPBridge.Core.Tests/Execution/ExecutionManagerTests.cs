@@ -399,27 +399,32 @@ public class ExecutionManagerTests
     }
 
     [Fact]
-    public void CheckMaxDuration_ReturnValue_TrueOnlyWhenAPendingExecutionWasAutoCancelled()
+    public void CheckMaxDuration_ReturnValue_IsTheExecutionIdOnlyWhenAPendingExecutionWasAutoCancelled()
     {
         // Independent PR review finding: BridgeHost's periodic timer needs to know specifically "did this
-        // call just auto-cancel a still-Pending execution" -- the same signal RequestCancellation reports
-        // via AcknowledgedWasPending -- so it can call ExternalEventBridge.Abandon() the same way
-        // RequestDispatcher.HandleCancelExecution does for a manual cancel_execution. Without this return
-        // value, that wiring silently doesn't exist and a Pending auto-cancel wedges the bridge forever.
+        // call just auto-cancel a still-Pending execution, and which one" -- the same signal
+        // RequestCancellation reports via AcknowledgedWasPending -- so it can call
+        // ExternalEventBridge.Abandon(executionId) the same way RequestDispatcher.HandleCancelExecution
+        // does for a manual cancel_execution. Without this return value, that wiring silently doesn't
+        // exist and a Pending auto-cancel wedges the bridge forever. Returning the specific execution_id
+        // (not just a bool) matters too -- a second independent PR review found that an identity-blind
+        // Abandon() can fault a different, unrelated execution's work item; see ExternalEventBridge.
+        // Abandon's own doc comment.
         var manager = NewManager();
         var now = DateTimeOffset.UtcNow;
 
-        // No active execution at all: false, not an exception.
-        Assert.False(manager.CheckMaxDuration(now));
+        // No active execution at all: null, not an exception.
+        Assert.Null(manager.CheckMaxDuration(now));
 
-        var pending = manager.Start(NewId(), "// script", maxDurationMs: 1000, now).Record!;
-        Assert.False(manager.CheckMaxDuration(now.AddMilliseconds(500)), "not yet elapsed -- must not report a cancel that didn't happen.");
-        Assert.True(manager.CheckMaxDuration(now.AddMilliseconds(1500)), "elapsed while still Pending -- Abandon() is required.");
+        var pendingId = NewId();
+        var pending = manager.Start(pendingId, "// script", maxDurationMs: 1000, now).Record!;
+        Assert.Null(manager.CheckMaxDuration(now.AddMilliseconds(500))); // not yet elapsed -- must not report a cancel that didn't happen.
+        Assert.Equal(pendingId, manager.CheckMaxDuration(now.AddMilliseconds(1500))); // elapsed while still Pending -- Abandon(pendingId) is required.
         Assert.Equal(ExecutionStatus.Cancelled, pending.Status);
 
         var running = manager.Start(NewId(), "// script", maxDurationMs: 1000, now.AddMilliseconds(1600)).Record!;
         manager.MarkRunning(running.ExecutionId, now.AddMilliseconds(1600));
-        Assert.False(manager.CheckMaxDuration(now.AddMilliseconds(3200)), "a Running record's raise already fired -- Execute() completes its own TCS, Abandon() must not be called.");
+        Assert.Null(manager.CheckMaxDuration(now.AddMilliseconds(3200))); // a Running record's raise already fired -- Execute() completes its own TCS, Abandon() must not be called.
     }
 
     [Fact]

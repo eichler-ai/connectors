@@ -290,6 +290,24 @@ public class RoslynScriptRunnerTests
     }
 
     [Fact]
+    public async Task RunAsync_ScriptCallsUiApplicationActiveUiDocumentDotDocumentCreateTransaction_FailsToCompile()
+    {
+        // Same bug again, reached through a THIRD path: UIApplication.ActiveUiDocument.Document. A second
+        // independent PR review found the first fix closed Document and UIDocument.Document but missed
+        // this one -- ScriptGlobals.UIApplication was still typed IUiApplicationAdapter, whose
+        // ActiveUiDocument is IUiDocumentAdapter? (full interface, CreateTransaction and all), not the
+        // narrower IScriptUiApplication/IScriptUiDocument.
+        var runner = new RoslynScriptRunner();
+
+        var outcome = await runner.RunAsync(
+            "UIApplication.ActiveUiDocument.Document.CreateTransaction(\"x\")", NewGlobals(), CancellationToken.None);
+
+        Assert.False(outcome.Success);
+        Assert.NotNull(outcome.Exception);
+        Assert.Contains("CreateTransaction", outcome.Exception!.Message);
+    }
+
+    [Fact]
     public async Task RunAsync_AwaitInsideAStringLiteral_IsNotRejected()
     {
         // Sanity check that the rejection is a real syntax-tree walk (AwaitExpressionSyntax), not a naive
