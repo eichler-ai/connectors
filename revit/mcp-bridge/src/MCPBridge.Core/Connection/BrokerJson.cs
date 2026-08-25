@@ -1,0 +1,99 @@
+using System;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+
+namespace MCPBridge.Core.Connection;
+
+/// <summary>
+/// Thrown when broker.json exists but cannot be parsed or is missing a required field.
+/// Distinct from "file not found" (BrokerDiscovery.TryDiscover reports that as
+/// not-found, not an exception) -- this is specifically a malformed-file condition.
+/// </summary>
+public sealed class BrokerJsonParseException : Exception
+{
+    public BrokerJsonParseException(string message, Exception? inner = null) : base(message, inner)
+    {
+    }
+}
+
+/// <summary>
+/// The contents of broker.json (PRD §05/§10): port/PID/start-time for discovery, and
+/// the auth token the add-in must present on the TCP handshake (PRD §10).
+/// </summary>
+public sealed class BrokerJson
+{
+    public int Port { get; }
+    public int Pid { get; }
+    public DateTimeOffset StartTime { get; }
+    public string Token { get; }
+
+    private BrokerJson(int port, int pid, DateTimeOffset startTime, string token)
+    {
+        Port = port;
+        Pid = pid;
+        StartTime = startTime;
+        Token = token;
+    }
+
+    public static BrokerJson Parse(string json)
+    {
+        JsonDocument doc;
+        try
+        {
+            doc = JsonDocument.Parse(json);
+        }
+        catch (JsonException ex)
+        {
+            throw new BrokerJsonParseException("broker.json is not valid JSON.", ex);
+        }
+
+        using (doc)
+        {
+            var root = doc.RootElement;
+
+            var port = RequireInt(root, "port");
+            var pid = RequireInt(root, "pid");
+            var startTime = RequireDateTimeOffset(root, "start_time");
+            var token = RequireNonEmptyString(root, "token");
+
+            return new BrokerJson(port, pid, startTime, token);
+        }
+    }
+
+    private static int RequireInt(JsonElement root, string name)
+    {
+        if (!root.TryGetProperty(name, out var value) || value.ValueKind != JsonValueKind.Number)
+        {
+            throw new BrokerJsonParseException($"broker.json is missing required numeric field '{name}'.");
+        }
+
+        return value.GetInt32();
+    }
+
+    private static DateTimeOffset RequireDateTimeOffset(JsonElement root, string name)
+    {
+        if (!root.TryGetProperty(name, out var value) || value.ValueKind != JsonValueKind.String)
+        {
+            throw new BrokerJsonParseException($"broker.json is missing required field '{name}'.");
+        }
+
+        if (!value.TryGetDateTimeOffset(out var parsed))
+        {
+            throw new BrokerJsonParseException($"broker.json field '{name}' is not a valid ISO-8601 timestamp.");
+        }
+
+        return parsed;
+    }
+
+    private static string RequireNonEmptyString(JsonElement root, string name)
+    {
+        if (!root.TryGetProperty(name, out var value) ||
+            value.ValueKind != JsonValueKind.String ||
+            string.IsNullOrWhiteSpace(value.GetString()))
+        {
+            throw new BrokerJsonParseException($"broker.json is missing required non-empty field '{name}'.");
+        }
+
+        return value.GetString()!;
+    }
+}
