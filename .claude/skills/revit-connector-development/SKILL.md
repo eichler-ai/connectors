@@ -56,6 +56,31 @@ Not run on every commit by default (it's slow — VM/Revit lifecycle). Run it:
 - **`revit/test-harness/runner/`** — orchestrates VM/Revit lifecycle plus the corpus run; this is what "re-run the corpus" actually means mechanically.
 - **Shared drive (`Z:` in the dev VM)** — backs remote-mode file exchange and broker discovery (PRD §05, §09). If it stops resolving, check the Parallels shared-folder config before assuming a code bug.
 
+### Add-in deployment location — only two are valid, and Revit fails silently on the wrong one
+
+Revit's `AddInLoader` recognizes exactly two manifest locations per version, and treats everything else as if it doesn't exist — **no error, no dialog, `OnStartup` simply never runs**:
+- All-users: `C:\Program Files\Autodesk\Revit\Addins\<version>\`
+- Per-user: `%AppData%\Roaming\Autodesk\Revit\Addins\<version>\`
+
+**`C:\ProgramData\Autodesk\Revit\Addins\<version>\` is NOT a valid location**, despite looking like a plausible "all-users" path and despite `xcopy`/manual deployment there succeeding without complaint. During first live-wiring validation, every rebuild/redeploy cycle for several hours targeted `ProgramData` while a stale, hours-old copy of the add-in sat undisturbed in the per-user `Roaming` folder from an earlier test — Revit loaded only the stale `Roaming` copy every time, so identical symptoms (the same `FileNotFoundException`) persisted across multiple genuinely-different code fixes, each of which was actually correct but never reached the binary Revit was loading. **Pick exactly one of the two valid locations and always deploy there** — don't let both accumulate copies, since a stale one will win silently if the fresher one happens to be invalid or the deploy to it partially failed.
+
+To confirm which manifest location(s) Revit actually recognized on a given launch, check its journal (`%LocalAppData%\Autodesk\Revit\Autodesk Revit <version>\Journals\journal.NNNN.txt`) for a line like:
+```
+Add-in manifest file from: <path>\<name>.addin, won't be loaded. All-users Add-in manifest files must be installed to: C:\Program Files\Autodesk\Revit\Addins\<version>
+```
+If that line appears for the path you just deployed to, nothing else about the deploy matters until the location itself is fixed.
+
+### Verifying you're actually debugging the binary you just built
+
+Don't assume a redeploy landed where Revit will load it from, or that Revit is running the DLL you just built — verify it directly, every time symptoms don't match a code change:
+- **Log the loaded assembly's own identity as literally the first statement of `OnStartup`**: its `Assembly.Location` and `File.GetLastWriteTime` (or `FileInfo(...).LastWriteTime`) against that path. Compare against the build output's own timestamp before treating any subsequent log line (or its absence) as meaningful. A "diagnostic that should fire but doesn't" is otherwise indistinguishable from "the diagnostic isn't in the binary Revit actually loaded."
+- **File locks can silently defeat `xcopy /Y`.** `RevitWorker.exe`/`RevitAccelerator.exe` (not just `Revit.exe`) can hold a lock on a deployed DLL even after `Revit.exe` itself is killed. Kill all three before redeploying, and `del /F` the target before `xcopy` so a lock shows up as a loud failure instead of a silent no-op.
+- Any temporary `File.AppendAllText`-style diagnostic logging added for a debugging session must be stripped back out once the real fix is confirmed working — it's scaffolding, not something that belongs in a merged PR (don't hardcode a dev machine's user-specific path into the add-in either).
+
+### `register`'s document list is a one-shot snapshot, not live-updated
+
+The add-in sends `register` once per successful connect (first connect and every reconnect), with whatever documents are open *at that instant* — there's no live push when a document opens/closes mid-connection (Phase 1 scope). If you need a real `document_id` for live testing and you connected before Revit finished opening a document (e.g. one passed as a launch argument, which opens after add-ins load and after the connect race typically wins), the only way to get an updated `register` today is to force a reconnect — e.g. restart the broker process so the add-in's reconnect loop redials and re-snapshots. Confirm the document is actually open first (screenshot or journal check) before doing this, or you'll just get another empty list.
+
 ## Per-stage workflow (autonomous)
 
 Each development stage — a roadmap phase (PRD §15) or any other discrete scope of work — runs this pipeline. Once step 1 is resolved, the rest runs without further check-ins; status lives on GitHub (the PR and its review comments), not in a running report back to the user.
@@ -106,3 +131,4 @@ This file is expected to change as the project learns things — that's the poin
 - Added the autonomous per-stage workflow (questions up front → implement → classify groundbreaking/additive → `/simplify` for groundbreaking → open PR → independent Opus (groundbreaking) or Sonnet (additive) code-review agent → report, no auto-merge). This is meant to run without per-step check-ins once the up-front questions are resolved.
 - Implementation now delegates to subagents (worktree-isolated for MCP Server; main-checkout for MCP Bridge, since the VM's shared folder is bound to that specific path) instead of the orchestrating session writing code directly — keeps the orchestrator's context free for spec alignment and review. Independent parts of a stage run in parallel.
 - Documented the interactive-Revit-relaunch technique (Tools & scripts) after `prlctl exec`'s default SYSTEM-context launch put Revit in a non-interactive session during first live-wiring validation — a one-shot Scheduled Task with `/it` reuses the logged-in user's session without needing their password.
+- Added "Add-in deployment location" and "Verifying you're actually debugging the binary you just built" (Tools & scripts) after a multi-hour debugging session chased a real, already-fixed assembly-resolution bug through several correct-but-never-tested code changes, because every redeploy targeted `C:\ProgramData\...` — not a valid Revit add-in location — while Revit kept silently loading an untouched, hours-stale copy from the per-user `Roaming` folder instead. The fix (only one valid location, verify via the loaded assembly's own logged identity, check the journal for the "won't be loaded" line) is meant to make this class of "identical symptom despite a genuinely different fix" mistake fast to rule out instead of the multi-hour rabbit hole it was this time. Also documented `register`'s one-shot-snapshot timing (Tools & scripts), discovered live: a document opened via launch argument is often still loading when `register` fires, so its `document_id` doesn't appear until something forces a reconnect.
