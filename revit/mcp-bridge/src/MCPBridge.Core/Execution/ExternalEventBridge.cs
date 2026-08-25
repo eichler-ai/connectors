@@ -47,8 +47,12 @@ public sealed class ExternalEventBridge<TResult> : IScriptExecutionCallback
     /// pattern, it means the request genuinely is still queued in Revit and Execute() will still eventually
     /// fire for it, so it's treated the same as Accepted: the work item stays queued and this call simply
     /// returns the still-pending Task.
+    ///
+    /// <paramref name="executionId"/> tags the queued work item so a later <see cref="Abandon"/> call can
+    /// verify it's abandoning THIS work item specifically, not whatever happens to be pending by the time
+    /// it runs (second independent PR review finding -- see Abandon's own doc comment).
     /// </summary>
-    public Task<TResult> RunAsync(Func<IUiApplicationAdapter, TResult> work)
+    public Task<TResult> RunAsync(string executionId, Func<IUiApplicationAdapter, TResult> work)
     {
         var tcs = new TaskCompletionSource<TResult>(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -66,7 +70,7 @@ public sealed class ExternalEventBridge<TResult> : IScriptExecutionCallback
                 return tcs.Task;
             }
 
-            _pending = new PendingWork(work, tcs);
+            _pending = new PendingWork(executionId, work, tcs);
         }
 
         var outcome = _raiser.Raise();
@@ -127,5 +131,39 @@ public sealed class ExternalEventBridge<TResult> : IScriptExecutionCallback
         }
     }
 
-    private readonly record struct PendingWork(Func<IUiApplicationAdapter, TResult> Work, TaskCompletionSource<TResult> CompletionSource);
+    /// <summary>
+    /// Faults the currently-queued work item and clears it, so a stale queued raise -- e.g. for a Pending
+    /// execution that was cancelled while still queued (third review finding; see BridgeHost.cs's hard
+    /// requirement 3) -- can't wedge this bridge for the life of the process: without this, a subsequent
+    /// RunAsync would keep hitting the "already has a work item pending" guard forever, since nothing else
+    /// can reach into Revit's ExternalEvent queue and un-queue an already-raised request.
+    ///
+    /// Compare-and-clear on <paramref name="executionId"/>, mirroring RunAsync's own Denied-branch pattern
+    /// (second independent PR review finding): only clears/faults <see cref="_pending"/> if it's STILL the
+    /// work item this call means to abandon. Without this check, a caller driven by a stale signal (e.g.
+    /// BridgeHost's periodic timer, which reads ExecutionManager state and then calls Abandon() on a
+    /// SEPARATE thread with no shared lock across the two calls) can race a brand-new, unrelated
+    /// execute_script: that new call's RunAsync can queue its own work item in the gap between the old
+    /// execution being freed and this Abandon() call actually running, and an identity-blind Abandon()
+    /// would then fault that unrelated, legitimately-queued work item instead of doing nothing (which is
+    /// the correct outcome once the work item this call was meant to abandon has already been superseded
+    /// or already resolved on its own). A no-op if nothing is pending, or if what's pending belongs to a
+    /// different execution_id.
+    /// </summary>
+    public void Abandon(string executionId)
+    {
+        PendingWork? pending = null;
+        lock (_lock)
+        {
+            if (_pending is { } current && current.ExecutionId == executionId)
+            {
+                pending = current;
+                _pending = null;
+            }
+        }
+
+        pending?.CompletionSource.TrySetException(new ExternalEventBridgeAbandonedException());
+    }
+
+    private readonly record struct PendingWork(string ExecutionId, Func<IUiApplicationAdapter, TResult> Work, TaskCompletionSource<TResult> CompletionSource);
 }

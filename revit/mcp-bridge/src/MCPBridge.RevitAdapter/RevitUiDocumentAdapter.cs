@@ -11,4 +11,6 @@ public sealed class RevitUiDocumentAdapter : IUiDocumentAdapter
     }
 
     public IDocumentAdapter Document { get; }
+
+    IScriptDocument IScriptUiDocument.Document => Document;
 }

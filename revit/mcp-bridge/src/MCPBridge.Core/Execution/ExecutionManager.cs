@@ -217,8 +217,12 @@ public sealed class ExecutionManager
                 return CancellationRequestOutcome.AlreadyTerminal;
             }
 
+            // Read before ApplyCancellation mutates the record -- this is exactly the same status
+            // ApplyCancellation itself branches on internally, read under the same lock, so there's no
+            // TOCTOU gap between this check and the transition it describes.
+            var wasPending = record.Status == ExecutionStatus.Pending;
             ctsToCancel = ApplyCancellation(record, now);
-            outcome = CancellationRequestOutcome.Acknowledged;
+            outcome = wasPending ? CancellationRequestOutcome.AcknowledgedWasPending : CancellationRequestOutcome.Acknowledged;
         }
 
         // Cancel() outside the lock -- it runs registered callbacks synchronously on this thread, and a
@@ -241,34 +245,53 @@ public sealed class ExecutionManager
     /// never reach, so a start-of-Running reference time would never fire for exactly the
     /// case this exists to catch. max_duration_ms is the agent's budget for the whole
     /// execute_script call, queue wait included, not just active running time.
+    ///
+    /// Returns the execution_id iff this call just auto-cancelled a still-<em>Pending</em> execution --
+    /// the same signal <see cref="RequestCancellation"/> reports via
+    /// <see cref="CancellationRequestOutcome.AcknowledgedWasPending"/>, for the same reason: a Pending
+    /// execution's ExternalEvent raise is still sitting queued in Revit's idle loop and will eventually
+    /// fire regardless, so the caller (BridgeHost's periodic timer) must call
+    /// ExternalEventBridge.Abandon(executionId) to unwedge the TCS nothing else will ever complete.
+    /// Returning the id (not just a bool) matters: a second independent PR review found that calling
+    /// Abandon() unconditionally -- with no way to verify it's abandoning the SAME work item that
+    /// motivated the call -- can abandon a DIFFERENT, unrelated execution's legitimately-queued work item
+    /// if a new execute_script starts in the window between this method freeing the ExecutionManager slot
+    /// (inside ApplyCancellation) and the caller's Abandon() call actually running (both happen outside
+    /// any shared lock, on different threads). Handing back the specific execution_id lets Abandon()
+    /// compare-and-clear the same way RunAsync's own Denied branch already does, closing that window.
+    /// Null for a Running record (its raise already fired; Execute() will complete/fault the TCS itself
+    /// when it returns) and for a no-op call.
     /// </summary>
-    public void CheckMaxDuration(DateTimeOffset now)
+    public string? CheckMaxDuration(DateTimeOffset now)
     {
         CancellationTokenSource? ctsToCancel;
+        string? cancelledPendingExecutionId;
 
         lock (_lock)
         {
             if (_active is not { } record || record.Status is not (ExecutionStatus.Pending or ExecutionStatus.Running))
             {
-                return;
+                return null;
             }
 
             if (record.CancellationRequestedAt is not null)
             {
-                return;
+                return null;
             }
 
             var elapsedMs = (now - record.CreatedAt).TotalMilliseconds;
             if (elapsedMs < record.MaxDurationMs)
             {
-                return;
+                return null;
             }
 
+            cancelledPendingExecutionId = record.Status == ExecutionStatus.Pending ? record.ExecutionId : null;
             ctsToCancel = ApplyCancellation(record, now);
         }
 
         // Outside the lock, same reasoning as RequestCancellation.
         SafeCancel(ctsToCancel);
+        return cancelledPendingExecutionId;
     }
 
     /// <summary>

@@ -13,4 +13,6 @@ public sealed class RevitUiApplicationAdapter : IUiApplicationAdapter
     }
 
     public IUiDocumentAdapter? ActiveUiDocument { get; }
+
+    IScriptUiDocument? IScriptUiApplication.ActiveUiDocument => ActiveUiDocument;
 }

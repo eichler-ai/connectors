@@ -204,7 +204,9 @@ public class ExecutionManagerTests
 
         var result = manager.RequestCancellation(record.ExecutionId, now.AddSeconds(1));
 
-        Assert.Equal(CancellationRequestOutcome.Acknowledged, result);
+        // Second live-wiring review finding: distinct outcome value so a caller (ExternalEventBridge's
+        // Abandon() gating) can detect this specific transition without re-Polling and re-inferring it.
+        Assert.Equal(CancellationRequestOutcome.AcknowledgedWasPending, result);
         Assert.Equal(ExecutionStatus.Cancelled, record.Status);
         Assert.False(manager.IsInstanceUnrecoverable);
 
@@ -397,6 +399,35 @@ public class ExecutionManagerTests
     }
 
     [Fact]
+    public void CheckMaxDuration_ReturnValue_IsTheExecutionIdOnlyWhenAPendingExecutionWasAutoCancelled()
+    {
+        // Independent PR review finding: BridgeHost's periodic timer needs to know specifically "did this
+        // call just auto-cancel a still-Pending execution, and which one" -- the same signal
+        // RequestCancellation reports via AcknowledgedWasPending -- so it can call
+        // ExternalEventBridge.Abandon(executionId) the same way RequestDispatcher.HandleCancelExecution
+        // does for a manual cancel_execution. Without this return value, that wiring silently doesn't
+        // exist and a Pending auto-cancel wedges the bridge forever. Returning the specific execution_id
+        // (not just a bool) matters too -- a second independent PR review found that an identity-blind
+        // Abandon() can fault a different, unrelated execution's work item; see ExternalEventBridge.
+        // Abandon's own doc comment.
+        var manager = NewManager();
+        var now = DateTimeOffset.UtcNow;
+
+        // No active execution at all: null, not an exception.
+        Assert.Null(manager.CheckMaxDuration(now));
+
+        var pendingId = NewId();
+        var pending = manager.Start(pendingId, "// script", maxDurationMs: 1000, now).Record!;
+        Assert.Null(manager.CheckMaxDuration(now.AddMilliseconds(500))); // not yet elapsed -- must not report a cancel that didn't happen.
+        Assert.Equal(pendingId, manager.CheckMaxDuration(now.AddMilliseconds(1500))); // elapsed while still Pending -- Abandon(pendingId) is required.
+        Assert.Equal(ExecutionStatus.Cancelled, pending.Status);
+
+        var running = manager.Start(NewId(), "// script", maxDurationMs: 1000, now.AddMilliseconds(1600)).Record!;
+        manager.MarkRunning(running.ExecutionId, now.AddMilliseconds(1600));
+        Assert.Null(manager.CheckMaxDuration(now.AddMilliseconds(3200))); // a Running record's raise already fired -- Execute() completes its own TCS, Abandon() must not be called.
+    }
+
+    [Fact]
     public void CheckMaxDuration_ElapsedWhileStillPending_ActuallyCancelsTheToken()
     {
         // Third review finding: a still-Pending record's CancellationTokenSource was previously left
@@ -429,7 +460,7 @@ public class ExecutionManagerTests
 
         var outcome = manager.RequestCancellation(record.ExecutionId, now);
 
-        Assert.Equal(CancellationRequestOutcome.Acknowledged, outcome);
+        Assert.Equal(CancellationRequestOutcome.AcknowledgedWasPending, outcome);
         Assert.Equal(ExecutionStatus.Cancelled, record.Status);
         Assert.True(token.IsCancellationRequested);
         // The dictionary entry must still be there too (not just the pre-captured token) -- a later,

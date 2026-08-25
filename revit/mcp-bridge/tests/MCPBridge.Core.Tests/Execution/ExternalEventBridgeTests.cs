@@ -21,7 +21,7 @@ public class ExternalEventBridgeTests
         var raiser = new FakeExternalEventRaiser { NextOutcome = ExternalEventRaiseOutcome.Accepted };
         var bridge = new ExternalEventBridge<int>(raiser);
 
-        var task = bridge.RunAsync(app => 42);
+        var task = bridge.RunAsync("exec-1", app => 42);
         Assert.False(task.IsCompleted); // must not block/complete before Execute() fires
 
         bridge.OnExecute(new FakeUiApplicationAdapter());
@@ -39,7 +39,7 @@ public class ExternalEventBridgeTests
         var raiser = new FakeExternalEventRaiser();
         var bridge = new ExternalEventBridge<int>(raiser);
 
-        var task = bridge.RunAsync(app => throw new InvalidOperationException("boom"));
+        var task = bridge.RunAsync("exec-1", app => throw new InvalidOperationException("boom"));
 
         var ex = Record.Exception(() => bridge.OnExecute(new FakeUiApplicationAdapter()));
         Assert.Null(ex); // OnExecute itself never throws
@@ -56,7 +56,7 @@ public class ExternalEventBridgeTests
         var raiser = new FakeExternalEventRaiser { NextOutcome = ExternalEventRaiseOutcome.Denied };
         var bridge = new ExternalEventBridge<int>(raiser);
 
-        var task = bridge.RunAsync(app => 42);
+        var task = bridge.RunAsync("exec-1", app => 42);
 
         var ex = await Assert.ThrowsAsync<ExternalEventRaiseDeniedException>(() => task);
         Assert.Equal(ExternalEventRaiseOutcome.Denied, ex.Outcome);
@@ -69,7 +69,7 @@ public class ExternalEventBridgeTests
         var raiser = new FakeExternalEventRaiser { NextOutcome = ExternalEventRaiseOutcome.TimedOut };
         var bridge = new ExternalEventBridge<int>(raiser);
 
-        var task = bridge.RunAsync(app => 42);
+        var task = bridge.RunAsync("exec-1", app => 42);
 
         var ex = await Assert.ThrowsAsync<ExternalEventRaiseDeniedException>(() => task);
         Assert.Equal(ExternalEventRaiseOutcome.TimedOut, ex.Outcome);
@@ -84,7 +84,7 @@ public class ExternalEventBridgeTests
         var raiser = new FakeExternalEventRaiser { NextOutcome = ExternalEventRaiseOutcome.Pending };
         var bridge = new ExternalEventBridge<int>(raiser);
 
-        var task = bridge.RunAsync(app => 42);
+        var task = bridge.RunAsync("exec-1", app => 42);
         Assert.False(task.IsCompleted);
         Assert.False(task.IsFaulted);
 
@@ -102,12 +102,12 @@ public class ExternalEventBridgeTests
         var raiser = new FakeExternalEventRaiser { NextOutcome = ExternalEventRaiseOutcome.Denied };
         var bridge = new ExternalEventBridge<int>(raiser);
 
-        var firstTask = bridge.RunAsync(app => 1);
+        var firstTask = bridge.RunAsync("exec-1", app => 1);
         await Assert.ThrowsAsync<ExternalEventRaiseDeniedException>(() => firstTask);
 
         // A second RunAsync after the first failed and cleared _pending should queue and resolve normally.
         raiser.NextOutcome = ExternalEventRaiseOutcome.Accepted;
-        var secondTask = bridge.RunAsync(app => 2);
+        var secondTask = bridge.RunAsync("exec-2", app => 2);
         bridge.OnExecute(new FakeUiApplicationAdapter());
 
         Assert.Equal(2, await secondTask);
@@ -132,9 +132,93 @@ public class ExternalEventBridgeTests
         var bridge = new ExternalEventBridge<string>(raiser);
         var expectedAdapter = new FakeUiApplicationAdapter();
 
-        var task = bridge.RunAsync(app => ReferenceEquals(app, expectedAdapter) ? "same" : "different");
+        var task = bridge.RunAsync("exec-1", app => ReferenceEquals(app, expectedAdapter) ? "same" : "different");
         bridge.OnExecute(expectedAdapter);
 
         Assert.Equal("same", await task);
+    }
+
+    [Fact]
+    public async Task Abandon_WithPendingWorkItem_FaultsItAndClearsPending()
+    {
+        // Third review finding: a still-Pending execution that gets cancelled must not leave its queued
+        // work item wedging the bridge forever -- Abandon() faults it instead.
+        var raiser = new FakeExternalEventRaiser { NextOutcome = ExternalEventRaiseOutcome.Pending };
+        var bridge = new ExternalEventBridge<int>(raiser);
+
+        var task = bridge.RunAsync("exec-1", app => 42);
+        Assert.False(task.IsCompleted);
+
+        bridge.Abandon("exec-1");
+
+        var ex = await Assert.ThrowsAsync<ExternalEventBridgeAbandonedException>(() => task);
+        Assert.Contains(ExternalEventBridgeAbandonedException.Code, ex.Message);
+    }
+
+    [Fact]
+    public void Abandon_WithNothingPending_DoesNotThrow()
+    {
+        var bridge = new ExternalEventBridge<int>(new FakeExternalEventRaiser());
+
+        var ex = Record.Exception(() => bridge.Abandon("exec-1"));
+
+        Assert.Null(ex);
+    }
+
+    [Fact]
+    public async Task Abandon_WrongExecutionId_DoesNotClobberTheActuallyPendingWorkItem()
+    {
+        // Second independent PR review finding: Abandon() must compare-and-clear on execution_id, exactly
+        // like RunAsync's own Denied branch does -- a caller (BridgeHost's periodic timer, or
+        // RequestDispatcher's cancel_execution handler) can be acting on a stale signal about a DIFFERENT
+        // execution than whatever is actually queued in _pending by the time Abandon() runs. Calling
+        // Abandon() with an id that doesn't match what's pending must be a no-op, not fault the wrong
+        // work item.
+        var raiser = new FakeExternalEventRaiser { NextOutcome = ExternalEventRaiseOutcome.Pending };
+        var bridge = new ExternalEventBridge<int>(raiser);
+
+        var task = bridge.RunAsync("exec-real", app => 42);
+        Assert.False(task.IsCompleted);
+
+        bridge.Abandon("exec-stale"); // a different, unrelated execution_id
+        Assert.False(task.IsCompleted); // must NOT have been faulted
+
+        bridge.OnExecute(new FakeUiApplicationAdapter());
+        Assert.Equal(42, await task); // still resolves normally once Execute() actually fires
+    }
+
+    [Fact]
+    public async Task Abandon_ThenOnExecuteStillFiresLater_IsANoOp_DoesNotDoubleResolve()
+    {
+        // Simulates the real scenario: Revit's idle loop still eventually enters Execute() for the
+        // already-abandoned raise (nothing can un-queue it from Revit's side) -- OnExecute must not throw
+        // or attempt to resolve a completion source that's already been faulted and forgotten.
+        var raiser = new FakeExternalEventRaiser { NextOutcome = ExternalEventRaiseOutcome.Pending };
+        var bridge = new ExternalEventBridge<int>(raiser);
+
+        var task = bridge.RunAsync("exec-1", app => 42);
+        bridge.Abandon("exec-1");
+        await Assert.ThrowsAsync<ExternalEventBridgeAbandonedException>(() => task);
+
+        var ex = Record.Exception(() => bridge.OnExecute(new FakeUiApplicationAdapter()));
+
+        Assert.Null(ex);
+    }
+
+    [Fact]
+    public async Task Abandon_DoesNotWedgeTheBridge_ASubsequentRunAsyncStillWorks()
+    {
+        var raiser = new FakeExternalEventRaiser { NextOutcome = ExternalEventRaiseOutcome.Pending };
+        var bridge = new ExternalEventBridge<int>(raiser);
+
+        var firstTask = bridge.RunAsync("exec-1", app => 1);
+        bridge.Abandon("exec-1");
+        await Assert.ThrowsAsync<ExternalEventBridgeAbandonedException>(() => firstTask);
+
+        raiser.NextOutcome = ExternalEventRaiseOutcome.Accepted;
+        var secondTask = bridge.RunAsync("exec-2", app => 2);
+        bridge.OnExecute(new FakeUiApplicationAdapter());
+
+        Assert.Equal(2, await secondTask);
     }
 }
