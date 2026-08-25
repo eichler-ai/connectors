@@ -11,7 +11,12 @@ namespace MCPBridge.Core.Execution;
 /// </summary>
 public sealed class ExecutionRecord
 {
-    public Guid ExecutionId { get; }
+    /// <summary>
+    /// Broker-minted, per PRD §01: "the add-in echoes the same ID back rather than
+    /// generating its own." The Go broker mints IDs shaped "exec-&lt;uuid&gt;" (not
+    /// Guid-parseable, due to the "exec-" prefix), so this is a plain string, not a Guid.
+    /// </summary>
+    public string ExecutionId { get; }
     public string ScriptText { get; }
     public long MaxDurationMs { get; }
     public DateTimeOffset CreatedAt { get; }
@@ -26,7 +31,7 @@ public sealed class ExecutionRecord
     public DiagnosticRecord? Error { get; private set; }
     public IReadOnlyList<DiagnosticRecord> Notices { get; private set; } = Array.Empty<DiagnosticRecord>();
 
-    private ExecutionRecord(Guid executionId, string scriptText, long maxDurationMs, DateTimeOffset createdAt)
+    private ExecutionRecord(string executionId, string scriptText, long maxDurationMs, DateTimeOffset createdAt)
     {
         ExecutionId = executionId;
         ScriptText = scriptText;
@@ -35,7 +40,7 @@ public sealed class ExecutionRecord
         Status = ExecutionStatus.Pending;
     }
 
-    public static ExecutionRecord CreatePending(Guid executionId, string scriptText, long maxDurationMs, DateTimeOffset createdAt) =>
+    public static ExecutionRecord CreatePending(string executionId, string scriptText, long maxDurationMs, DateTimeOffset createdAt) =>
         new(executionId, scriptText, maxDurationMs, createdAt);
 
     public void MarkRunning(DateTimeOffset now)

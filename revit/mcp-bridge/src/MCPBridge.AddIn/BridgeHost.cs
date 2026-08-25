@@ -34,6 +34,25 @@ internal sealed class BridgeHost
         // the live-harness wiring step since it needs a live Revit session to exercise
         // (see tests/MCPBridge.Integration.Tests).
         //
+        // 0. MANDATORY two-step handshake, per PRD §10 and the Go broker's actual behavior
+        //    (broker.go's handleConn): every new TCP connection MUST send an `auth` request
+        //    (MCPBridge.Core.Protocol.AuthMessage -- role AuthRole.AddIn, token from
+        //    BrokerDiscoveryResult.BrokerJson.Token) as the VERY FIRST message, before
+        //    anything else. The broker replies with a JSON-RPC result {"result":{"ok":true}}
+        //    on success, correlated by the request's `id`; on failure it replies with a
+        //    JSON-RPC error and then closes the connection outright -- there is no retry
+        //    within the same socket, the caller must reconnect (a fresh socket) and send a
+        //    fresh `auth` request. ONLY after that exchange succeeds does the broker expect
+        //    a `register` notification (MCPBridge.Core.Protocol.RegisterMessage) -- which,
+        //    per the Go broker's registerParams shape, carries NO token of its own (the
+        //    token belongs solely to the prior `auth` request; RegisterMessage does not
+        //    accept one). Sending `register` (or anything else) before `auth` succeeds, or
+        //    embedding a token inside `register`'s params, does not work against the real
+        //    broker: the former is rejected and the connection is closed before `register`
+        //    is ever read, and the latter would simply be ignored even if it were somehow
+        //    accepted. This ordering applies identically on every reconnect, not just the
+        //    first connection of the process's lifetime.
+        //
         // PR #2 review, Fix 1's confirmed architecture decision (see MCPBridge.Core.Execution.
         // ExternalEventBridge<TResult> and RoslynScriptRunner's doc comments for the full
         // reasoning): when this wiring lands, it composes as

@@ -73,13 +73,34 @@ public class BrokerDiscoveryTests : IDisposable
         var discovery = new BrokerDiscovery(options);
         Directory.CreateDirectory(Path.GetDirectoryName(discovery.BrokerJsonPath)!);
         File.WriteAllText(discovery.BrokerJsonPath, """
-            {"port": 4000, "pid": 1, "start_time": "2026-01-01T00:00:00Z", "token": "tok"}
+            {"host": "127.0.0.1", "port": 4000, "pid": 1, "started_at": "2026-01-01T00:00:00Z", "token": "tok"}
             """);
 
         var result = discovery.TryDiscover();
 
         Assert.True(result.Found);
         Assert.Equal(4000, result.BrokerJson!.Port);
+    }
+
+    [Fact]
+    public void TryDiscover_FilePresent_SurfacesAddress_FromParsedBrokerJson()
+    {
+        // Fix 2: a successful discovery must also yield a usable Address (host+port) --
+        // not just on the fallback path -- since remote mode is the primary topology and
+        // has no other source of a connectable host.
+        var options = BrokerDiscoveryOptions.Local(localAppDataRoot: _tempRoot);
+        var discovery = new BrokerDiscovery(options);
+        Directory.CreateDirectory(Path.GetDirectoryName(discovery.BrokerJsonPath)!);
+        File.WriteAllText(discovery.BrokerJsonPath, """
+            {"host": "10.211.55.2", "port": 4000, "pid": 1, "started_at": "2026-01-01T00:00:00Z", "token": "tok"}
+            """);
+
+        var result = discovery.TryDiscover();
+
+        Assert.True(result.Found);
+        Assert.NotNull(result.Address);
+        Assert.Equal("10.211.55.2", result.Address!.Host);
+        Assert.Equal(4000, result.Address.Port);
     }
 
     [Fact]
@@ -97,6 +118,7 @@ public class BrokerDiscoveryTests : IDisposable
         Assert.NotNull(result.Fallback);
         Assert.Equal("10.211.55.2", result.Fallback!.Host);
         Assert.Equal(51423, result.Fallback.Port);
+        Assert.Same(result.Fallback, result.Address);
     }
 
     [Fact]

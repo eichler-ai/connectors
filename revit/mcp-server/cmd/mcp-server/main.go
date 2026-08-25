@@ -263,6 +263,19 @@ func run(mode, bindAddr string, port int, appDataDirOverride string, logger *log
 
 	dataDir := appDataDirOverride
 	if dataDir == "" {
+		if mode == "remote" {
+			// PRD §05: in remote mode, broker.json must be written to the
+			// shared drive's agreed root (the same location §09's
+			// file-exchange mechanism uses), NOT the local platform
+			// app-data directory singleton.AppDataDir() resolves — that
+			// directory is local-mode-only and the remote add-in side
+			// never looks there. Silently falling back to it here would
+			// mean the add-in's remote-mode discovery just never finds
+			// broker.json, with nothing anywhere explaining why. Fail
+			// fast instead: require the operator to pass the shared-drive
+			// root explicitly via -app-data-dir.
+			return fmt.Errorf("-app-data-dir is required in remote mode (PRD §05: broker.json must be written to the shared drive's agreed root, not the local app-data directory)")
+		}
 		d, err := singleton.AppDataDir()
 		if err != nil {
 			return fmt.Errorf("resolving app-data directory: %w", err)

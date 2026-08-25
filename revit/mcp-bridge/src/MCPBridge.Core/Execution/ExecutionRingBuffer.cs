@@ -18,7 +18,7 @@ public sealed class ExecutionRingBuffer
 
     // Insertion-ordered so capacity eviction removes the oldest entry first.
     private readonly LinkedList<ExecutionRecord> _order = new();
-    private readonly Dictionary<Guid, LinkedListNode<ExecutionRecord>> _byId = new();
+    private readonly Dictionary<string, LinkedListNode<ExecutionRecord>> _byId = new();
 
     public ExecutionRingBuffer(int capacity, TimeSpan retention)
     {
@@ -60,7 +60,7 @@ public sealed class ExecutionRingBuffer
         }
     }
 
-    public bool TryGet(Guid executionId, out ExecutionRecord? record)
+    public bool TryGet(string executionId, out ExecutionRecord? record)
     {
         lock (_lock)
         {

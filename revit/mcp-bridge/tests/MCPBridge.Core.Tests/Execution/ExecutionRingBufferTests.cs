@@ -8,7 +8,7 @@ namespace MCPBridge.Core.Tests.Execution;
 public class ExecutionRingBufferTests
 {
     private static ExecutionRecord NewRecord(DateTimeOffset createdAt) =>
-        ExecutionRecord.CreatePending(Guid.NewGuid(), "// script", maxDurationMs: 600_000, createdAt: createdAt);
+        ExecutionRecord.CreatePending("exec-" + Guid.NewGuid(), "// script", maxDurationMs: 600_000, createdAt: createdAt);
 
     // Prune() (second review, Fix 5) only ever evicts terminal records -- age-based pruning tests that mean
     // to exercise actual eviction need a record that has already resolved, not a still-Pending one.
@@ -36,7 +36,7 @@ public class ExecutionRingBufferTests
     {
         var buffer = new ExecutionRingBuffer(capacity: 10, retention: TimeSpan.FromMinutes(10));
 
-        Assert.False(buffer.TryGet(Guid.NewGuid(), out var found));
+        Assert.False(buffer.TryGet("exec-" + Guid.NewGuid(), out var found));
         Assert.Null(found);
     }
 
