@@ -41,27 +41,15 @@ public sealed class ReconnectBackoffPolicy
             throw new ArgumentOutOfRangeException(nameof(attemptNumber), "attemptNumber cannot be negative.");
         }
 
-        // Guard against overflow for very large attempt numbers -- once we'd exceed
-        // the cap there's no need to actually compute 2^attemptNumber.
-        var maxDoublings = 0;
-        var probe = _initialDelay;
-        while (probe < _maxDelay && maxDoublings < 62)
-        {
-            probe += probe;
-            maxDoublings++;
-        }
+        // delay = min(initialDelay * 2^attemptNumber, maxDelay), computed with a
+        // shift bounded well below 63 so it can never overflow a long even for a
+        // very large attemptNumber -- once the shift alone would exceed maxDelay,
+        // there's no need to actually compute the (potentially enormous) power.
+        var shift = Math.Min(attemptNumber, 62);
+        var scaled = _initialDelay.Ticks <= _maxDelay.Ticks >> shift
+            ? _initialDelay.Ticks << shift
+            : long.MaxValue;
 
-        if (attemptNumber >= maxDoublings)
-        {
-            return _maxDelay;
-        }
-
-        var delay = _initialDelay;
-        for (var i = 0; i < attemptNumber; i++)
-        {
-            delay += delay;
-        }
-
-        return delay > _maxDelay ? _maxDelay : delay;
+        return scaled >= _maxDelay.Ticks ? _maxDelay : TimeSpan.FromTicks(scaled);
     }
 }

@@ -33,6 +33,13 @@ internal sealed class BridgeHost
         // and register the RevitScriptExecutionHandler/ExternalEvent pair. Deferred to
         // the live-harness wiring step since it needs a live Revit session to exercise
         // (see tests/MCPBridge.Integration.Tests).
+        //
+        // Also call RoslynAssemblyIsolation.EnsureInitialized() here, before any script
+        // ever compiles. It's a partial mitigation, not full isolation (see its own doc
+        // comment for why -- true isolation needs a shadow-load bootstrap), and nothing
+        // currently calls it anywhere in the codebase. Flagged deliberately (adversarial
+        // code review, Phase 1) so that caveat doesn't quietly become "solved" the moment
+        // this stub is filled in.
     }
 
     public void Stop()

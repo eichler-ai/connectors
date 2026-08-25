@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Linq;
 
 namespace MCPBridge.Core.Execution;
 
@@ -72,11 +71,16 @@ public sealed class ExecutionRingBuffer
         lock (_lock)
         {
             var cutoff = now - _retention;
-            var toRemove = _order.Where(r => r.CreatedAt <= cutoff).ToList();
-            foreach (var record in toRemove)
+
+            // _order is insertion-ordered oldest-first (the same invariant Add's
+            // own capacity eviction relies on), so expired entries are always a
+            // prefix -- walk from the front and stop at the first survivor,
+            // rather than scanning/filtering the whole list and then doing an
+            // O(n) LinkedList.Remove search per expired entry.
+            while (_order.First is { } oldest && oldest.Value.CreatedAt <= cutoff)
             {
-                _byId.Remove(record.ExecutionId);
-                _order.Remove(record);
+                _order.RemoveFirst();
+                _byId.Remove(oldest.Value.ExecutionId);
             }
         }
     }
