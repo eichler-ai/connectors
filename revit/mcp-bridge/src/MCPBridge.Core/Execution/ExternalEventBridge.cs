@@ -127,5 +127,29 @@ public sealed class ExternalEventBridge<TResult> : IScriptExecutionCallback
         }
     }
 
+    /// <summary>
+    /// Faults whatever work item is currently queued in <see cref="_pending"/> (if any) and clears it, so
+    /// a stale queued raise -- e.g. for a Pending execution that was cancelled while still queued (third
+    /// review finding; see BridgeHost.cs's hard requirement 3) -- can't wedge this bridge for the life of
+    /// the process: without this, a subsequent RunAsync would keep hitting the "already has a work item
+    /// pending" guard forever, since nothing else can reach into Revit's ExternalEvent queue and un-queue
+    /// an already-raised request. A no-op if nothing is currently pending. Thread-safe against a
+    /// concurrent OnExecute(): both methods take <see cref="_lock"/> to read-and-clear
+    /// <see cref="_pending"/>, so whichever of the two runs first is the one that actually resolves the
+    /// work item (with a result, in OnExecute's case, or with the abandonment fault, in this method's
+    /// case) -- the loser sees <see cref="_pending"/> already null and does nothing further.
+    /// </summary>
+    public void Abandon()
+    {
+        PendingWork? pending;
+        lock (_lock)
+        {
+            pending = _pending;
+            _pending = null;
+        }
+
+        pending?.CompletionSource.TrySetException(new ExternalEventBridgeAbandonedException());
+    }
+
     private readonly record struct PendingWork(Func<IUiApplicationAdapter, TResult> Work, TaskCompletionSource<TResult> CompletionSource);
 }
