@@ -25,10 +25,30 @@ public class ExecutionRingBufferTests
         var buffer = new ExecutionRingBuffer(capacity: 10, retention: TimeSpan.FromMinutes(10));
         var record = NewRecord(DateTimeOffset.UtcNow);
 
-        buffer.Add(record);
+        var added = buffer.Add(record);
 
+        Assert.True(added);
         Assert.True(buffer.TryGet(record.ExecutionId, out var found));
         Assert.Same(record, found);
+    }
+
+    [Fact]
+    public void Add_DuplicateExecutionId_ReturnsFalse_DoesNotCorruptExistingEntry()
+    {
+        // Third review finding: a duplicate id must never silently overwrite _byId while leaving the
+        // old node in _order -- that would corrupt eviction (removing the wrong entry's mapping) and
+        // could leave a still-live execution permanently unreachable via TryGet.
+        var buffer = new ExecutionRingBuffer(capacity: 10, retention: TimeSpan.FromMinutes(10));
+        var now = DateTimeOffset.UtcNow;
+        var first = ExecutionRecord.CreatePending("exec-dup", "// first", maxDurationMs: 600_000, createdAt: now);
+        var second = ExecutionRecord.CreatePending("exec-dup", "// second", maxDurationMs: 600_000, createdAt: now.AddSeconds(1));
+
+        Assert.True(buffer.Add(first));
+        var added = buffer.Add(second);
+
+        Assert.False(added);
+        Assert.True(buffer.TryGet("exec-dup", out var found));
+        Assert.Same(first, found); // the original entry, untouched
     }
 
     [Fact]

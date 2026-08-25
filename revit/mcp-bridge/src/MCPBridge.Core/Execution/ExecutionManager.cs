@@ -71,9 +71,25 @@ public sealed class ExecutionManager
     /// the Go broker mints IDs shaped "exec-&lt;uuid&gt;" and sends one in every execute_script
     /// call's params, so the caller (the TCP-handling code, once wired) passes that string straight
     /// through here rather than this class minting its own Guid.
+    ///
+    /// Third review finding: unlike a locally-minted Guid, executionId now arrives from the wire --
+    /// untrusted input, not a value this class controls the shape or uniqueness of. Every other
+    /// public method here is deliberately built never to throw (RequireRecord/Transition return a
+    /// diagnostic instead, since they can run on Revit's UI thread where an uncaught exception is a
+    /// crash-class bug), but Start is the one true entry point where a caller-supplied executionId is
+    /// first accepted -- validating it here, loudly, is what keeps every downstream method able to
+    /// keep assuming a well-formed, unique id. A null/empty/whitespace id or one that collides with
+    /// an existing ring-buffer entry (which should never happen given the broker's uuid-derived ids,
+    /// but would otherwise corrupt ExecutionRingBuffer's _byId mapping -- see its own Add() doc
+    /// comment) is rejected with an ArgumentException rather than silently accepted.
     /// </summary>
     public ExecuteOutcome Start(string executionId, string scriptText, long maxDurationMs, DateTimeOffset now)
     {
+        if (string.IsNullOrWhiteSpace(executionId))
+        {
+            throw new ArgumentException("executionId must not be null or empty -- it is broker-minted and must be echoed back exactly, per PRD §01.", nameof(executionId));
+        }
+
         lock (_lock)
         {
             if (_instanceUnrecoverable)
@@ -87,8 +103,12 @@ public sealed class ExecutionManager
             }
 
             var record = ExecutionRecord.CreatePending(executionId, scriptText, maxDurationMs, now);
+            if (!_ringBuffer.Add(record))
+            {
+                throw new ArgumentException($"executionId '{executionId}' is already in use by another (possibly still-active) execution.", nameof(executionId));
+            }
+
             _active = record;
-            _ringBuffer.Add(record);
             _cancellationSources[record.ExecutionId] = new CancellationTokenSource();
             return ExecuteOutcome.Started(record);
         }

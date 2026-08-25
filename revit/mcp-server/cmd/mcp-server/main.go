@@ -160,26 +160,39 @@ func (r *turnReader) Read(p []byte) (int, error) {
 		if !ok {
 			return 0, io.EOF // physical stdin itself closed/EOF'd
 		}
-		// select has no priority between its cases, so it's entirely
-		// possible to win this chunk race even though stop was also (or
-		// is concurrently being) closed — Go picks pseudo-randomly among
-		// ready cases. Re-check non-blocking: if stop is now closed, this
-		// role is being torn down and this chunk was never meant for it;
-		// donate it back rather than ever handing it to this role's
-		// caller, so it's the newly-promoted role's turnReader that gets
-		// it instead.
-		select {
-		case <-r.stop:
-			r.relay.donate(chunk)
-			return 0, io.EOF
-		default:
-		}
-		n := copy(p, chunk)
-		if n < len(chunk) {
-			r.leftover = chunk[n:]
-		}
-		return n, nil
+		return r.deliverOrDonate(p, chunk)
 	}
+}
+
+// deliverOrDonate handles a chunk this reader just won from relay.chunks in
+// Read's blocking select. Split out from Read (rather than inlined) so the
+// specific behavior it implements — the case a stopped reader can still win
+// that race, since select has no priority between its two cases and Go
+// picks pseudo-randomly among whichever are ready — can be unit tested
+// directly and deterministically (see TestTurnReaderDeliverOrDonate*),
+// without depending on actually winning that race via real goroutine
+// scheduling, which turned out to be far too sensitive to host CPU
+// contention to make a reliable end-to-end regression test (see the
+// now-informational-only rate check in TestTurnReaderStopDoesNotStealFromNextReader
+// and its comment for the full story of why that approach didn't hold up).
+func (r *turnReader) deliverOrDonate(p, chunk []byte) (int, error) {
+	// select has no priority between its cases, so it's entirely possible to
+	// win the chunk race even though stop was also (or is concurrently
+	// being) closed. Re-check non-blocking: if stop is now closed, this
+	// role is being torn down and this chunk was never meant for it; donate
+	// it back rather than ever handing it to this role's caller, so it's
+	// the newly-promoted role's turnReader that gets it instead.
+	select {
+	case <-r.stop:
+		r.relay.donate(chunk)
+		return 0, io.EOF
+	default:
+	}
+	n := copy(p, chunk)
+	if n < len(chunk) {
+		r.leftover = chunk[n:]
+	}
+	return n, nil
 }
 
 // donate pushes back any buffered leftover this reader hasn't yet handed to

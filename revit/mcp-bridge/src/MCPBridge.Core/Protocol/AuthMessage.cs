@@ -44,6 +44,15 @@ public sealed class AuthMessage
 
     public AuthMessage(JsonElement id, string token, AuthRole role)
     {
+        // A default(JsonElement) (ValueKind.Undefined) would otherwise pass silently here and only
+        // surface as an opaque InvalidOperationException from deep inside JsonSerializer.Serialize
+        // when ToJson() is eventually called -- fail immediately, at construction, with a message
+        // that actually names the problem.
+        if (id.ValueKind == JsonValueKind.Undefined)
+        {
+            throw new ArgumentException("id must be a real JSON value (e.g. from JsonSerializer.SerializeToElement), not a default/uninitialized JsonElement.", nameof(id));
+        }
+
         _id = id;
         _token = token;
         _role = role;

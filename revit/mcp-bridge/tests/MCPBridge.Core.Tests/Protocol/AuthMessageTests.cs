@@ -1,3 +1,5 @@
+using System;
+using System.Text.Json;
 using MCPBridge.Core.Protocol;
 using Xunit;
 
@@ -5,6 +7,16 @@ namespace MCPBridge.Core.Tests.Protocol;
 
 public class AuthMessageTests
 {
+    [Fact]
+    public void Constructor_DefaultJsonElement_ThrowsImmediately_NotDeepInsideToJson()
+    {
+        // Fourth review finding: a default(JsonElement) (ValueKind.Undefined) used to pass silently
+        // into the constructor and only surface as an opaque InvalidOperationException from
+        // System.Text.Json internals when ToJson() was eventually called -- fail at construction,
+        // with a message that names the actual problem.
+        Assert.Throws<ArgumentException>(() => new AuthMessage(default(JsonElement), "tok", AuthRole.AddIn));
+    }
+
     [Fact]
     public void ToJson_IsARequest_WithIdMethodTokenAndRole()
     {

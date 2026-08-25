@@ -44,6 +44,35 @@ public class ExecutionManagerTests
         Assert.Same(outcome.Record, manager.Poll(brokerMintedId));
     }
 
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void Start_NullOrEmptyExecutionId_Throws(string? executionId)
+    {
+        // Third review finding: unlike a locally-minted Guid, executionId now arrives untrusted from
+        // the wire -- Start is the one boundary that must reject a malformed id loudly rather than
+        // let it corrupt downstream state (e.g. a null key in _cancellationSources).
+        var manager = NewManager();
+
+        Assert.Throws<ArgumentException>(() => manager.Start(executionId!, "// script", 600_000, DateTimeOffset.UtcNow));
+    }
+
+    [Fact]
+    public void Start_DuplicateExecutionId_Throws_DoesNotClobberTheExistingExecution()
+    {
+        var manager = NewManager();
+        var now = DateTimeOffset.UtcNow;
+        var id = NewId();
+        var first = manager.Start(id, "// first", 600_000, now).Record!;
+        first.MarkCompleted(now, result: null, stdOut: null, notices: Array.Empty<DiagnosticRecord>());
+
+        Assert.Throws<ArgumentException>(() => manager.Start(id, "// second", 600_000, now.AddSeconds(1)));
+
+        // The original (now-terminal) record must still be the one on record for this id.
+        Assert.Same(first, manager.Poll(id));
+    }
+
     [Fact]
     public void Start_WhileAnExecutionIsActive_ReturnsBusyPointingAtExistingId()
     {

@@ -169,6 +169,56 @@ func TestTurnReaderLeftoverNotServedAfterStop(t *testing.T) {
 	}
 }
 
+// TestTurnReaderDeliverOrDonate_StopAlreadyClosed_DonatesRatherThanDelivers is
+// the deterministic unit test for finding (b): the specific case where a
+// reader has already won a chunk off relay.chunks but stop is (by then)
+// closed. This is the exact code path TestTurnReaderStopDoesNotStealFromNextReader
+// originally tried to exercise end-to-end via real goroutine scheduling —
+// which turned out to be unreliable under host CPU contention (see that
+// test's own comment). Calling deliverOrDonate directly sidesteps needing to
+// actually win the real select race: it tests "given a chunk was won and
+// stop is closed, what happens" in isolation, with no dependency on
+// scheduling timing at all.
+func TestTurnReaderDeliverOrDonate_StopAlreadyClosed_DonatesRatherThanDelivers(t *testing.T) {
+	relay := &stdinRelay{chunks: make(chan []byte)}
+	stop := make(chan struct{})
+	close(stop)
+	r := &turnReader{relay: relay, stop: stop}
+
+	buf := make([]byte, 16)
+	n, err := r.deliverOrDonate(buf, []byte{42, 43})
+
+	if n != 0 || err != io.EOF {
+		t.Fatalf("deliverOrDonate with stop closed = (%d, %v), want (0, io.EOF) — the chunk must never reach this reader's caller once it's been told to stop", n, err)
+	}
+	pending := relay.takePending()
+	if string(pending) != string([]byte{42, 43}) {
+		t.Fatalf("relay.pending after a stopped deliverOrDonate = %v, want the donated chunk %v so the next turnReader over this relay picks it up", pending, []byte{42, 43})
+	}
+}
+
+// TestTurnReaderDeliverOrDonate_StopStillOpen_DeliversNormally is the
+// complementary deterministic case: a reader that hasn't been told to stop
+// must deliver a won chunk normally, including the leftover-carryover
+// behavior when the chunk is larger than the caller's buffer.
+func TestTurnReaderDeliverOrDonate_StopStillOpen_DeliversNormally(t *testing.T) {
+	relay := &stdinRelay{chunks: make(chan []byte)}
+	r := &turnReader{relay: relay, stop: make(chan struct{})}
+
+	buf := make([]byte, 2)
+	n, err := r.deliverOrDonate(buf, []byte{1, 2, 3})
+
+	if err != nil {
+		t.Fatalf("deliverOrDonate with stop open: err = %v, want nil", err)
+	}
+	if n != 2 || string(buf[:n]) != string([]byte{1, 2}) {
+		t.Fatalf("deliverOrDonate = (%d, %v), want to fill the 2-byte buffer with the chunk's first 2 bytes", n, buf[:n])
+	}
+	if string(r.leftover) != string([]byte{3}) {
+		t.Fatalf("r.leftover after a short buffer = %v, want the chunk's remaining byte %v carried over", r.leftover, []byte{3})
+	}
+}
+
 // TestTurnReaderStopDoesNotStealFromNextReader is the regression test for
 // findings (a)/(b): two turnReaders constructed over the SAME stdinRelay,
 // simulating a real run() role transition. r1 is parked genuinely blocked in
@@ -190,16 +240,21 @@ func TestTurnReaderLeftoverNotServedAfterStop(t *testing.T) {
 // without consuming it and the byte must show up, undiminished, on r2 — the
 // newly-promoted role's reader — instead (checked every round below).
 //
-// On top of that per-round invariant, this also tracks HOW OFTEN r1 wins
-// the race at all, across many rounds, and asserts it stays a small
-// minority. Empirically, on this fix, r1 wins roughly a quarter of rounds
-// under this harness's deliberately-adversarial timing (an unfixed
-// turnReader — checked by temporarily reverting Read to the pre-fix
-// single-select version — wins closer to 40%, i.e. this specific check
-// would fail against the regression finding (b) describes, even though the
-// per-round invariant above is satisfied either way by construction). The
-// threshold below is set with comfortable margin between those two
-// empirically-measured rates.
+// On top of that per-round invariant, this also LOGS how often r1 wins the
+// race at all, purely as informational context — it is NOT a pass/fail
+// gate. It was originally one (asserting the rate stays under an
+// empirically-calibrated threshold), but that turned out not to hold up: the
+// per-round invariant above is satisfied either way by construction — it
+// cannot distinguish "r1 legitimately won before stop was visible" from
+// "the deliverOrDonate mitigation is silently missing entirely" (verified by
+// temporarily deleting that mitigation outright: every per-round check still
+// passed). The rate itself also turned out to be far more sensitive to host
+// CPU contention than its original calibration assumed, on this
+// machine ranging anywhere from ~45% to ~50% under load regardless of
+// whether the mitigation is present. The mitigation's actual correctness is
+// instead covered deterministically, independent of scheduling, by
+// TestTurnReaderDeliverOrDonate_StopAlreadyClosed_DonatesRatherThanDelivers
+// and its sibling above.
 func TestTurnReaderStopDoesNotStealFromNextReader(t *testing.T) {
 	const rounds = 300
 	r1Wins := 0
