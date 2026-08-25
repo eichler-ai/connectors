@@ -330,6 +330,44 @@ public class ExecutionManagerTests
     }
 
     [Fact]
+    public void CheckMaxDuration_ElapsedWhileStillPending_ActuallyCancelsTheToken()
+    {
+        // Third review finding: a still-Pending record's CancellationTokenSource was previously left
+        // untouched (never Cancel()'d) and its dictionary entry was removed, so GetCancellationToken
+        // silently started returning CancellationToken.None -- permanently unset -- for an execution whose
+        // ExternalEventBridge work item is still going to fire eventually. That defeated the BridgeHost.cs
+        // TODO's mandated check ("bail out if IsCancellationRequested"): a Pending execution cancelled here
+        // must still report IsCancellationRequested == true once its queued work item finally runs.
+        var manager = NewManager();
+        var now = DateTimeOffset.UtcNow;
+        var record = manager.Start("// script", maxDurationMs: 1000, now).Record!;
+        var token = manager.GetCancellationToken(record.ExecutionId);
+        Assert.False(token.IsCancellationRequested);
+
+        manager.CheckMaxDuration(now.AddMilliseconds(1500));
+
+        Assert.Equal(ExecutionStatus.Cancelled, record.Status);
+        Assert.True(token.IsCancellationRequested);
+        // The token must still be resolvable (not thrown from a disposed source) after the cancel.
+        Assert.True(manager.GetCancellationToken(record.ExecutionId).IsCancellationRequested);
+    }
+
+    [Fact]
+    public void RequestCancellation_WhileStillPending_ActuallyCancelsTheToken()
+    {
+        var manager = NewManager();
+        var now = DateTimeOffset.UtcNow;
+        var record = manager.Start("// script", maxDurationMs: 600_000, now).Record!;
+        var token = manager.GetCancellationToken(record.ExecutionId);
+
+        var outcome = manager.RequestCancellation(record.ExecutionId, now);
+
+        Assert.Equal(CancellationRequestOutcome.Acknowledged, outcome);
+        Assert.Equal(ExecutionStatus.Cancelled, record.Status);
+        Assert.True(token.IsCancellationRequested);
+    }
+
+    [Fact]
     public void CheckMaxDuration_ElapsedWhileStillPending_GraceExpiryNeverEscalatesIt()
     {
         // Even if CheckGraceExpiry is later called against a stale `now`, a Pending-cancelled execution

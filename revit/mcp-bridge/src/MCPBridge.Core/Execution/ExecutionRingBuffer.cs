@@ -34,6 +34,15 @@ public sealed class ExecutionRingBuffer
     /// <summary>Default per PRD §05: ~50 entries or 10 minutes, whichever comes first.</summary>
     public static ExecutionRingBuffer CreateDefault() => new(capacity: 50, retention: TimeSpan.FromMinutes(10));
 
+    /// <summary>
+    /// Unlike <see cref="Prune"/>, capacity eviction here has no non-terminal exemption -- it doesn't need
+    /// one. ExecutionManager.Start() refuses to add a new record while the current one is still non-terminal
+    /// (its single-active-execution invariant), so the active record can never be the oldest-and-evicted
+    /// entry: it's always the most recently added, and nothing else can be appended behind it until it goes
+    /// terminal itself. Third review finding: a stronger comment here previously overclaimed a "regardless
+    /// of capacity pressure" exemption that was never actually implemented -- this note replaces it with why
+    /// none was needed rather than pretending one exists.
+    /// </summary>
     public void Add(ExecutionRecord record)
     {
         lock (_lock)
@@ -70,8 +79,8 @@ public sealed class ExecutionRingBuffer
     /// periodically, not on every access.
     ///
     /// Second review finding: a still-active (non-terminal) record must never be evicted here, regardless
-    /// of age or capacity pressure -- age-based Prune() running long enough to age out the one execution
-    /// that's actually still in flight would otherwise cause ExecutionManager.Transition()'s finishing-path
+    /// of age -- age-based Prune() running long enough to age out the one execution that's actually still
+    /// in flight would otherwise cause ExecutionManager.Transition()'s finishing-path
     /// methods (CompleteSuccess/CompleteError/etc.) to find no record for that execution_id when the script
     /// finally does finish, which without the ExecutionManager-side fix would throw from inside Revit's
     /// UI-thread Execute() callback -- exactly the crash class the terminal-race fix elsewhere in this

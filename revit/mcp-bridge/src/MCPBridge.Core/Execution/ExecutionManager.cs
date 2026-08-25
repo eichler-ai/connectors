@@ -29,10 +29,21 @@ public sealed class ExecutionManager
     // Repo note (pre-existing, phase-01): no CancellationTokenSource existed anywhere in src/ --
     // cancellation was plumbed through types (ScriptGlobals.CancellationToken) but never wired up, so
     // cancel_execution could not actually stop even a cooperative script. Wired here: one CTS per
-    // execution, created in Start() and cancelled in RequestCancellation(), keyed by execution_id so a
-    // caller can fetch the right Token for the ScriptGlobals it builds via GetCancellationToken(). Kept
-    // under the same _lock as everything else in this class for the same reason as the Fix 4 mutations
-    // above -- Cancel() and disposal must never race a concurrent terminal-state transition.
+    // execution, created in Start() and cancelled via ApplyCancellation(), keyed by execution_id so a
+    // caller can fetch the right Token for the ScriptGlobals it builds via GetCancellationToken().
+    //
+    // Third review finding: this class deliberately never calls CancellationTokenSource.Dispose(). An
+    // earlier version did, with Cancel()/Dispose() both moved outside _lock (so neither could block a
+    // UI-thread caller waiting on the lock) -- but that let two independent code paths race for the same
+    // CTS: one thread reads it via TryGetValue to Cancel() it outside the lock while another thread's
+    // Transition() concurrently removes-and-disposes the same instance, so the first thread's Cancel()
+    // call could land on an already-disposed source and throw ObjectDisposedException straight out of
+    // RequestCancellation/CheckMaxDuration. None of these CancellationTokenSources ever use CancelAfter or
+    // have their .WaitHandle accessed, so they hold no unmanaged resource that actually needs releasing --
+    // skipping Dispose() entirely removes the race without reintroducing the original lock-blocking
+    // problem, at the cost of a CTS object living until GC reclaims it rather than being deterministically
+    // released the moment its execution finishes. Cancel() remains idempotent and safe to call any number
+    // of times, including after removal from this dictionary.
     private readonly Dictionary<Guid, CancellationTokenSource> _cancellationSources = new();
 
     public ExecutionManager(ExecutionRingBuffer ringBuffer, TimeSpan gracePeriod)
@@ -117,9 +128,6 @@ public sealed class ExecutionManager
     /// </summary>
     private DiagnosticRecord? Transition(Guid executionId, string transitionName, Action<ExecutionRecord> mutate, bool clearActive)
     {
-        CancellationTokenSource? ctsToDispose = null;
-        DiagnosticRecord? diagnostic;
-
         lock (_lock)
         {
             if (!_ringBuffer.TryGet(executionId, out var record) || record is null)
@@ -141,23 +149,16 @@ public sealed class ExecutionManager
             mutate(record);
             if (clearActive)
             {
-                ClearActiveIfMatches(executionId, out ctsToDispose);
+                ClearActiveIfMatches(executionId);
             }
 
-            diagnostic = null;
+            return null;
         }
-
-        // Fix 6: Dispose() outside the lock -- it can block waiting for an in-flight CTS callback, which
-        // must never happen while other threads (including Revit's UI thread) are blocked trying to
-        // acquire _lock for their own Complete*/MarkRunning calls.
-        ctsToDispose?.Dispose();
-        return diagnostic;
     }
 
     public CancellationRequestOutcome RequestCancellation(Guid executionId, DateTimeOffset now)
     {
-        CancellationTokenSource? ctsToCancel = null;
-        CancellationTokenSource? ctsToDispose = null;
+        CancellationTokenSource? ctsToCancel;
         CancellationRequestOutcome outcome;
 
         lock (_lock)
@@ -172,15 +173,16 @@ public sealed class ExecutionManager
                 return CancellationRequestOutcome.AlreadyTerminal;
             }
 
-            ApplyCancellation(record, now, out ctsToCancel, out ctsToDispose);
+            ctsToCancel = ApplyCancellation(record, now);
             outcome = CancellationRequestOutcome.Acknowledged;
         }
 
-        // Fix 6: Cancel()/Dispose() outside the lock -- Cancel() runs registered callbacks synchronously on
-        // this thread, and a script may have registered one on its ScriptGlobals.CancellationToken; doing
-        // this under _lock risks blocking it (and therefore Revit's UI thread) for an unbounded time.
+        // Cancel() outside the lock -- it runs registered callbacks synchronously on this thread, and a
+        // script may have registered one on its ScriptGlobals.CancellationToken; doing this under _lock
+        // risks blocking it (and therefore Revit's UI thread) for an unbounded time. Safe to call on a CTS
+        // this class has since removed from _cancellationSources (e.g. via a concurrent grace expiry) --
+        // see the class-level note on why this class never Dispose()s a CancellationTokenSource.
         ctsToCancel?.Cancel();
-        ctsToDispose?.Dispose();
         return outcome;
     }
 
@@ -198,8 +200,7 @@ public sealed class ExecutionManager
     /// </summary>
     public void CheckMaxDuration(DateTimeOffset now)
     {
-        CancellationTokenSource? ctsToCancel = null;
-        CancellationTokenSource? ctsToDispose = null;
+        CancellationTokenSource? ctsToCancel;
 
         lock (_lock)
         {
@@ -219,44 +220,60 @@ public sealed class ExecutionManager
                 return;
             }
 
-            ApplyCancellation(record, now, out ctsToCancel, out ctsToDispose);
+            ctsToCancel = ApplyCancellation(record, now);
         }
 
-        // Fix 6: outside the lock, same reasoning as RequestCancellation.
+        // Outside the lock, same reasoning as RequestCancellation.
         ctsToCancel?.Cancel();
-        ctsToDispose?.Dispose();
     }
 
     /// <summary>
     /// Shared cancel logic for <see cref="RequestCancellation"/> (manual cancel_execution) and
     /// <see cref="CheckMaxDuration"/> (auto-cancel) -- second review, Fixes 3 &amp; 4. Caller must already
-    /// hold <see cref="_lock"/>; the caller is responsible for calling Cancel()/Dispose() on the returned
-    /// CancellationTokenSource references AFTER releasing the lock (Fix 6).
+    /// hold <see cref="_lock"/>; the caller is responsible for calling Cancel() on the returned
+    /// CancellationTokenSource AFTER releasing the lock (Fix 6).
     ///
     /// A still-Pending record (nothing has started running -- there's nothing to cooperatively/forcibly
-    /// stop) resolves directly and immediately to Cancelled via the same record-mutation +
-    /// ClearActiveIfMatches path Transition() uses elsewhere in this file, rather than merely stamping
-    /// CancellationRequestedAt and falling through to CheckGraceExpiry's generic "didn't stop in time ->
-    /// Unrecoverable" escalation -- that escalation exists for a script actually in flight, which a Pending
-    /// execution by definition is not (Fix 4). A Running record goes through that flow as before: stamp
-    /// CancellationRequestedAt and hand back its CancellationTokenSource for the caller to Cancel() (Fix 3
-    /// -- previously only the record was stamped and the token itself was never actually cancelled from
-    /// this path, so a cooperative script polling it never observed a max-duration timeout).
+    /// stop) resolves directly and immediately to Cancelled via the same record-mutation path Transition()
+    /// uses elsewhere in this file, rather than merely stamping CancellationRequestedAt and falling through
+    /// to CheckGraceExpiry's generic "didn't stop in time -> Unrecoverable" escalation -- that escalation
+    /// exists for a script actually in flight, which a Pending execution by definition is not (Fix 4).
+    ///
+    /// Third review finding: a Pending record's CancellationTokenSource must still be Cancel()'d, and its
+    /// dictionary entry must NOT be removed. The work item this execution's ExternalEventBridge raise
+    /// already queued is still going to fire eventually (nothing can currently un-queue it from Revit's
+    /// side -- see the BridgeHost.cs TODO), and per that same TODO the work item's first move must be to
+    /// check GetCancellationToken(executionId).IsCancellationRequested and bail out without touching the
+    /// model if it's set. Both halves of that contract depend on this dictionary entry surviving with its
+    /// token actually cancelled: removing it here would make GetCancellationToken silently return
+    /// CancellationToken.None (permanently unset) for an id that legitimately still has a pending raise in
+    /// flight, defeating the exact check the TODO mandates and letting an already-cancelled script run
+    /// anyway once the dialog/blockage clears. _active is still cleared immediately (via the same
+    /// _active-only half of what ClearActiveIfMatches does) so a new execute_script isn't blocked Busy on
+    /// an execution that's already terminal from the caller's point of view.
+    ///
+    /// A Running record goes through the flow as before: stamp CancellationRequestedAt and hand back its
+    /// CancellationTokenSource for the caller to Cancel() (Fix 3 -- previously only the record was stamped
+    /// and the token itself was never actually cancelled from this path, so a cooperative script polling it
+    /// never observed a max-duration timeout).
     /// </summary>
-    private void ApplyCancellation(ExecutionRecord record, DateTimeOffset now, out CancellationTokenSource? ctsToCancel, out CancellationTokenSource? ctsToDispose)
+    private CancellationTokenSource? ApplyCancellation(ExecutionRecord record, DateTimeOffset now)
     {
-        ctsToCancel = null;
-        ctsToDispose = null;
-
         if (record.Status == ExecutionStatus.Pending)
         {
             record.MarkCancelled(now, stdOut: null);
-            ClearActiveIfMatches(record.ExecutionId, out ctsToDispose);
-            return;
+            if (_active?.ExecutionId == record.ExecutionId)
+            {
+                _active = null;
+            }
+
+            _cancellationSources.TryGetValue(record.ExecutionId, out var pendingCts);
+            return pendingCts;
         }
 
         record.RequestCancellation(now);
-        _cancellationSources.TryGetValue(record.ExecutionId, out ctsToCancel);
+        _cancellationSources.TryGetValue(record.ExecutionId, out var runningCts);
+        return runningCts;
     }
 
     /// <summary>
@@ -295,13 +312,11 @@ public sealed class ExecutionManager
             record.MarkUnrecoverable(now, diagnostic);
             _instanceUnrecoverable = true;
 
-            // Fix 6 nuance: deliberately do NOT Dispose() here (unlike every other path in this class). At
-            // grace expiry the script may still be running -- that's the definition of grace expiry -- and
-            // could still touch its CancellationToken (e.g. token.WaitHandle, or a linked CTS) via a
-            // still-live reference; disposing the source out from under it risks ObjectDisposedException
-            // inside the script. Cancel() was already called (idempotently safe) whenever cancellation was
-            // first requested/escalated -- just stop tracking the source here and let it be GC'd once the
-            // script (and its last reference to the token) actually lets go of it.
+            // At grace expiry the script may still be running -- that's the definition of grace expiry --
+            // so stop tracking the source (this class never Dispose()s one; see the class-level note on
+            // _cancellationSources) rather than trying to reason about whether it's still safe to touch.
+            // Cancel() was already called (idempotently safe) whenever cancellation was first
+            // requested/escalated.
             _cancellationSources.Remove(record.ExecutionId);
         }
     }
@@ -315,15 +330,15 @@ public sealed class ExecutionManager
         }
     }
 
-    /// <summary>Caller must already hold <see cref="_lock"/>. Returns the removed CancellationTokenSource (if any) via <paramref name="removedCts"/> so the caller can Cancel()/Dispose() it AFTER releasing the lock (Fix 6) -- this method itself never calls either.</summary>
-    private void ClearActiveIfMatches(Guid executionId, out CancellationTokenSource? removedCts)
+    /// <summary>Caller must already hold <see cref="_lock"/>. Used by a normal terminal completion (the execution is genuinely done, nothing will ever need its token again), so it's safe to stop tracking the source here -- unlike <see cref="ApplyCancellation"/>'s Pending branch, which deliberately leaves it tracked.</summary>
+    private void ClearActiveIfMatches(Guid executionId)
     {
         if (_active?.ExecutionId == executionId)
         {
             _active = null;
         }
 
-        _cancellationSources.Remove(executionId, out removedCts);
+        _cancellationSources.Remove(executionId);
     }
 
     /// <summary>

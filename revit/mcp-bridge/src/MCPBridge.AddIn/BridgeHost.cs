@@ -75,6 +75,18 @@ internal sealed class BridgeHost
         //    pass itself (it requires this not-yet-implemented composition to exist first), but must not be
         //    forgotten when this TODO is finally implemented.
         //
+        // 3. Third review finding: ExternalEventBridge<TResult> currently has no way to abandon a
+        //    still-queued work item -- treating Pending as "not a failure" (necessary; see its own doc
+        //    comment) means a Raise() that comes back Pending because Revit is still inside Execute() for
+        //    THIS SAME event (e.g. a new RunAsync called from within the work item's own OnExecute callback,
+        //    or from a callback that fires before Execute() has fully returned) can permanently wedge the
+        //    bridge: the new work item sits in _pending forever, and every RunAsync after it fails outright
+        //    on the "already has a work item pending" guard. Before this wiring ships, add an
+        //    Abandon()-style method to ExternalEventBridge<TResult> (fault whatever TCS is currently pending
+        //    and clear _pending) and call it from the max-duration/cancel path for a Pending execution
+        //    alongside ExecutionManager.ApplyCancellation, so a stale queued raise can't wedge the bridge for
+        //    the life of the process.
+        //
         // Also call RoslynAssemblyIsolation.EnsureInitialized() here, before any script
         // ever compiles. It's a partial mitigation, not full isolation (see its own doc
         // comment for why -- true isolation needs a shadow-load bootstrap), and nothing
