@@ -7,3 +7,7 @@ See [`CONVENTIONS.md`](./CONVENTIONS.md) for the naming and testing conventions 
 ## Connectors
 
 - [`revit/`](./revit/) — Revit connector (Revit MCP Bridge + Revit MCP Server). In design; see [`revit/docs/PRD.md`](./revit/docs/PRD.md).
+
+## License
+
+Apache License 2.0 — see [`LICENSE`](./LICENSE) and [`NOTICE`](./NOTICE).
