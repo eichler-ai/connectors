@@ -35,13 +35,14 @@ public sealed class ExecutionRingBuffer
     public static ExecutionRingBuffer CreateDefault() => new(capacity: 50, retention: TimeSpan.FromMinutes(10));
 
     /// <summary>
-    /// Unlike <see cref="Prune"/>, capacity eviction here has no non-terminal exemption -- it doesn't need
-    /// one. ExecutionManager.Start() refuses to add a new record while the current one is still non-terminal
-    /// (its single-active-execution invariant), so the active record can never be the oldest-and-evicted
-    /// entry: it's always the most recently added, and nothing else can be appended behind it until it goes
-    /// terminal itself. Third review finding: a stronger comment here previously overclaimed a "regardless
-    /// of capacity pressure" exemption that was never actually implemented -- this note replaces it with why
-    /// none was needed rather than pretending one exists.
+    /// Appends a new record and, if that pushes the buffer past capacity, evicts the oldest entry.
+    ///
+    /// Unlike <see cref="Prune"/>, capacity eviction here has no non-terminal exemption -- callers of this
+    /// class don't need to provide one. A caller that also maintains the single-active-execution invariant
+    /// this buffer was designed for (see ExecutionManager: it refuses to add a new record while the current
+    /// one is still non-terminal) can never have that active record be the oldest-and-evicted entry -- it's
+    /// always the most recently added, and nothing else can be appended behind it until it goes terminal
+    /// itself.
     /// </summary>
     public void Add(ExecutionRecord record)
     {

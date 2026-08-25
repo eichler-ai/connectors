@@ -365,6 +365,32 @@ public class ExecutionManagerTests
         Assert.Equal(CancellationRequestOutcome.Acknowledged, outcome);
         Assert.Equal(ExecutionStatus.Cancelled, record.Status);
         Assert.True(token.IsCancellationRequested);
+        // The dictionary entry must still be there too (not just the pre-captured token) -- a later,
+        // independent GetCancellationToken call for this id must keep reporting cancelled.
+        Assert.True(manager.GetCancellationToken(record.ExecutionId).IsCancellationRequested);
+    }
+
+    [Fact]
+    public void RequestCancellation_ScriptRegisteredCallbackThrows_DoesNotPropagate_StillCancelsAndAcknowledges()
+    {
+        // Fourth review finding: CancellationTokenSource.Cancel() runs registered callbacks synchronously
+        // and rethrows any callback failure as an AggregateException -- distinct from (and not fixed by)
+        // this class no longer Dispose()ing its sources. ScriptGlobals.CancellationToken is exposed by name
+        // into arbitrary script scope, so a script's own registered callback throwing must never propagate
+        // out of RequestCancellation/CheckMaxDuration, both of which can be driven from Revit's UI thread.
+        var manager = NewManager();
+        var now = DateTimeOffset.UtcNow;
+        var record = manager.Start("// script", maxDurationMs: 600_000, now).Record!;
+        manager.MarkRunning(record.ExecutionId, now);
+        var token = manager.GetCancellationToken(record.ExecutionId);
+        token.Register(() => throw new InvalidOperationException("script cleanup callback boom"));
+
+        var ex = Record.Exception(() => manager.RequestCancellation(record.ExecutionId, now));
+
+        Assert.Null(ex);
+        Assert.True(token.IsCancellationRequested);
+        Assert.Equal(ExecutionStatus.Running, record.Status); // cancellation requested, not yet resolved
+        Assert.NotNull(record.CancellationRequestedAt);
     }
 
     [Fact]

@@ -42,8 +42,12 @@ public sealed class ExecutionManager
     // have their .WaitHandle accessed, so they hold no unmanaged resource that actually needs releasing --
     // skipping Dispose() entirely removes the race without reintroducing the original lock-blocking
     // problem, at the cost of a CTS object living until GC reclaims it rather than being deterministically
-    // released the moment its execution finishes. Cancel() remains idempotent and safe to call any number
-    // of times, including after removal from this dictionary.
+    // released the moment its execution finishes. Cancel() itself remains idempotent and safe from
+    // ObjectDisposedException regardless of ordering, including after removal from this dictionary -- but
+    // NOT unconditionally safe: Cancel() still runs any callback a script registered on its
+    // ScriptGlobals.CancellationToken synchronously, and a throwing callback surfaces as an
+    // AggregateException from Cancel() itself (see SafeCancel, fourth review finding), which is a
+    // completely separate hazard from disposal and isn't fixed by anything in this note.
     private readonly Dictionary<Guid, CancellationTokenSource> _cancellationSources = new();
 
     public ExecutionManager(ExecutionRingBuffer ringBuffer, TimeSpan gracePeriod)
@@ -182,7 +186,7 @@ public sealed class ExecutionManager
         // risks blocking it (and therefore Revit's UI thread) for an unbounded time. Safe to call on a CTS
         // this class has since removed from _cancellationSources (e.g. via a concurrent grace expiry) --
         // see the class-level note on why this class never Dispose()s a CancellationTokenSource.
-        ctsToCancel?.Cancel();
+        SafeCancel(ctsToCancel);
         return outcome;
     }
 
@@ -224,7 +228,34 @@ public sealed class ExecutionManager
         }
 
         // Outside the lock, same reasoning as RequestCancellation.
-        ctsToCancel?.Cancel();
+        SafeCancel(ctsToCancel);
+    }
+
+    /// <summary>
+    /// Fourth review finding: CancellationTokenSource.Cancel() runs every registered callback
+    /// synchronously on the calling thread, and if any callback throws, Cancel() collects the
+    /// failure(s) and rethrows as an AggregateException once every callback has run -- this is
+    /// documented, unavoidable behavior, distinct from (and not fixed by) this class no longer
+    /// Dispose()ing its CancellationTokenSources. The token handed to a running script
+    /// (ScriptGlobals.CancellationToken) is exposed by name into arbitrary Roslyn-compiled script
+    /// scope, so a script registering a callback that throws -- deliberately, or incidentally
+    /// because Revit is in a state the callback didn't expect -- must never be able to propagate
+    /// that exception out of RequestCancellation/CheckMaxDuration, both of which can be driven from
+    /// Revit's UI thread (CheckMaxDuration per this class's own periodic-pump contract). By the time
+    /// any callback runs, Cancel() has already flipped the token's cancelled state, so the
+    /// cancellation itself has already taken effect regardless of what a callback does afterward --
+    /// swallowing a callback failure here doesn't mask a failed cancellation, only a failed
+    /// notification of one.
+    /// </summary>
+    private static void SafeCancel(CancellationTokenSource? cts)
+    {
+        try
+        {
+            cts?.Cancel();
+        }
+        catch (AggregateException)
+        {
+        }
     }
 
     /// <summary>
@@ -234,8 +265,12 @@ public sealed class ExecutionManager
     /// CancellationTokenSource AFTER releasing the lock (Fix 6).
     ///
     /// A still-Pending record (nothing has started running -- there's nothing to cooperatively/forcibly
-    /// stop) resolves directly and immediately to Cancelled via the same record-mutation path Transition()
-    /// uses elsewhere in this file, rather than merely stamping CancellationRequestedAt and falling through
+    /// stop) resolves directly and immediately to Cancelled via the same record mutation (record.MarkCancelled)
+    /// Transition() performs elsewhere in this file -- called directly here, under the caller's already-held
+    /// lock, rather than through Transition() itself (this method doesn't get Transition()'s own
+    /// ring-buffer/terminal-race guards, because both of this method's callers already did that exact
+    /// guarding, under the same lock, immediately before calling in) -- rather than merely stamping
+    /// CancellationRequestedAt and falling through
     /// to CheckGraceExpiry's generic "didn't stop in time -> Unrecoverable" escalation -- that escalation
     /// exists for a script actually in flight, which a Pending execution by definition is not (Fix 4).
     ///
@@ -312,12 +347,18 @@ public sealed class ExecutionManager
             record.MarkUnrecoverable(now, diagnostic);
             _instanceUnrecoverable = true;
 
-            // At grace expiry the script may still be running -- that's the definition of grace expiry --
-            // so stop tracking the source (this class never Dispose()s one; see the class-level note on
-            // _cancellationSources) rather than trying to reason about whether it's still safe to touch.
-            // Cancel() was already called (idempotently safe) whenever cancellation was first
-            // requested/escalated.
-            _cancellationSources.Remove(record.ExecutionId);
+            // Fourth review finding: deliberately do NOT remove the dictionary entry here. Removing it was
+            // this method's original behavior, but that's exactly the same mistake ApplyCancellation's
+            // Pending branch made and was fixed for (see its doc comment): at grace expiry the script may
+            // still be running -- that's the definition of grace expiry -- so removing the entry would make
+            // GetCancellationToken start silently returning an uncancelled CancellationToken.None for an
+            // execution that is in fact still running and was in fact cancelled. Cancel() was already
+            // called whenever cancellation was first requested/escalated, so leaving the entry in place
+            // costs nothing but keeps GetCancellationToken accurate for as long as anything might still
+            // call it. This class never Dispose()s a CancellationTokenSource (see the class-level note), so
+            // there's no resource cost to leaving it tracked -- an entry is now removed only on a clean
+            // terminal completion (ClearActiveIfMatches), the one case where nothing will ever need the
+            // token again.
         }
     }
 
