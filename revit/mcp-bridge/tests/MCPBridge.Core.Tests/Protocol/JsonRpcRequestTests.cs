@@ -29,6 +29,22 @@ public class JsonRpcRequestTests
     }
 
     [Fact]
+    public void Parse_MissingId_Throws()
+    {
+        // Second live-wiring review finding: an id-less "request" could never be answered (message
+        // serialization needs a real id to echo back) -- reject it here with a clear message instead of
+        // letting a default(JsonElement) id reach serialization later and throw an opaque
+        // InvalidOperationException from deep inside System.Text.Json.
+        Assert.Throws<JsonRpcParamException>(() => JsonRpcRequest.Parse("{\"jsonrpc\":\"2.0\",\"method\":\"poll_execution\",\"params\":{}}"));
+    }
+
+    [Fact]
+    public void Parse_NullId_Throws()
+    {
+        Assert.Throws<JsonRpcParamException>(() => JsonRpcRequest.Parse("{\"jsonrpc\":\"2.0\",\"id\":null,\"method\":\"poll_execution\",\"params\":{}}"));
+    }
+
+    [Fact]
     public void GetRequiredString_Missing_Throws()
     {
         var request = JsonRpcRequest.Parse("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"poll_execution\",\"params\":{}}");

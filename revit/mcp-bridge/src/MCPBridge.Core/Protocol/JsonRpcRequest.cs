@@ -49,10 +49,22 @@ public sealed class JsonRpcRequest
             throw new JsonRpcParamException("message has no non-empty string 'method' field; not a valid JSON-RPC request.");
         }
 
+        // A request with no (or a null) id can never be answered -- ExecutionResultMessage/
+        // JsonRpcErrorMessage both need a real id to echo back, and this class's own doc comment already
+        // states the Go broker never sends the add-in anything but genuine requests (always a non-null
+        // id). Reject it here rather than letting a default(JsonElement) id reach message serialization
+        // later, where it throws InvalidOperationException from deep inside System.Text.Json instead of a
+        // clear message naming the actual problem (the same failure class AuthMessage's own constructor
+        // guards against for the exact same reason).
+        if (!root.TryGetProperty("id", out var idElement) || idElement.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+        {
+            throw new JsonRpcParamException("message has no non-null 'id' field; not a valid JSON-RPC request this add-in can respond to.");
+        }
+
         // .Clone() is required here: doc (and every JsonElement view into it) becomes invalid once this
         // using block disposes it at the end of this method, so anything returned to the caller must be an
         // independent copy, not a view into the disposed document.
-        var id = root.TryGetProperty("id", out var idElement) ? idElement.Clone() : default;
+        var id = idElement.Clone();
         var paramsElement = root.TryGetProperty("params", out var p) ? p.Clone() : default;
 
         return new JsonRpcRequest(id, methodElement.GetString()!, paramsElement);

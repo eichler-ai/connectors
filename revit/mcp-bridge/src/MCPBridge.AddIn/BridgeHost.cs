@@ -42,6 +42,10 @@ internal sealed class BridgeHost
     private CancellationTokenSource? _stopCts;
     private Thread? _workerThread;
     private volatile TcpClient? _activeTcpClient;
+    private Timer? _timeoutTimer;
+
+    /// <summary>How often <see cref="_timeoutTimer"/> re-checks max_duration_ms/the cancellation grace period.</summary>
+    private static readonly TimeSpan TimeoutCheckInterval = TimeSpan.FromSeconds(1);
 
     public BridgeHost(
         Guid instanceId,
@@ -97,6 +101,24 @@ internal sealed class BridgeHost
             Name = "MCPBridge-Connection",
         };
         _workerThread.Start();
+
+        // Second live-wiring review finding: ExecutionManager.CheckMaxDuration/CheckGraceExpiry
+        // (ExecutionManager.cs's own doc comment: "a caller (the AddIn wiring) is expected to drive
+        // [these] periodically") were never actually driven anywhere in the add-in -- this IS that AddIn
+        // wiring. Without it, max_duration_ms was accepted and stored but never enforced, and the
+        // cancellation-grace -> Unrecoverable escalation could never fire from the bridge side. Both calls
+        // are pure in-memory state-machine checks (ExecutionManager does its own locking; neither touches
+        // the Revit API), so a threadpool Timer callback is fine -- no UI-thread dependency.
+        _timeoutTimer = new Timer(
+            _ =>
+            {
+                var now = DateTimeOffset.UtcNow;
+                _executionManager.CheckMaxDuration(now);
+                _executionManager.CheckGraceExpiry(now);
+            },
+            state: null,
+            dueTime: TimeoutCheckInterval,
+            period: TimeoutCheckInterval);
     }
 
     public void Stop()
@@ -111,6 +133,9 @@ internal sealed class BridgeHost
         {
             // Best-effort: the socket may already be closed/faulted; Stop() must never throw.
         }
+
+        _timeoutTimer?.Dispose();
+        _timeoutTimer = null;
 
         _workerThread?.Join(TimeSpan.FromSeconds(5));
         _workerThread = null;
@@ -137,7 +162,7 @@ internal sealed class BridgeHost
             {
                 RunOneConnection(discoveryResult.BrokerJson, discoveryResult.Address, dispatcher, documentSnapshotHandler, documentSnapshotEvent, reconnectController, stopToken);
             }
-            catch
+            catch (Exception)
             {
                 // Any failure during this connection's lifetime (auth rejected, socket error, broker
                 // closed unexpectedly) falls through to backoff-and-retry -- the reconnect loop is
@@ -210,7 +235,9 @@ internal sealed class BridgeHost
 
         using (var authDoc = JsonDocument.Parse(authResponseLine))
         {
-            if (authDoc.RootElement.TryGetProperty("error", out _))
+            if (!authDoc.RootElement.TryGetProperty("result", out var resultElement) ||
+                !resultElement.TryGetProperty("ok", out var okElement) ||
+                okElement.ValueKind != JsonValueKind.True)
             {
                 throw new IOException($"broker rejected auth: {authResponseLine}");
             }
@@ -219,7 +246,35 @@ internal sealed class BridgeHost
         // `register`, sent on every successful connect -- first connect and every reconnect alike (PRD
         // §05) -- with the real, live values: the stable per-process instance_id, the real process id, the
         // real Revit version, and a fresh snapshot of currently open documents.
-        var documents = documentsTask.GetAwaiter().GetResult();
+        //
+        // Second live-wiring review finding: ExternalEvent.Raise() returning Accepted only means "queued" --
+        // Revit runs the handler whenever its idle loop next gets to it, which can be indefinitely delayed
+        // (a modal dialog open, another long-running ExternalEvent already in flight). An unbounded wait
+        // here would block this connection thread forever in that case, and since Stop() (called from
+        // OnShutdown, which runs ON Revit's UI thread) can't do anything to unblock a wait that itself
+        // depends on the UI thread, that also turns Stop() into a guaranteed-to-time-out Join(). Bound the
+        // wait instead: if the snapshot doesn't arrive in time, proceed with an empty document list rather
+        // than never sending `register` at all -- a live connection with an incomplete document list is far
+        // better than no connection.
+        List<RegisteredDocument> documents;
+        try
+        {
+            documents = documentsTask.Wait(10_000, stopToken)
+                ? documentsTask.GetAwaiter().GetResult()
+                : new List<RegisteredDocument>();
+        }
+        catch (OperationCanceledException)
+        {
+            throw; // Stop() was called during the wait -- let this connection attempt unwind cleanly.
+        }
+        catch
+        {
+            // The snapshot ExternalEvent faulted (Denied/TimedOut raise, or an exception building it) --
+            // proceed with an empty document list rather than throwing away an otherwise-good, already-
+            // authenticated connection over a problem unrelated to the connection itself.
+            documents = new List<RegisteredDocument>();
+        }
+
         var registerMessage = new RegisterMessage(_instanceId, Process.GetCurrentProcess().Id, _revitVersion, documents);
         WriteLine(stream, registerMessage.ToJson());
 
@@ -249,20 +304,41 @@ internal sealed class BridgeHost
             // Fire-and-continue: execute_script's own dispatch can take a while (up to its timeout_ms) and
             // must not block this thread from reading/dispatching poll_execution/cancel_execution for
             // other in-flight work in the meantime.
-            _ = dispatcher.DispatchAsync(request).ContinueWith(
+            //
+            // Second live-wiring review finding: DispatchAsync's poll_execution/cancel_execution branches
+            // are non-async (an expression-bodied switch), so any exception they throw (e.g. a malformed
+            // request that slips past JsonRpcRequest.Parse's own validation) surfaces SYNCHRONOUSLY from
+            // this very call, not via the returned Task -- it would otherwise propagate straight out of
+            // this while loop, past the ContinueWith below (which never gets attached), and be caught only
+            // by RunConnectionLoop's outer catch, tearing down and re-dialing an otherwise-healthy
+            // connection over one bad request. Wrapped here so a dispatch failure -- synchronous or via a
+            // faulted Task -- always produces a JSON-RPC error response instead of silently doing nothing
+            // (dropping the response entirely) or killing the connection.
+            Task<string> dispatchTask;
+            try
+            {
+                dispatchTask = dispatcher.DispatchAsync(request);
+            }
+            catch (Exception ex)
+            {
+                dispatchTask = Task.FromResult(JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InternalError, $"dispatch failed: {ex.Message}", null));
+            }
+
+            _ = dispatchTask.ContinueWith(
                 t =>
                 {
-                    if (t.IsCompletedSuccessfully)
+                    var response = t.IsCompletedSuccessfully
+                        ? t.Result
+                        : JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InternalError, $"dispatch failed: {t.Exception?.GetBaseException().Message}", null);
+
+                    try
                     {
-                        try
-                        {
-                            WriteLine(stream, t.Result);
-                        }
-                        catch
-                        {
-                            // A write failure here means the connection is already dead; the read loop's
-                            // own next ReadOneLine call will observe that and trigger a reconnect.
-                        }
+                        WriteLine(stream, response);
+                    }
+                    catch
+                    {
+                        // A write failure here means the connection is already dead; the read loop's own
+                        // next ReadOneLine call will observe that and trigger a reconnect.
                     }
                 },
                 TaskScheduler.Default);

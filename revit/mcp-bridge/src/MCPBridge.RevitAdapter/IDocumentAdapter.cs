@@ -1,16 +1,15 @@
 namespace MCPBridge.RevitAdapter;
 
 /// <summary>
-/// Thin seam over Autodesk.Revit.DB.Document (PRD §06/§09). Exposes just what
-/// phase 01's script execution loop needs -- transaction creation and enough
-/// identity to name things in diagnostics. Document identity hashing (§09) is
-/// out of scope for phase 01 (that's the workspace/file-exchange work in phase 03).
+/// Thin seam over Autodesk.Revit.DB.Document (PRD §06/§09), used by TransactionScriptExecutor to build
+/// the ambient Transaction/TransactionGroup it wraps every script run in. NOT what a script itself sees
+/// -- that's the narrower <see cref="IScriptDocument"/> (this interface's CreateTransaction/
+/// CreateTransactionGroup would always fail if a script called them directly, since the executor has
+/// already opened one; see IScriptDocument's doc comment). Document identity hashing (§09) is out of
+/// scope for phase 01 (that's the workspace/file-exchange work in phase 03).
 /// </summary>
-public interface IDocumentAdapter
+public interface IDocumentAdapter : IScriptDocument
 {
-    /// <summary>Human-readable title, for diagnostics only -- not a stable identity.</summary>
-    string Title { get; }
-
     ITransactionAdapter CreateTransaction(string name);
 
     ITransactionGroupAdapter CreateTransactionGroup(string name);

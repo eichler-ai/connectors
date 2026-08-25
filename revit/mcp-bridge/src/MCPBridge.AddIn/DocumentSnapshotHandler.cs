@@ -52,10 +52,19 @@ public sealed class DocumentSnapshotHandler : IExternalEventHandler
     public Task<List<RegisteredDocument>> SnapshotAsync(ExternalEvent externalEvent)
     {
         var tcs = new TaskCompletionSource<List<RegisteredDocument>>(TaskCreationOptions.RunContinuationsAsynchronously);
+        TaskCompletionSource<List<RegisteredDocument>>? orphaned;
         lock (_lock)
         {
+            orphaned = _pending;
             _pending = tcs;
         }
+
+        // Second live-wiring review finding: a prior still-queued snapshot request (e.g. a connection torn
+        // down/reconnected while its own raise was still sitting in Revit's idle queue) was previously
+        // silently overwritten here, leaving its TaskCompletionSource orphaned -- never faulted, never
+        // completed, an abandoned Task nothing awaits. Fault it instead, same shape as
+        // ExternalEventBridge{TResult}.Abandon().
+        orphaned?.TrySetException(new InvalidOperationException("a newer document snapshot request superseded this one before Revit's idle loop reached it."));
 
         var outcome = externalEvent.Raise();
         if (outcome is ExternalEventRequest.Denied or ExternalEventRequest.TimedOut)

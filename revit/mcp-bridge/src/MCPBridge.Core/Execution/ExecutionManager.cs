@@ -217,8 +217,12 @@ public sealed class ExecutionManager
                 return CancellationRequestOutcome.AlreadyTerminal;
             }
 
+            // Read before ApplyCancellation mutates the record -- this is exactly the same status
+            // ApplyCancellation itself branches on internally, read under the same lock, so there's no
+            // TOCTOU gap between this check and the transition it describes.
+            var wasPending = record.Status == ExecutionStatus.Pending;
             ctsToCancel = ApplyCancellation(record, now);
-            outcome = CancellationRequestOutcome.Acknowledged;
+            outcome = wasPending ? CancellationRequestOutcome.AcknowledgedWasPending : CancellationRequestOutcome.Acknowledged;
         }
 
         // Cancel() outside the lock -- it runs registered callbacks synchronously on this thread, and a

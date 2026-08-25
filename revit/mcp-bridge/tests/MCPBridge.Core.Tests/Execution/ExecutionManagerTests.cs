@@ -204,7 +204,9 @@ public class ExecutionManagerTests
 
         var result = manager.RequestCancellation(record.ExecutionId, now.AddSeconds(1));
 
-        Assert.Equal(CancellationRequestOutcome.Acknowledged, result);
+        // Second live-wiring review finding: distinct outcome value so a caller (ExternalEventBridge's
+        // Abandon() gating) can detect this specific transition without re-Polling and re-inferring it.
+        Assert.Equal(CancellationRequestOutcome.AcknowledgedWasPending, result);
         Assert.Equal(ExecutionStatus.Cancelled, record.Status);
         Assert.False(manager.IsInstanceUnrecoverable);
 
@@ -429,7 +431,7 @@ public class ExecutionManagerTests
 
         var outcome = manager.RequestCancellation(record.ExecutionId, now);
 
-        Assert.Equal(CancellationRequestOutcome.Acknowledged, outcome);
+        Assert.Equal(CancellationRequestOutcome.AcknowledgedWasPending, outcome);
         Assert.Equal(ExecutionStatus.Cancelled, record.Status);
         Assert.True(token.IsCancellationRequested);
         // The dictionary entry must still be there too (not just the pre-captured token) -- a later,

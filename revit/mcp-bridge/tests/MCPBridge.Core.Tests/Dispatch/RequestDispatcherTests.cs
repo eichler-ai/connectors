@@ -1,6 +1,7 @@
 using System;
 using System.Text.Json;
 using System.Threading.Tasks;
+using MCPBridge.Core.Diagnostics;
 using MCPBridge.Core.Dispatch;
 using MCPBridge.Core.Execution;
 using MCPBridge.Core.Protocol;
@@ -178,9 +179,15 @@ public class RequestDispatcherTests
     }
 
     [Fact]
-    public async Task ExecuteScript_CancelledWhileStillPending_BailsOutToCancelled_WithoutTouchingTheModel()
+    public async Task ExecuteScript_CancelledWhileStillPending_ThenBridgeAbandoned_NeverRunsTheWorkItemAtAll()
     {
-        // Hard requirement 1: the queued work item must check cancellation before touching the model.
+        // Hard requirement 3 (the common case in practice): cancel_execution's Abandon() call faults the
+        // queued work item's Task directly and clears ExternalEventBridge._pending -- so by the time
+        // Revit's idle loop actually gets around to firing Execute() for the already-raised event,
+        // OnExecute finds nothing queued and no-ops. RunScriptWorkItem's own cancellation check (hard
+        // requirement 1) never even runs in THIS race -- Abandon() already fully closed it. Verified here:
+        // OnExecute after Abandon() must be a safe no-op, and the dispatch must have already resolved to
+        // Cancelled from the cancel_execution call itself, not from OnExecute ever firing.
         var executionManager = NewExecutionManager();
         var bridge = new ExternalEventBridge<ScriptExecutionOutcome>(new FakeExternalEventRaiser());
         var dispatcher = new RequestDispatcher(executionManager, bridge, NewScriptExecutor());
@@ -191,9 +198,38 @@ public class RequestDispatcherTests
         var cancelJson = await dispatcher.DispatchAsync(CancelRequest(2, "exec-1"));
         Assert.Contains("\"status\":\"cancelled\"", cancelJson);
 
-        // Revit's idle loop eventually gets around to firing Execute() for the already-queued work item --
-        // it must resolve to Cancelled without ever starting a transaction.
+        // Simulates Revit's idle loop eventually firing Execute() for the already-raised (but now
+        // Abandon()-cleared) event -- must be a harmless no-op, not a second resolution attempt.
         bridge.OnExecute(NewUiApp(document));
+        var executeJson = await dispatchTask;
+
+        Assert.Contains("\"status\":\"cancelled\"", executeJson);
+        Assert.Null(document.LastTransaction);
+        Assert.Null(document.LastTransactionGroup);
+    }
+
+    [Fact]
+    public async Task RunScriptWorkItem_CancellationTokenAlreadySet_BailsOutWithoutTouchingTheModel()
+    {
+        // Hard requirement 1's ACTUAL code path (RequestDispatcherTests' prior version of this test only
+        // exercised hard requirement 3's Abandon() no-op -- Abandon() had already cleared _pending before
+        // OnExecute ever ran, so RunScriptWorkItem's own cancellation check never executed; see that test's
+        // updated name/comment above). This test drives the narrower, genuinely-still-reachable race
+        // directly: ExecutionManager.RequestCancellation runs WITHOUT going through the dispatcher's
+        // cancel_execution (so Abandon() is never called and the bridge's queued work item is untouched) --
+        // simulating the exact window between RequestCancellation's lock release and Abandon() being called
+        // in the real cancel_execution handler, where Revit's idle loop could still fire Execute() for the
+        // still-queued raise before Abandon() gets to it. RunScriptWorkItem's own token check must catch
+        // this and bail out without ever starting a transaction.
+        var executionManager = NewExecutionManager();
+        var bridge = new ExternalEventBridge<ScriptExecutionOutcome>(new FakeExternalEventRaiser());
+        var dispatcher = new RequestDispatcher(executionManager, bridge, NewScriptExecutor());
+        var document = new FakeDocumentAdapter();
+
+        var dispatchTask = dispatcher.DispatchAsync(ExecuteScriptRequest(1, "exec-1", "1 + 1")); // Pending, queued
+        executionManager.RequestCancellation("exec-1", DateTimeOffset.UtcNow); // bypasses Abandon() deliberately
+
+        bridge.OnExecute(NewUiApp(document)); // RunScriptWorkItem actually runs now; its token check must fire
         var executeJson = await dispatchTask;
 
         Assert.Contains("\"status\":\"cancelled\"", executeJson);
@@ -257,10 +293,34 @@ public class RequestDispatcherTests
 
         executionManager.Start("exec-1", "1 + 1", 600_000, DateTimeOffset.UtcNow);
 
-        var json = await dispatcher.DispatchAsync(PollRequest(1, "exec-1"));
+        // Second live-wiring review finding: poll_execution now genuinely waits up to timeout_ms for a
+        // terminal state (see HandlePollExecutionAsync) -- a short timeout here keeps this test fast while
+        // still exercising the real wait-then-answer-with-current-status path (nothing ever marks exec-1
+        // Running/terminal in this test, so it deliberately times out still Pending).
+        var json = await dispatcher.DispatchAsync(PollRequest(1, "exec-1", timeoutMs: 50));
 
         Assert.Contains("\"status\":\"pending\"", json);
         Assert.Contains("\"execution_id\":\"exec-1\"", json);
+    }
+
+    [Fact]
+    public async Task PollExecution_ReachesTerminalStateBeforeTimeout_ReturnsPromptly_DoesNotWaitOutTheFullTimeout()
+    {
+        var executionManager = NewExecutionManager();
+        var bridge = new ExternalEventBridge<ScriptExecutionOutcome>(new FakeExternalEventRaiser());
+        var dispatcher = new RequestDispatcher(executionManager, bridge, NewScriptExecutor());
+
+        var now = DateTimeOffset.UtcNow;
+        executionManager.Start("exec-1", "1 + 1", 600_000, now);
+        executionManager.MarkRunning("exec-1", now);
+        executionManager.CompleteSuccess("exec-1", now, result: 2, stdOut: null, notices: Array.Empty<DiagnosticRecord>());
+
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+        var json = await dispatcher.DispatchAsync(PollRequest(1, "exec-1", timeoutMs: 30_000));
+        stopwatch.Stop();
+
+        Assert.Contains("\"status\":\"success\"", json);
+        Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(5), $"poll_execution took {stopwatch.Elapsed} for an already-terminal execution -- it must return promptly, not wait out timeout_ms.");
     }
 
     [Fact]

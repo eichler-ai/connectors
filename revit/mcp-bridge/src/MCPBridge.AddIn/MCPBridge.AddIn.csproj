@@ -12,6 +12,24 @@
     <RevitVersion>2027</RevitVersion>
     <RevitInstallDir>C:\Program Files\Autodesk\Revit $(RevitVersion)</RevitInstallDir>
     <!-- Unsigned dev build per PRD §12 / roadmap phase 01; signing is phase 05. -->
+    <!--
+      Revit loads this DLL directly out of its Addins folder: there is no "dotnet publish" style
+      deployment step doing dependency flattening for us, and this is a plugin, not a standalone app, so
+      a plain "dotnet build" output isn't enough. Build only copies THIS project's own direct output plus
+      its ProjectReferences, never a ProjectReference's own *transitive* NuGet package dependencies
+      (e.g. MCPBridge.Core's Microsoft.CodeAnalysis.CSharp.Scripting and friends, i.e. Roslyn). Without
+      them physically present next to MCPBridge.AddIn.dll, the CLR's default probing (which only looks in
+      the app's base directory when there's no host-provided resolution, as is the case for a raw
+      Assembly.LoadFrom style plugin load) can't find them, and depending on exactly when/how that
+      failure surfaces, Revit can silently fail to even construct MCPBridgeApplication: no exception
+      visible anywhere, no add-in security prompt, nothing. OnStartup is simply never reached. Confirmed
+      via live-wiring validation (first live-Revit test session): the build output was missing the Roslyn
+      DLLs entirely, and copying only MCPBridge.*.dll to the Addins folder reproduced exactly that
+      silent-no-load symptom. CopyLocalLockFileAssemblies makes `dotnet build` behave like `publish` for
+      this purpose, copying every resolved dependency (including transitive ones) into the output folder,
+      so a straightforward folder copy of bin\Release\net10.0-windows\ is actually deployable.
+    -->
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
   </PropertyGroup>
 
   <ItemGroup>

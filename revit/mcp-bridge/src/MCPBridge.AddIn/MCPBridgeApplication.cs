@@ -19,20 +19,30 @@ public sealed class MCPBridgeApplication : IExternalApplication
 
     public Result OnStartup(UIControlledApplication application)
     {
-        InstanceId = Guid.NewGuid();
+        AssemblyResolution.Register();
+        try
+        {
+            InstanceId = Guid.NewGuid();
 
-        var ringBuffer = ExecutionRingBuffer.CreateDefault();
-        var executionManager = ExecutionManager.CreateDefault(ringBuffer);
+            var ringBuffer = ExecutionRingBuffer.CreateDefault();
+            var executionManager = ExecutionManager.CreateDefault(ringBuffer);
 
-        // e.g. "2027" -- available directly off ControlledApplication, no live UIApplication needed
-        // (unlike the open-documents list, which register also needs -- see DocumentSnapshotHandler).
-        var revitVersion = application.ControlledApplication.VersionNumber;
-        var discoveryOptions = BuildDiscoveryOptions();
+            // e.g. "2027" -- available directly off ControlledApplication, no live UIApplication needed
+            // (unlike the open-documents list, which register also needs -- see DocumentSnapshotHandler).
+            var revitVersion = application.ControlledApplication.VersionNumber;
+            var discoveryOptions = BuildDiscoveryOptions();
 
-        _host = new BridgeHost(InstanceId, executionManager, ReconnectBackoffPolicy.Default, revitVersion, discoveryOptions);
-        _host.Start();
+            _host = new BridgeHost(InstanceId, executionManager, ReconnectBackoffPolicy.Default, revitVersion, discoveryOptions);
+            _host.Start();
 
-        return Result.Succeeded;
+            return Result.Succeeded;
+        }
+        catch (Exception)
+        {
+            // A failed OnStartup must not take down all of Revit -- report failure to the AddInLoader
+            // instead of letting the exception propagate (PRD §04).
+            return Result.Failed;
+        }
     }
 
     public Result OnShutdown(UIControlledApplication application)

@@ -58,10 +58,13 @@ public sealed class RequestDispatcher
         _now = now ?? (() => DateTimeOffset.UtcNow);
     }
 
+    /// <summary>How often <see cref="HandlePollExecutionAsync"/> re-checks the record while waiting out timeout_ms.</summary>
+    private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(100);
+
     public Task<string> DispatchAsync(JsonRpcRequest request) => request.Method switch
     {
         "execute_script" => HandleExecuteScriptAsync(request),
-        "poll_execution" => Task.FromResult(HandlePollExecution(request)),
+        "poll_execution" => HandlePollExecutionAsync(request),
         "cancel_execution" => Task.FromResult(HandleCancelExecution(request)),
         _ => Task.FromResult(JsonRpcErrorMessage.ToJson(
             request.Id,
@@ -82,6 +85,16 @@ public sealed class RequestDispatcher
             script = request.GetRequiredString("script");
             maxDurationMs = request.GetOptionalInt64("max_duration_ms", DefaultMaxDurationMs);
             timeoutMs = request.GetOptionalInt64("timeout_ms", DefaultTimeoutMs);
+
+            // KNOWN PHASE 1 LIMITATION (second live-wiring review finding): document_id is part of the wire
+            // contract (the broker always sends it) but is not read or enforced here -- every script runs
+            // against whatever IUiApplicationAdapter.ActiveUiDocument happens to be (see RunScriptWorkItem
+            // below), regardless of which document_id was requested. Real per-document routing needs
+            // Application.Documents (only reachable via DocumentSnapshotHandler's raw-Revit-API path, not
+            // the IUiApplicationAdapter seam RunScriptWorkItem goes through) plus a way to select/activate
+            // the target document -- deferred to Phase 2/3 alongside the rest of multi-document support.
+            // Silently ignoring a mismatch (rather than erroring) is a deliberate Phase 1 choice: single
+            // active-document Revit instances (the common case) work correctly either way.
         }
         catch (JsonRpcParamException ex)
         {
@@ -175,7 +188,17 @@ public sealed class RequestDispatcher
             return ScriptExecutionOutcome.Cancelled("");
         }
 
-        _executionManager.MarkRunning(executionId, _now());
+        // Second live-wiring review finding: MarkRunning's return value (non-null means the record already
+        // went terminal by the time this ran -- e.g. cancelled in the window between OnExecute clearing
+        // ExternalEventBridge._pending and this method reaching MarkRunning, since the cancellation-token
+        // check above already passed before that happened) was previously discarded. Discarding it meant
+        // the script ran against the model anyway for an execution the broker had already been told was
+        // Cancelled. Bail out here instead -- the record is already terminal, so there's nothing left to
+        // transition to; just don't touch the model.
+        if (_executionManager.MarkRunning(executionId, _now()) is not null)
+        {
+            return ScriptExecutionOutcome.Cancelled("");
+        }
 
         var uiDocument = uiApplication.ActiveUiDocument;
         var document = uiDocument?.Document;
@@ -222,22 +245,45 @@ public sealed class RequestDispatcher
         return outcome;
     }
 
-    private string HandlePollExecution(JsonRpcRequest request)
+    /// <summary>
+    /// Second live-wiring review finding: poll_execution previously ignored timeout_ms entirely and
+    /// answered instantly with whatever the current status was -- against execution.go's own package doc
+    /// ("the add-in is expected to wait internally ... up to the caller's timeout_ms before answering"),
+    /// this turned a long-poll into a hot spin (the agent's own client re-polls immediately, so a 30s
+    /// timeout_ms returned in ~1ms). Now waits, re-checking at a fixed interval, until either the execution
+    /// reaches a terminal state or timeout_ms elapses -- an in-memory poll rather than a real event/signal,
+    /// but bounded and cheap, and matches the documented contract without new signaling infrastructure.
+    /// </summary>
+    private async Task<string> HandlePollExecutionAsync(JsonRpcRequest request)
     {
         string executionId;
+        long timeoutMs;
         try
         {
             executionId = request.GetRequiredString("execution_id");
+            timeoutMs = request.GetOptionalInt64("timeout_ms", DefaultTimeoutMs);
         }
         catch (JsonRpcParamException ex)
         {
             return JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InvalidParams, ex.Message, null);
         }
 
-        var record = _executionManager.Poll(executionId);
-        return record is not null
-            ? ExecutionResultMessage.FromRecord(request.Id, record)
-            : JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InvalidParams, $"execution_id '{executionId}' is not known to this add-in instance.", UnknownExecutionDiagnostic(executionId));
+        var deadline = _now().AddMilliseconds(Math.Max(0, timeoutMs));
+        while (true)
+        {
+            var record = _executionManager.Poll(executionId);
+            if (record is null)
+            {
+                return JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InvalidParams, $"execution_id '{executionId}' is not known to this add-in instance.", UnknownExecutionDiagnostic(executionId));
+            }
+
+            if (record.Status.IsTerminal() || _now() >= deadline)
+            {
+                return ExecutionResultMessage.FromRecord(request.Id, record);
+            }
+
+            await Task.Delay(PollInterval).ConfigureAwait(false);
+        }
     }
 
     private string HandleCancelExecution(JsonRpcRequest request)
@@ -258,16 +304,20 @@ public sealed class RequestDispatcher
             return JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InvalidParams, $"execution_id '{executionId}' is not known to this add-in instance.", UnknownExecutionDiagnostic(executionId));
         }
 
-        var record = _executionManager.Poll(executionId);
-        if (record is not null && outcome == CancellationRequestOutcome.Acknowledged && record.Status == ExecutionStatus.Cancelled)
+        // Hard requirement 3, fixed per second live-wiring review: gate Abandon() on the outcome
+        // RequestCancellation itself reports (AcknowledgedWasPending), NOT on re-Polling the record's
+        // resulting status. The two are NOT equivalent: this dispatch loop is fire-and-continue, so a
+        // completely different execution can start, run, and reach Cancelled/whatever status in the window
+        // between this call's RequestCancellation and its own Poll -- re-inferring "was this a Pending
+        // cancel" from Poll's snapshot could then call Abandon() and kill THAT unrelated execution's
+        // legitimately-queued work item. AcknowledgedWasPending is set inside ExecutionManager's own lock,
+        // at the exact moment of the transition it describes, so there's no such window.
+        if (outcome == CancellationRequestOutcome.AcknowledgedWasPending)
         {
-            // Hard requirement 3: RequestCancellation resolving straight to Cancelled (rather than merely
-            // stamping CancellationRequestedAt and leaving the record Running) means the execution was
-            // still Pending -- ExecutionManager.ApplyCancellation's own doc comment explains why that
-            // specific transition is the signal that a queued-but-not-yet-run work item may still be
-            // sitting in the bridge, so it must be abandoned here rather than left to fire later.
             _bridge.Abandon();
         }
+
+        var record = _executionManager.Poll(executionId);
 
         return record is not null
             ? ExecutionResultMessage.FromRecord(request.Id, record)
