@@ -9,6 +9,12 @@
     <RootNamespace>MCPBridge.AddIn</RootNamespace>
     <AssemblyName>MCPBridge.AddIn</AssemblyName>
     <UseWindowsForms>false</UseWindowsForms>
+    <!-- For MCPBridgeStatusWindow: a non-modal status display (a real WPF Window shown via .Show(), not
+         .ShowDialog()/TaskDialog.Show()) so it never blocks Revit's UI thread the way a modal would;
+         load-bearing for both UX (doesn't force-interrupt the user's work to dismiss it) and for this
+         add-in's own live self-testing (a modal here would deadlock: closing it needs the same UI thread
+         a follow-up execute_script call also needs). -->
+    <UseWPF>true</UseWPF>
     <RevitVersion>2027</RevitVersion>
     <RevitInstallDir>C:\Program Files\Autodesk\Revit $(RevitVersion)</RevitInstallDir>
     <!--
@@ -85,6 +91,25 @@
   -->
   <Target Name="MCPBridgeSignDevBuild" AfterTargets="Build" Condition="'$(MCPBridgeSignDevBuild)'=='true' And '$(OS)'=='Windows_NT' And '$(TargetFramework)'!=''">
     <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildThisFileDirectory)..\..\tools\Sign-AddIn.ps1&quot; -DllPath &quot;$(TargetPath)&quot;" />
+  </Target>
+
+  <!--
+    Embeds the current git commit into the assembly (read by MCPBridgeStatusCommand's ribbon-button
+    dialog, via AssemblyMetadataAttribute) so "which build is this" can be answered from inside Revit, not
+    just from a log file or by cross-referencing a build timestamp against git log. BeforeTargets=
+    "GenerateAssemblyInfo" so the AssemblyMetadata item this target adds is populated before that target
+    reads it; ContinueOnError deliberately (not the SignDevBuild target's philosophy above) since a
+    missing git executable or building outside a checkout should degrade to "unknown", not fail the build;
+    this is a pure diagnostic convenience with no correctness implication, unlike signing actually failing
+    partway through.
+  -->
+  <Target Name="MCPBridgeEmbedGitCommit" BeforeTargets="GenerateAssemblyInfo" Condition="'$(TargetFramework)'!=''">
+    <Exec Command="git rev-parse --short HEAD" ConsoleToMSBuild="true" StandardOutputImportance="low" ContinueOnError="WarnAndContinue">
+      <Output TaskParameter="ConsoleOutput" PropertyName="MCPBridgeGitCommit" />
+    </Exec>
+    <ItemGroup Condition="'$(MCPBridgeGitCommit)'!=''">
+      <AssemblyMetadata Include="GitCommit" Value="$(MCPBridgeGitCommit)" />
+    </ItemGroup>
   </Target>
 
 </Project>
