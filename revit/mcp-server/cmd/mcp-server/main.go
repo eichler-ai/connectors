@@ -31,6 +31,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/broker"
+	"github.com/eichler-ai/connectors/revit/mcp-server/internal/discovery"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/execution"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/mcpserver"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/registry"
@@ -390,11 +391,14 @@ func runPrimary(ctx context.Context, bindAddr string, port int, dataDir string, 
 	mcpServer := mcp.NewServer(&mcp.Implementation{Name: serverName, Version: version}, nil)
 	execMgr := execution.NewManager()
 	mcpserver.Register(mcpServer, execMgr)
+	discoveryRouter := discovery.NewRouter()
+	mcpserver.RegisterDiscovery(mcpServer, discoveryRouter)
 
 	b := &broker.Broker{
 		Token:     token,
 		Registry:  registry.New(),
 		Execution: execMgr,
+		Discovery: discoveryRouter,
 		MCPServer: mcpServer,
 		Logger:    logger,
 	}

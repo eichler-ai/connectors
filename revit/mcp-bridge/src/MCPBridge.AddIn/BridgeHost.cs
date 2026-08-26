@@ -9,6 +9,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Autodesk.Revit.UI;
 using MCPBridge.Core.Connection;
+using MCPBridge.Core.Discovery;
 using MCPBridge.Core.Dispatch;
 using MCPBridge.Core.Execution;
 using MCPBridge.Core.Protocol;
@@ -117,7 +118,20 @@ internal sealed class BridgeHost
         deferredRaiser.Bind(scriptExternalEvent);
 
         var scriptExecutor = new TransactionScriptExecutor(new RoslynScriptRunner());
-        var dispatcher = new RequestDispatcher(_executionManager, scriptBridge, scriptExecutor, windowInventory: new Win32WindowInventory());
+
+        // PRD §08: discovery reflects directly over the RevitAPI/RevitAPIUI assemblies Revit has already
+        // loaded into this process -- typeof(...).Assembly, never a second load from a guessed install
+        // path -- so it always matches the exact assembly/version actually running.
+        var discoveryService = new DiscoveryService(new DiscoveryOptions
+        {
+            Assemblies = new[]
+            {
+                typeof(Autodesk.Revit.DB.Document).Assembly,
+                typeof(UIApplication).Assembly,
+            },
+        });
+
+        var dispatcher = new RequestDispatcher(_executionManager, scriptBridge, scriptExecutor, windowInventory: new Win32WindowInventory(), discoveryService: discoveryService);
 
         _stopCts = new CancellationTokenSource();
         var stopToken = _stopCts.Token;

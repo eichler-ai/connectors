@@ -7,14 +7,19 @@
     <LangVersion>latest</LangVersion>
     <IsPackable>false</IsPackable>
     <RootNamespace>MCPBridge.Discovery.Tests</RootNamespace>
+    <!--
+      Emits a real XML-doc sidecar (MCPBridge.Discovery.Tests.xml) next to this test assembly's own DLL,
+      compiled from the Fixtures/*.cs triple-slash comments; DiscoveryServiceTests reflects over
+      typeof(Fixtures.Widget).Assembly (this assembly) and relies on DiscoveryService locating this file
+      via the same Path.ChangeExtension(assembly.Location, ".xml") convention it uses for RevitAPI.xml in
+      production (see DiscoveryOptions' own doc comment); a portable, self-contained fixture rather than
+      depending on the real, Windows/Revit-install-only RevitAPI.dll being present in dev environments.
+    -->
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>
-    <!--
-      Empty shell for now: API discovery (list_functions/search_functions/describe_function)
-      is phase 03 per PRD §15. No tests here yet; this project exists so the
-      solution/test layout matches the README from day one.
-    -->
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
     <PackageReference Include="xunit" Version="2.9.2" />
     <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
@@ -23,6 +28,13 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\MCPBridge.Core\MCPBridge.Core.csproj" />
     <ProjectReference Include="..\..\src\MCPBridge.RevitAdapter\MCPBridge.RevitAdapter.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Hand-computed doc-id XML asset for direct XmlDocIndex parsing tests (option (a) in this feature's task brief); kept separate from the compiler-generated Fixtures/*.cs sidecar so XmlDocIndex's own parsing is exercised against a genuinely hand-authored file, not just the compiler's output. -->
+    <None Include="Fixtures\SampleDocs.xml">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
   </ItemGroup>
 
 </Project>
