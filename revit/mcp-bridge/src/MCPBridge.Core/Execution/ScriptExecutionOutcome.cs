@@ -22,6 +22,6 @@ public sealed class ScriptExecutionOutcome
     public static ScriptExecutionOutcome Failed(Exception exception, string stdOut, IReadOnlyList<DiagnosticRecord>? notices = null) =>
         new() { Success = false, Exception = exception, StdOut = stdOut, Notices = notices ?? Array.Empty<DiagnosticRecord>() };
 
-    public static ScriptExecutionOutcome Cancelled(string stdOut) =>
-        new() { Success = false, WasCancelled = true, StdOut = stdOut };
+    public static ScriptExecutionOutcome Cancelled(string stdOut, IReadOnlyList<DiagnosticRecord>? notices = null) =>
+        new() { Success = false, WasCancelled = true, StdOut = stdOut, Notices = notices ?? Array.Empty<DiagnosticRecord>() };
 }

@@ -305,7 +305,7 @@ public sealed class RequestDispatcher
 
         if (outcome.WasCancelled)
         {
-            _executionManager.CompleteCancelled(executionId, _now(), outcome.StdOut);
+            _executionManager.CompleteCancelled(executionId, _now(), outcome.StdOut, outcome.Notices);
         }
         else if (outcome.Success)
         {

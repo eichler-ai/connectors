@@ -18,11 +18,9 @@ public sealed class FakeTransactionAdapter : ITransactionAdapter
     public bool ThrowOnCommit { get; set; }
     public IReadOnlyList<FailureSummary> FailuresToReport { get; set; } = Array.Empty<FailureSummary>();
 
-    private Action<IReadOnlyList<FailureSummary>>? _observer;
+    public IReadOnlyList<FailureSummary> CommitFailures { get; private set; } = Array.Empty<FailureSummary>();
 
     public void Start() => Calls.Add("Start");
-
-    public void SetFailuresObserver(Action<IReadOnlyList<FailureSummary>> observer) => _observer = observer;
 
     public TransactionCommitResult Commit()
     {
@@ -32,16 +30,8 @@ public sealed class FakeTransactionAdapter : ITransactionAdapter
             throw new InvalidOperationException("simulated commit failure");
         }
 
-        if (FailuresToReport.Count > 0)
-        {
-            _observer?.Invoke(FailuresToReport);
-            if (FailuresToReport.Any(f => f.IsError))
-            {
-                return TransactionCommitResult.RolledBack;
-            }
-        }
-
-        return TransactionCommitResult.Committed;
+        CommitFailures = FailuresToReport;
+        return FailuresToReport.Any(f => f.IsError) ? TransactionCommitResult.RolledBack : TransactionCommitResult.Committed;
     }
 
     public void RollBack() => Calls.Add("RollBack");

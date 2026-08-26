@@ -23,6 +23,15 @@ public static class ActiveDialogContext
     private static IDictionary<string, int>? _overrides;
     private static List<DiagnosticRecord> _recorded = new();
 
+    /// <summary>
+    /// True only while a script is actually running. Review finding: without this, the AddIn-side
+    /// DialogBoxShowing handler had no way to tell "a script is running" apart from "Revit is idle with
+    /// a human at the keyboard" -- it auto-answered every dialog in the entire Revit session
+    /// unconditionally, including a human's own "Save changes?"/sync-with-central prompts. The handler
+    /// must check this and let Revit show the dialog normally (no override at all) whenever it's false.
+    /// </summary>
+    public static bool IsActive => _overrides is not null;
+
     public static void SetActive(IDictionary<string, int> overrides)
     {
         _overrides = overrides;

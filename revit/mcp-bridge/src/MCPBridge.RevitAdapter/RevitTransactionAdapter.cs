@@ -13,28 +13,37 @@ namespace MCPBridge.RevitAdapter;
 public sealed class RevitTransactionAdapter : ITransactionAdapter
 {
     private readonly Transaction _transaction;
-    private Action<IReadOnlyList<FailureSummary>>? _observer;
 
     public RevitTransactionAdapter(Transaction transaction)
     {
         _transaction = transaction;
     }
 
-    public void Start() => _transaction.Start();
+    public IReadOnlyList<FailureSummary> CommitFailures { get; private set; } = Array.Empty<FailureSummary>();
 
-    public void SetFailuresObserver(Action<IReadOnlyList<FailureSummary>> observer) => _observer = observer;
+    public void Start() => _transaction.Start();
 
     public TransactionCommitResult Commit()
     {
-        if (_observer is not null)
-        {
-            var options = _transaction.GetFailureHandlingOptions();
-            options.SetFailuresPreprocessor(new AdapterFailuresPreprocessor(_observer));
-            _transaction.SetFailureHandlingOptions(options);
-        }
+        var preprocessor = new AdapterFailuresPreprocessor();
+        var options = _transaction.GetFailureHandlingOptions();
+        options.SetFailuresPreprocessor(preprocessor);
+        _transaction.SetFailureHandlingOptions(options);
 
         var status = _transaction.Commit();
-        return status == TransactionStatus.Committed ? TransactionCommitResult.Committed : TransactionCommitResult.RolledBack;
+        CommitFailures = preprocessor.Summaries;
+
+        // Review finding: mapping every non-Committed status to RolledBack was wrong -- only
+        // TransactionStatus.RolledBack means Revit already closed the Transaction itself (the
+        // ProceedWithRollBack contract this class relies on); any other non-Committed status
+        // (Uninitialized/Pending/Error/Started) means the Transaction is NOT actually closed, and the
+        // caller must not skip its own RollBack() call the way it correctly does for RolledBack.
+        return status switch
+        {
+            TransactionStatus.Committed => TransactionCommitResult.Committed,
+            TransactionStatus.RolledBack => TransactionCommitResult.RolledBack,
+            _ => throw new InvalidOperationException($"Transaction.Commit() returned unexpected status {status}."),
+        };
     }
 
     public void RollBack() => _transaction.RollBack();

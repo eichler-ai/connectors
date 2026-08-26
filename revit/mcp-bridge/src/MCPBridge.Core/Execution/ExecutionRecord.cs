@@ -70,12 +70,13 @@ public sealed class ExecutionRecord
         Notices = notices ?? Array.Empty<DiagnosticRecord>();
     }
 
-    public void MarkCancelled(DateTimeOffset now, string? stdOut)
+    public void MarkCancelled(DateTimeOffset now, string? stdOut, IReadOnlyList<DiagnosticRecord>? notices = null)
     {
         RequireNonTerminal();
         Status = ExecutionStatus.Cancelled;
         CompletedAt = now;
         StdOut = stdOut;
+        Notices = notices ?? Array.Empty<DiagnosticRecord>();
     }
 
     public void MarkUnrecoverable(DateTimeOffset now, DiagnosticRecord diagnostic)
