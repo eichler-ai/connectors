@@ -64,18 +64,22 @@ public sealed class MCPBridgeApplication : IExternalApplication
             // OnStartup exception and a manifest Revit never loaded at all were otherwise indistinguishable
             // from the outside. Best-effort only (never let a logging failure mask the real one); path is
             // computed per-machine, not hardcoded to any one developer's username.
-            TryLogStartupFailure(ex);
+            TryLogDiagnostic($"OnStartup failed: {ex}");
             return Result.Failed;
         }
     }
 
-    private static void TryLogStartupFailure(Exception ex)
+    /// <summary>Best-effort append to %LOCALAPPDATA%\MCPBridge\startup-errors.log -- shared by OnStartup's
+    /// own failure path and CreateStatusRibbonButton's (PRD §01 observability: a caught-and-swallowed
+    /// failure still deserves a trace somewhere, not total silence, even when it must not fail the whole
+    /// add-in load).</summary>
+    private static void TryLogDiagnostic(string message)
     {
         try
         {
             var directory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "MCPBridge");
             Directory.CreateDirectory(directory);
-            File.AppendAllText(Path.Combine(directory, "startup-errors.log"), $"{DateTimeOffset.UtcNow:O} OnStartup failed: {ex}\n");
+            File.AppendAllText(Path.Combine(directory, "startup-errors.log"), $"{DateTimeOffset.UtcNow:O} {message}\n");
         }
         catch
         {
@@ -117,9 +121,12 @@ public sealed class MCPBridgeApplication : IExternalApplication
             };
             panel.AddItem(buttonData);
         }
-        catch
+        catch (Exception ex)
         {
-            // Best-effort UI nicety -- see this method's own doc comment.
+            // Best-effort UI nicety -- see this method's own doc comment. Still logged (independent PR
+            // review finding: a bare catch{} here silently violated PRD §01's observability principle --
+            // "caught and swallowed" should mean "doesn't fail the load," not "leaves zero trace").
+            TryLogDiagnostic($"CreateStatusRibbonButton failed: {ex}");
         }
     }
 

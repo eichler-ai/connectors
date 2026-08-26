@@ -336,6 +336,13 @@ internal sealed class BridgeHost
         // returns (which happens on disconnect, the opposite condition). Same moment defines "connected"
         // for the ribbon status button.
         reconnectController.OnConnectSucceeded();
+        // _isConnected MUST be written last, after _brokerAddress/_connectedSinceUtcTicks (independent PR
+        // review confirmed this ordering is what makes the three safe to read together from another
+        // thread without a lock): _isConnected is the volatile "release" a UI-thread reader synchronizes
+        // on -- observing _isConnected == true is only meaningful as a guarantee that the writes before it
+        // are also visible if it's genuinely the LAST of the three to be written. Reordering these three
+        // lines would reopen a window where a status read could observe IsConnected=true alongside a
+        // stale/null BrokerAddress from a previous connection.
         _brokerAddress = $"{address.Host}:{address.Port}";
         Interlocked.Exchange(ref _connectedSinceUtcTicks, DateTimeOffset.UtcNow.Ticks);
         _isConnected = true;

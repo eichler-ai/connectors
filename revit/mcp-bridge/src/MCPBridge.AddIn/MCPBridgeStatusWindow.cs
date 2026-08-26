@@ -31,15 +31,30 @@ internal static class MCPBridgeStatusWindow
 
     public static void ShowOrActivate(IntPtr ownerHandle, string content)
     {
+        // Independent PR review finding: this branch used to just Activate() the existing window without
+        // ever updating its content, so a window left open across a reconnect/disconnect kept showing
+        // whatever status was true at the moment it was first opened -- silently stale for exactly the
+        // information (connection status) this button exists to keep honest. Re-clicking now always
+        // refreshes the visible content, whether or not a window was already open.
         if (_window is { } existing)
         {
+            if (existing.Content is TextBox existingTextBox)
+            {
+                existingTextBox.Text = content;
+            }
+
             existing.Activate();
             return;
         }
 
         var window = new Window
         {
-            Title = "Status",
+            // Unlike TaskDialog.Show(), Revit does NOT auto-prefix a plain WPF Window's title with this
+            // add-in's registered <Name> -- that auto-prefixing was specifically a TaskDialog behavior
+            // (see the git history on this file/MCPBridgeStatusCommand.cs for the two rounds of live
+            // title-wording feedback that established "MCP Bridge - Status" as the correct rendered
+            // title). Set the full string directly here since nothing else will add the prefix now.
+            Title = "MCP Bridge - Status",
             Width = 420,
             Height = 260,
             ResizeMode = ResizeMode.CanResize,

@@ -125,7 +125,7 @@ This connector is the first of what's expected to be several in a shared connect
 
 > **Repo-wide convention, documented here first.** The Bridge/Server split — an in-process add-in plus a separate agent-facing MCP server — is the general pattern for any future connector to an app with the same constraints (single-threaded UI API, needs an in-process executor), not a Revit-specific naming choice. Captured in the repo root's `CONVENTIONS.md`.
 
-The add-in stays intentionally thin: a TCP client, a Roslyn script runner, a `DialogBoxShowing` handler, and live reflection over `RevitAPI.dll`/`RevitAPI.xml` serving §08's discovery commands directly, on the connection thread rather than through `ExternalEvent`. Every piece of MCP-protocol churn — schema versions, new transport features — lives in the broker, which can be updated without resigning or redistributing the signed Revit DLL.
+The add-in stays intentionally thin: a TCP client, a Roslyn script runner, a `DialogBoxShowing` handler, and live reflection over `RevitAPI.dll`/`RevitAPI.xml` serving §08's discovery commands directly, on the connection thread rather than through `ExternalEvent`. Every piece of MCP-protocol churn — schema versions, new transport features — lives in the broker, which can be updated without resigning or redistributing the signed Revit DLL. One small piece of user-facing UI sits outside this list deliberately: a single "MCP Bridge" ribbon panel with a "Status" button (Add-Ins tab), showing live connection state and build identity in a non-modal window — a diagnostic convenience the add-in's own live-wiring development made clear was worth having, not a step toward a broader in-Revit UI surface.
 
 ### MCP Server implementation language — Go
 

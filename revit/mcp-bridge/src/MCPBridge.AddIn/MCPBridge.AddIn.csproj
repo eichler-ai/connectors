@@ -96,18 +96,31 @@
   <!--
     Embeds the current git commit into the assembly (read by MCPBridgeStatusCommand's ribbon-button
     dialog, via AssemblyMetadataAttribute) so "which build is this" can be answered from inside Revit, not
-    just from a log file or by cross-referencing a build timestamp against git log. BeforeTargets=
-    "GenerateAssemblyInfo" so the AssemblyMetadata item this target adds is populated before that target
-    reads it; ContinueOnError deliberately (not the SignDevBuild target's philosophy above) since a
-    missing git executable or building outside a checkout should degrade to "unknown", not fail the build;
-    this is a pure diagnostic convenience with no correctness implication, unlike signing actually failing
-    partway through.
+    just from a log file or by cross-referencing a build timestamp against git log.
+
+    Independent PR review finding: an earlier version used BeforeTargets="GenerateAssemblyInfo", which
+    never actually worked; MSBuild's real order is DependsOnTargets, then BeforeTargets, then the
+    target's own body, and GenerateAssemblyInfo's DependsOnTargets chain (via CoreGenerateAssemblyInfo)
+    already runs GetAssemblyAttributes, the target that actually converts @(AssemblyMetadata) items into
+    @(AssemblyAttribute), before GenerateAssemblyInfo's own BeforeTargets hook ever fires. The
+    AssemblyMetadata item this target adds was therefore always too late to be picked up; the button
+    always showed "Commit: unknown" regardless of whether git was even available. Masked on the dev VM
+    itself specifically because it has no git installed, so the bug and the intended graceful degradation
+    looked identical from the UI. BeforeTargets="GetAssemblyAttributes" is the actually-correct hook.
+
+    Second finding: ConsoleToMSBuild="true" captures BOTH stdout and stderr into ConsoleOutput, so a git
+    failure that writes to stderr (plausible here: SYSTEM-context builds over a UNC/mapped shared drive
+    path routinely trip git's "detected dubious ownership" safe-directory check) would embed the literal
+    "fatal: ..." message as the commit string instead of leaving it empty. IgnoreExitCode +
+    checking $(MCPBridgeGitExitCode)=='0' before using the captured value fixes this: only a genuinely
+    successful `git rev-parse` populates AssemblyMetadata at all.
   -->
-  <Target Name="MCPBridgeEmbedGitCommit" BeforeTargets="GenerateAssemblyInfo" Condition="'$(TargetFramework)'!=''">
-    <Exec Command="git rev-parse --short HEAD" ConsoleToMSBuild="true" StandardOutputImportance="low" ContinueOnError="WarnAndContinue">
+  <Target Name="MCPBridgeEmbedGitCommit" BeforeTargets="GetAssemblyAttributes" Condition="'$(TargetFramework)'!=''">
+    <Exec Command="git rev-parse --short HEAD" ConsoleToMSBuild="true" StandardOutputImportance="low" StandardErrorImportance="low" IgnoreExitCode="true">
       <Output TaskParameter="ConsoleOutput" PropertyName="MCPBridgeGitCommit" />
+      <Output TaskParameter="ExitCode" PropertyName="MCPBridgeGitExitCode" />
     </Exec>
-    <ItemGroup Condition="'$(MCPBridgeGitCommit)'!=''">
+    <ItemGroup Condition="'$(MCPBridgeGitExitCode)'=='0' And '$(MCPBridgeGitCommit)'!=''">
       <AssemblyMetadata Include="GitCommit" Value="$(MCPBridgeGitCommit)" />
     </ItemGroup>
   </Target>
