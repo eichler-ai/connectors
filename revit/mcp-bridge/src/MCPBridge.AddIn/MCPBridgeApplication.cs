@@ -16,6 +16,14 @@ public sealed class MCPBridgeApplication : IExternalApplication
     /// <summary>Minted once per Revit process at OnStartup; stable for the process's lifetime (PRD §05).</summary>
     public static Guid InstanceId { get; private set; }
 
+    /// <summary>
+    /// The live BridgeHost for this process, if OnStartup has run -- read by MCPBridgeStatusCommand (the
+    /// ribbon button) to show connection status without needing its own separate channel to the
+    /// connection thread. Revit's own add-in model guarantees at most one MCPBridgeApplication instance
+    /// per process, so a static reference here is safe and matches the existing InstanceId pattern above.
+    /// </summary>
+    internal static BridgeHost? CurrentHost { get; private set; }
+
     private BridgeHost? _host;
 
     public Result OnStartup(UIControlledApplication application)
@@ -39,7 +47,10 @@ public sealed class MCPBridgeApplication : IExternalApplication
             var discoveryOptions = BuildDiscoveryOptions();
 
             _host = new BridgeHost(InstanceId, executionManager, ReconnectBackoffPolicy.Default, revitVersion, discoveryOptions);
+            CurrentHost = _host;
             _host.Start();
+
+            CreateStatusRibbonButton(application);
 
             return Result.Succeeded;
         }
@@ -53,18 +64,22 @@ public sealed class MCPBridgeApplication : IExternalApplication
             // OnStartup exception and a manifest Revit never loaded at all were otherwise indistinguishable
             // from the outside. Best-effort only (never let a logging failure mask the real one); path is
             // computed per-machine, not hardcoded to any one developer's username.
-            TryLogStartupFailure(ex);
+            TryLogDiagnostic($"OnStartup failed: {ex}");
             return Result.Failed;
         }
     }
 
-    private static void TryLogStartupFailure(Exception ex)
+    /// <summary>Best-effort append to %LOCALAPPDATA%\MCPBridge\startup-errors.log -- shared by OnStartup's
+    /// own failure path and CreateStatusRibbonButton's (PRD §01 observability: a caught-and-swallowed
+    /// failure still deserves a trace somewhere, not total silence, even when it must not fail the whole
+    /// add-in load).</summary>
+    private static void TryLogDiagnostic(string message)
     {
         try
         {
             var directory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "MCPBridge");
             Directory.CreateDirectory(directory);
-            File.AppendAllText(Path.Combine(directory, "startup-errors.log"), $"{DateTimeOffset.UtcNow:O} OnStartup failed: {ex}\n");
+            File.AppendAllText(Path.Combine(directory, "startup-errors.log"), $"{DateTimeOffset.UtcNow:O} {message}\n");
         }
         catch
         {
@@ -77,7 +92,42 @@ public sealed class MCPBridgeApplication : IExternalApplication
     {
         _host?.Stop();
         _host = null;
+        CurrentHost = null;
         return Result.Succeeded;
+    }
+
+    /// <summary>
+    /// Adds a single "Status" button to a new "MCP Bridge" ribbon panel on the Add-Ins tab, per the
+    /// user's own request: a quick, no-context-needed way to check "is this actually connected" and "what
+    /// build/commit is this" without going through logs or an external tool -- exactly the two questions
+    /// that took the most manual digging to answer during this add-in's own live-wiring development.
+    /// Best-effort: a ribbon-creation failure (e.g. a panel name collision with another add-in) must not
+    /// fail the whole add-in load over a UI nicety, so it's caught and swallowed here specifically, not
+    /// folded into OnStartup's own broader catch.
+    /// </summary>
+    private static void CreateStatusRibbonButton(UIControlledApplication application)
+    {
+        try
+        {
+            var panel = application.CreateRibbonPanel("MCP Bridge");
+            var assemblyLocation = typeof(MCPBridgeApplication).Assembly.Location;
+            var buttonData = new PushButtonData(
+                "MCPBridgeStatus",
+                "Status",
+                assemblyLocation,
+                typeof(MCPBridgeStatusCommand).FullName)
+            {
+                ToolTip = "Show MCP Bridge connection status and build info.",
+            };
+            panel.AddItem(buttonData);
+        }
+        catch (Exception ex)
+        {
+            // Best-effort UI nicety -- see this method's own doc comment. Still logged (independent PR
+            // review finding: a bare catch{} here silently violated PRD §01's observability principle --
+            // "caught and swallowed" should mean "doesn't fail the load," not "leaves zero trace").
+            TryLogDiagnostic($"CreateStatusRibbonButton failed: {ex}");
+        }
     }
 
     /// <summary>

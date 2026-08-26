@@ -44,6 +44,33 @@ internal sealed class BridgeHost
     private volatile TcpClient? _activeTcpClient;
     private Timer? _timeoutTimer;
 
+    // Backing fields for the status snapshot the MCP Bridge ribbon button reads (see
+    // MCPBridgeStatusCommand). Set from the connection thread at the exact same points that already
+    // define "connected" for reconnect-backoff purposes (OnConnectSucceeded) and "disconnected"
+    // (RunConnectionLoop's finally clearing _activeTcpClient) -- no separate state machine, just exposing
+    // what this class already tracks internally. Read from Revit's UI thread (when the ribbon button is
+    // clicked), so all three are volatile/interlocked-safe rather than requiring a lock a UI-thread read
+    // would have no business contending with a background thread over.
+    private volatile bool _isConnected;
+    private volatile string? _brokerAddress;
+    private long _connectedSinceUtcTicks;
+
+    /// <summary>True once auth+register has succeeded on the current connection; false while disconnected/reconnecting.</summary>
+    public bool IsConnected => _isConnected;
+
+    /// <summary>The broker's "host:port" for the current (or most recent) connection, if one has ever succeeded.</summary>
+    public string? BrokerAddress => _brokerAddress;
+
+    /// <summary>When the current connection's auth+register last succeeded, if <see cref="IsConnected"/>.</summary>
+    public DateTimeOffset? ConnectedSince
+    {
+        get
+        {
+            var ticks = Interlocked.Read(ref _connectedSinceUtcTicks);
+            return ticks == 0 ? null : new DateTimeOffset(ticks, TimeSpan.Zero);
+        }
+    }
+
     /// <summary>How often <see cref="_timeoutTimer"/> re-checks max_duration_ms/the cancellation grace period.</summary>
     private static readonly TimeSpan TimeoutCheckInterval = TimeSpan.FromSeconds(1);
 
@@ -196,6 +223,7 @@ internal sealed class BridgeHost
             finally
             {
                 _activeTcpClient = null;
+                _isConnected = false;
             }
 
             if (!stopToken.IsCancellationRequested)
@@ -305,8 +333,19 @@ internal sealed class BridgeHost
 
         // A live connection with a successful auth+register exchange is what "connected" means for
         // backoff-reset purposes -- reset here, not merely on TCP connect, and not merely once this method
-        // returns (which happens on disconnect, the opposite condition).
+        // returns (which happens on disconnect, the opposite condition). Same moment defines "connected"
+        // for the ribbon status button.
         reconnectController.OnConnectSucceeded();
+        // _isConnected MUST be written last, after _brokerAddress/_connectedSinceUtcTicks (independent PR
+        // review confirmed this ordering is what makes the three safe to read together from another
+        // thread without a lock): _isConnected is the volatile "release" a UI-thread reader synchronizes
+        // on -- observing _isConnected == true is only meaningful as a guarantee that the writes before it
+        // are also visible if it's genuinely the LAST of the three to be written. Reordering these three
+        // lines would reopen a window where a status read could observe IsConnected=true alongside a
+        // stale/null BrokerAddress from a previous connection.
+        _brokerAddress = $"{address.Host}:{address.Port}";
+        Interlocked.Exchange(ref _connectedSinceUtcTicks, DateTimeOffset.UtcNow.Ticks);
+        _isConnected = true;
 
         while (!stopToken.IsCancellationRequested)
         {

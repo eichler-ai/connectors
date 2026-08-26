@@ -9,6 +9,12 @@
     <RootNamespace>MCPBridge.AddIn</RootNamespace>
     <AssemblyName>MCPBridge.AddIn</AssemblyName>
     <UseWindowsForms>false</UseWindowsForms>
+    <!-- For MCPBridgeStatusWindow: a non-modal status display (a real WPF Window shown via .Show(), not
+         .ShowDialog()/TaskDialog.Show()) so it never blocks Revit's UI thread the way a modal would;
+         load-bearing for both UX (doesn't force-interrupt the user's work to dismiss it) and for this
+         add-in's own live self-testing (a modal here would deadlock: closing it needs the same UI thread
+         a follow-up execute_script call also needs). -->
+    <UseWPF>true</UseWPF>
     <RevitVersion>2027</RevitVersion>
     <RevitInstallDir>C:\Program Files\Autodesk\Revit $(RevitVersion)</RevitInstallDir>
     <!--
@@ -85,6 +91,38 @@
   -->
   <Target Name="MCPBridgeSignDevBuild" AfterTargets="Build" Condition="'$(MCPBridgeSignDevBuild)'=='true' And '$(OS)'=='Windows_NT' And '$(TargetFramework)'!=''">
     <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildThisFileDirectory)..\..\tools\Sign-AddIn.ps1&quot; -DllPath &quot;$(TargetPath)&quot;" />
+  </Target>
+
+  <!--
+    Embeds the current git commit into the assembly (read by MCPBridgeStatusCommand's ribbon-button
+    dialog, via AssemblyMetadataAttribute) so "which build is this" can be answered from inside Revit, not
+    just from a log file or by cross-referencing a build timestamp against git log.
+
+    Independent PR review finding: an earlier version used BeforeTargets="GenerateAssemblyInfo", which
+    never actually worked; MSBuild's real order is DependsOnTargets, then BeforeTargets, then the
+    target's own body, and GenerateAssemblyInfo's DependsOnTargets chain (via CoreGenerateAssemblyInfo)
+    already runs GetAssemblyAttributes, the target that actually converts @(AssemblyMetadata) items into
+    @(AssemblyAttribute), before GenerateAssemblyInfo's own BeforeTargets hook ever fires. The
+    AssemblyMetadata item this target adds was therefore always too late to be picked up; the button
+    always showed "Commit: unknown" regardless of whether git was even available. Masked on the dev VM
+    itself specifically because it has no git installed, so the bug and the intended graceful degradation
+    looked identical from the UI. BeforeTargets="GetAssemblyAttributes" is the actually-correct hook.
+
+    Second finding: ConsoleToMSBuild="true" captures BOTH stdout and stderr into ConsoleOutput, so a git
+    failure that writes to stderr (plausible here: SYSTEM-context builds over a UNC/mapped shared drive
+    path routinely trip git's "detected dubious ownership" safe-directory check) would embed the literal
+    "fatal: ..." message as the commit string instead of leaving it empty. IgnoreExitCode +
+    checking $(MCPBridgeGitExitCode)=='0' before using the captured value fixes this: only a genuinely
+    successful `git rev-parse` populates AssemblyMetadata at all.
+  -->
+  <Target Name="MCPBridgeEmbedGitCommit" BeforeTargets="GetAssemblyAttributes" Condition="'$(TargetFramework)'!=''">
+    <Exec Command="git rev-parse --short HEAD" ConsoleToMSBuild="true" StandardOutputImportance="low" StandardErrorImportance="low" IgnoreExitCode="true">
+      <Output TaskParameter="ConsoleOutput" PropertyName="MCPBridgeGitCommit" />
+      <Output TaskParameter="ExitCode" PropertyName="MCPBridgeGitExitCode" />
+    </Exec>
+    <ItemGroup Condition="'$(MCPBridgeGitExitCode)'=='0' And '$(MCPBridgeGitCommit)'!=''">
+      <AssemblyMetadata Include="GitCommit" Value="$(MCPBridgeGitCommit)" />
+    </ItemGroup>
   </Target>
 
 </Project>
