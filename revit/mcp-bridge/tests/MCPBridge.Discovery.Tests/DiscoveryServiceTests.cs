@@ -133,6 +133,57 @@ public class DiscoveryServiceTests
     }
 
     // ---------------------------------------------------------------------------------------------
+    // Type-surface filtering (which types count as "the API" at all)
+    // ---------------------------------------------------------------------------------------------
+
+    [Fact]
+    public void PublicTypeNestedInInternalType_IsNeverDiscoverable()
+    {
+        // IsNestedPublic is true for InternalOuter.NestedPublic, but Type.IsVisible is false -- nothing
+        // outside the assembly can reach it, so it must not appear on any discovery path.
+        const string nested = "MCPBridge.Discovery.Tests.Fixtures.InternalOuter.NestedPublic";
+        var service = NewService();
+
+        var unscoped = service.ListFunctions(null, null, null, pageSize: 100_000);
+        Assert.DoesNotContain(unscoped.Members, m => m.DeclaringType == nested);
+
+        var byType = service.ListFunctions(null, nested, null, pageSize: 100);
+        Assert.Empty(byType.Members);
+        Assert.Equal(0, byType.TotalScoped);
+
+        Assert.Throws<DiscoveryMemberNotFoundException>(() =>
+            service.DescribeFunction(nested + ".NestedPublicWork", null, null));
+    }
+
+    [Fact]
+    public void UndocumentedType_IsHiddenFromBrowsing_ButStillReachableByExplicitLookup()
+    {
+        // The RevitAPI.dll C++/CLI-metadata-noise filter: types with no XML-doc entry are dropped from the
+        // browse/search surface, but must never become unreachable -- an explicit type_name scope and
+        // describe_function both still resolve them.
+        const string undocumented = "MCPBridge.Discovery.Tests.Fixtures.Undocumented";
+        var service = NewService();
+
+        var unscoped = service.ListFunctions(null, null, null, pageSize: 100_000);
+        Assert.DoesNotContain(unscoped.Members, m => m.MemberId == "T:" + undocumented);
+
+        var byNamespace = service.ListFunctions("MCPBridge.Discovery.Tests.Fixtures", null, null, pageSize: 100_000);
+        Assert.DoesNotContain(byNamespace.Members, m => m.DeclaringType == undocumented);
+
+        var byType = service.ListFunctions(null, undocumented, null, pageSize: 100);
+        Assert.Contains(byType.Members, m => m.Name == "UndocumentedWork");
+
+        var described = service.DescribeFunction(undocumented + ".UndocumentedWork", null, null);
+        Assert.NotNull(described.Single);
+        Assert.Equal("UndocumentedWork", described.Single!.Name);
+    }
+
+    // The no-sidecar escape hatch (an assembly with no XML-doc file gets no documented-types narrowing at
+    // all, rather than an empty discovery surface) is covered by MCPBridge.Core.Tests' DiscoveryDispatchTests:
+    // that project deliberately does not set GenerateDocumentationFile, so every one of its discovery tests
+    // only passes if the escape hatch holds.
+
+    // ---------------------------------------------------------------------------------------------
     // search_functions
     // ---------------------------------------------------------------------------------------------
 

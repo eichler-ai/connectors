@@ -209,17 +209,28 @@ internal sealed class BridgeHost
 
     private void RunConnectionLoop(RequestDispatcher dispatcher, DocumentSnapshotHandler documentSnapshotHandler, ExternalEvent documentSnapshotEvent, CancellationToken stopToken)
     {
+        LogConnectionDiagnostic($"RunConnectionLoop starting. Mode={_discoveryOptions.Mode} ConnectorRoot={_discoveryOptions.ConnectorRoot}");
         var discovery = new BrokerDiscovery(_discoveryOptions);
         var reconnectController = new ReconnectLoopController(_backoffPolicy);
 
         while (!stopToken.IsCancellationRequested)
         {
+            LogConnectionDiagnostic("loop iteration: about to TryDiscover");
             var discoveryResult = discovery.TryDiscover();
             if (!discoveryResult.Found || discoveryResult.BrokerJson is null || discoveryResult.Address is null)
             {
                 // Not found (or found but unreadable/malformed -- BrokerDiscovery already reports both as
                 // "not found"), or a remote-mode fallback address with no token to authenticate with:
                 // treat identically as a failed attempt and back off, per PRD §05's single retry loop.
+                //
+                // Was previously silent -- PRD §01's observability principle ("caught and swallowed" must
+                // still leave a trace, not mean invisible) didn't actually hold here: a broker.json that's
+                // missing, unreadable, or fails to parse produced literally no evidence anywhere that this
+                // loop was even trying, let alone why it kept failing -- discovered live, chasing exactly
+                // that symptom, when even direct filesystem/network checks outside the add-in all
+                // checked out fine and the real cause turned out to be reachable only from inside this
+                // loop's own exception handling.
+                LogConnectionDiagnostic($"broker discovery failed: {discoveryResult.Diagnostic?.Message ?? "(broker.json not found)"}");
                 Backoff(reconnectController, stopToken);
                 continue;
             }
@@ -228,8 +239,12 @@ internal sealed class BridgeHost
             {
                 RunOneConnection(discoveryResult.BrokerJson, discoveryResult.Address, dispatcher, documentSnapshotHandler, documentSnapshotEvent, reconnectController, stopToken);
             }
-            catch (Exception)
+            catch (Exception ex)
             {
+                // Same observability gap, on the other failure path: this used to catch and discard the
+                // exception with zero trace -- an auth rejection, a connect timeout, or any socket-level
+                // failure looked identical to "never even tried" from the outside.
+                LogConnectionDiagnostic($"connection attempt to {discoveryResult.Address.Host}:{discoveryResult.Address.Port} failed: {ex}");
                 // Any failure during this connection's lifetime (auth rejected, socket error, broker
                 // closed unexpectedly) falls through to backoff-and-retry -- the reconnect loop is
                 // indefinite by design (PRD §05), never fatal to this thread.
@@ -244,6 +259,29 @@ internal sealed class BridgeHost
             {
                 Backoff(reconnectController, stopToken);
             }
+        }
+    }
+
+    /// <summary>
+    /// Best-effort append to %LocalAppData%\MCPBridge\connection.log -- the reconnect loop's own
+    /// equivalent of MCPBridgeApplication.TryLogDiagnostic (PRD §01 observability: a caught-and-swallowed
+    /// failure still deserves a trace somewhere, not total silence). Deliberately a separate file from
+    /// startup-errors.log: this loop retries indefinitely and can log far more often than a one-shot
+    /// OnStartup failure ever would, so keeping them apart means a busy connection log never buries a
+    /// startup failure underneath it.
+    /// </summary>
+    private static void LogConnectionDiagnostic(string message)
+    {
+        try
+        {
+            var directory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "MCPBridge");
+            Directory.CreateDirectory(directory);
+            File.AppendAllText(Path.Combine(directory, "connection.log"), $"{DateTimeOffset.UtcNow:O} {message}\n");
+        }
+        catch
+        {
+            // Best-effort diagnostic only -- a failure here must never mask or interfere with the
+            // reconnect loop itself, which already handles its own failures independently.
         }
     }
 

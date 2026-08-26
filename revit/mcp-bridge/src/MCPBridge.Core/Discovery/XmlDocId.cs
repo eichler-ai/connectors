@@ -79,9 +79,14 @@ public static class XmlDocId
     /// </summary>
     private static string BuildParamTypeName(Type t)
     {
+        // Review finding (M1): a byref parameter's real XML-doc-id convention appends "@" to the element
+        // type's name (e.g. "System.Int32@" for `out int`/`ref int`) -- this used to just unwrap to the
+        // element type with no suffix, silently breaking the doc join for every out/ref parameter (Revit's
+        // API does have some) rather than throwing, since a missing join just looks like "no doc text",
+        // not an error.
         if (t.IsByRef)
         {
-            t = t.GetElementType()!;
+            return BuildParamTypeName(t.GetElementType()!) + "@";
         }
 
         if (t.IsGenericParameter)

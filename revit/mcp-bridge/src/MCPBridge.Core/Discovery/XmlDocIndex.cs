@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text;
 using System.Text.RegularExpressions;
 using System.Xml.Linq;
 
@@ -96,7 +97,7 @@ public sealed class XmlDocIndex
                     var paramName = (string?)paramElement.Attribute("name");
                     if (!string.IsNullOrEmpty(paramName))
                     {
-                        parameters[paramName] = Normalize(paramElement.Value);
+                        parameters[paramName] = Normalize(RenderText(paramElement));
                     }
                 }
 
@@ -105,9 +106,9 @@ public sealed class XmlDocIndex
 
                 members[name] = new XmlDocEntry
                 {
-                    Summary = summaryElement is null ? null : Normalize(summaryElement.Value),
+                    Summary = summaryElement is null ? null : Normalize(RenderText(summaryElement)),
                     Parameters = parameters,
-                    Returns = returnsElement is null ? null : Normalize(returnsElement.Value),
+                    Returns = returnsElement is null ? null : Normalize(RenderText(returnsElement)),
                 };
             }
 
@@ -123,4 +124,53 @@ public sealed class XmlDocIndex
     private static string Normalize(string text) => WhitespaceRun.Replace(text, " ").Trim();
 
     private static readonly Regex WhitespaceRun = new(@"\s+", RegexOptions.Compiled);
+
+    /// <summary>
+    /// Review finding (M5): XElement.Value concatenates only text nodes -- a self-closing
+    /// &lt;see cref="..."/&gt; or &lt;paramref name="..."/&gt; contributes nothing, silently dropping the
+    /// word from the middle of a sentence (e.g. "Deletes the &lt;paramref name="elementId"/&gt; from the
+    /// document" rendered as "Deletes the  from the document"). Revit's XML docs use &lt;see cref&gt;
+    /// heavily. Renders those inline elements as the short (last-segment) name from their cref/name
+    /// attribute instead of dropping them.
+    /// </summary>
+    private static string RenderText(XElement element)
+    {
+        var sb = new StringBuilder();
+        AppendText(element, sb);
+        return sb.ToString();
+    }
+
+    private static void AppendText(XElement element, StringBuilder sb)
+    {
+        foreach (var node in element.Nodes())
+        {
+            switch (node)
+            {
+                case XText text:
+                    sb.Append(text.Value);
+                    break;
+                case XElement el when el.Name.LocalName is "see" or "seealso":
+                    var cref = (string?)el.Attribute("cref");
+                    sb.Append(cref is not null ? ShortNameFromCref(cref) : (string?)el.Attribute("langword") ?? "");
+                    break;
+                case XElement el when el.Name.LocalName is "paramref" or "typeparamref":
+                    sb.Append((string?)el.Attribute("name") ?? "");
+                    break;
+                case XElement el:
+                    AppendText(el, sb); // unrecognized nested element -- still walk into it for its own text.
+                    break;
+            }
+        }
+    }
+
+    /// <summary>Strips a cref's "T:"/"M:"/etc. prefix, parameter list, and namespace/declaring-type qualification down to just the member/type's own short name -- readable inline text, not a full doc-id.</summary>
+    private static string ShortNameFromCref(string cref)
+    {
+        var colonIndex = cref.IndexOf(':');
+        var afterPrefix = colonIndex >= 0 ? cref[(colonIndex + 1)..] : cref;
+        var parenIndex = afterPrefix.IndexOf('(');
+        var namePart = parenIndex >= 0 ? afterPrefix[..parenIndex] : afterPrefix;
+        var lastDot = namePart.LastIndexOf('.');
+        return lastDot >= 0 ? namePart[(lastDot + 1)..] : namePart;
+    }
 }

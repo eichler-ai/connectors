@@ -44,7 +44,9 @@ public sealed class MCPBridgeApplication : IExternalApplication
             // e.g. "2027" -- available directly off ControlledApplication, no live UIApplication needed
             // (unlike the open-documents list, which register also needs -- see DocumentSnapshotHandler).
             var revitVersion = application.ControlledApplication.VersionNumber;
+            TryLogDiagnostic($"raw env MCPBRIDGE_BROKER_MODE={Environment.GetEnvironmentVariable("MCPBRIDGE_BROKER_MODE") ?? "(null)"} MCPBRIDGE_SHARED_ROOT={Environment.GetEnvironmentVariable("MCPBRIDGE_SHARED_ROOT") ?? "(null)"}");
             var discoveryOptions = BuildDiscoveryOptions();
+            TryLogDiagnostic($"resolved discoveryOptions Mode={discoveryOptions.Mode} ConnectorRoot={discoveryOptions.ConnectorRoot}");
 
             _host = new BridgeHost(InstanceId, executionManager, ReconnectBackoffPolicy.Default, revitVersion, discoveryOptions);
             CurrentHost = _host;

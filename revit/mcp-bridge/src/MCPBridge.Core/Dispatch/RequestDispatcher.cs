@@ -452,7 +452,7 @@ public sealed class RequestDispatcher
             var namespaceFilter = request.GetOptionalString("namespace");
             var typeFilter = request.GetOptionalString("type_name");
             var cursor = request.GetOptionalString("cursor");
-            var pageSize = request.GetOptionalInt32("page_size", DefaultListFunctionsPageSize);
+            var pageSize = ClampPageSize(request.GetOptionalInt32("page_size", DefaultListFunctionsPageSize));
 
             var result = _discoveryService.ListFunctions(namespaceFilter, typeFilter, cursor, pageSize);
             return DiscoveryResultMessage.ListFunctions(request.Id, result);
@@ -460,6 +460,10 @@ public sealed class RequestDispatcher
         catch (JsonRpcParamException ex)
         {
             return JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InvalidParams, ex.Message, null);
+        }
+        catch (Exception ex)
+        {
+            return DiscoveryUnexpectedError(request.Id, "list_functions", ex);
         }
     }
 
@@ -474,7 +478,7 @@ public sealed class RequestDispatcher
         {
             var query = request.GetRequiredString("query");
             var cursor = request.GetOptionalString("cursor");
-            var topN = request.GetOptionalInt32("top_n", DefaultSearchFunctionsTopN);
+            var topN = ClampPageSize(request.GetOptionalInt32("top_n", DefaultSearchFunctionsTopN));
 
             var result = _discoveryService.SearchFunctions(query, cursor, topN);
             return DiscoveryResultMessage.SearchFunctions(request.Id, result);
@@ -482,6 +486,10 @@ public sealed class RequestDispatcher
         catch (JsonRpcParamException ex)
         {
             return JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InvalidParams, ex.Message, null);
+        }
+        catch (Exception ex)
+        {
+            return DiscoveryUnexpectedError(request.Id, "search_functions", ex);
         }
     }
 
@@ -516,7 +524,39 @@ public sealed class RequestDispatcher
                 remedy: new[] { "Use list_functions or search_functions to find the correct namespace/type/member name." });
             return JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InvalidParams, ex.Message, diagnostic);
         }
+        catch (Exception ex)
+        {
+            return DiscoveryUnexpectedError(request.Id, "describe_function", ex);
+        }
     }
+
+    /// <summary>
+    /// Review finding (H2): DiscoveryService's reflection can throw for reasons beyond the two typed
+    /// exceptions above (a hostile/unresolvable type in a C++/CLI interop assembly, etc.) -- this runs on
+    /// the add-in's background connection thread (PRD §08's execution-locus decision), so an uncaught
+    /// exception here would take down that connection entirely rather than surfacing as one failed call.
+    /// </summary>
+    private static string DiscoveryUnexpectedError(System.Text.Json.JsonElement id, string method, Exception ex)
+    {
+        var diagnostic = DiagnosticRecord.Create(
+            DiagnosticSeverity.Error,
+            "discovery-unexpected-error",
+            DiagnosticSource.Discovery,
+            $"{method} failed unexpectedly: {ex.Message}",
+            detail: new Dictionary<string, object?> { ["method"] = method },
+            remedy: null);
+        return JsonRpcErrorMessage.ToJson(id, JsonRpcErrorCode.InternalError, diagnostic.Message, diagnostic);
+    }
+
+    /// <summary>
+    /// Review finding (H3): page_size/top_n were passed straight through unvalidated. A caller-supplied
+    /// value &lt;= 0 makes list_functions/search_functions return an empty page whose next_cursor equals
+    /// the cursor just supplied -- an agent paginating in a loop never terminates. A caller-supplied huge
+    /// value returns the entire scoped/matched surface in one response, blowing straight past the
+    /// ~25,000-token MCP output ceiling PRD §08 explicitly designs pagination around. Same clamping
+    /// pattern as <see cref="ClampTimeoutMs"/>.
+    /// </summary>
+    private static int ClampPageSize(int pageSize) => Math.Clamp(pageSize, 1, 500);
 
     private static string DiscoveryUnavailable(System.Text.Json.JsonElement id) => JsonRpcErrorMessage.ToJson(
         id,
