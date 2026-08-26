@@ -80,6 +80,29 @@ Don't assume a redeploy landed where Revit will load it from, or that Revit is r
 - **File locks can silently defeat `xcopy /Y`.** `RevitWorker.exe`/`RevitAccelerator.exe` (not just `Revit.exe`) can hold a lock on a deployed DLL even after `Revit.exe` itself is killed. Kill all three before redeploying, and `del /F` the target before `xcopy` so a lock shows up as a loud failure instead of a silent no-op.
 - Any temporary `File.AppendAllText`-style diagnostic logging added for a debugging session must be stripped back out once the real fix is confirmed working — it's scaffolding, not something that belongs in a merged PR (don't hardcode a dev machine's user-specific path into the add-in either).
 
+### The VM has exactly one .NET SDK — keep it that way
+
+The project targets `net10.0-windows` (PRD §11: Revit 2027's own `RevitAPI.dll` requires .NET 10 —
+confirmed live via `RevitAPI.runtimeconfig.json`'s `"tfm": "net10.0"`). The VM has a single SDK install,
+`C:\dotnet10` (.NET 10 SDK, `10.0.400`), on machine `PATH` — bare `dotnet build`/`dotnet test` resolves
+to it correctly.
+
+This was **not always true during Phase 1/2 development**: an early session installed a plain .NET 8
+SDK to `C:\dotnet` (back when the project still targeted `net8.0-windows`, before PRD §11's correction),
+and a later VM re-provisioning event reinstalled `C:\dotnet` (.NET 8) without `C:\dotnet10` ever
+appearing on `PATH`. Bare `dotnet` silently resolved to the wrong SDK for a while — every build in that
+stretch had actually been calling `C:\dotnet10\dotnet.exe` by its full path, masking the drift until a
+bare `dotnet build` was tried and failed with `NETSDK1045: The current .NET SDK does not support
+targeting .NET 10.0`. Root-caused and fixed by removing the unused `C:\dotnet` (.NET 8) entirely, so
+there is now only one SDK on the VM and no ambiguity for bare `dotnet` to fall into.
+
+**If `NETSDK1045` ever comes back**, don't assume the .NET 10 SDK vanished — first check
+`dotnet --list-sdks` and `[Environment]::GetEnvironmentVariable('PATH','Machine')` (via `prlctl exec`)
+for a second SDK install that's shadowing `C:\dotnet10` on `PATH`. If a re-provisioning event reinstalls
+a stray .NET 8/9 SDK again, remove it (kill any lingering `dotnet.exe`/`VBCSCompiler`/`MSBuild`
+processes first — they hold file locks that make `Remove-Item -Recurse` fail) rather than just
+reordering `PATH` around it, so this class of drift can't quietly recur a third time.
+
 ### `register`'s document list is a one-shot snapshot, not live-updated
 
 The add-in sends `register` once per successful connect (first connect and every reconnect), with whatever documents are open *at that instant* — there's no live push when a document opens/closes mid-connection (Phase 1 scope). If you need a real `document_id` for live testing and you connected before Revit finished opening a document (e.g. one passed as a launch argument, which opens after add-ins load and after the connect race typically wins), the only way to get an updated `register` today is to force a reconnect — e.g. restart the broker process so the add-in's reconnect loop redials and re-snapshots. Confirm the document is actually open first (screenshot or journal check) before doing this, or you'll just get another empty list.
@@ -136,3 +159,4 @@ This file is expected to change as the project learns things — that's the poin
 - Documented the interactive-Revit-relaunch technique (Tools & scripts) after `prlctl exec`'s default SYSTEM-context launch put Revit in a non-interactive session during first live-wiring validation — a one-shot Scheduled Task with `/it` reuses the logged-in user's session without needing their password.
 - Added "Add-in deployment location" and "Verifying you're actually debugging the binary you just built" (Tools & scripts) after a multi-hour debugging session chased a real, already-fixed assembly-resolution bug through several correct-but-never-tested code changes, because every redeploy targeted `C:\ProgramData\...` — not a valid Revit add-in location — while Revit kept silently loading an untouched, hours-stale copy from the per-user `Roaming` folder instead. The fix (only one valid location, verify via the loaded assembly's own logged identity, check the journal for the "won't be loaded" line) is meant to make this class of "identical symptom despite a genuinely different fix" mistake fast to rule out instead of the multi-hour rabbit hole it was this time. Also documented `register`'s one-shot-snapshot timing (Tools & scripts), discovered live: a document opened via launch argument is often still loading when `register` fires, so its `document_id` doesn't appear until something forces a reconnect.
 - Added "Dev-loop add-in signing" (Tools & scripts) after re-clicking Revit's unverified-publisher security prompt dozens of times across one debugging session became the dominant source of friction: a post-build MSBuild target now auto-signs with a local self-signed cert, one-time setup via `tools/New-DevSigningCert.ps1`. Documented two real gotchas hit while building this: `CurrentUser` cert stores silently don't work when the build runs as SYSTEM (via `prlctl exec`) but Revit runs as the interactive user — must use `LocalMachine` stores instead; and `AfterTargets="Build"` on a `<TargetFrameworks>` (plural)-style csproj fires on an outer pass where `$(TargetPath)` is empty, needing a `'$(TargetFramework)'!=''` guard.
+- Added "The VM has exactly one .NET SDK" (Tools & scripts) after bare `dotnet build`/`dotnet test` started failing with `NETSDK1045` (looked like the .NET 10 SDK had vanished from the VM) — turned out `C:\dotnet10` (.NET 10) was never on `PATH`, only `C:\dotnet` (.NET 8, freshly reinstalled by a VM re-provisioning event that day, a leftover from before PRD §11's net8→net10 correction); every prior successful build in the session had been calling `C:\dotnet10\dotnet.exe` by its full path, masking the drift. Fixed by removing the unused `C:\dotnet` (.NET 8) entirely rather than just reordering `PATH` around it, so there's only one SDK left and this can't recur; documented the diagnostic check (`--list-sdks` + `PATH`) for if it ever does.

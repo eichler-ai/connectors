@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 using MCPBridge.Core.Diagnostics;
 using MCPBridge.Core.Execution;
@@ -53,18 +54,25 @@ public sealed class RequestDispatcher
     // tests can substitute an instant no-op alongside a frozen/steppable _now.
     private readonly Func<TimeSpan, Task> _delay;
 
+    // PRD §07 v1 non-framework-dialog fallback: null (the default) means the feature is off -- matches
+    // this codebase's convention for optional add-in features (see CreateStatusRibbonButton's
+    // best-effort registration). Production wiring (BridgeHost) passes a real Win32WindowInventory.
+    private readonly IWindowInventory? _windowInventory;
+
     public RequestDispatcher(
         ExecutionManager executionManager,
         ExternalEventBridge<ScriptExecutionOutcome> bridge,
         TransactionScriptExecutor scriptExecutor,
         Func<DateTimeOffset>? now = null,
-        Func<TimeSpan, Task>? delay = null)
+        Func<TimeSpan, Task>? delay = null,
+        IWindowInventory? windowInventory = null)
     {
         _executionManager = executionManager;
         _bridge = bridge;
         _scriptExecutor = scriptExecutor;
         _now = now ?? (() => DateTimeOffset.UtcNow);
         _delay = delay ?? Task.Delay;
+        _windowInventory = windowInventory;
     }
 
     /// <summary>How often <see cref="HandlePollExecutionAsync"/> re-checks the record while waiting out timeout_ms.</summary>
@@ -150,9 +158,73 @@ public sealed class RequestDispatcher
         }
 
         var record = _executionManager.Poll(executionId);
-        return record is not null
-            ? ExecutionResultMessage.FromRecord(request.Id, record)
-            : ExecutionResultMessage.Busy(request.Id, executionId); // defensive fallback; should be unreachable
+        if (record is null)
+        {
+            return ExecutionResultMessage.Busy(request.Id, executionId); // defensive fallback; should be unreachable
+        }
+
+        // PRD §07 v1 fallback: this call's own local timeout_ms elapsed while the execution is still
+        // Pending/Running (as opposed to workTask winning the race above) -- with DialogBoxShowing
+        // installed, a framework dialog never blocks this long, so a genuine local timeout here means
+        // something else (a non-framework dialog, a slow API call, a real hang) is holding the UI
+        // thread. Diagnosis only, never persisted onto the record itself.
+        var extraNotices = first != workTask && !record.Status.IsTerminal() ? BuildWindowInventoryNotices() : null;
+        return ExecutionResultMessage.FromRecord(request.Id, record, extraNotices);
+    }
+
+    /// <summary>
+    /// PRD §07 v1: enumerates top-level windows owned by this Revit process and wraps them into a
+    /// single diagnostic notice, for a caller to attach to one specific poll/execute response.
+    /// Deliberately does not mutate ExecutionRecord -- this is ephemeral, point-in-time diagnostic
+    /// data, not part of the execution's permanent history. Best-effort: any failure (including
+    /// _windowInventory being unset) degrades to no extra notice, never to a failed response.
+    /// </summary>
+    private IReadOnlyList<DiagnosticRecord>? BuildWindowInventoryNotices()
+    {
+        if (_windowInventory is null)
+        {
+            return null;
+        }
+
+        IReadOnlyList<WindowInfo> windows;
+        try
+        {
+            windows = _windowInventory.EnumerateOwnedTopLevelWindows();
+        }
+        catch
+        {
+            return null;
+        }
+
+        if (windows.Count == 0)
+        {
+            return null;
+        }
+
+        var detail = new Dictionary<string, object?>
+        {
+            ["windows"] = windows
+                .Select(w => new Dictionary<string, object?>
+                {
+                    ["title"] = w.Title,
+                    ["class_name"] = w.ClassName,
+                    ["text"] = w.ChildText,
+                })
+                .ToArray(),
+        };
+
+        return new[]
+        {
+            DiagnosticRecord.Create(
+                DiagnosticSeverity.Info,
+                "window-inventory-timeout-fallback",
+                DiagnosticSource.Dialogs,
+                "poll/execute timed out while the execution was still pending/running; top-level windows " +
+                "owned by this Revit process are listed in detail.windows for manual triage (PRD §07 v1 -- " +
+                "diagnosis only, no automatic action).",
+                detail: detail,
+                remedy: new[] { "Check Revit's screen for a modal dialog and dismiss it manually." }),
+        };
     }
 
     private Task RunScriptWorkItemAsync(string executionId, string scriptText)
@@ -233,11 +305,11 @@ public sealed class RequestDispatcher
 
         if (outcome.WasCancelled)
         {
-            _executionManager.CompleteCancelled(executionId, _now(), outcome.StdOut);
+            _executionManager.CompleteCancelled(executionId, _now(), outcome.StdOut, outcome.Notices);
         }
         else if (outcome.Success)
         {
-            _executionManager.CompleteSuccess(executionId, _now(), outcome.ReturnValue, outcome.StdOut, Array.Empty<DiagnosticRecord>());
+            _executionManager.CompleteSuccess(executionId, _now(), outcome.ReturnValue, outcome.StdOut, outcome.Notices);
         }
         else
         {
@@ -248,7 +320,7 @@ public sealed class RequestDispatcher
                 outcome.Exception?.Message ?? $"execution {executionId} failed with no exception detail.",
                 detail: new Dictionary<string, object?> { ["execution_id"] = executionId },
                 remedy: null);
-            _executionManager.CompleteError(executionId, _now(), diagnostic, outcome.StdOut);
+            _executionManager.CompleteError(executionId, _now(), diagnostic, outcome.StdOut, outcome.Notices);
         }
 
         return outcome;
@@ -286,9 +358,14 @@ public sealed class RequestDispatcher
                 return JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InvalidParams, $"execution_id '{executionId}' is not known to this add-in instance.", UnknownExecutionDiagnostic(executionId));
             }
 
-            if (record.Status.IsTerminal() || _now() >= deadline)
+            if (record.Status.IsTerminal())
             {
                 return ExecutionResultMessage.FromRecord(request.Id, record);
+            }
+
+            if (_now() >= deadline)
+            {
+                return ExecutionResultMessage.FromRecord(request.Id, record, BuildWindowInventoryNotices());
             }
 
             await _delay(PollInterval).ConfigureAwait(false);

@@ -51,6 +51,7 @@ public sealed class MCPBridgeApplication : IExternalApplication
             _host.Start();
 
             CreateStatusRibbonButton(application);
+            DialogSuppressionHandler.Register(application, TryLogDiagnostic);
 
             return Result.Succeeded;
         }
@@ -90,6 +91,7 @@ public sealed class MCPBridgeApplication : IExternalApplication
 
     public Result OnShutdown(UIControlledApplication application)
     {
+        DialogSuppressionHandler.Unregister(application);
         _host?.Stop();
         _host = null;
         CurrentHost = null;

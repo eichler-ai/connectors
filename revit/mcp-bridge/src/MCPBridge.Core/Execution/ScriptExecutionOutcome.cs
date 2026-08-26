@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using MCPBridge.Core.Diagnostics;
 
 namespace MCPBridge.Core.Execution;
 
@@ -11,12 +13,15 @@ public sealed class ScriptExecutionOutcome
     public string StdOut { get; init; } = "";
     public Exception? Exception { get; init; }
 
-    public static ScriptExecutionOutcome Completed(object? returnValue, string stdOut) =>
-        new() { Success = true, ReturnValue = returnValue, StdOut = stdOut };
+    /// <summary>Dialogs auto-answered (PRD §07) and transaction failures auto-resolved (warnings dismissed, errors rolled back) during this run -- folded into notices[] on the wire result.</summary>
+    public IReadOnlyList<DiagnosticRecord> Notices { get; init; } = Array.Empty<DiagnosticRecord>();
 
-    public static ScriptExecutionOutcome Failed(Exception exception, string stdOut) =>
-        new() { Success = false, Exception = exception, StdOut = stdOut };
+    public static ScriptExecutionOutcome Completed(object? returnValue, string stdOut, IReadOnlyList<DiagnosticRecord>? notices = null) =>
+        new() { Success = true, ReturnValue = returnValue, StdOut = stdOut, Notices = notices ?? Array.Empty<DiagnosticRecord>() };
 
-    public static ScriptExecutionOutcome Cancelled(string stdOut) =>
-        new() { Success = false, WasCancelled = true, StdOut = stdOut };
+    public static ScriptExecutionOutcome Failed(Exception exception, string stdOut, IReadOnlyList<DiagnosticRecord>? notices = null) =>
+        new() { Success = false, Exception = exception, StdOut = stdOut, Notices = notices ?? Array.Empty<DiagnosticRecord>() };
+
+    public static ScriptExecutionOutcome Cancelled(string stdOut, IReadOnlyList<DiagnosticRecord>? notices = null) =>
+        new() { Success = false, WasCancelled = true, StdOut = stdOut, Notices = notices ?? Array.Empty<DiagnosticRecord>() };
 }

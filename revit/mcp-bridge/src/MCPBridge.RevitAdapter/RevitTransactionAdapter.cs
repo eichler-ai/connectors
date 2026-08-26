@@ -1,3 +1,5 @@
+using System;
+using System.Collections.Generic;
 using Autodesk.Revit.DB;
 
 namespace MCPBridge.RevitAdapter;
@@ -17,9 +19,32 @@ public sealed class RevitTransactionAdapter : ITransactionAdapter
         _transaction = transaction;
     }
 
+    public IReadOnlyList<FailureSummary> CommitFailures { get; private set; } = Array.Empty<FailureSummary>();
+
     public void Start() => _transaction.Start();
 
-    public void Commit() => _transaction.Commit();
+    public TransactionCommitResult Commit()
+    {
+        var preprocessor = new AdapterFailuresPreprocessor();
+        var options = _transaction.GetFailureHandlingOptions();
+        options.SetFailuresPreprocessor(preprocessor);
+        _transaction.SetFailureHandlingOptions(options);
+
+        var status = _transaction.Commit();
+        CommitFailures = preprocessor.Summaries;
+
+        // Review finding: mapping every non-Committed status to RolledBack was wrong -- only
+        // TransactionStatus.RolledBack means Revit already closed the Transaction itself (the
+        // ProceedWithRollBack contract this class relies on); any other non-Committed status
+        // (Uninitialized/Pending/Error/Started) means the Transaction is NOT actually closed, and the
+        // caller must not skip its own RollBack() call the way it correctly does for RolledBack.
+        return status switch
+        {
+            TransactionStatus.Committed => TransactionCommitResult.Committed,
+            TransactionStatus.RolledBack => TransactionCommitResult.RolledBack,
+            _ => throw new InvalidOperationException($"Transaction.Commit() returned unexpected status {status}."),
+        };
+    }
 
     public void RollBack() => _transaction.RollBack();
 }

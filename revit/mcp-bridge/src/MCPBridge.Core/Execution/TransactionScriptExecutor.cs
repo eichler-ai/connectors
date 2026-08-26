@@ -1,16 +1,24 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using MCPBridge.Core.Diagnostics;
 using MCPBridge.RevitAdapter;
 
 namespace MCPBridge.Core.Execution;
 
 /// <summary>
-/// Wraps one script run in a Transaction/TransactionGroup (PRD §06 step 4): commit +
-/// assimilate on success, roll back both on any failure (thrown exception, compile
-/// error, or cooperative cancellation) so a failed script never leaves partial
-/// document changes behind. Deliberately simple for phase 01 -- no
-/// IFailuresPreprocessor hookup here, that's phase 02 (PRD §15).
+/// Wraps one script run in a Transaction/TransactionGroup (PRD §06 step 4): commit + assimilate on
+/// success, roll back both on any failure (thrown exception, compile error, or cooperative
+/// cancellation) so a failed script never leaves partial document changes behind.
+///
+/// PRD §07 (phase 02): the transaction's Failures API results (warnings auto-dismissed, any error
+/// forces a rollback) are read from ITransactionAdapter.CommitFailures once, after Commit() returns.
+/// Dialogs seen via DialogBoxShowing during the run (ActiveDialogContext) and those failures are both
+/// folded into the same notices[] list, so a script's result always shows everything that was
+/// auto-resolved on its behalf in one place -- including on a cancelled run, since a dialog may well be
+/// what the script was stuck behind when it got cancelled.
 /// </summary>
 public sealed class TransactionScriptExecutor
 {
@@ -37,30 +45,105 @@ public sealed class TransactionScriptExecutor
         transaction.Start();
 
         var globals = new ScriptGlobals(document, uiApplication, uiDocument, cancellationToken);
-        var outcome = await _runner.RunAsync(scriptText, globals, cancellationToken).ConfigureAwait(false);
-
-        if (!outcome.Success)
-        {
-            RollBackBoth(transaction, group);
-            return outcome;
-        }
-
+        ActiveDialogContext.SetActive(globals.DialogResultOverrides);
         try
         {
-            transaction.Commit();
+            var outcome = await _runner.RunAsync(scriptText, globals, cancellationToken).ConfigureAwait(false);
+
+            if (!outcome.Success)
+            {
+                RollBackBoth(transaction, group);
+                // Commit() never ran -- no failures-API notices to fold in, but a dialog may still have
+                // fired mid-script before it failed or was cancelled (PRD §07: this is precisely the
+                // headline case -- a script stuck behind a dialog gets auto-cancelled by max_duration_ms).
+                var dialogNotices = ActiveDialogContext.DrainRecorded();
+                if (dialogNotices.Count == 0)
+                {
+                    return outcome;
+                }
+
+                return outcome.WasCancelled
+                    ? ScriptExecutionOutcome.Cancelled(outcome.StdOut, dialogNotices)
+                    : ScriptExecutionOutcome.Failed(outcome.Exception!, outcome.StdOut, dialogNotices);
+            }
+
+            TransactionCommitResult commitResult;
+            try
+            {
+                commitResult = transaction.Commit();
+            }
+            catch (Exception ex)
+            {
+                RollBackBoth(transaction, group);
+                return ScriptExecutionOutcome.Failed(ex, outcome.StdOut, CombinedNotices(transaction.CommitFailures));
+            }
+
+            var commitFailures = transaction.CommitFailures;
+
+            if (commitResult == TransactionCommitResult.RolledBack)
+            {
+                // Revit already rolled back the Transaction itself (ProceedWithRollBack) -- only the
+                // TransactionGroup still needs an explicit rollback; calling transaction.RollBack()
+                // again here would be invalid.
+                group.RollBack();
+                var errorMessage = commitFailures.LastOrDefault(f => f.IsError)?.Message
+                    ?? "A transaction failure forced a rollback.";
+                return ScriptExecutionOutcome.Failed(new InvalidOperationException(errorMessage), outcome.StdOut, CombinedNotices(commitFailures));
+            }
+
             group.Assimilate();
-            return outcome;
+            return ScriptExecutionOutcome.Completed(outcome.ReturnValue, outcome.StdOut, CombinedNotices(commitFailures));
         }
-        catch (Exception ex)
+        finally
         {
-            RollBackBoth(transaction, group);
-            return ScriptExecutionOutcome.Failed(ex, outcome.StdOut);
+            ActiveDialogContext.ClearActive();
         }
     }
 
+    private static IReadOnlyList<DiagnosticRecord> CombinedNotices(IReadOnlyList<FailureSummary> commitFailures)
+    {
+        var failureNotices = commitFailures.Select(ToDiagnosticRecord).ToList();
+        var dialogNotices = ActiveDialogContext.DrainRecorded();
+        if (dialogNotices.Count == 0)
+        {
+            return failureNotices;
+        }
+
+        failureNotices.AddRange(dialogNotices);
+        return failureNotices;
+    }
+
+    private static DiagnosticRecord ToDiagnosticRecord(FailureSummary failure) => DiagnosticRecord.Create(
+        failure.IsError ? DiagnosticSeverity.Error : DiagnosticSeverity.Warning,
+        failure.IsError ? "transaction-failure-error" : "transaction-failure-warning",
+        DiagnosticSource.Dialogs,
+        failure.Message,
+        detail: new Dictionary<string, object?>
+        {
+            ["failure_definition_id"] = failure.FailureDefinitionId,
+            ["failing_element_ids"] = failure.FailingElementIds,
+        },
+        remedy: null);
+
     private static void RollBackBoth(ITransactionAdapter transaction, ITransactionGroupAdapter group)
     {
-        transaction.RollBack();
-        group.RollBack();
+        // Review finding: an unguarded transaction.RollBack() here could itself throw (e.g. the
+        // Transaction was already closed by Revit's own Failures API resolution before Commit() threw),
+        // which previously propagated uncaught and replaced the real failure being reported with a
+        // rollback-time exception instead. Each rollback is now independently best-effort.
+        SafeRollBack(transaction.RollBack);
+        SafeRollBack(group.RollBack);
+    }
+
+    private static void SafeRollBack(Action rollBack)
+    {
+        try
+        {
+            rollBack();
+        }
+        catch
+        {
+            // Best-effort: never let a rollback-time exception mask the original failure being reported.
+        }
     }
 }

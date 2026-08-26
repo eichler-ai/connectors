@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.Threading;
 using MCPBridge.RevitAdapter;
 
@@ -41,6 +42,16 @@ public sealed class ScriptGlobals
     public IScriptUiApplication UIApplication { get; }
     public IScriptUiDocument? UIDocument { get; }
     public CancellationToken CancellationToken { get; }
+
+    /// <summary>
+    /// Per-script override of the default-safe DialogBoxShowing auto-answer policy (PRD §07: "unless
+    /// the script explicitly opts into a different per-call policy"). Keyed by
+    /// DialogBoxShowingEventArgs.DialogId (a string Revit assigns per dialog template), value is the
+    /// raw OverrideResult(int) to use instead of the handler's own default. A script sets this before
+    /// triggering the dialog, e.g. `DialogResultOverrides["TaskDialog_Some_Id"] = 1001;`. Deliberately a
+    /// flat dictionary, not a richer typed API -- OverrideResult(int) already takes exactly this shape.
+    /// </summary>
+    public IDictionary<string, int> DialogResultOverrides { get; } = new Dictionary<string, int>();
 
     public ScriptGlobals(
         IDocumentAdapter document,

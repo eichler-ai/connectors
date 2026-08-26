@@ -156,6 +156,18 @@ public class ExecutionResultMessageTests
     }
 
     [Fact]
+    public void FromRecord_WithExtraNotices_MergesIntoWireNotices_WithoutMutatingRecord()
+    {
+        var record = ExecutionRecord.CreatePending("exec-1", "1+1", 600_000, Now);
+        var extra = DiagnosticRecord.Create(DiagnosticSeverity.Info, "window-inventory-timeout-fallback", DiagnosticSource.Dialogs, "possible blocking window.", null, null);
+
+        var json = ExecutionResultMessage.FromRecord(Id, record, new[] { extra });
+
+        Assert.Contains("\"code\":\"window-inventory-timeout-fallback\"", json);
+        Assert.Empty(record.Notices); // ephemeral -- never written back onto the record
+    }
+
+    [Fact]
     public void ToJson_IsSingleLine_SafeForNdjsonFraming()
     {
         var record = ExecutionRecord.CreatePending("exec-1", "1+1", 600_000, Now);

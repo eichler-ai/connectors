@@ -60,21 +60,23 @@ public sealed class ExecutionRecord
         Notices = notices;
     }
 
-    public void MarkError(DateTimeOffset now, DiagnosticRecord error, string? stdOut)
+    public void MarkError(DateTimeOffset now, DiagnosticRecord error, string? stdOut, IReadOnlyList<DiagnosticRecord>? notices = null)
     {
         RequireNonTerminal();
         Status = ExecutionStatus.Error;
         CompletedAt = now;
         Error = error;
         StdOut = stdOut;
+        Notices = notices ?? Array.Empty<DiagnosticRecord>();
     }
 
-    public void MarkCancelled(DateTimeOffset now, string? stdOut)
+    public void MarkCancelled(DateTimeOffset now, string? stdOut, IReadOnlyList<DiagnosticRecord>? notices = null)
     {
         RequireNonTerminal();
         Status = ExecutionStatus.Cancelled;
         CompletedAt = now;
         StdOut = stdOut;
+        Notices = notices ?? Array.Empty<DiagnosticRecord>();
     }
 
     public void MarkUnrecoverable(DateTimeOffset now, DiagnosticRecord diagnostic)
