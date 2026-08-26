@@ -351,6 +351,46 @@ public class RequestDispatcherTests
     }
 
     [Fact]
+    public async Task PollExecution_DeadlineElapsedWhileStillPending_AttachesWindowInventoryNotice()
+    {
+        var executionManager = NewExecutionManager();
+        var bridge = new ExternalEventBridge<ScriptExecutionOutcome>(new FakeExternalEventRaiser());
+        var now = DateTimeOffset.UtcNow;
+        var windowInventory = new FakeWindowInventory { Windows = new[] { new WindowInfo("Warning", "#32770", Array.Empty<string>()) } };
+        var dispatcher = new RequestDispatcher(
+            executionManager,
+            bridge,
+            NewScriptExecutor(),
+            now: () => now,
+            delay: _ => { now = now.AddMilliseconds(200); return Task.CompletedTask; },
+            windowInventory: windowInventory);
+
+        executionManager.Start("exec-1", "1 + 1", 600_000, now);
+
+        var json = await dispatcher.DispatchAsync(PollRequest(1, "exec-1", timeoutMs: 500));
+
+        Assert.Contains("\"status\":\"pending\"", json);
+        Assert.Contains("\"code\":\"window-inventory-timeout-fallback\"", json);
+        Assert.Contains("\"title\":\"Warning\"", json);
+    }
+
+    [Fact]
+    public async Task PollExecution_ReachesTerminalBeforeDeadline_DoesNotAttachWindowInventory()
+    {
+        var executionManager = NewExecutionManager();
+        var bridge = new ExternalEventBridge<ScriptExecutionOutcome>(new FakeExternalEventRaiser());
+        var windowInventory = new FakeWindowInventory { Windows = new[] { new WindowInfo("Warning", "#32770", Array.Empty<string>()) } };
+        var dispatcher = new RequestDispatcher(executionManager, bridge, NewScriptExecutor(), windowInventory: windowInventory);
+
+        var dispatchTask = dispatcher.DispatchAsync(ExecuteScriptRequest(1, "exec-1", "1 + 1"));
+        bridge.OnExecute(NewUiApp());
+        var json = await dispatchTask;
+
+        Assert.Contains("\"status\":\"success\"", json);
+        Assert.DoesNotContain("window-inventory-timeout-fallback", json);
+    }
+
+    [Fact]
     public async Task UnknownMethod_ReturnsMethodNotFoundError()
     {
         var executionManager = NewExecutionManager();

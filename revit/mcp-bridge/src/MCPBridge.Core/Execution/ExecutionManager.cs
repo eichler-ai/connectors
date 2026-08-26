@@ -150,8 +150,8 @@ public sealed class ExecutionManager
         Transition(executionId, "complete-success", record => record.MarkCompleted(now, result, stdOut, notices), clearActive: true);
 
     /// <summary>See <see cref="Transition"/> for why this never throws on a terminal race.</summary>
-    public DiagnosticRecord? CompleteError(string executionId, DateTimeOffset now, DiagnosticRecord error, string? stdOut) =>
-        Transition(executionId, "complete-error", record => record.MarkError(now, error, stdOut), clearActive: true);
+    public DiagnosticRecord? CompleteError(string executionId, DateTimeOffset now, DiagnosticRecord error, string? stdOut, IReadOnlyList<DiagnosticRecord>? notices = null) =>
+        Transition(executionId, "complete-error", record => record.MarkError(now, error, stdOut, notices), clearActive: true);
 
     /// <summary>See <see cref="Transition"/> for why this never throws on a terminal race.</summary>
     public DiagnosticRecord? CompleteCancelled(string executionId, DateTimeOffset now, string? stdOut) =>

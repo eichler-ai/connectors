@@ -75,15 +75,30 @@ public static class ExecutionResultMessage
         public ResultDto Result { get; set; } = new();
     }
 
-    /// <summary>Builds the wire result for a pending/running/success/error/cancelled/unrecoverable execution's current state.</summary>
-    public static string FromRecord(JsonElement id, ExecutionRecord record)
+    /// <summary>
+    /// Builds the wire result for a pending/running/success/error/cancelled/unrecoverable execution's
+    /// current state. extraNotices (PRD §07 v1 window-inventory fallback) are merged into this one
+    /// response's notices[] only -- deliberately never written back onto <paramref name="record"/>,
+    /// which stays the persistent, ExecutionManager-owned source of truth.
+    /// </summary>
+    public static string FromRecord(JsonElement id, ExecutionRecord record, IReadOnlyList<DiagnosticRecord>? extraNotices = null)
     {
+        List<DiagnosticRecord>? notices = null;
+        if (record.Notices.Count > 0 || (extraNotices?.Count ?? 0) > 0)
+        {
+            notices = new List<DiagnosticRecord>(record.Notices);
+            if (extraNotices is not null)
+            {
+                notices.AddRange(extraNotices);
+            }
+        }
+
         var dto = new ResultDto
         {
             Status = ToWireStatus(record.Status),
             ExecutionId = record.ExecutionId,
             Output = ComposeOutput(record),
-            Notices = record.Notices.Count > 0 ? record.Notices.ToList() : null,
+            Notices = notices,
             Error = record.Error,
         };
 

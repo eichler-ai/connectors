@@ -2,6 +2,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using MCPBridge.Core.Execution;
 using MCPBridge.Core.Tests.Fakes;
+using MCPBridge.RevitAdapter;
 using Xunit;
 
 namespace MCPBridge.Core.Tests.Execution;
@@ -75,6 +76,44 @@ public class TransactionScriptExecutorTests
         Assert.True(outcome.WasCancelled);
         Assert.Equal(new[] { "Start", "RollBack" }, document.LastTransaction!.Calls);
         Assert.Equal(new[] { "Start", "RollBack" }, document.LastTransactionGroup!.Calls);
+    }
+
+    [Fact]
+    public async Task WarningOnlyFailure_CommitsAndReportsNotice()
+    {
+        var executor = NewExecutor();
+        var document = new FakeDocumentAdapter();
+        var uiApp = new FakeUiApplicationAdapter();
+        var transaction = (FakeTransactionAdapter)document.CreateTransaction("pre-created");
+        transaction.FailuresToReport = new[] { new FailureSummary(false, "wall is slightly off axis", "warn-def-1", System.Array.Empty<string>()) };
+        var riggedDocument = new RiggedDocumentAdapter(document, transaction);
+
+        var outcome = await executor.ExecuteAsync(riggedDocument, uiApp, null, "1 + 1", CancellationToken.None);
+
+        Assert.True(outcome.Success);
+        Assert.Equal(new[] { "Start", "Commit" }, transaction.Calls);
+        Assert.Equal(new[] { "Start", "Assimilate" }, riggedDocument.LastTransactionGroup!.Calls);
+        Assert.Contains(outcome.Notices, n => n.Message.Contains("off axis"));
+    }
+
+    [Fact]
+    public async Task ErrorFailure_RollsBackGroupOnly_NotTransactionAgain_ReturnsFailedWithNotices()
+    {
+        var executor = NewExecutor();
+        var document = new FakeDocumentAdapter();
+        var uiApp = new FakeUiApplicationAdapter();
+        var transaction = (FakeTransactionAdapter)document.CreateTransaction("pre-created");
+        transaction.FailuresToReport = new[] { new FailureSummary(true, "elements would be deleted", "err-def-1", System.Array.Empty<string>()) };
+        var riggedDocument = new RiggedDocumentAdapter(document, transaction);
+
+        var outcome = await executor.ExecuteAsync(riggedDocument, uiApp, null, "1 + 1", CancellationToken.None);
+
+        Assert.False(outcome.Success);
+        // Commit() already rolled the Transaction back internally (ProceedWithRollBack) -- only one
+        // "Commit" call, no separate "RollBack" on the transaction itself.
+        Assert.Equal(new[] { "Start", "Commit" }, transaction.Calls);
+        Assert.Equal(new[] { "Start", "RollBack" }, riggedDocument.LastTransactionGroup!.Calls);
+        Assert.Contains(outcome.Notices, n => n.Message.Contains("deleted"));
     }
 
     /// <summary>Test-only helper: a document adapter that hands out a pre-built (rigged) transaction instead of a fresh one.</summary>

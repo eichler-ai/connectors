@@ -117,7 +117,7 @@ internal sealed class BridgeHost
         deferredRaiser.Bind(scriptExternalEvent);
 
         var scriptExecutor = new TransactionScriptExecutor(new RoslynScriptRunner());
-        var dispatcher = new RequestDispatcher(_executionManager, scriptBridge, scriptExecutor);
+        var dispatcher = new RequestDispatcher(_executionManager, scriptBridge, scriptExecutor, windowInventory: new Win32WindowInventory());
 
         _stopCts = new CancellationTokenSource();
         var stopToken = _stopCts.Token;
