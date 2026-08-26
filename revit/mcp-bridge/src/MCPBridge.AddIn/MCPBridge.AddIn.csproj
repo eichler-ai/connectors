@@ -19,8 +19,13 @@
       iterative live testing, where that prompt was real, repeated friction (every DLL content change
       re-triggers it, since Revit's own per-file trust decision is keyed by content, not just publisher;
       signing sidesteps that by making the publisher itself verified, not the specific file). Opt out with
-      -p:MCPBridgeSignDevBuild=false (e.g. CI, or a machine without the dev cert set up); the target
-      warns and continues rather than failing the build if PowerShell/the cert isn't available.
+      -p:MCPBridgeSignDevBuild=false (e.g. CI, or a machine without the dev cert set up); though that
+      shouldn't usually be necessary: Sign-AddIn.ps1 itself treats "no cert configured" as an intentionally
+      supported unsigned-build mode (exits 0, just prints a note) rather than an error, so a fresh checkout
+      without the dev cert set up still builds fine unsigned with no opt-out needed. What DOES fail the
+      build (deliberately, per independent PR review; a prior version of this target used
+      ContinueOnError="WarnAndContinue" unconditionally, which would have silently warned away a genuine
+      signing bug indefinitely) is a cert that WAS found but a real signing attempt that then failed.
     -->
     <MCPBridgeSignDevBuild Condition="'$(MCPBridgeSignDevBuild)'==''">true</MCPBridgeSignDevBuild>
     <!--
@@ -68,8 +73,10 @@
   <!--
     Signs the built DLL with the local dev cert immediately after Build, so a plain folder copy of the
     output (the deploy step this project uses; see the revit-connector-development skill) is already
-    signed. WarnAndContinue rather than failing the build: a machine without the dev cert set up (a fresh
-    checkout, CI) should still be able to build and run unit tests, just without this convenience.
+    signed. Deliberately NOT ContinueOnError: Sign-AddIn.ps1 itself exits 0 (not an error) for the "no
+    cert configured on this machine" case, so a genuine non-zero exit here means a cert WAS found and a
+    real signing attempt actually failed; that should fail the build loudly, not be warned away forever
+    (independent PR review finding on an earlier version of this target).
 
     TargetFrameworks (plural, see the multi-target comment above) means this project builds via an outer
     cross-targeting orchestration pass plus one inner per-TargetFramework pass; AfterTargets="Build" fires
@@ -77,8 +84,7 @@
     keeps this from running (and failing on an empty -DllPath) in the outer pass.
   -->
   <Target Name="MCPBridgeSignDevBuild" AfterTargets="Build" Condition="'$(MCPBridgeSignDevBuild)'=='true' And '$(OS)'=='Windows_NT' And '$(TargetFramework)'!=''">
-    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildThisFileDirectory)..\..\tools\Sign-AddIn.ps1&quot; -DllPath &quot;$(TargetPath)&quot;"
-          ContinueOnError="WarnAndContinue" />
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildThisFileDirectory)..\..\tools\Sign-AddIn.ps1&quot; -DllPath &quot;$(TargetPath)&quot;" />
   </Target>
 
 </Project>
