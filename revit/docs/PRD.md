@@ -336,6 +336,42 @@ Unsigned add-ins load in Revit today, with an "untrusted publisher" warning on e
 
 There's a relevant precedent among widely-used Revit scripting tools: the most established one has never been distributed through the Autodesk Marketplace, shipping instead as a signed installer from GitHub Releases with its own extension registry layered on top — a durable end-state, not just a stopgap. Its own maintainers, asked directly whether it could go on the App Store, had no official answer beyond a guess of "probably not." v1 follows the same path; Marketplace submission is deferred to a later milestone and treated as genuinely uncertain rather than a formality (§14).
 
+### Installation UX — a PowerShell script, not a GUI installer
+
+That precedent's own installer is a packaged GUI (Inno Setup) — but its update story splits in two: the core app needs the installer re-run for a new version, while installed extensions update in place via `git pull` against their own repos. Neither half of that transfers cleanly here: our extension surface isn't interpreted Python re-read on each launch, it's a single signed, compiled DLL, so there's no "just pull new files" path at all — every update, small or large, means replacing that DLL.
+
+Given that, a full GUI installer buys less than it costs. The chosen path is a single PowerShell script (`Install-MCPBridge.ps1`), run either as a downloaded file or piped directly (`irm .../install.ps1 | iex`, matching the same pattern this project's own dev tooling already leans on via `dotnet-install.ps1`):
+- **Self-upgrade reuses the exact same code path as install** — there is no separate "installer mode" vs. "updater mode" to design or maintain; the script is idempotent by construction (see below), so the ribbon's update click just re-invokes it.
+- **Less to build and sign.** No separate installer-authoring toolchain; only the add-in DLL itself needs the Authenticode signature (already required regardless, per this section's first paragraph).
+- **Matches the audience.** Anyone installing a connector that lets an AI agent run C# against their live Revit session is already past the comfort level a GUI wizard exists to protect.
+
+The tradeoff, accepted deliberately: no automatic Programs & Features entry (the script writes one itself — an uninstall registry key under `HKCU`/`HKLM:\...\Uninstall\` pointing back at a `-Uninstall` invocation of itself), and a downloaded-then-double-clicked `.ps1` still hits PowerShell's execution-policy gate (the piped one-liner doesn't, since policy checks apply to script *files*, not piped content) — worth documenting the piped form as primary and the downloaded form as the fallback for anyone who wants to read it first, which this audience often will.
+
+### Self-upgrade
+
+The two components have genuinely different update stories, because only one of them is something Windows can hold a file lock on:
+
+- **MCP Server (Go broker)** is a normal long-running process — nothing has it locked. It can check GitHub's latest-release API itself and a single click can download-and-relaunch the new binary immediately, no restart of anything else required.
+- **MCP Bridge (the add-in DLL)** is loaded for the whole Revit session; it cannot be hot-swapped while Revit is running. The realistic ceiling on "one click" here is: detect the update, download it silently in the background, then one click either closes and relaunches Revit right away or defers to Revit's own next natural restart — "one click" means *one click commits to it*, not that the loaded DLL is patched in place.
+
+Both are driven by the same install script (`-Update -Silent` for the non-interactive, ribbon-triggered case). The UX surfaces through the ribbon Status button already built for connection/build-identity display (§04's "intentionally thin" exception) rather than any new UI surface — extended with an "Update available (vX.Y.Z)" state, sourced from a version field added to the same status the add-in already polls from the broker.
+
+**Idempotency is load-bearing, not incidental** — the same script runs unattended from the ribbon, so re-running it with nothing to do must be a true no-op: one `GitHub` API call, a version-string comparison against a locally-written marker, done. That comparison must check the *actual deployed DLL's presence*, not just the version marker — a marker claiming "current" while the DLL is missing (deleted by hand, a failed prior run, AV quarantine) must trigger a repair, not a silent no-op that leaves a broken install unfixed forever. Three outcomes, not two: version matches + DLL present → true no-op; version matches + DLL missing → repair (redeploy, logged as a repair, not a version bump); version differs → normal update.
+
+### Multi-version installs
+
+Revit's own `AddInLoader` already isolates this for us: `Addins\<year>\` is a separate folder per major version, and Revit only loads manifests from the matching year's folder (§04's deployment-location finding, extended). The script detects every installed Revit version and deploys to each one's Addins folder automatically, with no "which version?" prompt — cheap to do, and asking would be pure friction. It's bounded to versions we actually ship a build for: today that's 2027 only, so a detected-but-unsupported 2026 install is skipped with a note, not attempted. §11's already-flagged multi-version runtime split (2027 needs .NET 10; 2025 needs .NET 8; 2026 unverified) means those future variants are genuinely different builds per version, not copies — the release artifact will need one build per supported version-TFM once Phase 6 lands, which the install script's per-version loop already accommodates without needing a rewrite.
+
+One update-flow wrinkle worth deciding now: an update click must not force-close every open Revit across every installed version just because one of them triggered it. The script should only redeploy to version-folders whose `Revit.exe` isn't currently running, leaving any version that IS running to finish updating on its own next restart — a partial "2026 updated, 2027 will finish next restart" outcome, not an all-or-nothing shutdown.
+
+**Installed on multiple versions and usable simultaneously are different claims.** The installer only answers the first: deploying to every detected version's Addins folder says nothing about whether an agent can address a specific one of two concurrently-running Revit instances (say, 2026 and 2027 both open at once) — that's the deferred multi-instance/`list_instances`/`{instance_id, document_id}` routing half of Phase 2 (§15), not something this section solves.
+
+### Mac + Parallels
+
+There is no macOS build of Revit, so this was never a case for a second add-in installer — it's this project's own existing dev topology (§05 remote mode). A Mac-based user runs the Windows install script inside their Parallels VM for the add-in half exactly as above, and runs the MCP Server broker natively on the Mac host in `-mode remote`, pointed at the VM's shared folder. The Go broker already cross-compiles for macOS with no code changes (`internal/singleton`'s `lock_unix.go`/`lock_windows.go` split already exists for this). What's missing is not code but a short, separate macOS/bash counterpart to the install script — fetching and placing the Mac broker binary and wiring the remote-mode flags — not a redesign of anything above.
+
+> **Known gap.** Nothing above works until a release pipeline actually exists to produce what the script downloads: a signed zip per supported version-TFM plus a `checksums.txt`, published to GitHub Releases with a stable asset-naming convention the script can rely on. That pipeline is unbuilt — a prerequisite for shipping this design, not just for writing the script itself.
+
 ## 13. Validation & test corpus
 
 Correctness here isn't unit-testable in the conventional sense — the surface under test is "can an agent, given only `execute_script` + the three discovery commands, actually accomplish real Revit workflows." The validation strategy is a growing corpus of test cases drawn from real tutorials, run end-to-end against a live Revit session:
