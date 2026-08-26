@@ -11,18 +11,7 @@
     <UseWindowsForms>false</UseWindowsForms>
     <RevitVersion>2027</RevitVersion>
     <RevitInstallDir>C:\Program Files\Autodesk\Revit $(RevitVersion)</RevitInstallDir>
-    <!--
-      Not the PRD §12 production signing plan (a CA-issued, publicly-trusted, timestamped cert for
-      signed-installer distribution; still phase 05, still not done here). This is dev-loop convenience
-      only: a self-signed cert trusted on THIS machine (see tools\New-DevSigningCert.ps1) eliminates
-      Revit's "unverified publisher, Load Once/Always Load/Do Not Load" prompt on every rebuild during
-      iterative live testing, where that prompt was real, repeated friction (every DLL content change
-      re-triggers it, since Revit's own per-file trust decision is keyed by content, not just publisher;
-      signing sidesteps that by making the publisher itself verified, not the specific file). Opt out with
-      -p:MCPBridgeSignDevBuild=false (e.g. CI, or a machine without the dev cert set up); the target
-      warns and continues rather than failing the build if PowerShell/the cert isn't available.
-    -->
-    <MCPBridgeSignDevBuild Condition="'$(MCPBridgeSignDevBuild)'==''">true</MCPBridgeSignDevBuild>
+    <!-- Unsigned dev build per PRD §12 / roadmap phase 01; signing is phase 05. -->
     <!--
       Revit loads this DLL directly out of its Addins folder: there is no "dotnet publish" style
       deployment step doing dependency flattening for us, and this is a plugin, not a standalone app, so
@@ -64,21 +53,5 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
   </ItemGroup>
-
-  <!--
-    Signs the built DLL with the local dev cert immediately after Build, so a plain folder copy of the
-    output (the deploy step this project uses; see the revit-connector-development skill) is already
-    signed. WarnAndContinue rather than failing the build: a machine without the dev cert set up (a fresh
-    checkout, CI) should still be able to build and run unit tests, just without this convenience.
-
-    TargetFrameworks (plural, see the multi-target comment above) means this project builds via an outer
-    cross-targeting orchestration pass plus one inner per-TargetFramework pass; AfterTargets="Build" fires
-    on BOTH, but $(TargetPath) is only populated in the inner one; the '$(TargetFramework)' != '' guard
-    keeps this from running (and failing on an empty -DllPath) in the outer pass.
-  -->
-  <Target Name="MCPBridgeSignDevBuild" AfterTargets="Build" Condition="'$(MCPBridgeSignDevBuild)'=='true' And '$(OS)'=='Windows_NT' And '$(TargetFramework)'!=''">
-    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildThisFileDirectory)..\..\tools\Sign-AddIn.ps1&quot; -DllPath &quot;$(TargetPath)&quot;"
-          ContinueOnError="WarnAndContinue" />
-  </Target>
 
 </Project>
