@@ -54,7 +54,7 @@ func attachFakeDiscoveryInstance(t *testing.T, r *discovery.Router, instanceID s
 // Each of the three tests below exercises one tier's wire shape.
 
 func TestListFunctionsToolSuccess_NamespacesTier(t *testing.T) {
-	r := discovery.NewRouter()
+	r := discovery.NewRouter(nil)
 	attachFakeDiscoveryInstance(t, r, "inst-1", func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
 		if method != "list_functions" {
 			t.Errorf("method = %q, want list_functions", method)
@@ -93,7 +93,7 @@ func TestListFunctionsToolSuccess_NamespacesTier(t *testing.T) {
 }
 
 func TestListFunctionsToolSuccess_TypesTier(t *testing.T) {
-	r := discovery.NewRouter()
+	r := discovery.NewRouter(nil)
 	attachFakeDiscoveryInstance(t, r, "inst-1", func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
 		if method != "list_functions" {
 			t.Errorf("method = %q, want list_functions", method)
@@ -134,7 +134,7 @@ func TestListFunctionsToolSuccess_TypesTier(t *testing.T) {
 }
 
 func TestListFunctionsToolSuccess_MembersTier(t *testing.T) {
-	r := discovery.NewRouter()
+	r := discovery.NewRouter(nil)
 	attachFakeDiscoveryInstance(t, r, "inst-1", func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
 		if method != "list_functions" {
 			t.Errorf("method = %q, want list_functions", method)
@@ -175,7 +175,7 @@ func TestListFunctionsToolSuccess_MembersTier(t *testing.T) {
 }
 
 func TestSearchFunctionsToolSuccess(t *testing.T) {
-	r := discovery.NewRouter()
+	r := discovery.NewRouter(nil)
 	attachFakeDiscoveryInstance(t, r, "inst-1", func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
 		if method != "search_functions" {
 			t.Errorf("method = %q, want search_functions", method)
@@ -224,7 +224,7 @@ func TestSearchFunctionsToolSuccess(t *testing.T) {
 }
 
 func TestDescribeFunctionToolSingleOverload(t *testing.T) {
-	r := discovery.NewRouter()
+	r := discovery.NewRouter(nil)
 	attachFakeDiscoveryInstance(t, r, "inst-1", func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
 		if method != "describe_function" {
 			t.Errorf("method = %q, want describe_function", method)
@@ -267,7 +267,7 @@ func TestDescribeFunctionToolSingleOverload(t *testing.T) {
 }
 
 func TestDescribeFunctionToolMultipleOverloads(t *testing.T) {
-	r := discovery.NewRouter()
+	r := discovery.NewRouter(nil)
 	attachFakeDiscoveryInstance(t, r, "inst-1", func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
 		return map[string]any{
 			"member": "Autodesk.Revit.DB.Document.Delete",
@@ -301,7 +301,7 @@ func TestDescribeFunctionToolMultipleOverloads(t *testing.T) {
 }
 
 func TestListFunctionsToolNoInstanceIsToolError(t *testing.T) {
-	r := discovery.NewRouter()
+	r := discovery.NewRouter(nil)
 	cs := connectDiscoveryClient(t, r)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -330,7 +330,7 @@ func TestListFunctionsToolNoInstanceIsToolError(t *testing.T) {
 }
 
 func TestDescribeFunctionToolUnknownInstanceIsToolError(t *testing.T) {
-	r := discovery.NewRouter()
+	r := discovery.NewRouter(nil)
 	cs := connectDiscoveryClient(t, r)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -354,7 +354,7 @@ func TestDescribeFunctionToolUnknownInstanceIsToolError(t *testing.T) {
 }
 
 func TestDiscoveryToolsMalformedWireResponseIsToolError(t *testing.T) {
-	r := discovery.NewRouter()
+	r := discovery.NewRouter(nil)
 	attachFakeDiscoveryInstance(t, r, "inst-1", func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
 		// Return something that doesn't decode into the expected shape:
 		// a bare JSON string instead of an object.
@@ -385,7 +385,7 @@ func TestDiscoveryToolsMalformedWireResponseIsToolError(t *testing.T) {
 }
 
 func TestDiscoveryToolsAreRegisteredWithExpectedNames(t *testing.T) {
-	r := discovery.NewRouter()
+	r := discovery.NewRouter(nil)
 	cs := connectDiscoveryClient(t, r)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

@@ -65,11 +65,12 @@ if (-not $ScriptPath) {
     $BootstrapCreated = $true
 }
 
-# Only 2027 ships a build today (PRD §11: it's the only version with a verified .NET requirement,
-# net10.0-windows). The detection/deploy loop below is written to cover every year in this list, not
-# just the first one, specifically so adding 2025/2026 (Phase 6, PRD §15) is "add a year + a matching
-# addin-<year>/ build to the release payload," not a rewrite of this script.
-$SupportedRevitVersions = @('2027')
+# 2025 and 2027 ship builds today (PRD §11: both have verified .NET requirements -- net8.0-windows and
+# net10.0-windows respectively). 2026 remains unverified and isn't in this list yet. The detection/deploy
+# loop below is written to cover every year in this list, not just the first one, specifically so adding
+# 2026 (Phase 6, PRD §15) once verified is "add a year + a matching addin-<year>/ build to the release
+# payload," not a rewrite of this script.
+$SupportedRevitVersions = @('2025', '2027')
 
 function Get-AddinsDir([string]$RevitVersion, [string]$InstallScope) {
     if ($InstallScope -eq 'User') {

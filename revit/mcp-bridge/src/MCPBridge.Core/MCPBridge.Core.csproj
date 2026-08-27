@@ -1,7 +1,11 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net10.0-windows</TargetFramework>
+    <!-- Multi-targeted even though Core has no Revit-version-specific logic of its own: it references
+         MCPBridge.RevitAdapter (now itself multi-targeted, PRD §11), and a ProjectReference's TFM must be
+         compatible with the referencing project's ;AddIn's net8.0-windows leg needs a net8.0-windows
+         build of Core to link against, not just net10.0-windows. -->
+    <TargetFrameworks>net10.0-windows;net8.0-windows</TargetFrameworks>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>latest</LangVersion>

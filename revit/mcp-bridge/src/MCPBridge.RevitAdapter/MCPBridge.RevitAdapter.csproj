@@ -2,29 +2,39 @@
 
   <PropertyGroup>
     <!--
-      Multi-target structure per PRD §11: v1 needs only 2027, but the plural
-      <TargetFrameworks> element (rather than singular) is used deliberately so
-      that adding 2025/2026 support later is a matter of adding TFM entries, not
-      restructuring the project.
+      Multi-target structure per PRD §11: the plural <TargetFrameworks> element
+      (rather than singular) was used deliberately from v1 onward so that
+      adding 2025/2026 support later is a matter of adding TFM entries, not
+      restructuring the project ;this is that step for 2025.
 
-      DEVIATION FROM PRD §11: the PRD specifies net8.0-windows for 2027. This
-      dev environment's actual installed Revit 2027 build (RevitAPI.dll/
-      RevitAPIUI.dll, version 27.0.4.0) references System.Runtime 10.0.0.0,
-      and compiling against it under net8.0-windows fails with a hard CS1705
-      error (not suppressible via NoWarn; it is a true compiler error, not a
-      promotable warning). Targeting net10.0-windows here resolves it. See the
-      phase-01 implementation report for the full explanation and a
-      recommendation to reconcile this with PRD §11: it's possible this
-      dev-environment Revit 2027 build is simply ahead of the PRD's assumption,
-      or that the PRD's "2025-2027 all on .NET 8" premise no longer holds.
+      Per-version .NET requirements, both confirmed live against the actual
+      installed products on the dev VM (PRD §11), not assumed: Revit 2027's
+      RevitAPI.dll/RevitAPIUI.dll (27.0.4.0) references System.Runtime
+      10.0.0.0 and requires net10.0-windows ;compiling it under
+      net8.0-windows fails with a hard, non-suppressible CS1705. Revit 2025's
+      RevitAPI.runtimeconfig.json instead declares "tfm": "net8.0", and does
+      build cleanly under net8.0-windows (derisked with a live spike before
+      this project change: the single .NET 10 SDK already on this VM
+      cross-targets net8.0-windows against the real 2025 RevitAPI.dll with 0
+      errors ;no second SDK needed, deliberately, per this project's
+      standing "exactly one SDK on the VM" rule). 2026 remains unverified;
+      don't assume it matches 2025 without checking the same way.
     -->
-    <TargetFrameworks>net10.0-windows</TargetFrameworks>
+    <TargetFrameworks>net10.0-windows;net8.0-windows</TargetFrameworks>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>latest</LangVersion>
     <RootNamespace>MCPBridge.RevitAdapter</RootNamespace>
     <AssemblyName>MCPBridge.RevitAdapter</AssemblyName>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(TargetFramework)'=='net10.0-windows'">
     <RevitVersion>2027</RevitVersion>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(TargetFramework)'=='net8.0-windows'">
+    <RevitVersion>2025</RevitVersion>
+  </PropertyGroup>
+  <PropertyGroup>
     <RevitInstallDir>C:\Program Files\Autodesk\Revit $(RevitVersion)</RevitInstallDir>
   </PropertyGroup>
 

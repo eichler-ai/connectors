@@ -1,8 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <!-- See MCPBridge.RevitAdapter.csproj for the multi-target rationale (PRD §11). -->
-    <TargetFrameworks>net10.0-windows</TargetFrameworks>
+    <!-- See MCPBridge.RevitAdapter.csproj for the multi-target rationale and per-version .NET requirements (PRD §11). -->
+    <TargetFrameworks>net10.0-windows;net8.0-windows</TargetFrameworks>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>latest</LangVersion>
@@ -15,8 +15,6 @@
          add-in's own live self-testing (a modal here would deadlock: closing it needs the same UI thread
          a follow-up execute_script call also needs). -->
     <UseWPF>true</UseWPF>
-    <RevitVersion>2027</RevitVersion>
-    <RevitInstallDir>C:\Program Files\Autodesk\Revit $(RevitVersion)</RevitInstallDir>
     <!--
       Not the PRD §12 production signing plan (a CA-issued, publicly-trusted, timestamped cert for
       signed-installer distribution; still phase 05, still not done here). This is dev-loop convenience
@@ -52,6 +50,16 @@
       so a straightforward folder copy of bin\Release\net10.0-windows\ is actually deployable.
     -->
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(TargetFramework)'=='net10.0-windows'">
+    <RevitVersion>2027</RevitVersion>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(TargetFramework)'=='net8.0-windows'">
+    <RevitVersion>2025</RevitVersion>
+  </PropertyGroup>
+  <PropertyGroup>
+    <RevitInstallDir>C:\Program Files\Autodesk\Revit $(RevitVersion)</RevitInstallDir>
   </PropertyGroup>
 
   <ItemGroup>
