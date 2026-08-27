@@ -13,9 +13,9 @@ namespace MCPBridge.Core.Tests.Dispatch;
 /// Exercises RequestDispatcher's list_functions/search_functions/describe_function routing (PRD §08) --
 /// specifically that these three methods are served synchronously, directly from DiscoveryService, with
 /// zero ExecutionManager/ExternalEventBridge involvement (unlike execute_script/poll_execution/
-/// cancel_execution, covered in RequestDispatcherTests). The deep reflection/XML-doc-join behavior itself is
-/// covered in MCPBridge.Discovery.Tests -- these tests only verify the dispatcher wires params through and
-/// serializes the response/error correctly.
+/// cancel_execution, covered in RequestDispatcherTests). The deep reflection/cache/ranking behavior itself is
+/// covered in MCPBridge.Discovery.Tests and MCPBridge.Core.Tests' own DiscoveryCacheTests -- these tests only
+/// verify the dispatcher wires params through and serializes the response/error correctly.
 /// </summary>
 public class DiscoveryDispatchTests
 {
@@ -35,8 +35,15 @@ public class DiscoveryDispatchTests
     private static ExternalEventBridge<ScriptExecutionOutcome> NewBridge() =>
         new(new MCPBridge.Core.Tests.Fakes.FakeExternalEventRaiser());
 
-    private static DiscoveryService NewDiscoveryService() =>
-        new(new DiscoveryOptions { Assemblies = new[] { typeof(Sample).Assembly } });
+    private const string SampleNamespace = "MCPBridge.Core.Tests.Dispatch";
+    private const string SampleTypeName = "Sample";
+
+    private static DiscoveryService NewDiscoveryService()
+    {
+        var cache = new DiscoveryCache(":memory:");
+        cache.Sync(new[] { ("core", typeof(Sample).Assembly) });
+        return new DiscoveryService(cache);
+    }
 
     private static RequestDispatcher NewDispatcher(bool withDiscovery = true) => new(
         NewExecutionManager(),
@@ -47,7 +54,7 @@ public class DiscoveryDispatchTests
     private static JsonRpcRequest Parse(object envelope) => JsonRpcRequest.Parse(JsonSerializer.Serialize(envelope));
 
     [Fact]
-    public async Task ListFunctions_ScopedByType_ReturnsMembersAndTotalScoped()
+    public async Task ListFunctions_ScopedByNamespaceAndType_ReturnsMemberNamesAndTotalScoped()
     {
         var dispatcher = NewDispatcher();
         var request = Parse(new
@@ -55,15 +62,46 @@ public class DiscoveryDispatchTests
             jsonrpc = "2.0",
             id = 1,
             method = "list_functions",
-            @params = new { instance_id = "inst-1", type_name = "MCPBridge.Core.Tests.Dispatch.DiscoveryDispatchTests+Sample" },
+            @params = new { instance_id = "inst-1", @namespace = SampleNamespace, type_name = SampleTypeName },
         });
 
         var json = await dispatcher.DispatchAsync(request);
 
-        Assert.Contains("\"members\":[", json);
-        Assert.Contains("\"name\":\"DoThing\"", json);
+        Assert.Contains("\"members\":\"DoThing, Sample\"", json); // includes the implicit public parameterless constructor
         Assert.Contains("\"total_scoped\":", json);
         Assert.DoesNotContain("\"next_cursor\"", json); // small scope, one page -- must be OMITTED, not null.
+    }
+
+    [Fact]
+    public async Task ListFunctions_TypeWithoutNamespace_ReturnsInvalidParamsError()
+    {
+        var dispatcher = NewDispatcher();
+        var request = Parse(new
+        {
+            jsonrpc = "2.0",
+            id = 2,
+            method = "list_functions",
+            @params = new { instance_id = "inst-1", type_name = SampleTypeName },
+        });
+
+        var json = await dispatcher.DispatchAsync(request);
+
+        Assert.Contains("\"error\":", json);
+        Assert.Contains("-32602", json); // InvalidParams
+        Assert.Contains("requires params.namespace", json);
+    }
+
+    [Fact]
+    public async Task ListFunctions_NoArgs_ReturnsNamespaceList()
+    {
+        var dispatcher = NewDispatcher();
+        var request = Parse(new { jsonrpc = "2.0", id = 3, method = "list_functions", @params = new { instance_id = "inst-1" } });
+
+        var json = await dispatcher.DispatchAsync(request);
+
+        Assert.Contains("\"namespaces\":[", json);
+        Assert.Contains($"\"namespace\":\"{SampleNamespace}\"", json);
+        Assert.Contains("\"type_count\":", json);
     }
 
     [Fact]
@@ -73,7 +111,7 @@ public class DiscoveryDispatchTests
         var request = Parse(new
         {
             jsonrpc = "2.0",
-            id = 2,
+            id = 4,
             method = "search_functions",
             @params = new { instance_id = "inst-1", query = "DoThing" },
         });
@@ -92,9 +130,12 @@ public class DiscoveryDispatchTests
         var request = Parse(new
         {
             jsonrpc = "2.0",
-            id = 3,
+            id = 5,
             method = "describe_function",
-            @params = new { instance_id = "inst-1", member = "MCPBridge.Core.Tests.Dispatch.DiscoveryDispatchTests+Sample.DoThing" },
+            // DiscoveryReflector normalizes nested-type '+' to '.' (the same dotted convention used
+            // everywhere else in this API), so the member reference must use '.' here too, not the raw
+            // CLR FullName's '+'.
+            @params = new { instance_id = "inst-1", member = "MCPBridge.Core.Tests.Dispatch.DiscoveryDispatchTests.Sample.DoThing" },
         });
 
         var json = await dispatcher.DispatchAsync(request);
@@ -110,7 +151,7 @@ public class DiscoveryDispatchTests
         var request = Parse(new
         {
             jsonrpc = "2.0",
-            id = 4,
+            id = 6,
             method = "describe_function",
             @params = new { instance_id = "inst-1", member = "MCPBridge.Core.Tests.Dispatch.DiscoveryDispatchTests+Sample.NoSuchMethod" },
         });
@@ -129,9 +170,9 @@ public class DiscoveryDispatchTests
         var request = Parse(new
         {
             jsonrpc = "2.0",
-            id = 5,
+            id = 7,
             method = "list_functions",
-            @params = new { instance_id = "inst-1", type_name = "MCPBridge.Core.Tests.Dispatch.DiscoveryDispatchTests+Sample", cursor = "not-a-number" },
+            @params = new { instance_id = "inst-1", @namespace = SampleNamespace, type_name = SampleTypeName, cursor = "not-a-number" },
         });
 
         var json = await dispatcher.DispatchAsync(request);
@@ -144,7 +185,7 @@ public class DiscoveryDispatchTests
     public async Task ListFunctions_NoDiscoveryServiceWired_ReturnsInternalErrorNotCrash()
     {
         var dispatcher = NewDispatcher(withDiscovery: false);
-        var request = Parse(new { jsonrpc = "2.0", id = 6, method = "list_functions", @params = new { instance_id = "inst-1" } });
+        var request = Parse(new { jsonrpc = "2.0", id = 8, method = "list_functions", @params = new { instance_id = "inst-1" } });
 
         var json = await dispatcher.DispatchAsync(request);
 
@@ -167,14 +208,14 @@ public class DiscoveryDispatchTests
         var request = Parse(new
         {
             jsonrpc = "2.0",
-            id = 7,
+            id = 9,
             method = "list_functions",
-            @params = new { instance_id = "inst-1", type_name = "MCPBridge.Core.Tests.Dispatch.DiscoveryDispatchTests+Sample" },
+            @params = new { instance_id = "inst-1", @namespace = SampleNamespace, type_name = SampleTypeName },
         });
 
         var json = await dispatcher.DispatchAsync(request);
 
-        Assert.Contains("\"members\":[", json);
+        Assert.Contains("\"members\":\"DoThing, Sample\"", json); // includes the implicit public parameterless constructor
         Assert.DoesNotContain("\"status\":\"busy\"", json);
     }
 }

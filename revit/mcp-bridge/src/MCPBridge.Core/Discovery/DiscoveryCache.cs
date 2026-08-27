@@ -1,0 +1,686 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Reflection;
+using System.Security.Cryptography;
+using System.Text.Json;
+using Microsoft.Data.Sqlite;
+
+namespace MCPBridge.Core.Discovery;
+
+/// <summary>One reflected member, joined back with its declaring type's identity -- the shape both list_functions' type-scoped tier and search_functions' results are built from.</summary>
+public sealed class DiscoveryMemberRow
+{
+    public required string MemberId { get; init; }
+    public required string Kind { get; init; }
+    public required string Namespace { get; init; }
+    public required string DeclaringType { get; init; }
+    public required string Name { get; init; }
+    public required string Signature { get; init; }
+    public string? Summary { get; init; }
+    public string? Returns { get; init; }
+    public required IReadOnlyList<ReflectedParameter> Parameters { get; init; }
+}
+
+/// <summary>Counts from one <see cref="DiscoveryCache.Sync"/> call -- surfaced for logging (PRD §01: an automatic-resolution pass like this deserves a trace, not just silent success).</summary>
+public sealed record DiscoverySyncResult(int Added, int Updated, int Removed, int Unchanged);
+
+/// <summary>
+/// SQLite-backed persistent cache of the reflected discovery surface (PRD §08 addendum: live reflection
+/// alone cost ~1.5s to enumerate types plus ~700ms per full-corpus search_functions scan, paid on every
+/// Revit process launch with nothing carried over -- this cache survives across restarts and turns repeat
+/// scans into an indexed query). <see cref="Sync"/> is the only thing that mutates it; every other member is
+/// a read-only query DiscoveryService composes into list_functions/search_functions/describe_function.
+///
+/// <para>
+/// Deliberately takes a plain file path (":memory:" included) rather than computing
+/// %LOCALAPPDATA%\Connectors\Revit\ itself -- same convention as
+/// <see cref="MCPBridge.Core.Connection.BrokerDiscoveryOptions.Local"/>: the caller (BridgeHost in
+/// production, a test elsewhere) owns path resolution so this class stays fully testable without touching
+/// the real filesystem.
+/// </para>
+/// </summary>
+public sealed class DiscoveryCache : IDisposable
+{
+    private readonly SqliteConnection _connection;
+
+    public DiscoveryCache(string databasePath)
+    {
+        _connection = new SqliteConnection($"Data Source={databasePath}");
+        _connection.Open();
+
+        using (var pragma = _connection.CreateCommand())
+        {
+            // Required for the types/members ON DELETE CASCADE below to actually cascade -- SQLite ignores
+            // foreign key actions entirely unless this pragma is set on the connection, every time it opens.
+            pragma.CommandText = "PRAGMA foreign_keys = ON;";
+            pragma.ExecuteNonQuery();
+        }
+
+        CreateSchema();
+    }
+
+    public void Dispose() => _connection.Dispose();
+
+    private void CreateSchema()
+    {
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText = """
+            CREATE TABLE IF NOT EXISTS assemblies (
+                id INTEGER PRIMARY KEY,
+                kind TEXT NOT NULL CHECK (kind IN ('core','addin')),
+                name TEXT NOT NULL,
+                file_path TEXT NOT NULL UNIQUE,
+                file_hash TEXT NOT NULL,
+                file_version TEXT,
+                last_synced_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS types (
+                id INTEGER PRIMARY KEY,
+                assembly_id INTEGER NOT NULL REFERENCES assemblies(id) ON DELETE CASCADE,
+                namespace TEXT NOT NULL,
+                name TEXT NOT NULL,
+                full_name TEXT NOT NULL,
+                member_id TEXT NOT NULL,
+                base_full_name TEXT,
+                documented INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS ix_types_namespace ON types(namespace);
+            CREATE INDEX IF NOT EXISTS ix_types_full_name ON types(full_name);
+            CREATE INDEX IF NOT EXISTS ix_types_ns_name ON types(namespace, name);
+
+            CREATE TABLE IF NOT EXISTS members (
+                id INTEGER PRIMARY KEY,
+                type_id INTEGER NOT NULL REFERENCES types(id) ON DELETE CASCADE,
+                kind TEXT NOT NULL,
+                name TEXT NOT NULL,
+                signature TEXT NOT NULL,
+                summary TEXT,
+                member_id TEXT NOT NULL,
+                returns TEXT,
+                params_json TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS ix_members_type_id ON members(type_id);
+
+            CREATE VIRTUAL TABLE IF NOT EXISTS members_fts USING fts5(
+                name, summary, type_name,
+                tokenize = 'unicode61'
+            );
+            """;
+        cmd.ExecuteNonQuery();
+    }
+
+    // -------------------------------------------------------------------------------------------------
+    // Sync
+    // -------------------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// Diffs <paramref name="currentAssemblies"/> (the assemblies actually loaded into this Revit process
+    /// right now) against the `assemblies` table by file hash, and reconciles: new assemblies are reflected
+    /// and inserted, changed ones (hash mismatch -- a rebuilt add-in DLL, typically) are purged and
+    /// re-reflected, gone ones (an add-in that was loaded before but isn't now) are purged, and unchanged
+    /// ones are skipped entirely -- no re-reflection, no re-write.
+    ///
+    /// <para>
+    /// An assembly with no <see cref="Assembly.Location"/> (dynamic/in-memory, e.g. Roslyn's own
+    /// per-script collectible ALCs -- PRD §06) can't be hashed or matched back to a stable identity across
+    /// syncs, so it's silently excluded from this call entirely -- not an error, just not a candidate for
+    /// persistent tracking. Same for a Location that no longer exists/isn't readable (skipped, not thrown).
+    /// </para>
+    /// </summary>
+    public DiscoverySyncResult Sync(IReadOnlyList<(string Kind, Assembly Assembly)> currentAssemblies)
+    {
+        var now = DateTimeOffset.UtcNow.ToString("O");
+
+        var current = new Dictionary<string, (string Kind, Assembly Assembly, string Hash, string? Version, string Name)>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (kind, assembly) in currentAssemblies)
+        {
+            if (string.IsNullOrEmpty(assembly.Location) || current.ContainsKey(assembly.Location))
+            {
+                continue;
+            }
+
+            string hash;
+            try
+            {
+                hash = ComputeFileHash(assembly.Location);
+            }
+            catch
+            {
+                continue; // unreadable file -- can't sync this one, skip rather than fail the whole call.
+            }
+
+            current[assembly.Location] = (kind, assembly, hash, assembly.GetName().Version?.ToString(), assembly.GetName().Name ?? assembly.Location);
+        }
+
+        var existing = new Dictionary<string, (long Id, string Hash)>(StringComparer.OrdinalIgnoreCase);
+        using (var select = _connection.CreateCommand())
+        {
+            select.CommandText = "SELECT id, file_path, file_hash FROM assemblies";
+            using var reader = select.ExecuteReader();
+            while (reader.Read())
+            {
+                existing[reader.GetString(1)] = (reader.GetInt64(0), reader.GetString(2));
+            }
+        }
+
+        int added = 0, updated = 0, removed = 0, unchanged = 0;
+
+        using var transaction = _connection.BeginTransaction();
+
+        foreach (var path in existing.Keys.Where(p => !current.ContainsKey(p)).ToList())
+        {
+            DeleteAssembly(existing[path].Id, transaction);
+            removed++;
+        }
+
+        foreach (var (path, info) in current)
+        {
+            if (existing.TryGetValue(path, out var row))
+            {
+                if (string.Equals(row.Hash, info.Hash, StringComparison.Ordinal))
+                {
+                    unchanged++;
+                    continue;
+                }
+
+                DeleteAssembly(row.Id, transaction);
+                updated++;
+            }
+            else
+            {
+                added++;
+            }
+
+            InsertAssembly(info.Kind, info.Name, path, info.Hash, info.Version, now, info.Assembly, transaction);
+        }
+
+        transaction.Commit();
+
+        return new DiscoverySyncResult(added, updated, removed, unchanged);
+    }
+
+    private static string ComputeFileHash(string path)
+    {
+        using var stream = File.OpenRead(path);
+        var hash = SHA256.HashData(stream);
+        return Convert.ToHexString(hash);
+    }
+
+    private void DeleteAssembly(long assemblyId, SqliteTransaction transaction)
+    {
+        // members_fts has no foreign key of its own (FTS5 virtual tables can't declare one) -- its rows must
+        // be deleted explicitly, and BEFORE the cascading delete below removes the `members` rows this
+        // subquery joins through (once those are gone there's nothing left to join against).
+        using (var deleteFts = _connection.CreateCommand())
+        {
+            deleteFts.Transaction = transaction;
+            deleteFts.CommandText = """
+                DELETE FROM members_fts WHERE rowid IN (
+                    SELECT m.id FROM members m JOIN types t ON m.type_id = t.id WHERE t.assembly_id = @id
+                )
+                """;
+            deleteFts.Parameters.AddWithValue("@id", assemblyId);
+            deleteFts.ExecuteNonQuery();
+        }
+
+        using var deleteAssembly = _connection.CreateCommand();
+        deleteAssembly.Transaction = transaction;
+        deleteAssembly.CommandText = "DELETE FROM assemblies WHERE id = @id"; // cascades to types, then members
+        deleteAssembly.Parameters.AddWithValue("@id", assemblyId);
+        deleteAssembly.ExecuteNonQuery();
+    }
+
+    private void InsertAssembly(string kind, string name, string path, string hash, string? version, string syncedAt, Assembly assembly, SqliteTransaction transaction)
+    {
+        long assemblyId;
+        using (var insert = _connection.CreateCommand())
+        {
+            insert.Transaction = transaction;
+            insert.CommandText = """
+                INSERT INTO assemblies (kind, name, file_path, file_hash, file_version, last_synced_at)
+                VALUES (@kind, @name, @path, @hash, @version, @syncedAt);
+                SELECT last_insert_rowid();
+                """;
+            insert.Parameters.AddWithValue("@kind", kind);
+            insert.Parameters.AddWithValue("@name", name);
+            insert.Parameters.AddWithValue("@path", path);
+            insert.Parameters.AddWithValue("@hash", hash);
+            insert.Parameters.AddWithValue("@version", (object?)version ?? DBNull.Value);
+            insert.Parameters.AddWithValue("@syncedAt", syncedAt);
+            assemblyId = (long)insert.ExecuteScalar()!;
+        }
+
+        IReadOnlyList<ReflectedType> types;
+        try
+        {
+            types = DiscoveryReflector.Reflect(assembly);
+        }
+        catch
+        {
+            // Review posture carried over from the original DiscoveryService: a pathological assembly must
+            // not take down the whole sync. The assembly row itself still gets recorded (so it's tracked as
+            // "synced, zero types" rather than retried every single call), just with no types/members.
+            return;
+        }
+
+        foreach (var type in types)
+        {
+            long typeId;
+            using (var insertType = _connection.CreateCommand())
+            {
+                insertType.Transaction = transaction;
+                insertType.CommandText = """
+                    INSERT INTO types (assembly_id, namespace, name, full_name, member_id, base_full_name, documented)
+                    VALUES (@assemblyId, @ns, @name, @fullName, @memberId, @baseFullName, @documented);
+                    SELECT last_insert_rowid();
+                    """;
+                insertType.Parameters.AddWithValue("@assemblyId", assemblyId);
+                insertType.Parameters.AddWithValue("@ns", type.Namespace);
+                insertType.Parameters.AddWithValue("@name", type.Name);
+                insertType.Parameters.AddWithValue("@fullName", type.FullName);
+                insertType.Parameters.AddWithValue("@memberId", type.MemberId);
+                insertType.Parameters.AddWithValue("@baseFullName", (object?)type.BaseFullName ?? DBNull.Value);
+                insertType.Parameters.AddWithValue("@documented", type.Documented ? 1 : 0);
+                typeId = (long)insertType.ExecuteScalar()!;
+            }
+
+            foreach (var member in type.Members)
+            {
+                long memberRowId;
+                using (var insertMember = _connection.CreateCommand())
+                {
+                    insertMember.Transaction = transaction;
+                    insertMember.CommandText = """
+                        INSERT INTO members (type_id, kind, name, signature, summary, member_id, returns, params_json)
+                        VALUES (@typeId, @kind, @name, @signature, @summary, @memberId, @returns, @paramsJson);
+                        SELECT last_insert_rowid();
+                        """;
+                    insertMember.Parameters.AddWithValue("@typeId", typeId);
+                    insertMember.Parameters.AddWithValue("@kind", member.Kind);
+                    insertMember.Parameters.AddWithValue("@name", member.Name);
+                    insertMember.Parameters.AddWithValue("@signature", member.Signature);
+                    insertMember.Parameters.AddWithValue("@summary", (object?)member.Summary ?? DBNull.Value);
+                    insertMember.Parameters.AddWithValue("@memberId", member.MemberId);
+                    insertMember.Parameters.AddWithValue("@returns", (object?)member.Returns ?? DBNull.Value);
+                    insertMember.Parameters.AddWithValue("@paramsJson", JsonSerializer.Serialize(member.Parameters));
+                    memberRowId = (long)insertMember.ExecuteScalar()!;
+                }
+
+                using var insertFts = _connection.CreateCommand();
+                insertFts.Transaction = transaction;
+                insertFts.CommandText = "INSERT INTO members_fts (rowid, name, summary, type_name) VALUES (@rowid, @name, @summary, @typeName)";
+                insertFts.Parameters.AddWithValue("@rowid", memberRowId);
+                insertFts.Parameters.AddWithValue("@name", member.Name);
+                insertFts.Parameters.AddWithValue("@summary", (object?)member.Summary ?? "");
+                insertFts.Parameters.AddWithValue("@typeName", type.Name);
+                insertFts.ExecuteNonQuery();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Test-only seam: forces one already-synced assembly's stored file_hash to a bogus value, so a
+    /// following <see cref="Sync"/> call deterministically exercises the "changed" (purge + re-reflect)
+    /// path without needing two genuinely different on-disk builds of the same test assembly. Never called
+    /// by production code (BridgeHost only ever calls <see cref="Sync"/> itself).
+    /// </summary>
+    public void SetStoredHashForTesting(string assemblyLocation, string bogusHash)
+    {
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText = "UPDATE assemblies SET file_hash = @hash WHERE file_path = @path";
+        cmd.Parameters.AddWithValue("@hash", bogusHash);
+        cmd.Parameters.AddWithValue("@path", assemblyLocation);
+        cmd.ExecuteNonQuery();
+    }
+
+    // -------------------------------------------------------------------------------------------------
+    // list_functions queries
+    // -------------------------------------------------------------------------------------------------
+
+    /// <summary>Every namespace with at least one documented type, alphabetical, with a per-namespace documented-type count.</summary>
+    public IReadOnlyList<(string Namespace, int TypeCount)> ListNamespaces()
+    {
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText = """
+            SELECT namespace, COUNT(*) FROM types
+            WHERE documented = 1
+            GROUP BY namespace
+            ORDER BY namespace COLLATE NOCASE
+            """;
+        using var reader = cmd.ExecuteReader();
+        var results = new List<(string, int)>();
+        while (reader.Read())
+        {
+            results.Add((reader.GetString(0), (int)reader.GetInt64(1)));
+        }
+
+        return results;
+    }
+
+    /// <summary>Short (unqualified) names of every documented type in one namespace, alphabetical.</summary>
+    public IReadOnlyList<string> ListTypeNames(string namespaceName)
+    {
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText = "SELECT name FROM types WHERE namespace = @ns AND documented = 1 ORDER BY name COLLATE NOCASE";
+        cmd.Parameters.AddWithValue("@ns", namespaceName);
+        using var reader = cmd.ExecuteReader();
+        var results = new List<string>();
+        while (reader.Read())
+        {
+            results.Add(reader.GetString(0));
+        }
+
+        return results;
+    }
+
+    public bool TypeExists(string namespaceName, string typeName) => FindTypeRow(namespaceName, typeName) is not null;
+
+    public bool TypeExistsByFullName(string fullTypeName) => FindTypeRowByFullName(fullTypeName) is not null;
+
+    /// <summary>
+    /// Distinct member names (constructors excluded from name-dedup collapse the same way overload text
+    /// would be -- every overload of the same name collapses to one entry) declared on the type OR any base
+    /// type still within the reflected surface, alphabetical. This is list_functions' tier-3 shape (PRD §08
+    /// addendum): a member name list to browse, not full signatures -- describe_function is the only way to
+    /// get overload detail, by design (see the task brief this cache was built from).
+    /// </summary>
+    public IReadOnlyList<string> ListMemberNames(string namespaceName, string typeName)
+    {
+        var typeRow = FindTypeRow(namespaceName, typeName);
+        if (typeRow is null)
+        {
+            return Array.Empty<string>();
+        }
+
+        return WalkInheritance(typeRow.Value)
+            .Select(m => m.Name)
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    /// <summary>All members (every overload) declared on the type OR any base type still within the reflected surface -- used by describe_function to resolve a member name to its candidate overload(s). Scoped by namespace+short type name (list_functions' own scoping shape).</summary>
+    public IReadOnlyList<DiscoveryMemberRow> GetMembersIncludingInherited(string namespaceName, string typeName)
+    {
+        var typeRow = FindTypeRow(namespaceName, typeName);
+        return typeRow is null ? Array.Empty<DiscoveryMemberRow>() : WalkInheritance(typeRow.Value);
+    }
+
+    /// <summary>Same as <see cref="GetMembersIncludingInherited(string,string)"/>, scoped by a fully-qualified dotted type name instead -- describe_function's own scoping shape ("Namespace.Type.Member" -- see its own doc comment).</summary>
+    public IReadOnlyList<DiscoveryMemberRow> GetMembersIncludingInheritedByFullName(string fullTypeName)
+    {
+        var typeRow = FindTypeRowByFullName(fullTypeName);
+        return typeRow is null ? Array.Empty<DiscoveryMemberRow>() : WalkInheritance(typeRow.Value);
+    }
+
+    private readonly record struct TypeRow(long Id, string Namespace, string Name, string FullName, string? BaseFullName);
+
+    private TypeRow? FindTypeRow(string namespaceName, string typeName)
+    {
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText = "SELECT id, namespace, name, full_name, base_full_name FROM types WHERE namespace = @ns AND name = @name LIMIT 1";
+        cmd.Parameters.AddWithValue("@ns", namespaceName);
+        cmd.Parameters.AddWithValue("@name", typeName);
+        using var reader = cmd.ExecuteReader();
+        return reader.Read() ? ReadTypeRow(reader) : null;
+    }
+
+    private TypeRow? FindTypeRowByFullName(string fullTypeName)
+    {
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText = "SELECT id, namespace, name, full_name, base_full_name FROM types WHERE full_name = @fullName LIMIT 1";
+        cmd.Parameters.AddWithValue("@fullName", fullTypeName);
+        using var reader = cmd.ExecuteReader();
+        return reader.Read() ? ReadTypeRow(reader) : null;
+    }
+
+    private static TypeRow ReadTypeRow(SqliteDataReader reader) => new(
+        reader.GetInt64(0),
+        reader.GetString(1),
+        reader.GetString(2),
+        reader.GetString(3),
+        reader.IsDBNull(4) ? null : reader.GetString(4));
+
+    /// <summary>
+    /// Review finding (H1) from the original in-memory DiscoveryService, carried over unchanged: a
+    /// type-scoped member list must include members declared on base types (Revit's API is deeply inherited
+    /// -- e.g. Wall.Id is declared on Element), not just what the exact type itself declares. Walks the base
+    /// chain via `base_full_name`, stopping the moment a base type isn't itself in the `types` table (i.e.
+    /// isn't part of any reflected assembly's surface) -- this naturally stops at the BCL boundary
+    /// (System.Object etc. are never reflected/stored) without hardcoding it. Most-derived first; a
+    /// (kind, name, signature) duplicate from a base type (an override) is dropped in favor of the
+    /// most-derived declaration already seen.
+    /// </summary>
+    private List<DiscoveryMemberRow> WalkInheritance(TypeRow startType)
+    {
+        var results = new List<DiscoveryMemberRow>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+
+        TypeRow? current = startType;
+        var guard = 0;
+        while (current is { } type && guard++ < 64) // 64: generous depth guard against a malformed base-chain cycle; Revit's real inheritance depth is nowhere close.
+        {
+            foreach (var member in GetOwnMembers(type.Id, type.Namespace, type.FullName))
+            {
+                var key = member.Kind + "|" + member.Name + "|" + member.Signature;
+                if (seen.Add(key))
+                {
+                    results.Add(member);
+                }
+            }
+
+            current = type.BaseFullName is null ? null : FindTypeRowByFullName(type.BaseFullName);
+        }
+
+        return results;
+    }
+
+    private List<DiscoveryMemberRow> GetOwnMembers(long typeId, string namespaceName, string declaringTypeFullName)
+    {
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText = "SELECT kind, name, signature, summary, member_id, returns, params_json FROM members WHERE type_id = @typeId";
+        cmd.Parameters.AddWithValue("@typeId", typeId);
+        using var reader = cmd.ExecuteReader();
+
+        var results = new List<DiscoveryMemberRow>();
+        while (reader.Read())
+        {
+            results.Add(new DiscoveryMemberRow
+            {
+                Kind = reader.GetString(0),
+                Name = reader.GetString(1),
+                Signature = reader.GetString(2),
+                Summary = reader.IsDBNull(3) ? null : reader.GetString(3),
+                MemberId = reader.GetString(4),
+                Returns = reader.IsDBNull(5) ? null : reader.GetString(5),
+                Parameters = JsonSerializer.Deserialize<List<ReflectedParameter>>(reader.GetString(6)) ?? new List<ReflectedParameter>(),
+                Namespace = namespaceName,
+                DeclaringType = declaringTypeFullName,
+            });
+        }
+
+        return results;
+    }
+
+    // -------------------------------------------------------------------------------------------------
+    // search_functions
+    // -------------------------------------------------------------------------------------------------
+
+    /// <summary>How many raw candidates each of the token-match/FTS5 tiers below pulls before ranking/pagination -- bounded so a broad query against a huge corpus stays a cheap indexed query, not a full scan; well above any realistic topN+cursor walk.</summary>
+    private const int TierCandidateLimit = 500;
+
+    /// <summary>
+    /// FTS5-backed ranked search, per the design decision in this feature's task brief: three tiers,
+    /// highest first, built on FTS5's own indexing rather than a hand-rolled full-corpus scan (the previous
+    /// design -- see search_functions' original ScoreMember doc comment -- cost ~700ms per call precisely
+    /// because it scanned every documented member on every query).
+    ///
+    /// <list type="number">
+    /// <item><b>Exact Type.Member.</b> The query cleanly parses as "TypeToken.MemberToken" (or
+    /// "TypeToken MemberToken", the last whitespace-separated pair) and both halves resolve to a real,
+    /// case-insensitive type-name + member-name pair in the corpus.</item>
+    /// <item><b>All tokens matched across {type name, member name}.</b> Every whitespace/punctuation-split
+    /// query token is a case-insensitive substring of the member's own name or its declaring type's short
+    /// name (not the summary) -- what makes "wall create" reliably surface Wall.Create even when neither
+    /// word alone is a great match against a huge summary corpus.</item>
+    /// <item><b>FTS5 BM25 fallback</b> against name+summary+type_name combined -- the loose/exploratory
+    /// case, ranked by SQLite's own <c>rank</c> column.</item>
+    /// </list>
+    ///
+    /// Deduplicated across tiers (a member found in tier 1 is never also emitted at a lower tier).
+    /// </summary>
+    public IReadOnlyList<(DiscoveryMemberRow Member, double Score)> Search(string query, string? namespaceFilter)
+    {
+        var queryLower = query.Trim().ToLowerInvariant();
+        var tokens = queryLower.Split(new[] { ' ', '.', '_', '-' }, StringSplitOptions.RemoveEmptyEntries);
+
+        var results = new List<(DiscoveryMemberRow Member, double Score)>();
+        var seenMemberIds = new HashSet<string>(StringComparer.Ordinal);
+
+        // Tier 1: exact Type.Member.
+        var lastDot = queryLower.LastIndexOf('.');
+        var lastSpace = queryLower.LastIndexOf(' ');
+        var splitAt = Math.Max(lastDot, lastSpace);
+        if (splitAt > 0 && splitAt < queryLower.Length - 1)
+        {
+            var typeToken = queryLower[..splitAt].Trim();
+            var memberToken = queryLower[(splitAt + 1)..].Trim();
+            foreach (var row in QueryExactTypeMember(typeToken, memberToken, namespaceFilter))
+            {
+                if (seenMemberIds.Add(row.MemberId))
+                {
+                    results.Add((row, 1000));
+                }
+            }
+        }
+
+        // Tier 2: all tokens matched across {type name, member name}.
+        if (tokens.Length > 0)
+        {
+            foreach (var row in QueryTokenMatch(tokens, namespaceFilter))
+            {
+                if (seenMemberIds.Add(row.MemberId))
+                {
+                    results.Add((row, 500));
+                }
+            }
+        }
+
+        // Tier 3: FTS5 BM25 fallback.
+        foreach (var (row, rank) in QueryFts(queryLower, namespaceFilter))
+        {
+            if (seenMemberIds.Add(row.MemberId))
+            {
+                // bm25() returns a negative value, more negative = better match; fold into a positive
+                // [0,499) band strictly below tier 2's floor of 500, preserving relative FTS5 ordering.
+                var normalized = 499.0 / (1.0 + Math.Max(0, -rank));
+                results.Add((row, normalized));
+            }
+        }
+
+        return results;
+    }
+
+    private IEnumerable<DiscoveryMemberRow> QueryExactTypeMember(string typeToken, string memberToken, string? namespaceFilter)
+    {
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText = """
+            SELECT m.kind, m.name, m.signature, m.summary, m.member_id, m.returns, m.params_json, t.namespace, t.full_name
+            FROM members m JOIN types t ON m.type_id = t.id
+            WHERE t.documented = 1 AND LOWER(t.name) = @typeToken AND LOWER(m.name) = @memberToken
+              AND (@ns IS NULL OR t.namespace = @ns)
+            """;
+        cmd.Parameters.AddWithValue("@typeToken", typeToken);
+        cmd.Parameters.AddWithValue("@memberToken", memberToken);
+        cmd.Parameters.AddWithValue("@ns", (object?)namespaceFilter ?? DBNull.Value);
+        using var reader = cmd.ExecuteReader();
+        return ReadMemberRows(reader);
+    }
+
+    private IEnumerable<DiscoveryMemberRow> QueryTokenMatch(string[] tokens, string? namespaceFilter)
+    {
+        using var cmd = _connection.CreateCommand();
+        var whereClauses = new List<string> { "t.documented = 1", "(@ns IS NULL OR t.namespace = @ns)" };
+        for (var i = 0; i < tokens.Length; i++)
+        {
+            whereClauses.Add($"(LOWER(t.name) LIKE @tok{i} ESCAPE '\\' OR LOWER(m.name) LIKE @tok{i} ESCAPE '\\')");
+            cmd.Parameters.AddWithValue($"@tok{i}", "%" + EscapeLike(tokens[i]) + "%");
+        }
+
+        cmd.Parameters.AddWithValue("@ns", (object?)namespaceFilter ?? DBNull.Value);
+        cmd.CommandText = $"""
+            SELECT m.kind, m.name, m.signature, m.summary, m.member_id, m.returns, m.params_json, t.namespace, t.full_name
+            FROM members m JOIN types t ON m.type_id = t.id
+            WHERE {string.Join(" AND ", whereClauses)}
+            LIMIT {TierCandidateLimit}
+            """;
+        using var reader = cmd.ExecuteReader();
+        return ReadMemberRows(reader);
+    }
+
+    private IEnumerable<(DiscoveryMemberRow Row, double Rank)> QueryFts(string query, string? namespaceFilter)
+    {
+        // FTS5's MATCH operand syntax treats bare punctuation specially; the query is already reduced to a
+        // token stream everywhere else in this class, so build a simple OR-of-tokens match expression rather
+        // than passing the raw query straight through.
+        var tokens = query.Split(new[] { ' ', '.', '_', '-' }, StringSplitOptions.RemoveEmptyEntries);
+        if (tokens.Length == 0)
+        {
+            return Array.Empty<(DiscoveryMemberRow, double)>();
+        }
+
+        var matchExpression = string.Join(" OR ", tokens.Select(t => "\"" + t.Replace("\"", "\"\"") + "\""));
+
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText = """
+            SELECT m.kind, m.name, m.signature, m.summary, m.member_id, m.returns, m.params_json, t.namespace, t.full_name, bm25(members_fts)
+            FROM members_fts
+            JOIN members m ON m.id = members_fts.rowid
+            JOIN types t ON m.type_id = t.id
+            WHERE members_fts MATCH @match AND t.documented = 1 AND (@ns IS NULL OR t.namespace = @ns)
+            ORDER BY bm25(members_fts)
+            LIMIT @limit
+            """;
+        cmd.Parameters.AddWithValue("@match", matchExpression);
+        cmd.Parameters.AddWithValue("@ns", (object?)namespaceFilter ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@limit", TierCandidateLimit);
+
+        var results = new List<(DiscoveryMemberRow, double)>();
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            results.Add((ReadMemberRow(reader), reader.GetDouble(9)));
+        }
+
+        return results;
+    }
+
+    private static string EscapeLike(string token) => token.Replace("\\", "\\\\").Replace("%", "\\%").Replace("_", "\\_");
+
+    private static IEnumerable<DiscoveryMemberRow> ReadMemberRows(SqliteDataReader reader)
+    {
+        var results = new List<DiscoveryMemberRow>();
+        while (reader.Read())
+        {
+            results.Add(ReadMemberRow(reader));
+        }
+
+        return results;
+    }
+
+    private static DiscoveryMemberRow ReadMemberRow(SqliteDataReader reader) => new()
+    {
+        Kind = reader.GetString(0),
+        Name = reader.GetString(1),
+        Signature = reader.GetString(2),
+        Summary = reader.IsDBNull(3) ? null : reader.GetString(3),
+        MemberId = reader.GetString(4),
+        Returns = reader.IsDBNull(5) ? null : reader.GetString(5),
+        Parameters = JsonSerializer.Deserialize<List<ReflectedParameter>>(reader.GetString(6)) ?? new List<ReflectedParameter>(),
+        Namespace = reader.GetString(7),
+        DeclaringType = reader.GetString(8),
+    };
+}

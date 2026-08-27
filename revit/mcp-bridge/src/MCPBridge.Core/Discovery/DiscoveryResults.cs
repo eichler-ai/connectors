@@ -11,9 +11,42 @@ public sealed class DiscoveryMemberNotFoundException : Exception
     }
 }
 
+/// <summary>list_functions' three scopes (PRD §08 addendum: a strict one-level-at-a-time tree, not a flat member dump) -- see <see cref="ListFunctionsResult"/>'s own doc comment for what each carries.</summary>
+public enum ListFunctionsTier
+{
+    /// <summary>No params: every namespace name (with a documented-type count), nothing deeper.</summary>
+    Namespaces,
+
+    /// <summary>namespace given, no type: every documented type's short name in that namespace.</summary>
+    Types,
+
+    /// <summary>namespace + type given: every distinct member name (own + inherited) declared on that type.</summary>
+    Members,
+}
+
+/// <summary>
+/// list_functions' result, one tier at a time (PRD §08 addendum) -- deliberately NOT the old flat
+/// "verbose member objects" shape: each tier returns just names (namespace names, or namespace/type-
+/// prefix-stripped type/member names), leaving full per-member detail (signature/summary/params) to
+/// describe_function alone. <see cref="Tier"/> says which of <see cref="Namespace"/>/<see cref="TypeName"/>/
+/// <see cref="Counts"/> are meaningful for this particular result.
+/// </summary>
 public sealed class ListFunctionsResult
 {
-    public required IReadOnlyList<MemberSignature> Members { get; init; }
+    public required ListFunctionsTier Tier { get; init; }
+
+    /// <summary>Set for <see cref="ListFunctionsTier.Types"/> and <see cref="ListFunctionsTier.Members"/>.</summary>
+    public string? Namespace { get; init; }
+
+    /// <summary>Set for <see cref="ListFunctionsTier.Members"/> only.</summary>
+    public string? TypeName { get; init; }
+
+    /// <summary>Namespace names / type names / member names, per <see cref="Tier"/> -- already namespace- or type-prefix-stripped for the Types/Members tiers.</summary>
+    public required IReadOnlyList<string> Names { get; init; }
+
+    /// <summary>Documented-type count per entry, parallel to <see cref="Names"/> -- <see cref="ListFunctionsTier.Namespaces"/> only.</summary>
+    public IReadOnlyList<int>? Counts { get; init; }
+
     public string? NextCursor { get; init; }
     public required int TotalScoped { get; init; }
 }

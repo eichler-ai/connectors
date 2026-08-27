@@ -25,11 +25,13 @@ public class RealRevitApiTests
         }
 
         var assembly = Assembly.LoadFrom(dllPath);
-        var service = new DiscoveryService(new DiscoveryOptions { Assemblies = new[] { assembly } });
+        using var cache = new DiscoveryCache(":memory:");
+        cache.Sync(new[] { ("core", assembly) });
+        var service = new DiscoveryService(cache);
 
-        var result = service.ListFunctions(namespaceFilter: null, typeFilter: "Autodesk.Revit.DB.Document", cursor: null, pageSize: 500);
+        var result = service.ListFunctions(namespaceFilter: "Autodesk.Revit.DB", typeFilter: "Document", cursor: null, pageSize: 500);
 
-        Assert.NotEmpty(result.Members);
-        Assert.Contains(result.Members, m => m.Name == "Delete");
+        Assert.NotEmpty(result.Names);
+        Assert.Contains("Delete", result.Names);
     }
 }

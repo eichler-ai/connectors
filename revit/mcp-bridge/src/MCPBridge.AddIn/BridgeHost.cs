@@ -2,7 +2,9 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Net.Sockets;
+using System.Reflection;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
@@ -44,6 +46,11 @@ internal sealed class BridgeHost
     private Thread? _workerThread;
     private volatile TcpClient? _activeTcpClient;
     private Timer? _timeoutTimer;
+
+    // Rooted for the same reason _timeoutTimer is a field rather than a local: an unreferenced Timer is
+    // eligible for GC at any point before it fires, one-shot or not.
+    private Timer? _discoveryResyncTimer;
+    private DiscoveryCache? _discoveryCache;
 
     // Backing fields for the status snapshot the MCP Bridge ribbon button reads (see
     // MCPBridgeStatusCommand). Set from the connection thread at the exact same points that already
@@ -99,6 +106,7 @@ internal sealed class BridgeHost
         // Partial mitigation for Roslyn/other-add-in version collisions (see its own doc comment) --
         // must happen before any script can ever compile.
         RoslynAssemblyIsolation.EnsureInitialized();
+        SqliteAssemblyIsolation.EnsureInitialized();
 
         // The document-snapshot ExternalEvent has no circular dependency (its handler doesn't wrap
         // anything else), so it's created directly.
@@ -119,17 +127,31 @@ internal sealed class BridgeHost
 
         var scriptExecutor = new TransactionScriptExecutor(new RoslynScriptRunner());
 
-        // PRD §08: discovery reflects directly over the RevitAPI/RevitAPIUI assemblies Revit has already
-        // loaded into this process -- typeof(...).Assembly, never a second load from a guessed install
-        // path -- so it always matches the exact assembly/version actually running.
-        var discoveryService = new DiscoveryService(new DiscoveryOptions
-        {
-            Assemblies = new[]
-            {
-                typeof(Autodesk.Revit.DB.Document).Assembly,
-                typeof(UIApplication).Assembly,
-            },
-        });
+        // PRD §08 addendum: discovery is now backed by a persistent SQLite cache (Microsoft.Data.Sqlite +
+        // FTS5) instead of reflecting fresh on every Revit process launch -- live-measured cost of the old
+        // approach was ~1.5s to enumerate types plus ~700ms per full-corpus search_functions scan, paid
+        // again on every restart with nothing carried over. %LOCALAPPDATA%\Connectors\Revit\ is the same
+        // app-data root BrokerDiscoveryOptions.Local() already uses (see its own doc comment) -- one place
+        // per machine, not a second convention.
+        var discoveryDbPath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Connectors", "Revit", "discovery-cache.db");
+        Directory.CreateDirectory(Path.GetDirectoryName(discoveryDbPath)!);
+        _discoveryCache = new DiscoveryCache(discoveryDbPath);
+        SyncDiscoveryCache("initial");
+
+        var discoveryService = new DiscoveryService(_discoveryCache);
+
+        // Revit doesn't guarantee add-in load order (PRD §05 already documents the analogous
+        // startup-ordering problem for the broker connection itself) -- an add-in that finishes loading
+        // AFTER this OnStartup call has already returned would otherwise never get picked up until the next
+        // full Revit restart. One deferred, one-shot re-check catches that window without a recurring poll
+        // loop; 8s was chosen as comfortably past typical add-in OnStartup duration without meaningfully
+        // delaying when a late-loading add-in's API becomes discoverable.
+        _discoveryResyncTimer = new Timer(
+            _ => SyncDiscoveryCache("deferred"),
+            state: null,
+            dueTime: TimeSpan.FromSeconds(8),
+            period: Timeout.InfiniteTimeSpan);
 
         var dispatcher = new RequestDispatcher(_executionManager, scriptBridge, scriptExecutor, windowInventory: new Win32WindowInventory(), discoveryService: discoveryService);
 
@@ -203,8 +225,82 @@ internal sealed class BridgeHost
         _timeoutTimer?.Dispose();
         _timeoutTimer = null;
 
+        _discoveryResyncTimer?.Dispose();
+        _discoveryResyncTimer = null;
+
         _workerThread?.Join(TimeSpan.FromSeconds(5));
         _workerThread = null;
+
+        _discoveryCache?.Dispose();
+        _discoveryCache = null;
+    }
+
+    /// <summary>
+    /// Reflects Revit's core API assemblies plus every currently-loaded add-in assembly into
+    /// <see cref="_discoveryCache"/>'s persistent SQLite store (<see cref="DiscoveryCache.Sync"/> diffs
+    /// against what's already there, so calling this twice -- initial + the deferred re-check above -- costs
+    /// nothing extra for anything unchanged between the two calls).
+    /// </summary>
+    private void SyncDiscoveryCache(string reason)
+    {
+        try
+        {
+            var result = _discoveryCache!.Sync(CollectAssembliesToSync());
+            LogConnectionDiagnostic($"discovery cache sync ({reason}): added={result.Added} updated={result.Updated} removed={result.Removed} unchanged={result.Unchanged}");
+        }
+        catch (Exception ex)
+        {
+            // A sync failure must never take down the connection thread or leave discovery permanently
+            // broken -- worst case this pass's changes (a rebuilt add-in DLL, a newly-loaded add-in) are
+            // missed until the next sync (the deferred one, or implicitly the next Revit restart).
+            LogConnectionDiagnostic($"discovery cache sync ({reason}) FAILED: {ex}");
+        }
+    }
+
+    /// <summary>
+    /// PRD §08: discovery covers Revit's own API (RevitAPI.dll/RevitAPIUI.dll, "core") plus whatever other
+    /// add-ins have loaded into this same process ("addin") -- an agent scripting against a live Revit
+    /// session can call into another add-in's public API just as validly as Revit's own. The filter below
+    /// excludes .NET/BCL assemblies (never anyone's "API" in the sense this feature means) and this add-in's
+    /// own assemblies (already covered structurally -- MCPBridge itself isn't something a script would
+    /// reflect-discover its own bridge through) by a simple name-prefix check; not exhaustive (a
+    /// vendored/renamed BCL assembly could slip through), but good enough to avoid flooding the discovery
+    /// surface with framework noise, and any false positive just becomes a few extra harmless namespaces
+    /// rather than a correctness problem -- DiscoveryCache.Sync silently skips anything with no
+    /// <see cref="System.Reflection.Assembly.Location"/> (dynamic assemblies) regardless.
+    /// </summary>
+    private static IReadOnlyList<(string Kind, Assembly Assembly)> CollectAssembliesToSync()
+    {
+        var assemblies = new List<(string Kind, Assembly Assembly)>
+        {
+            ("core", typeof(Autodesk.Revit.DB.Document).Assembly),
+            ("core", typeof(UIApplication).Assembly),
+        };
+
+        var excludedPrefixes = new[] { "System.", "Microsoft.", "MCPBridge.", "mscorlib", "netstandard", "WindowsBase", "PresentationCore", "PresentationFramework" };
+
+        foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+        {
+            var name = assembly.GetName().Name;
+            if (string.IsNullOrEmpty(name) || string.IsNullOrEmpty(assembly.Location))
+            {
+                continue;
+            }
+
+            if (excludedPrefixes.Any(prefix => name.StartsWith(prefix, StringComparison.Ordinal)))
+            {
+                continue;
+            }
+
+            if (name is "RevitAPI" or "RevitAPIUI")
+            {
+                continue; // already added above as "core", with an explicit typeof(...) reference rather than a name-string match.
+            }
+
+            assemblies.Add(("addin", assembly));
+        }
+
+        return assemblies;
     }
 
     private void RunConnectionLoop(RequestDispatcher dispatcher, DocumentSnapshotHandler documentSnapshotHandler, ExternalEvent documentSnapshotEvent, CancellationToken stopToken)

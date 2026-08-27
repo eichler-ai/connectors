@@ -9,11 +9,12 @@
     <RootNamespace>MCPBridge.Discovery.Tests</RootNamespace>
     <!--
       Emits a real XML-doc sidecar (MCPBridge.Discovery.Tests.xml) next to this test assembly's own DLL,
-      compiled from the Fixtures/*.cs triple-slash comments; DiscoveryServiceTests reflects over
-      typeof(Fixtures.Widget).Assembly (this assembly) and relies on DiscoveryService locating this file
-      via the same Path.ChangeExtension(assembly.Location, ".xml") convention it uses for RevitAPI.xml in
-      production (see DiscoveryOptions' own doc comment); a portable, self-contained fixture rather than
-      depending on the real, Windows/Revit-install-only RevitAPI.dll being present in dev environments.
+      compiled from the Fixtures/*.cs triple-slash comments; DiscoveryServiceTests/DiscoveryCacheTests sync a
+      DiscoveryCache against typeof(Fixtures.Widget).Assembly (this assembly), and DiscoveryReflector locates
+      this file via the same Path.ChangeExtension(assembly.Location, ".xml") convention it uses for
+      RevitAPI.xml in production (see DiscoveryReflector's own doc comment); a portable, self-contained
+      fixture rather than depending on the real, Windows/Revit-install-only RevitAPI.dll being present in
+      dev environments.
     -->
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <NoWarn>$(NoWarn);CS1591</NoWarn>

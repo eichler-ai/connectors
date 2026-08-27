@@ -49,26 +49,60 @@ func attachFakeDiscoveryInstance(t *testing.T, r *discovery.Router, instanceID s
 	r.AttachInstance(instanceID, brokerConn)
 }
 
-func TestListFunctionsToolSuccess(t *testing.T) {
+// list_functions is a strict one-level-at-a-time tree (PRD §08 addendum):
+// no args -> namespaces, +namespace -> types, +namespace+type -> members.
+// Each of the three tests below exercises one tier's wire shape.
+
+func TestListFunctionsToolSuccess_NamespacesTier(t *testing.T) {
 	r := discovery.NewRouter()
 	attachFakeDiscoveryInstance(t, r, "inst-1", func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
 		if method != "list_functions" {
 			t.Errorf("method = %q, want list_functions", method)
 		}
 		return map[string]any{
-			"members": []any{
-				map[string]any{
-					"member_id":      "M:Autodesk.Revit.DB.Document.Delete(Autodesk.Revit.DB.ElementId)",
-					"kind":           "Method",
-					"namespace":      "Autodesk.Revit.DB",
-					"declaring_type": "Autodesk.Revit.DB.Document",
-					"name":           "Delete",
-					"signature":      "ICollection<ElementId> Delete(ElementId elementId)",
-					"summary":        "Deletes an element.",
-				},
+			"namespaces": []any{
+				map[string]any{"namespace": "Autodesk.Revit.DB", "type_count": 1234},
 			},
-			"next_cursor":  "100",
-			"total_scoped": 734,
+			"next_cursor":  "50",
+			"total_scoped": 60,
+		}, nil
+	})
+	cs := connectDiscoveryClient(t, r)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "list_functions", Arguments: map[string]any{}})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected tool error: %+v", res.Content)
+	}
+
+	var out ListFunctionsOut
+	sc, _ := json.Marshal(res.StructuredContent)
+	if err := json.Unmarshal(sc, &out); err != nil {
+		t.Fatalf("decoding structured content: %v", err)
+	}
+	if len(out.Namespaces) != 1 || out.Namespaces[0].Namespace != "Autodesk.Revit.DB" || out.Namespaces[0].TypeCount != 1234 {
+		t.Errorf("out.Namespaces = %+v", out.Namespaces)
+	}
+	if out.NextCursor != "50" || out.TotalScoped != 60 {
+		t.Errorf("out = %+v", out)
+	}
+}
+
+func TestListFunctionsToolSuccess_TypesTier(t *testing.T) {
+	r := discovery.NewRouter()
+	attachFakeDiscoveryInstance(t, r, "inst-1", func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
+		if method != "list_functions" {
+			t.Errorf("method = %q, want list_functions", method)
+		}
+		return map[string]any{
+			"namespace":    "Autodesk.Revit.DB",
+			"types":        "Wall, Floor, Document",
+			"next_cursor":  "50",
+			"total_scoped": 1234,
 		}, nil
 	})
 	cs := connectDiscoveryClient(t, r)
@@ -91,10 +125,51 @@ func TestListFunctionsToolSuccess(t *testing.T) {
 	if err := json.Unmarshal(sc, &out); err != nil {
 		t.Fatalf("decoding structured content: %v", err)
 	}
-	if len(out.Members) != 1 || out.Members[0].Name != "Delete" {
-		t.Errorf("out.Members = %+v", out.Members)
+	if out.Namespace != "Autodesk.Revit.DB" || out.Types != "Wall, Floor, Document" {
+		t.Errorf("out = %+v", out)
 	}
-	if out.NextCursor != "100" || out.TotalScoped != 734 {
+	if out.NextCursor != "50" || out.TotalScoped != 1234 {
+		t.Errorf("out = %+v", out)
+	}
+}
+
+func TestListFunctionsToolSuccess_MembersTier(t *testing.T) {
+	r := discovery.NewRouter()
+	attachFakeDiscoveryInstance(t, r, "inst-1", func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
+		if method != "list_functions" {
+			t.Errorf("method = %q, want list_functions", method)
+		}
+		return map[string]any{
+			"namespace":    "Autodesk.Revit.DB",
+			"type":         "Document",
+			"members":      "Delete, Create",
+			"total_scoped": 2,
+		}, nil
+	})
+	cs := connectDiscoveryClient(t, r)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	res, err := cs.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "list_functions",
+		Arguments: map[string]any{"namespace": "Autodesk.Revit.DB", "type_name": "Autodesk.Revit.DB.Document"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected tool error: %+v", res.Content)
+	}
+
+	var out ListFunctionsOut
+	sc, _ := json.Marshal(res.StructuredContent)
+	if err := json.Unmarshal(sc, &out); err != nil {
+		t.Fatalf("decoding structured content: %v", err)
+	}
+	if out.Namespace != "Autodesk.Revit.DB" || out.Type != "Document" || out.Members != "Delete, Create" {
+		t.Errorf("out = %+v", out)
+	}
+	if out.TotalScoped != 2 {
 		t.Errorf("out = %+v", out)
 	}
 }

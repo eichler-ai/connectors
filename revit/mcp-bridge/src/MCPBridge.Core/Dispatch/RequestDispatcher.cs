@@ -477,10 +477,11 @@ public sealed class RequestDispatcher
         try
         {
             var query = request.GetRequiredString("query");
+            var namespaceFilter = request.GetOptionalString("namespace");
             var cursor = request.GetOptionalString("cursor");
             var topN = ClampPageSize(request.GetOptionalInt32("top_n", DefaultSearchFunctionsTopN));
 
-            var result = _discoveryService.SearchFunctions(query, cursor, topN);
+            var result = _discoveryService.SearchFunctions(query, namespaceFilter, cursor, topN);
             return DiscoveryResultMessage.SearchFunctions(request.Id, result);
         }
         catch (JsonRpcParamException ex)

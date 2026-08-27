@@ -29,6 +29,7 @@ type ListFunctionsIn struct {
 type SearchFunctionsIn struct {
 	InstanceID string `json:"instance_id,omitempty" jsonschema:"instance_id of the target Revit instance; if omitted, any currently-connected instance is used"`
 	Query      string `json:"query" jsonschema:"fuzzy-matched against member names and XML-doc summary text"`
+	Namespace  string `json:"namespace,omitempty" jsonschema:"scope the search to one namespace, e.g. Autodesk.Revit.DB"`
 	Cursor     string `json:"cursor,omitempty" jsonschema:"opaque pagination cursor echoed back from a prior response's next_cursor"`
 	TopN       int    `json:"top_n,omitempty" jsonschema:"ranked results per page; default 20"`
 }
@@ -54,9 +55,38 @@ type Member struct {
 	Score         float64 `json:"score,omitempty"`
 }
 
+// NamespaceEntry is one namespace's entry in list_functions' no-args tier.
+type NamespaceEntry struct {
+	Namespace string `json:"namespace"`
+	TypeCount int    `json:"type_count"`
+}
+
 // ListFunctionsOut is the output schema for the list_functions tool.
+//
+// PRD §08 addendum: list_functions is a strict one-level-at-a-time tree
+// (namespaces -> types -> members), not a flat member dump — the three
+// tiers below are mutually exclusive per response (only one is ever
+// populated), matching the add-in's DiscoveryResultMessage DTOs exactly so
+// json.Unmarshal doesn't silently drop fields it doesn't know about.
 type ListFunctionsOut struct {
-	Members     []Member     `json:"members,omitempty"`
+	// No-args tier: namespace names only.
+	Namespaces []NamespaceEntry `json:"namespaces,omitempty"`
+
+	// Namespace-scoped tier: type names in that namespace, comma-separated,
+	// prefix-stripped. Types is also non-empty here, sharing Namespace with
+	// the members tier below.
+	Types string `json:"types,omitempty"`
+
+	// Namespace+type-scoped tier: member names of that type, comma-separated,
+	// prefix-stripped. describe_function is the only way to get full detail
+	// on one of these.
+	Type    string `json:"type,omitempty"`
+	Members string `json:"members,omitempty"`
+
+	// Namespace is shared by the Types and Members tiers above (empty for
+	// the no-args Namespaces tier, which has no single namespace to name).
+	Namespace string `json:"namespace,omitempty"`
+
 	NextCursor  string       `json:"next_cursor,omitempty"`
 	TotalScoped int          `json:"total_scoped,omitempty"`
 	Error       *diag.Record `json:"error,omitempty"`
@@ -118,6 +148,9 @@ func RegisterDiscovery(s *mcp.Server, r *discovery.Router) {
 		Description: "Fuzzy-search Revit API members by name and XML-doc summary text, ranked, with pagination. Use when you don't know the exact type/method name to start from.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in SearchFunctionsIn) (*mcp.CallToolResult, SearchFunctionsOut, error) {
 		params := map[string]any{"query": in.Query}
+		if in.Namespace != "" {
+			params["namespace"] = in.Namespace
+		}
 		if in.Cursor != "" {
 			params["cursor"] = in.Cursor
 		}

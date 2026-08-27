@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
@@ -46,10 +47,57 @@ public static class DiscoveryResultMessage
         public double Score { get; set; }
     }
 
-    private sealed class ListFunctionsResultDto
+    private sealed class NamespaceEntryDto
     {
+        [JsonPropertyName("namespace")]
+        public string Namespace { get; set; } = "";
+
+        [JsonPropertyName("type_count")]
+        public int TypeCount { get; set; }
+    }
+
+    /// <summary>list_functions' no-args tier: namespace names only (PRD §08 addendum -- a strict one-level-at-a-time tree, never a flat member dump).</summary>
+    private sealed class NamespaceListResultDto
+    {
+        [JsonPropertyName("namespaces")]
+        public List<NamespaceEntryDto> Namespaces { get; set; } = new();
+
+        [JsonPropertyName("next_cursor")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string? NextCursor { get; set; }
+
+        [JsonPropertyName("total_scoped")]
+        public int TotalScoped { get; set; }
+    }
+
+    /// <summary>list_functions' namespace-scoped tier: type names in that namespace, prefix-stripped, as one comma-separated string.</summary>
+    private sealed class TypeListResultDto
+    {
+        [JsonPropertyName("namespace")]
+        public string Namespace { get; set; } = "";
+
+        [JsonPropertyName("types")]
+        public string Types { get; set; } = "";
+
+        [JsonPropertyName("next_cursor")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string? NextCursor { get; set; }
+
+        [JsonPropertyName("total_scoped")]
+        public int TotalScoped { get; set; }
+    }
+
+    /// <summary>list_functions' namespace+type-scoped tier: member names of that type, prefix-stripped, as one comma-separated string. describe_function is the only way to get full signature/summary/param detail on one of these.</summary>
+    private sealed class MemberListResultDto
+    {
+        [JsonPropertyName("namespace")]
+        public string Namespace { get; set; } = "";
+
+        [JsonPropertyName("type")]
+        public string Type { get; set; } = "";
+
         [JsonPropertyName("members")]
-        public List<MemberDto> Members { get; set; } = new();
+        public string Members { get; set; } = "";
 
         [JsonPropertyName("next_cursor")]
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
@@ -150,17 +198,33 @@ public static class DiscoveryResultMessage
         public TResult Result { get; set; } = default!;
     }
 
-    public static string ListFunctions(JsonElement id, ListFunctionsResult result)
+    public static string ListFunctions(JsonElement id, ListFunctionsResult result) => result.Tier switch
     {
-        var dto = new ListFunctionsResultDto
+        ListFunctionsTier.Namespaces => Serialize(id, new NamespaceListResultDto
         {
-            Members = result.Members.Select(ToMemberDto).ToList(),
+            Namespaces = result.Names
+                .Zip(result.Counts ?? Enumerable.Repeat(0, result.Names.Count), (name, count) => new NamespaceEntryDto { Namespace = name, TypeCount = count })
+                .ToList(),
             NextCursor = result.NextCursor,
             TotalScoped = result.TotalScoped,
-        };
-
-        return Serialize(id, dto);
-    }
+        }),
+        ListFunctionsTier.Types => Serialize(id, new TypeListResultDto
+        {
+            Namespace = result.Namespace ?? "",
+            Types = string.Join(", ", result.Names),
+            NextCursor = result.NextCursor,
+            TotalScoped = result.TotalScoped,
+        }),
+        ListFunctionsTier.Members => Serialize(id, new MemberListResultDto
+        {
+            Namespace = result.Namespace ?? "",
+            Type = result.TypeName ?? "",
+            Members = string.Join(", ", result.Names),
+            NextCursor = result.NextCursor,
+            TotalScoped = result.TotalScoped,
+        }),
+        _ => throw new ArgumentOutOfRangeException(nameof(result), result.Tier, "unknown list_functions tier"),
+    };
 
     public static string SearchFunctions(JsonElement id, SearchFunctionsResult result)
     {
@@ -209,17 +273,6 @@ public static class DiscoveryResultMessage
 
         return Serialize(id, overloadDto);
     }
-
-    private static MemberDto ToMemberDto(MemberSignature m) => new()
-    {
-        MemberId = m.MemberId,
-        Kind = m.Kind,
-        Namespace = m.Namespace,
-        DeclaringType = m.DeclaringType,
-        Name = m.Name,
-        Signature = m.Signature,
-        Summary = m.Summary,
-    };
 
     private static ScoredMemberDto ToScoredMemberDto(MemberSignature m) => new()
     {
