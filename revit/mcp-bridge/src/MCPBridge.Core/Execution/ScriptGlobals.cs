@@ -1,4 +1,6 @@
+using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Threading;
 using MCPBridge.RevitAdapter;
 
@@ -63,5 +65,96 @@ public sealed class ScriptGlobals
         UIApplication = uiApplication;
         UIDocument = uiDocument;
         CancellationToken = cancellationToken;
+    }
+
+    /// <summary>
+    /// Publishes a script output file to the active execution's exports/ directory (PRD §09
+    /// "Publishing script outputs"). Copies (never moves) <paramref name="sourcePath"/> to
+    /// <c>&lt;exports&gt;/&lt;name ?? Path.GetFileName(sourcePath)&gt;</c> and registers the result in
+    /// <see cref="ActiveExportContext"/> for this execution's files[] -- every call records exactly
+    /// one <see cref="PublishedFileRecord"/>, whether it succeeds or fails, and this method itself
+    /// NEVER throws: a script's own untrusted code calls this by name, and a failure on one file
+    /// (disk full, a locked target, a bad source path) must never roll back or block the rest of
+    /// the script or any other file it publishes.
+    ///
+    /// Collisions are controlled by the active execution's overwrite_output_files flag (PRD §09):
+    /// with the default false, a Publish call that would overwrite an existing destination file
+    /// becomes a status:"failed" entry naming the flag, never a silent skip and never an abort of
+    /// anything else the script does.
+    /// </summary>
+    public void Publish(string sourcePath, string? name = null)
+    {
+        var exportsDirectoryPath = ActiveExportContext.ExportsDirectoryPath;
+        var displayName = SafeFileName(name, sourcePath);
+
+        try
+        {
+            if (exportsDirectoryPath is null)
+            {
+                // Defensive: no active export context. Should not happen from a real script run
+                // (TransactionScriptExecutor always brackets one when an exports directory is
+                // known), but scripts are untrusted and this must never throw -- best-effort no-op.
+                return;
+            }
+
+            var destinationPath = Path.Combine(exportsDirectoryPath, displayName);
+            var normalizedSource = NormalizeFullPath(sourcePath);
+            var normalizedDestination = NormalizeFullPath(destinationPath);
+
+            if (string.Equals(normalizedSource, normalizedDestination, StringComparison.OrdinalIgnoreCase))
+            {
+                // The script already wrote directly into exports/ under this same name -- just
+                // register it, don't copy a file onto itself.
+                ActiveExportContext.RecordPublished(new PublishedFileRecord(displayName, destinationPath, PublishedFileRecord.StatusPublished, null));
+                return;
+            }
+
+            if (File.Exists(destinationPath) && !ActiveExportContext.OverwriteOutputFiles)
+            {
+                ActiveExportContext.RecordPublished(new PublishedFileRecord(
+                    displayName,
+                    destinationPath,
+                    PublishedFileRecord.StatusFailed,
+                    $"'{destinationPath}' already exists; set overwrite_output_files=true to replace it."));
+                return;
+            }
+
+            File.Copy(sourcePath, destinationPath, overwrite: ActiveExportContext.OverwriteOutputFiles);
+            ActiveExportContext.RecordPublished(new PublishedFileRecord(displayName, destinationPath, PublishedFileRecord.StatusPublished, null));
+        }
+        catch (Exception ex)
+        {
+            var destinationPath = exportsDirectoryPath is null ? sourcePath : Path.Combine(exportsDirectoryPath, displayName);
+            ActiveExportContext.RecordPublished(new PublishedFileRecord(displayName, destinationPath, PublishedFileRecord.StatusFailed, ex.Message));
+        }
+    }
+
+    private static string SafeFileName(string? name, string sourcePath)
+    {
+        if (!string.IsNullOrEmpty(name))
+        {
+            return name;
+        }
+
+        try
+        {
+            return Path.GetFileName(sourcePath);
+        }
+        catch
+        {
+            return sourcePath;
+        }
+    }
+
+    private static string NormalizeFullPath(string path)
+    {
+        try
+        {
+            return Path.GetFullPath(path);
+        }
+        catch
+        {
+            return path;
+        }
     }
 }

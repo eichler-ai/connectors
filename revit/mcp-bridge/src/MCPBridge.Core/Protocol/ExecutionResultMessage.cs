@@ -58,6 +58,10 @@ public static class ExecutionResultMessage
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public List<DiagnosticRecord>? Notices { get; set; }
 
+        [JsonPropertyName("files")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public List<PublishedFileRecord>? Files { get; set; }
+
         [JsonPropertyName("error")]
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public DiagnosticRecord? Error { get; set; }
@@ -99,6 +103,7 @@ public static class ExecutionResultMessage
             ExecutionId = record.ExecutionId,
             Output = ComposeOutput(record),
             Notices = notices,
+            Files = record.Files.Count > 0 ? new List<PublishedFileRecord>(record.Files) : null,
             Error = record.Error,
         };
 

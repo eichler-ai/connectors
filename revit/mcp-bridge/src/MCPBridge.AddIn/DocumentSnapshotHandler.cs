@@ -4,7 +4,10 @@ using System.Runtime.CompilerServices;
 using System.Threading.Tasks;
 using Autodesk.Revit.DB;
 using Autodesk.Revit.UI;
+using MCPBridge.Core.Identity;
 using MCPBridge.Core.Protocol;
+using MCPBridge.Core.Workspace;
+using MCPBridge.RevitAdapter;
 
 namespace MCPBridge.AddIn;
 
@@ -24,23 +27,36 @@ namespace MCPBridge.AddIn;
 /// RevitDocumentAdapter and friends), so there is no testability reason to route it through that seam --
 /// using the real Revit API types directly here is both simpler and unavoidable.
 ///
-/// KNOWN SIMPLIFICATION: document_id here is a placeholder, not the real §09 identity scheme (normalized
-/// central-model-path hashing, doc-/tmp- promotion-on-first-save, alias tracking, etc. -- explicitly
-/// Phase 3 scope). Every document -- saved or unsaved -- gets a "doc-"/"tmp-" + GUID minted the first
-/// time this handler sees it and cached for the life of the process (a ConditionalWeakTable keyed by the
-/// live Document reference), which is close in spirit to "session-scoped GUID minted on open" but not
-/// wired to Revit's actual document-open event, only to however often BridgeHost happens to call this
-/// snapshot. Deliberately NOT derived from the document's path (an earlier version hashed it): nothing at
-/// Phase 1 needs the id to be reproducible across a process restart or a different open of the same
-/// file -- only stable across repeated register calls for the SAME still-open Document within THIS
-/// process, which a reference-keyed cache already guarantees identically, without the extra hashing code
-/// path or its cost. Good enough for Phase 1's register notification; revisit fully when §09 lands.
+/// document_id now goes through the real §09 identity scheme (<see cref="DocumentIdentity.Resolve"/>):
+/// normalized central-model-path or local-path hashing for a saved document, a fresh `tmp-&lt;guid&gt;`
+/// for an unsaved one. Since this handler works with the raw Autodesk.Revit.DB.Document type rather than
+/// the IDocumentAdapter seam, each Document is wrapped in a RevitDocumentAdapter before being handed to
+/// DocumentIdentity.Resolve. The existing ConditionalWeakTable&lt;Document, string&gt; cache is exactly
+/// what makes DocumentIdentity.Resolve's "mints a fresh tmp- id every call for an unsaved document" rule
+/// safe to use here: it's still stable across repeated register calls for the SAME still-open Document
+/// within this process, the same guarantee the placeholder scheme relied on.
+///
+/// Best-effort promotion-on-first-save (PRD §09): a cached `tmp-` id is re-resolved on every call (a
+/// cached `doc-` id, once minted, is treated as final and never re-resolved); if that re-resolution
+/// flips it to a `doc-` id, that's the first-save transition -- see <see cref="ResolveDocumentId"/> for
+/// the rename-in-place + short-lived alias handling. Deliberately NOT implemented: promotion for a later
+/// Save-As of an already-`doc-` document to a different location (PRD §09 says "the same rename-and-alias
+/// path handles a later Save-As... it isn't a special case" in principle, but this handler doesn't
+/// currently re-resolve an already-`doc-` id to detect that case -- left as a known gap rather than
+/// re-resolving on every call, which would cost a UNC-resolve + hash per register for every saved
+/// document just to catch an uncommon path-change case).
 /// </summary>
 public sealed class DocumentSnapshotHandler : IExternalEventHandler
 {
     private readonly object _lock = new();
     private readonly ConditionalWeakTable<Document, string> _documentIds = new();
+    private readonly IUncPathResolver _uncPathResolver;
     private TaskCompletionSource<List<RegisteredDocument>>? _pending;
+
+    public DocumentSnapshotHandler(IUncPathResolver? uncPathResolver = null)
+    {
+        _uncPathResolver = uncPathResolver ?? new Win32UncPathResolver();
+    }
 
     /// <summary>
     /// Queues a snapshot request and raises <paramref name="externalEvent"/> (which must be an
@@ -152,10 +168,64 @@ public sealed class DocumentSnapshotHandler : IExternalEventHandler
             path = null;
         }
 
-        var prefix = string.IsNullOrEmpty(path) ? "tmp-" : "doc-";
-        var documentId = _documentIds.GetValue(document, _ => prefix + Guid.NewGuid());
+        var documentId = ResolveDocumentId(document);
 
         return new RegisteredDocument(documentId, document.Title, string.IsNullOrEmpty(path) ? null : path, isWorkshared, isActive);
+    }
+
+    /// <summary>
+    /// See the class doc comment for the caching/promotion contract this implements. Every path
+    /// through this method is best-effort -- a failure resolving or promoting identity must never
+    /// break the caller's whole register snapshot, only degrade to reusing the cached id.
+    /// </summary>
+    private string ResolveDocumentId(Document document)
+    {
+        if (!_documentIds.TryGetValue(document, out var cachedId))
+        {
+            var freshId = SafeResolve(document, fallback: null) ?? ("tmp-" + Guid.NewGuid());
+            _documentIds.Add(document, freshId);
+            return freshId;
+        }
+
+        if (!cachedId.StartsWith("tmp-", StringComparison.Ordinal))
+        {
+            // Already a durable doc- id -- treated as final (see class doc comment's known gap re:
+            // a later Save-As to a different location).
+            return cachedId;
+        }
+
+        var promotedId = SafeResolve(document, fallback: cachedId);
+        if (promotedId is null || !promotedId.StartsWith("doc-", StringComparison.Ordinal))
+        {
+            return cachedId; // still unsaved, or resolution failed -- keep the existing tmp- id.
+        }
+
+        // Promotion on first save (PRD §09): rename the old workspace folder in place and register a
+        // short-lived alias so an agent still holding the old tmp- id, and anything already written
+        // under it, isn't orphaned. Both best-effort -- never let a failure here break this snapshot.
+        try
+        {
+            WorkspacePaths.TryPromoteDocumentRoot(cachedId, promotedId);
+            WorkspacePaths.RegisterAlias(cachedId, promotedId);
+        }
+        catch
+        {
+        }
+
+        _documentIds.AddOrUpdate(document, promotedId);
+        return promotedId;
+    }
+
+    private string? SafeResolve(Document document, string? fallback)
+    {
+        try
+        {
+            return DocumentIdentity.Resolve(new RevitDocumentAdapter(document), _uncPathResolver);
+        }
+        catch
+        {
+            return fallback;
+        }
     }
 
     public string GetName() => "MCP Bridge document snapshot";

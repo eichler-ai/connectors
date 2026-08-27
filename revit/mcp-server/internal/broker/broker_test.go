@@ -184,7 +184,7 @@ func TestRegisterPopulatesRegistryAndAttachesExecution(t *testing.T) {
 	// Execution manager should now be able to route to this instance.
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	res, drec := b.Execution.ExecuteScript(ctx, "inst-xyz", "doc-1", "1+1", 2000, 60000)
+	res, drec := b.Execution.ExecuteScript(ctx, "inst-xyz", "doc-1", "1+1", 2000, 60000, false)
 	if drec != nil {
 		t.Fatalf("ExecuteScript: %+v", drec)
 	}
@@ -238,7 +238,7 @@ func TestRegisterThenImmediateCloseDetachesCleanly(t *testing.T) {
 	deadline = time.Now().Add(2 * time.Second)
 	var drec *diag.Record
 	for time.Now().Before(deadline) {
-		_, drec = b.Execution.ExecuteScript(context.Background(), "inst-fastclose", "doc-1", "1+1", 500, 60000)
+		_, drec = b.Execution.ExecuteScript(context.Background(), "inst-fastclose", "doc-1", "1+1", 500, 60000, false)
 		if drec != nil && drec.Code == "instance_not_found" {
 			return
 		}

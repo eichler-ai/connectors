@@ -1,3 +1,5 @@
+using System;
+using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using MCPBridge.Core.Execution;
@@ -10,6 +12,13 @@ namespace MCPBridge.Core.Tests.Execution;
 public class TransactionScriptExecutorTests
 {
     private static TransactionScriptExecutor NewExecutor() => new(new RoslynScriptRunner());
+
+    private static string CreateTempDir()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "mcpbridge-publish-tests-" + Guid.NewGuid());
+        Directory.CreateDirectory(dir);
+        return dir;
+    }
 
     [Fact]
     public async Task SuccessfulScript_CommitsTransaction_AndAssimilatesGroup()
@@ -116,6 +125,175 @@ public class TransactionScriptExecutorTests
         Assert.Contains(outcome.Notices, n => n.Message.Contains("deleted"));
     }
 
+    // --- PRD §09: Publish / files[] ---
+
+    [Fact]
+    public async Task ScriptThatPublishes_Succeeds_RecordsPublishedFile()
+    {
+        var executor = NewExecutor();
+        var document = new FakeDocumentAdapter();
+        var uiApp = new FakeUiApplicationAdapter();
+        var tempDir = CreateTempDir();
+        try
+        {
+            var sourcePath = Path.Combine(tempDir, "source.txt");
+            File.WriteAllText(sourcePath, "hello");
+            var exportsDir = Path.Combine(tempDir, "exports");
+            Directory.CreateDirectory(exportsDir);
+
+            var script = $"Publish(@\"{sourcePath}\");";
+            var outcome = await executor.ExecuteAsync(document, uiApp, null, script, CancellationToken.None, exportsDir, overwriteOutputFiles: false);
+
+            Assert.True(outcome.Success);
+            var published = Assert.Single(outcome.Files);
+            Assert.Equal(PublishedFileRecord.StatusPublished, published.Status);
+            Assert.True(File.Exists(Path.Combine(exportsDir, "source.txt")));
+        }
+        finally
+        {
+            Directory.Delete(tempDir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task PublishCollision_OverwriteFalse_RecordsFailedNamingTheFlag_ScriptOutcomeUnaffected()
+    {
+        var executor = NewExecutor();
+        var document = new FakeDocumentAdapter();
+        var uiApp = new FakeUiApplicationAdapter();
+        var tempDir = CreateTempDir();
+        try
+        {
+            var sourcePath = Path.Combine(tempDir, "source.txt");
+            File.WriteAllText(sourcePath, "hello");
+            var exportsDir = Path.Combine(tempDir, "exports");
+            Directory.CreateDirectory(exportsDir);
+            var destinationPath = Path.Combine(exportsDir, "source.txt");
+            File.WriteAllText(destinationPath, "existing");
+
+            var script = $"Publish(@\"{sourcePath}\");";
+            var outcome = await executor.ExecuteAsync(document, uiApp, null, script, CancellationToken.None, exportsDir, overwriteOutputFiles: false);
+
+            Assert.True(outcome.Success); // a publish failure never rolls back or fails the script's own outcome
+            var failed = Assert.Single(outcome.Files);
+            Assert.Equal(PublishedFileRecord.StatusFailed, failed.Status);
+            Assert.Contains("overwrite_output_files", failed.Message);
+            Assert.Equal("existing", File.ReadAllText(destinationPath)); // untouched
+        }
+        finally
+        {
+            Directory.Delete(tempDir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task PublishCollision_OverwriteTrue_Succeeds_ReplacesDestination()
+    {
+        var executor = NewExecutor();
+        var document = new FakeDocumentAdapter();
+        var uiApp = new FakeUiApplicationAdapter();
+        var tempDir = CreateTempDir();
+        try
+        {
+            var sourcePath = Path.Combine(tempDir, "source.txt");
+            File.WriteAllText(sourcePath, "new content");
+            var exportsDir = Path.Combine(tempDir, "exports");
+            Directory.CreateDirectory(exportsDir);
+            var destinationPath = Path.Combine(exportsDir, "source.txt");
+            File.WriteAllText(destinationPath, "existing");
+
+            var script = $"Publish(@\"{sourcePath}\");";
+            var outcome = await executor.ExecuteAsync(document, uiApp, null, script, CancellationToken.None, exportsDir, overwriteOutputFiles: true);
+
+            Assert.True(outcome.Success);
+            var published = Assert.Single(outcome.Files);
+            Assert.Equal(PublishedFileRecord.StatusPublished, published.Status);
+            Assert.Equal("new content", File.ReadAllText(destinationPath));
+        }
+        finally
+        {
+            Directory.Delete(tempDir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ScriptThatPublishesThenThrows_StillReportsPublishedFile()
+    {
+        // PRD §09 invariant: files[] is never conditional on the run's own outcome.
+        var executor = NewExecutor();
+        var document = new FakeDocumentAdapter();
+        var uiApp = new FakeUiApplicationAdapter();
+        var tempDir = CreateTempDir();
+        try
+        {
+            var sourcePath = Path.Combine(tempDir, "source.txt");
+            File.WriteAllText(sourcePath, "hello");
+            var exportsDir = Path.Combine(tempDir, "exports");
+            Directory.CreateDirectory(exportsDir);
+
+            var script = $"Publish(@\"{sourcePath}\"); throw new System.InvalidOperationException(\"boom\");";
+            var outcome = await executor.ExecuteAsync(document, uiApp, null, script, CancellationToken.None, exportsDir, overwriteOutputFiles: false);
+
+            Assert.False(outcome.Success);
+            var published = Assert.Single(outcome.Files);
+            Assert.Equal(PublishedFileRecord.StatusPublished, published.Status);
+        }
+        finally
+        {
+            Directory.Delete(tempDir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ScriptThatPublishesThenIsCancelled_StillReportsPublishedFile()
+    {
+        var executor = NewExecutor();
+        var document = new FakeDocumentAdapter();
+        var uiApp = new FakeUiApplicationAdapter();
+        var tempDir = CreateTempDir();
+        try
+        {
+            var sourcePath = Path.Combine(tempDir, "source.txt");
+            File.WriteAllText(sourcePath, "hello");
+            var exportsDir = Path.Combine(tempDir, "exports");
+            Directory.CreateDirectory(exportsDir);
+
+            // The token is deliberately NOT pre-cancelled here: RoslynScriptRunner.RunAsync checks
+            // cancellationToken.ThrowIfCancellationRequested() before the script body ever runs (see its
+            // own source), so a pre-cancelled token would never let Publish() execute at all -- that would
+            // test nothing about the files[]-survives-cancellation invariant this test exists to cover.
+            // Instead, the script itself calls Publish() and then throws OperationCanceledException
+            // directly, which RunAsync catches and reports as WasCancelled -- exercising the exact
+            // "published, then the run resolved to cancelled" sequence PRD §09's invariant describes,
+            // without depending on a real mid-run cooperative-cancellation race.
+            var script = $"Publish(@\"{sourcePath}\"); throw new System.OperationCanceledException();";
+            var outcome = await executor.ExecuteAsync(document, uiApp, null, script, CancellationToken.None, exportsDir, overwriteOutputFiles: false);
+
+            Assert.True(outcome.WasCancelled);
+            var published = Assert.Single(outcome.Files);
+            Assert.Equal(PublishedFileRecord.StatusPublished, published.Status);
+        }
+        finally
+        {
+            Directory.Delete(tempDir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ScriptThatDoesNotPublish_HasEmptyFilesArray_NoExportsDirectoryNeeded()
+    {
+        // exportsDirectoryPath omitted entirely -- existing callers/tests that don't pass one must
+        // keep working unaffected by this feature.
+        var executor = NewExecutor();
+        var document = new FakeDocumentAdapter();
+        var uiApp = new FakeUiApplicationAdapter();
+
+        var outcome = await executor.ExecuteAsync(document, uiApp, null, "1 + 1", CancellationToken.None);
+
+        Assert.True(outcome.Success);
+        Assert.Empty(outcome.Files);
+    }
+
     /// <summary>Test-only helper: a document adapter that hands out a pre-built (rigged) transaction instead of a fresh one.</summary>
     private sealed class RiggedDocumentAdapter : MCPBridge.RevitAdapter.IDocumentAdapter
     {
@@ -129,6 +307,9 @@ public class TransactionScriptExecutorTests
         }
 
         public string Title => _inner.Title;
+        public string? PathName => _inner.PathName;
+        public bool IsWorkshared => _inner.IsWorkshared;
+        public string? CentralModelPath => _inner.CentralModelPath;
 
         public MCPBridge.RevitAdapter.ITransactionAdapter CreateTransaction(string name) => _riggedTransaction;
 

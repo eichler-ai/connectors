@@ -32,11 +32,12 @@ const (
 
 // ExecuteScriptIn is the input schema for the execute_script tool.
 type ExecuteScriptIn struct {
-	InstanceID    string `json:"instance_id" jsonschema:"instance_id of the target Revit instance, from a prior register/list_instances"`
-	DocumentID    string `json:"document_id" jsonschema:"document_id of the target document within that instance"`
-	Script        string `json:"script" jsonschema:"C# script body to compile and run against the document"`
-	TimeoutMs     int    `json:"timeout_ms,omitempty" jsonschema:"milliseconds to wait for completion before returning a pending/running status; default 30000"`
-	MaxDurationMs int    `json:"max_duration_ms,omitempty" jsonschema:"hard ceiling on total script runtime in milliseconds, independent of timeout_ms; default 600000"`
+	InstanceID           string `json:"instance_id" jsonschema:"instance_id of the target Revit instance, from a prior register/list_instances"`
+	DocumentID           string `json:"document_id" jsonschema:"document_id of the target document within that instance"`
+	Script               string `json:"script" jsonschema:"C# script body to compile and run against the document"`
+	TimeoutMs            int    `json:"timeout_ms,omitempty" jsonschema:"milliseconds to wait for completion before returning a pending/running status; default 30000"`
+	MaxDurationMs        int    `json:"max_duration_ms,omitempty" jsonschema:"hard ceiling on total script runtime in milliseconds, independent of timeout_ms; default 600000"`
+	OverwriteOutputFiles bool   `json:"overwrite_output_files,omitempty" jsonschema:"if true, Publish() calls that would overwrite an existing exported file succeed and replace it; if false (default), such a collision fails that one file's publish rather than overwriting it silently"`
 }
 
 // PollExecutionIn is the input schema for the poll_execution tool.
@@ -56,11 +57,12 @@ type CancelExecutionIn struct {
 // or a non-terminal status (pending/running/busy) with ExecutionID for the
 // caller to poll.
 type ExecutionOut struct {
-	Status      string        `json:"status"`
-	ExecutionID string        `json:"execution_id"`
-	Output      string        `json:"output,omitempty"`
-	Notices     []diag.Record `json:"notices,omitempty"`
-	Error       *diag.Record  `json:"error,omitempty"`
+	Status      string                 `json:"status"`
+	ExecutionID string                 `json:"execution_id"`
+	Output      string                 `json:"output,omitempty"`
+	Notices     []diag.Record          `json:"notices,omitempty"`
+	Files       []execution.FileRecord `json:"files,omitempty"`
+	Error       *diag.Record           `json:"error,omitempty"`
 }
 
 // Register adds execute_script, poll_execution, and cancel_execution to s,
@@ -78,7 +80,7 @@ func Register(s *mcp.Server, mgr *execution.Manager) {
 		if maxDurationMs <= 0 {
 			maxDurationMs = defaultMaxDurationMs
 		}
-		res, drec := mgr.ExecuteScript(ctx, in.InstanceID, in.DocumentID, in.Script, timeoutMs, maxDurationMs)
+		res, drec := mgr.ExecuteScript(ctx, in.InstanceID, in.DocumentID, in.Script, timeoutMs, maxDurationMs, in.OverwriteOutputFiles)
 		return toolResult(res, drec)
 	})
 
@@ -122,6 +124,7 @@ func toolResult(res *execution.Result, drec *diag.Record) (*mcp.CallToolResult, 
 		ExecutionID: res.ExecutionID,
 		Output:      res.Output,
 		Notices:     res.Notices,
+		Files:       res.Files,
 		Error:       res.ErrorDetail,
 	}
 	if isErrorStatus(res.Status) {

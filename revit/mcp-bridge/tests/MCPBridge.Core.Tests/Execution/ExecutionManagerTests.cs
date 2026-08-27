@@ -727,4 +727,50 @@ public class ExecutionManagerTests
         Assert.Null(diagnostic);
         Assert.Equal(ExecutionStatus.Completed, record.Status);
     }
+
+    // --- PRD §09: files[] round-trips through Complete*/ExecutionRecord the same way notices[] does ---
+
+    [Fact]
+    public void CompleteSuccess_ThreadsFilesOntoTheRecord_DefaultsToEmpty()
+    {
+        var manager = NewManager();
+        var now = DateTimeOffset.UtcNow;
+        var record = manager.Start(NewId(), "// script", 600_000, now).Record!;
+        manager.MarkRunning(record.ExecutionId, now);
+        Assert.Empty(record.Files);
+
+        var files = new[] { new PublishedFileRecord("view.png", @"C:\exports\view.png", PublishedFileRecord.StatusPublished, null) };
+        manager.CompleteSuccess(record.ExecutionId, now, result: null, stdOut: null, notices: Array.Empty<DiagnosticRecord>(), files: files);
+
+        Assert.Same(files, record.Files);
+    }
+
+    [Fact]
+    public void CompleteError_ThreadsFilesOntoTheRecord()
+    {
+        var manager = NewManager();
+        var now = DateTimeOffset.UtcNow;
+        var record = manager.Start(NewId(), "// script", 600_000, now).Record!;
+        manager.MarkRunning(record.ExecutionId, now);
+        var error = DiagnosticRecord.Create(DiagnosticSeverity.Error, "script-exception", DiagnosticSource.Execution, "boom", null, null);
+        var files = new[] { new PublishedFileRecord("out.txt", @"C:\exports\out.txt", PublishedFileRecord.StatusFailed, "disk full") };
+
+        manager.CompleteError(record.ExecutionId, now, error, stdOut: null, notices: null, files: files);
+
+        Assert.Same(files, record.Files);
+    }
+
+    [Fact]
+    public void CompleteCancelled_ThreadsFilesOntoTheRecord()
+    {
+        var manager = NewManager();
+        var now = DateTimeOffset.UtcNow;
+        var record = manager.Start(NewId(), "// script", 600_000, now).Record!;
+        manager.MarkRunning(record.ExecutionId, now);
+        var files = new[] { new PublishedFileRecord("out.txt", @"C:\exports\out.txt", PublishedFileRecord.StatusPublished, null) };
+
+        manager.CompleteCancelled(record.ExecutionId, now, stdOut: null, notices: null, files: files);
+
+        Assert.Same(files, record.Files);
+    }
 }

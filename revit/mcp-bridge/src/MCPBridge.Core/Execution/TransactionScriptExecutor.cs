@@ -36,7 +36,9 @@ public sealed class TransactionScriptExecutor
         IUiApplicationAdapter uiApplication,
         IUiDocumentAdapter? uiDocument,
         string scriptText,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? exportsDirectoryPath = null,
+        bool overwriteOutputFiles = false)
     {
         var group = document.CreateTransactionGroup(TransactionName);
         var transaction = document.CreateTransaction(TransactionName);
@@ -46,6 +48,11 @@ public sealed class TransactionScriptExecutor
 
         var globals = new ScriptGlobals(document, uiApplication, uiDocument, cancellationToken);
         ActiveDialogContext.SetActive(globals.DialogResultOverrides);
+        if (exportsDirectoryPath is not null)
+        {
+            ActiveExportContext.SetActive(exportsDirectoryPath, overwriteOutputFiles);
+        }
+
         try
         {
             var outcome = await _runner.RunAsync(scriptText, globals, cancellationToken).ConfigureAwait(false);
@@ -56,15 +63,18 @@ public sealed class TransactionScriptExecutor
                 // Commit() never ran -- no failures-API notices to fold in, but a dialog may still have
                 // fired mid-script before it failed or was cancelled (PRD §07: this is precisely the
                 // headline case -- a script stuck behind a dialog gets auto-cancelled by max_duration_ms).
+                // Same reasoning applies to files[] (PRD §09): a script may have published a file before
+                // it threw/was cancelled, and that publication must still be reported here.
                 var dialogNotices = ActiveDialogContext.DrainRecorded();
-                if (dialogNotices.Count == 0)
+                var publishedFiles = ActiveExportContext.DrainRecorded();
+                if (dialogNotices.Count == 0 && publishedFiles.Count == 0)
                 {
                     return outcome;
                 }
 
                 return outcome.WasCancelled
-                    ? ScriptExecutionOutcome.Cancelled(outcome.StdOut, dialogNotices)
-                    : ScriptExecutionOutcome.Failed(outcome.Exception!, outcome.StdOut, dialogNotices);
+                    ? ScriptExecutionOutcome.Cancelled(outcome.StdOut, dialogNotices, publishedFiles)
+                    : ScriptExecutionOutcome.Failed(outcome.Exception!, outcome.StdOut, dialogNotices, publishedFiles);
             }
 
             TransactionCommitResult commitResult;
@@ -75,7 +85,8 @@ public sealed class TransactionScriptExecutor
             catch (Exception ex)
             {
                 RollBackBoth(transaction, group);
-                return ScriptExecutionOutcome.Failed(ex, outcome.StdOut, CombinedNotices(transaction.CommitFailures));
+                var (failedNotices, failedFiles) = CombinedNoticesAndFiles(transaction.CommitFailures);
+                return ScriptExecutionOutcome.Failed(ex, outcome.StdOut, failedNotices, failedFiles);
             }
 
             var commitFailures = transaction.CommitFailures;
@@ -88,29 +99,32 @@ public sealed class TransactionScriptExecutor
                 group.RollBack();
                 var errorMessage = commitFailures.LastOrDefault(f => f.IsError)?.Message
                     ?? "A transaction failure forced a rollback.";
-                return ScriptExecutionOutcome.Failed(new InvalidOperationException(errorMessage), outcome.StdOut, CombinedNotices(commitFailures));
+                var (rolledBackNotices, rolledBackFiles) = CombinedNoticesAndFiles(commitFailures);
+                return ScriptExecutionOutcome.Failed(new InvalidOperationException(errorMessage), outcome.StdOut, rolledBackNotices, rolledBackFiles);
             }
 
             group.Assimilate();
-            return ScriptExecutionOutcome.Completed(outcome.ReturnValue, outcome.StdOut, CombinedNotices(commitFailures));
+            var (completedNotices, completedFiles) = CombinedNoticesAndFiles(commitFailures);
+            return ScriptExecutionOutcome.Completed(outcome.ReturnValue, outcome.StdOut, completedNotices, completedFiles);
         }
         finally
         {
             ActiveDialogContext.ClearActive();
+            ActiveExportContext.ClearActive();
         }
     }
 
-    private static IReadOnlyList<DiagnosticRecord> CombinedNotices(IReadOnlyList<FailureSummary> commitFailures)
+    private static (IReadOnlyList<DiagnosticRecord> Notices, IReadOnlyList<PublishedFileRecord> Files) CombinedNoticesAndFiles(IReadOnlyList<FailureSummary> commitFailures)
     {
         var failureNotices = commitFailures.Select(ToDiagnosticRecord).ToList();
         var dialogNotices = ActiveDialogContext.DrainRecorded();
-        if (dialogNotices.Count == 0)
+        if (dialogNotices.Count > 0)
         {
-            return failureNotices;
+            failureNotices.AddRange(dialogNotices);
         }
 
-        failureNotices.AddRange(dialogNotices);
-        return failureNotices;
+        var publishedFiles = ActiveExportContext.DrainRecorded();
+        return (failureNotices, publishedFiles);
     }
 
     private static DiagnosticRecord ToDiagnosticRecord(FailureSummary failure) => DiagnosticRecord.Create(

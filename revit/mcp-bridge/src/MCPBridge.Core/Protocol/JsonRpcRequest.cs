@@ -103,6 +103,22 @@ public sealed class JsonRpcRequest
     /// <summary>Reads an optional 32-bit numeric param (PRD §08's page_size/top_n/overload_index), returning <paramref name="defaultValue"/> if absent/null. Throws if present with a non-numeric shape.</summary>
     public int GetOptionalInt32(string name, int defaultValue) => (int)GetOptionalInt64(name, defaultValue);
 
+    /// <summary>Reads an optional boolean param (PRD §09's overwrite_output_files), returning <paramref name="defaultValue"/> if absent/null. Throws if present with a non-boolean shape.</summary>
+    public bool GetOptionalBool(string name, bool defaultValue)
+    {
+        if (_params.ValueKind != JsonValueKind.Object || !_params.TryGetProperty(name, out var value))
+        {
+            return defaultValue;
+        }
+
+        return value.ValueKind switch
+        {
+            JsonValueKind.True or JsonValueKind.False => value.GetBoolean(),
+            JsonValueKind.Null or JsonValueKind.Undefined => defaultValue,
+            _ => throw new JsonRpcParamException($"params.{name} must be a boolean."),
+        };
+    }
+
     /// <summary>Reads an optional non-empty string param (PRD §08's namespace/type_name/cursor/member/etc.), returning null if absent/null/empty. Throws if present with a non-string shape.</summary>
     public string? GetOptionalString(string name)
     {

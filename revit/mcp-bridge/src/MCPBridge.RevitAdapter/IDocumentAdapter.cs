@@ -13,4 +13,16 @@ public interface IDocumentAdapter : IScriptDocument
     ITransactionAdapter CreateTransaction(string name);
 
     ITransactionGroupAdapter CreateTransactionGroup(string name);
+
+    /// <summary>Local file path if this document has been saved, else null (PRD §09 document identity).</summary>
+    string? PathName { get; }
+
+    /// <summary>Whether this document is workshared (local or cloud/ACC central) -- PRD §09.</summary>
+    bool IsWorkshared { get; }
+
+    /// <summary>
+    /// The user-visible central model path when <see cref="IsWorkshared"/> is true, else null.
+    /// Never the local copy's path -- PRD §09: "per-user and regenerated on every fresh local copy".
+    /// </summary>
+    string? CentralModelPath { get; }
 }

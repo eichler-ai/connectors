@@ -5,7 +5,9 @@ using System.Threading.Tasks;
 using MCPBridge.Core.Diagnostics;
 using MCPBridge.Core.Discovery;
 using MCPBridge.Core.Execution;
+using MCPBridge.Core.Identity;
 using MCPBridge.Core.Protocol;
+using MCPBridge.Core.Workspace;
 using MCPBridge.RevitAdapter;
 
 namespace MCPBridge.Core.Dispatch;
@@ -68,6 +70,17 @@ public sealed class RequestDispatcher
     // passes a real DiscoveryService built from Revit's already-loaded assemblies.
     private readonly DiscoveryService? _discoveryService;
 
+    // PRD §09: resolves a mapped network drive letter to its UNC form before hashing a saved,
+    // non-workshared document's path into its document_id. null (the default) means "no UNC
+    // resolution, just passthrough" -- matches this codebase's optional-feature convention (see
+    // _windowInventory/_discoveryService above); production wiring (BridgeHost) passes a real
+    // Win32UncPathResolver.
+    private readonly IUncPathResolver _uncPathResolver;
+
+    // Static for this process's lifetime (PRD §09: tmp/<instance-id>/ scopes scratch space per
+    // instance sharing a workspace) -- safe to accept once at construction rather than per-call.
+    private readonly string _instanceId;
+
     public RequestDispatcher(
         ExecutionManager executionManager,
         ExternalEventBridge<ScriptExecutionOutcome> bridge,
@@ -75,7 +88,9 @@ public sealed class RequestDispatcher
         Func<DateTimeOffset>? now = null,
         Func<TimeSpan, Task>? delay = null,
         IWindowInventory? windowInventory = null,
-        DiscoveryService? discoveryService = null)
+        DiscoveryService? discoveryService = null,
+        IUncPathResolver? uncPathResolver = null,
+        string? instanceId = null)
     {
         _executionManager = executionManager;
         _bridge = bridge;
@@ -84,6 +99,14 @@ public sealed class RequestDispatcher
         _delay = delay ?? Task.Delay;
         _windowInventory = windowInventory;
         _discoveryService = discoveryService;
+        _uncPathResolver = uncPathResolver ?? new PassthroughUncPathResolver();
+        _instanceId = instanceId ?? "";
+    }
+
+    /// <summary>Default when no real IUncPathResolver is wired up (e.g. most existing unit tests) -- returns every path unchanged.</summary>
+    private sealed class PassthroughUncPathResolver : IUncPathResolver
+    {
+        public string Resolve(string path) => path;
     }
 
     /// <summary>How often <see cref="HandlePollExecutionAsync"/> re-checks the record while waiting out timeout_ms.</summary>
@@ -110,6 +133,7 @@ public sealed class RequestDispatcher
         string script;
         long maxDurationMs;
         long timeoutMs;
+        bool overwriteOutputFiles;
         try
         {
             executionId = request.GetRequiredString("execution_id");
@@ -117,15 +141,22 @@ public sealed class RequestDispatcher
             maxDurationMs = request.GetOptionalInt64("max_duration_ms", DefaultMaxDurationMs);
             timeoutMs = request.GetOptionalInt64("timeout_ms", DefaultTimeoutMs);
 
-            // KNOWN PHASE 1 LIMITATION (second live-wiring review finding): document_id is part of the wire
-            // contract (the broker always sends it) but is not read or enforced here -- every script runs
-            // against whatever IUiApplicationAdapter.ActiveUiDocument happens to be (see RunScriptWorkItem
-            // below), regardless of which document_id was requested. Real per-document routing needs
-            // Application.Documents (only reachable via DocumentSnapshotHandler's raw-Revit-API path, not
-            // the IUiApplicationAdapter seam RunScriptWorkItem goes through) plus a way to select/activate
-            // the target document -- deferred to Phase 2/3 alongside the rest of multi-document support.
-            // Silently ignoring a mismatch (rather than erroring) is a deliberate Phase 1 choice: single
-            // active-document Revit instances (the common case) work correctly either way.
+            // PRD §09: applies uniformly across every file ScriptGlobals.Publish touches during this
+            // run -- not a per-file override.
+            overwriteOutputFiles = request.GetOptionalBool("overwrite_output_files", false);
+
+            // KNOWN LIMITATION (second live-wiring review finding, still true after PRD §09's file-exchange
+            // work): document_id is part of the wire contract (the broker always sends it) but is not read
+            // or enforced here for ROUTING -- every script still runs against whatever
+            // IUiApplicationAdapter.ActiveUiDocument happens to be (see RunScriptWorkItem below), regardless
+            // of which document_id was requested. Real per-document routing needs Application.Documents
+            // (only reachable via DocumentSnapshotHandler's raw-Revit-API path, not the
+            // IUiApplicationAdapter seam RunScriptWorkItem goes through) plus a way to select/activate the
+            // target document -- still deferred, per that file's own comment. Document identity IS now
+            // computed (DocumentIdentity.Resolve, PRD §09) from whichever document actually ends up active,
+            // purely to build that document's exports/ workspace path for Publish -- not to select which
+            // document runs. Silently ignoring a routing mismatch (rather than erroring) is a deliberate
+            // choice: single active-document Revit instances (the common case) work correctly either way.
         }
         catch (JsonRpcParamException ex)
         {
@@ -152,7 +183,7 @@ public sealed class RequestDispatcher
                 return ExecutionResultMessage.FromInstanceUnrecoverable(request.Id, outcome.Diagnostic!);
         }
 
-        var workTask = RunScriptWorkItemAsync(executionId, script);
+        var workTask = RunScriptWorkItemAsync(executionId, script, overwriteOutputFiles);
 
         // PRD §06: a script finishing inside timeout_ms returns the completed result inline; one that
         // doesn't returns the current {status, execution_id} instead of hanging the call. The timeout
@@ -241,9 +272,9 @@ public sealed class RequestDispatcher
         };
     }
 
-    private Task RunScriptWorkItemAsync(string executionId, string scriptText)
+    private Task RunScriptWorkItemAsync(string executionId, string scriptText, bool overwriteOutputFiles)
     {
-        var runTask = _bridge.RunAsync(executionId, uiApplication => RunScriptWorkItem(executionId, scriptText, uiApplication));
+        var runTask = _bridge.RunAsync(executionId, uiApplication => RunScriptWorkItem(executionId, scriptText, overwriteOutputFiles, uiApplication));
 
         // Hard requirement 2: ANY fault on this Task -- including ExternalEventRaiseDeniedException, which
         // RunScriptWorkItem below never gets a chance to observe or react to since it never even ran --
@@ -270,7 +301,7 @@ public sealed class RequestDispatcher
             TaskScheduler.Default);
     }
 
-    private ScriptExecutionOutcome RunScriptWorkItem(string executionId, string scriptText, IUiApplicationAdapter uiApplication)
+    private ScriptExecutionOutcome RunScriptWorkItem(string executionId, string scriptText, bool overwriteOutputFiles, IUiApplicationAdapter uiApplication)
     {
         // Hard requirement 1: check cancellation before touching the model at all -- a still-Pending
         // execution can have been resolved directly to Cancelled by ExecutionManager.ApplyCancellation
@@ -310,20 +341,26 @@ public sealed class RequestDispatcher
             return ScriptExecutionOutcome.Failed(new InvalidOperationException(diagnostic.Message), "");
         }
 
+        // PRD §09: document identity is resolved here purely to build THIS document's exports/
+        // workspace path for Publish -- not to select/route which document the script runs against
+        // (that's still whatever ActiveUiDocument already is, per the KNOWN LIMITATION comment above).
+        var documentId = DocumentIdentity.Resolve(document, _uncPathResolver);
+        var workspacePaths = WorkspacePaths.Local(documentId, _instanceId);
+
         // .GetAwaiter().GetResult() is deadlock-safe here only because RoslynScriptRunner rejects any
         // script containing its own top-level `await` before compiling it -- see
         // ExternalEventBridge<TResult>'s own doc comment and RoslynScriptRunner.RejectTopLevelAwait.
         var outcome = _scriptExecutor
-            .ExecuteAsync(document, uiApplication, uiDocument, scriptText, cancellationToken)
+            .ExecuteAsync(document, uiApplication, uiDocument, scriptText, cancellationToken, workspacePaths.Exports, overwriteOutputFiles)
             .GetAwaiter().GetResult();
 
         if (outcome.WasCancelled)
         {
-            _executionManager.CompleteCancelled(executionId, _now(), outcome.StdOut, outcome.Notices);
+            _executionManager.CompleteCancelled(executionId, _now(), outcome.StdOut, outcome.Notices, outcome.Files);
         }
         else if (outcome.Success)
         {
-            _executionManager.CompleteSuccess(executionId, _now(), outcome.ReturnValue, outcome.StdOut, outcome.Notices);
+            _executionManager.CompleteSuccess(executionId, _now(), outcome.ReturnValue, outcome.StdOut, outcome.Notices, outcome.Files);
         }
         else
         {
@@ -334,7 +371,7 @@ public sealed class RequestDispatcher
                 outcome.Exception?.Message ?? $"execution {executionId} failed with no exception detail.",
                 detail: new Dictionary<string, object?> { ["execution_id"] = executionId },
                 remedy: null);
-            _executionManager.CompleteError(executionId, _now(), diagnostic, outcome.StdOut, outcome.Notices);
+            _executionManager.CompleteError(executionId, _now(), diagnostic, outcome.StdOut, outcome.Notices, outcome.Files);
         }
 
         return outcome;
