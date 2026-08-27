@@ -8,7 +8,7 @@ namespace MCPBridge.Core.Protocol;
 /// Gives one enum member a custom JSON wire name, decoupling it from the C# identifier
 /// (PRD §01/§06/§10: several enums need lowercase, hyphenated wire values that don't
 /// match their PascalCase member names -- e.g. AddIn -&gt; "add-in", Completed -&gt; "success").
-/// A hand-rolled equivalent of System.Text.Json's JsonStringEnumMemberNameAttribute,
+/// A hand-rolled stand-in for System.Text.Json's JsonStringEnumMemberNameAttribute,
 /// which is .NET 9+ only; this project multi-targets net10.0-windows and net8.0-windows
 /// (PRD §11), so the framework attribute isn't available on the net8.0-windows leg.
 /// Written once here rather than duplicated per enum, and works identically on both
@@ -24,36 +24,122 @@ public sealed class WireEnumNameAttribute(string name) : Attribute
 /// Pair with <c>[JsonConverter(typeof(WireEnumNameConverter&lt;TEnum&gt;))]</c> on the enum
 /// itself; reads each member's <see cref="WireEnumNameAttribute"/> via reflection once
 /// (cached per closed generic type) rather than per (de)serialization call. A member with
-/// no attribute falls back to its plain <c>ToString()</c> spelling.
+/// no attribute falls back to its declared field name.
+///
+/// <para>
+/// DELIBERATE DIVERGENCES from <c>JsonStringEnumConverter</c> + the framework's
+/// <c>JsonStringEnumMemberNameAttribute</c>, so nobody later reads them as bugs. Both are
+/// hardening, and both match what the Go broker actually puts on the wire:
+/// </para>
+/// <list type="bullet">
+/// <item><description>Reads are case-SENSITIVE. The framework converter matched
+/// case-insensitively; the wire values here are a fixed lowercase vocabulary shared with
+/// the Go side, so a differently-cased value is a genuine protocol mismatch worth
+/// surfacing rather than quietly accepting.</description></item>
+/// <item><description>Integer values are NOT accepted. <c>JsonStringEnumConverter</c>
+/// defaults to <c>allowIntegerValues: true</c>, so it would read <c>2</c> as a valid
+/// member; the Go side never sends one, and silently accepting an ordinal would couple the
+/// wire format to C# declaration order.</description></item>
+/// <item><description><c>[Flags]</c> enums are NOT supported (the framework converter
+/// round-trips comma-separated composites). Enforced at type-initialization time below
+/// rather than left to produce a confusing half-working round trip.</description></item>
+/// </list>
 /// </summary>
 public sealed class WireEnumNameConverter<TEnum> : JsonConverter<TEnum> where TEnum : struct, Enum
 {
     private static readonly Dictionary<TEnum, string> ToWire = BuildToWire();
-    private static readonly Dictionary<string, TEnum> FromWire =
-        ToWire.ToDictionary(kv => kv.Value, kv => kv.Key);
+    private static readonly Dictionary<string, TEnum> FromWire = BuildFromWire(ToWire);
 
     private static Dictionary<TEnum, string> BuildToWire()
     {
+        if (typeof(TEnum).IsDefined(typeof(FlagsAttribute), inherit: false))
+        {
+            throw new NotSupportedException(
+                $"{typeof(TEnum).FullName} is marked [Flags], which {nameof(WireEnumNameConverter<TEnum>)} does not support: " +
+                "it would write a composite value as a single comma-separated string and then fail to read it back. " +
+                "Give the enum a non-flags wire representation, or write a dedicated converter for it.");
+        }
+
         var map = new Dictionary<TEnum, string>();
         foreach (var field in typeof(TEnum).GetFields(BindingFlags.Public | BindingFlags.Static))
         {
             var value = (TEnum)field.GetValue(null)!;
-            var wireName = field.GetCustomAttribute<WireEnumNameAttribute>()?.Name ?? value.ToString();
+
+            // field.Name, NOT value.ToString(): for an aliased member (two names sharing one
+            // underlying value) ToString() returns whichever name the runtime considers
+            // canonical, which can silently be a DIFFERENT member's name than the one being
+            // read here.
+            var wireName = field.GetCustomAttribute<WireEnumNameAttribute>()?.Name ?? field.Name;
             map[value] = wireName;
         }
+
+        return map;
+    }
+
+    // Built with an explicit loop rather than ToDictionary so a duplicated wire name reports
+    // WHICH members collided. ToDictionary throws a bare "An item with the same key has
+    // already been added" ArgumentException naming neither, and because this runs in static
+    // initialization that surfaces as a TypeInitializationException which is then cached by
+    // the CLR -- so every later use of the converter keeps failing with the same opaque
+    // message for the rest of the process lifetime. A one-character typo in a
+    // [WireEnumName] would become an unexplained protocol outage, which is exactly what
+    // PRD §01 ("message names the concrete identifiers and the actual underlying
+    // condition") exists to prevent.
+    private static Dictionary<string, TEnum> BuildFromWire(Dictionary<TEnum, string> toWire)
+    {
+        var map = new Dictionary<string, TEnum>(StringComparer.Ordinal);
+        foreach (var pair in toWire)
+        {
+            if (map.TryGetValue(pair.Value, out var existing))
+            {
+                throw new InvalidOperationException(
+                    $"{typeof(TEnum).FullName} maps more than one member to the wire name \"{pair.Value}\": " +
+                    $"{existing} and {pair.Key}. Wire names must be unique, or deserialization would be ambiguous.");
+            }
+
+            map[pair.Value] = pair.Key;
+        }
+
         return map;
     }
 
     public override TEnum Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
     {
+        // Guard the token kind explicitly: Utf8JsonReader.GetString() throws
+        // InvalidOperationException (NOT JsonException) for a number/bool/null token, and an
+        // InvalidOperationException escapes every `catch (JsonException)` a caller has
+        // written. This is the decoder for the shared §01 diagnostic-record shape, whose own
+        // contract promises a malformed wire payload still deserializes into an object
+        // rather than throwing mid-parse -- so it has to fail as a JsonException.
+        if (reader.TokenType != JsonTokenType.String)
+        {
+            throw new JsonException(
+                $"Expected a JSON string for {typeof(TEnum).Name} but found {reader.TokenType}. " +
+                "Wire values are the lowercase names listed on the enum; integer/ordinal values are not accepted.");
+        }
+
         var raw = reader.GetString();
         if (raw is not null && FromWire.TryGetValue(raw, out var value))
         {
             return value;
         }
+
         throw new JsonException($"Unknown {typeof(TEnum).Name} wire value: \"{raw}\"");
     }
 
-    public override void Write(Utf8JsonWriter writer, TEnum value, JsonSerializerOptions options) =>
-        writer.WriteStringValue(ToWire.TryGetValue(value, out var name) ? name : value.ToString());
+    public override void Write(Utf8JsonWriter writer, TEnum value, JsonSerializerOptions options)
+    {
+        // No ToString() fallback. A value not in the map is an undefined ordinal cast into
+        // the enum, and ToString() would emit it as a bare numeric string ("7") that this
+        // converter's own Read then rejects -- a silently asymmetric round trip. Failing
+        // loudly here matches §01's observability-over-silence posture.
+        if (!ToWire.TryGetValue(value, out var name))
+        {
+            throw new JsonException(
+                $"Cannot serialize {typeof(TEnum).FullName} value '{value}': it is not a declared member, " +
+                "so it has no wire name. This usually means an out-of-range integer was cast into the enum.");
+        }
+
+        writer.WriteStringValue(name);
+    }
 }

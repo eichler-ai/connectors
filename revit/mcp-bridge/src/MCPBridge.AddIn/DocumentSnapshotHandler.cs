@@ -185,15 +185,12 @@ public sealed class DocumentSnapshotHandler : IExternalEventHandler
 
         var documentId = DocumentIdentity.ResolveCached(document, _uncPathResolver);
 
-        // Residual limitation, deliberately not papered over: an UNSAVED document has no path, so its
-        // id is a freshly-minted tmp- GUID cached against the wrapper reference (ConditionalWeakTable,
-        // which is itself reference-keyed). If Revit hands out distinct wrappers, two tmp- ids for the
-        // same unsaved document won't match and only the ReferenceEquals arm can identify it.
-        var isActive =
-            ReferenceEquals(document, activeDocument)
-            || (activeDocumentId is not null
-                && !activeDocumentId.StartsWith("tmp-", StringComparison.Ordinal)
-                && string.Equals(documentId, activeDocumentId, StringComparison.Ordinal));
+        // The decision itself lives in Core (ActiveDocumentPredicate) rather than inline here, so it
+        // can carry a regression test: this predicate was wrong in every case for the entire life of
+        // the feature, and the AddIn project is Revit glue that nothing unit-tests. See that class for
+        // why both arms are needed and why tmp- ids are excluded.
+        var isActive = ActiveDocumentPredicate.IsActive(
+            ReferenceEquals(document, activeDocument), documentId, activeDocumentId);
 
         return new RegisteredDocument(documentId, document.Title, string.IsNullOrEmpty(path) ? null : path, isWorkshared, isActive);
     }

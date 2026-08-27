@@ -25,12 +25,13 @@ func newTestBroker(t *testing.T) (*Broker, net.Listener) {
 	server := mcp.NewServer(&mcp.Implementation{Name: "revit-mcp-server-test", Version: "0.0.0"}, nil)
 	mgr := execution.NewManager()
 	mcpserver.Register(server, mgr)
+	reg := registry.New()
 
 	b := &Broker{
 		Token:     testToken,
-		Registry:  registry.New(),
+		Registry:  reg,
 		Execution: mgr,
-		Discovery: discovery.NewRouter(nil),
+		Discovery: discovery.NewRouter(reg),
 		MCPServer: server,
 	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")

@@ -176,10 +176,22 @@ Skipping any of these produces the exact same *symptom* — "nothing changed" / 
 
 ### The VM has exactly one .NET SDK — keep it that way
 
-The project targets `net10.0-windows` (PRD §11: Revit 2027's own `RevitAPI.dll` requires .NET 10 —
-confirmed live via `RevitAPI.runtimeconfig.json`'s `"tfm": "net10.0"`). The VM has a single SDK install,
-`C:\dotnet10` (.NET 10 SDK, `10.0.400`), on machine `PATH` — bare `dotnet build`/`dotnet test` resolves
-to it correctly.
+The project **multi-targets two TFMs** (PRD §11), and still needs only the one .NET 10 SDK to build
+both — the SDK cross-targets the older leg:
+- `net10.0-windows` for Revit 2027, whose `RevitAPI.dll` requires .NET 10 (confirmed live via
+  `RevitAPI.runtimeconfig.json`'s `"tfm": "net10.0"`; it will not compile under net8 — hard,
+  non-suppressible CS1705).
+- `net8.0-windows` for Revit 2025, whose `RevitAPI.runtimeconfig.json` declares `"tfm": "net8.0"`.
+
+The VM has a single SDK install, `C:\dotnet10` (.NET 10 SDK, `10.0.400`), on machine `PATH` — bare
+`dotnet build`/`dotnet test` resolves to it correctly. **Do not install a .NET 8 SDK to "support" the
+net8 leg** — that's the exact mistake documented below, and it isn't needed.
+
+**A multi-targeted build produces one output folder PER TFM**, so any deploy/verify step that assumed
+a single `bin\Debug\net10.0-windows\` is now ambiguous: pick the folder matching the Revit version you
+are deploying to (`net8.0-windows` → Addins\2025, `net10.0-windows` → Addins\2027). Deploying the
+wrong leg is a silent failure of exactly the kind the byte-grep check above exists to catch. The same
+applies to `dotnet test`, which now runs the suite once per TFM.
 
 This was **not always true during Phase 1/2 development**: an early session installed a plain .NET 8
 SDK to `C:\dotnet` (back when the project still targeted `net8.0-windows`, before PRD §11's correction),

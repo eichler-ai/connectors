@@ -1,7 +1,31 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net10.0-windows</TargetFramework>
+    <!-- Multi-targeted to match MCPBridge.Core itself (PRD §11). Reviewing this PR surfaced that the
+         net8.0-windows leg ; the entire reason the multi-target exists ; had zero automated coverage:
+         these tests only ever ran against the net10.0-windows build of Core. That is especially wrong
+         for WireEnumNameConverter, which exists SPECIFICALLY because net8 lacks .NET 9+'s
+         JsonStringEnumMemberNameAttribute, so the leg it was written for was the one leg never
+         exercised. `dotnet test` now runs the whole suite once per TFM, which is what makes
+         "byte-identical wire output on both legs" a claim CI can hold rather than one a live session
+         confirmed once by hand. -->
+    <TargetFrameworks>net10.0-windows;net8.0-windows</TargetFrameworks>
+    <!--
+      The VM deliberately has exactly ONE .NET install (the .NET 10 SDK ; see the
+      revit-connector-development skill for the multi-hour confusion that rule exists to prevent), and
+      it cross-COMPILES the net8 leg happily. It cannot RUN a net8.0 test host, though, so without this
+      `dotnet test` fails the net8 leg with "You must install or update .NET to run this application"
+      ; which would leave the leg untested for a second reason after we just multi-targeted to fix the
+      first. RollForward lets the net8-compiled assemblies execute on the installed .NET 10 runtime.
+
+      FIDELITY CAVEAT, stated plainly: this validates the net8 COMPILATION (which is what actually
+      differs ; WireEnumNameConverter exists precisely because net8's BCL lacks .NET 9+'s
+      JsonStringEnumMemberNameAttribute), not net8 RUNTIME behaviour. In production the net8 leg runs
+      inside Revit 2025, which hosts .NET 8. Installing the .NET 8 *runtime* (a runtime, NOT a second
+      SDK ; that distinction is the whole point) would close the remaining gap and is worth doing if
+      any runtime-level divergence is ever suspected.
+    -->
+    <RollForward>LatestMajor</RollForward>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>latest</LangVersion>

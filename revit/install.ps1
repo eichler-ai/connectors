@@ -264,7 +264,18 @@ if ($ApplyPendingUpdate) {
     if ($stillPending.Count -gt 0) {
         @{ version = $manifest.version; versions = $stillPending } | ConvertTo-Json | Out-File $manifestPath -Encoding utf8
     } else {
-        @{ version = $manifest.version } | ConvertTo-Json | Out-File $versionMarkerPath -Encoding utf8
+        # Carry `covered` forward (see the idempotency check and the marker write further down). This
+        # path completes an install whose deferred half has now landed, so the versions it just applied
+        # are covered too. Dropping the field here would silently send the next run back to the old
+        # check-every-detected-version behaviour.
+        $priorCovered = if (Test-Path $versionMarkerPath) {
+            $m = Get-Content $versionMarkerPath | ConvertFrom-Json
+            if ($m.PSObject.Properties['covered']) { @($m.covered) } else { @() }
+        } else { @() }
+        @{
+            version = $manifest.version
+            covered = @($priorCovered + @($manifest.versions) | Sort-Object -Unique)
+        } | ConvertTo-Json | Out-File $versionMarkerPath -Encoding utf8
         Remove-Item (Get-PendingUpdateDir $Scope) -Recurse -Force -ErrorAction SilentlyContinue
         Unregister-ScheduledTask -TaskName (Get-PendingUpdateTaskName $Scope) -Confirm:$false -ErrorAction SilentlyContinue
     }
@@ -333,10 +344,30 @@ if ($LocalPackagePath) {
 # DLL is missing (deleted by hand, a failed prior run, AV quarantine, whatever) must trigger a
 # repair, not a silent no-op that leaves a broken install unfixed forever -- see PRD §12
 # "Self-upgrade" for the three-outcome reasoning this implements.
-$installed = if (Test-Path $versionMarkerPath) { (Get-Content $versionMarkerPath | ConvertFrom-Json).version } else { $null }
-$allDllsPresent = -not ($detectedVersions | Where-Object {
-    -not (Test-Path (Join-Path (Get-AddinsDir $_ $Scope) 'MCPBridge.AddIn.dll'))
-})
+$marker = if (Test-Path $versionMarkerPath) { Get-Content $versionMarkerPath | ConvertFrom-Json } else { $null }
+$installed = if ($marker) { $marker.version } else { $null }
+
+# Only require a DLL for versions the LAST INSTALL ACTUALLY COVERED. Checking every detected version
+# is wrong whenever a release ships no `addin-<year>/` payload for one of them: the deploy loop below
+# skips such a version by design, so its DLL never appears, so this check could never become true, so
+# the "already up to date" short-circuit below could never fire. Every subsequent run would then
+# re-download the release and re-enter the deploy loop -- which for a running Revit prompts the user
+# or, under -Silent, force-closes it. PRD §12's self-upgrade path would be interrupting a perfectly
+# healthy install on every invocation. `install.md` notes the release pipeline doesn't exist yet, so
+# the first releases shipping 2027-only while 2025 is also installed is a realistic first encounter.
+#
+# `covered` = versions the marker's release deployed to, PLUS versions it explicitly had no payload
+# for. Anything detected but in NEITHER list is new since that install (e.g. the user installed Revit
+# 2025 afterwards) and must NOT short-circuit -- that genuinely needs a download to find out whether
+# a payload exists for it. Markers written before this field existed have no `covered`, so fall back
+# to the old all-detected behaviour rather than wrongly skipping work.
+$coveredVersions = if ($marker -and $marker.PSObject.Properties['covered']) { @($marker.covered) } else { $detectedVersions }
+$versionsNeedingDll = $detectedVersions | Where-Object { $coveredVersions -contains $_ }
+$allDllsPresent =
+    -not ($detectedVersions | Where-Object { $coveredVersions -notcontains $_ }) -and
+    -not ($versionsNeedingDll | Where-Object {
+        -not (Test-Path (Join-Path (Get-AddinsDir $_ $Scope) 'MCPBridge.AddIn.dll'))
+    })
 
 if (-not $LocalPackagePath -and $installed -eq $releaseTag -and $allDllsPresent) {
     if (-not $Silent) { Write-Host "Revit MCP Bridge is already up to date ($installed)." }
@@ -450,7 +481,15 @@ try {
     # Only mark the release current once at least one version was actually fully deployed -- a
     # version that's only deferred isn't "installed" yet, it's pending (see below).
     if ($deployedVersions.Count -gt 0) {
-        @{ version = $releaseTag } | ConvertTo-Json | Out-File $versionMarkerPath -Encoding utf8
+        # `covered` records what this release could actually account for: versions it deployed to, plus
+        # versions it deliberately skipped for lack of an `addin-<year>/` payload. The idempotency check
+        # above needs both to tell "no payload exists for this version, nothing more to do" apart from
+        # "this version is new since the last install and hasn't been tried yet". Without it, a
+        # release that skips any detected version makes every future run redo the whole install.
+        @{
+            version = $releaseTag
+            covered = @($deployedVersions + $skippedVersions | Sort-Object -Unique)
+        } | ConvertTo-Json | Out-File $versionMarkerPath -Encoding utf8
     }
     if ($deferredVersions.Count -gt 0) {
         $manifestPath = Get-PendingUpdateManifestPath $Scope

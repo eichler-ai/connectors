@@ -35,6 +35,17 @@ import (
 
 const source = "mcp-server.internal.discovery"
 
+// unknownRevitVersion marks a connected instance whose Revit version isn't
+// known -- either because it's attached to the Router but was never (or no
+// longer) present in the registry. It is deliberately never the empty
+// string: "" is also Go's zero value for RevitVersion, so reusing it here
+// would make "genuinely unknown" indistinguishable from "a real, empty
+// version string" wherever versionsSeen/candidates are built, and would let
+// a blank revit_version leak into the candidates list handed back to the
+// caller. A distinct, self-describing sentinel keeps those two meanings
+// apart and gives the caller something legible instead of "".
+const unknownRevitVersion = "unknown"
+
 // wireTimeout bounds every discovery wire round trip. Discovery is meant to
 // be fast/live (PRD §08: "trivially cheap live, every call" for
 // describe_function; list_functions/search_functions "stay fast" via
@@ -51,12 +62,20 @@ type Router struct {
 	reg   *registry.Registry
 }
 
-// NewRouter builds an empty Router. reg may be nil (e.g. in tests that
-// don't exercise the multi-version disambiguation/revit_version behavior) —
-// every reg access below is nil-checked, degrading to the pre-multi-version
-// behavior (silent sorted-first pick, no revit_version in responses) rather
-// than panicking.
+// NewRouter builds an empty Router bound to reg. reg must not be nil: the
+// multi-version disambiguation/revit_version behavior (PRD §11) is
+// load-bearing correctness, not an optional extra, and letting it be
+// silently degraded by an absent registry (the pre-existing NewRouter(nil)
+// convention) meant its correctness rested on every call site remembering
+// to pass one. Making the dependency structural -- panic here instead --
+// means a missing registry fails loudly at construction, not silently at
+// query time. Tests that don't care about version disambiguation can pass
+// registry.New() (an empty, real registry) just as cheaply as they
+// previously passed nil.
 func NewRouter(reg *registry.Registry) *Router {
+	if reg == nil {
+		panic("discovery.NewRouter: reg must not be nil")
+	}
 	return &Router{conns: make(map[string]*transport.Conn), reg: reg}
 }
 
@@ -154,12 +173,12 @@ func (r *Router) resolveConn(instanceID string) (*transport.Conn, string, *diag.
 	}
 	sort.Strings(ids)
 
-	if r.reg != nil && len(ids) > 1 {
+	if len(ids) > 1 {
 		versionsSeen := map[string]bool{}
 		candidates := make([]map[string]string, 0, len(ids))
 		for _, id := range ids {
-			version := ""
-			if inst, ok := r.reg.Get(id); ok {
+			version := unknownRevitVersion
+			if inst, ok := r.reg.Get(id); ok && inst.RevitVersion != "" {
 				version = inst.RevitVersion
 			}
 			versionsSeen[version] = true
@@ -202,7 +221,7 @@ func callWire(ctx context.Context, conn *transport.Conn, method string, params m
 
 // call resolves instanceID (or picks one, per resolveConn) and forwards the
 // wire call, also returning the resolved instance's Revit version (empty if
-// reg is nil or the instance isn't in it) so the mcpserver layer can stamp
+// the instance isn't in the registry) so the mcpserver layer can stamp
 // every discovery response with which Revit version it reflects.
 func (r *Router) call(ctx context.Context, instanceID, method string, params map[string]any) (json.RawMessage, string, *diag.Record) {
 	conn, resolvedID, drec := r.resolveConn(instanceID)
@@ -210,10 +229,8 @@ func (r *Router) call(ctx context.Context, instanceID, method string, params map
 		return nil, "", drec
 	}
 	revitVersion := ""
-	if r.reg != nil {
-		if inst, ok := r.reg.Get(resolvedID); ok {
-			revitVersion = inst.RevitVersion
-		}
+	if inst, ok := r.reg.Get(resolvedID); ok {
+		revitVersion = inst.RevitVersion
 	}
 	raw, callErr := callWire(ctx, conn, method, params)
 	if callErr != nil {
