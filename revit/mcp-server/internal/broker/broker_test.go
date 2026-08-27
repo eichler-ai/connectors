@@ -11,6 +11,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/diag"
+	"github.com/eichler-ai/connectors/revit/mcp-server/internal/discovery"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/execution"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/mcpserver"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/registry"
@@ -29,6 +30,7 @@ func newTestBroker(t *testing.T) (*Broker, net.Listener) {
 		Token:     testToken,
 		Registry:  registry.New(),
 		Execution: mgr,
+		Discovery: discovery.NewRouter(),
 		MCPServer: server,
 	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")

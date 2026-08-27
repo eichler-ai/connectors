@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using MCPBridge.Core.Diagnostics;
+using MCPBridge.Core.Discovery;
 using MCPBridge.Core.Execution;
 using MCPBridge.Core.Protocol;
 using MCPBridge.RevitAdapter;
@@ -59,13 +60,22 @@ public sealed class RequestDispatcher
     // best-effort registration). Production wiring (BridgeHost) passes a real Win32WindowInventory.
     private readonly IWindowInventory? _windowInventory;
 
+    // PRD §08: discovery (list_functions/search_functions/describe_function) is pure reflection with no
+    // Document/UIApplication dependency, so it deliberately does NOT go through ExecutionManager/
+    // ExternalEventBridge at all -- served synchronously on the connection thread, answerable even while a
+    // script is mid-execution on the UI thread. null (the default) means the feature is off, matching this
+    // codebase's optional-feature convention (see _windowInventory above); production wiring (BridgeHost)
+    // passes a real DiscoveryService built from Revit's already-loaded assemblies.
+    private readonly DiscoveryService? _discoveryService;
+
     public RequestDispatcher(
         ExecutionManager executionManager,
         ExternalEventBridge<ScriptExecutionOutcome> bridge,
         TransactionScriptExecutor scriptExecutor,
         Func<DateTimeOffset>? now = null,
         Func<TimeSpan, Task>? delay = null,
-        IWindowInventory? windowInventory = null)
+        IWindowInventory? windowInventory = null,
+        DiscoveryService? discoveryService = null)
     {
         _executionManager = executionManager;
         _bridge = bridge;
@@ -73,6 +83,7 @@ public sealed class RequestDispatcher
         _now = now ?? (() => DateTimeOffset.UtcNow);
         _delay = delay ?? Task.Delay;
         _windowInventory = windowInventory;
+        _discoveryService = discoveryService;
     }
 
     /// <summary>How often <see cref="HandlePollExecutionAsync"/> re-checks the record while waiting out timeout_ms.</summary>
@@ -83,6 +94,9 @@ public sealed class RequestDispatcher
         "execute_script" => HandleExecuteScriptAsync(request),
         "poll_execution" => HandlePollExecutionAsync(request),
         "cancel_execution" => Task.FromResult(HandleCancelExecution(request)),
+        "list_functions" => Task.FromResult(HandleListFunctions(request)),
+        "search_functions" => Task.FromResult(HandleSearchFunctions(request)),
+        "describe_function" => Task.FromResult(HandleDescribeFunction(request)),
         _ => Task.FromResult(JsonRpcErrorMessage.ToJson(
             request.Id,
             JsonRpcErrorCode.MethodNotFound,
@@ -418,6 +432,147 @@ public sealed class RequestDispatcher
             ? ExecutionResultMessage.FromRecord(request.Id, record)
             : JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InternalError, $"execution_id '{executionId}' vanished mid-cancellation.", null);
     }
+
+    /// <summary>
+    /// PRD §08: list_functions/search_functions/describe_function are dispatched directly here -- no
+    /// ExecutionManager/ExternalEventBridge/_bridge involvement whatsoever, since reflection never touches
+    /// Document/UIApplication and must stay answerable even mid-script-execution. instance_id (present on
+    /// every discovery request per the wire contract) is deliberately not read/validated here -- routing
+    /// to this specific add-in instance already happened broker-side before this request ever arrived.
+    /// </summary>
+    private string HandleListFunctions(JsonRpcRequest request)
+    {
+        if (_discoveryService is null)
+        {
+            return DiscoveryUnavailable(request.Id);
+        }
+
+        try
+        {
+            var namespaceFilter = request.GetOptionalString("namespace");
+            var typeFilter = request.GetOptionalString("type_name");
+            var cursor = request.GetOptionalString("cursor");
+            var pageSize = ClampPageSize(request.GetOptionalInt32("page_size", DefaultListFunctionsPageSize));
+
+            var result = _discoveryService.ListFunctions(namespaceFilter, typeFilter, cursor, pageSize);
+            return DiscoveryResultMessage.ListFunctions(request.Id, result);
+        }
+        catch (JsonRpcParamException ex)
+        {
+            return JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InvalidParams, ex.Message, null);
+        }
+        catch (Exception ex)
+        {
+            return DiscoveryUnexpectedError(request.Id, "list_functions", ex);
+        }
+    }
+
+    private string HandleSearchFunctions(JsonRpcRequest request)
+    {
+        if (_discoveryService is null)
+        {
+            return DiscoveryUnavailable(request.Id);
+        }
+
+        try
+        {
+            var query = request.GetRequiredString("query");
+            var namespaceFilter = request.GetOptionalString("namespace");
+            var cursor = request.GetOptionalString("cursor");
+            var topN = ClampPageSize(request.GetOptionalInt32("top_n", DefaultSearchFunctionsTopN));
+
+            var result = _discoveryService.SearchFunctions(query, namespaceFilter, cursor, topN);
+            return DiscoveryResultMessage.SearchFunctions(request.Id, result);
+        }
+        catch (JsonRpcParamException ex)
+        {
+            return JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InvalidParams, ex.Message, null);
+        }
+        catch (Exception ex)
+        {
+            return DiscoveryUnexpectedError(request.Id, "search_functions", ex);
+        }
+    }
+
+    private string HandleDescribeFunction(JsonRpcRequest request)
+    {
+        if (_discoveryService is null)
+        {
+            return DiscoveryUnavailable(request.Id);
+        }
+
+        try
+        {
+            var member = request.GetRequiredString("member");
+            var overloadIndex = request.GetOptionalInt32("overload_index", int.MinValue);
+            var memberId = request.GetOptionalString("member_id");
+
+            var result = _discoveryService.DescribeFunction(member, overloadIndex == int.MinValue ? null : overloadIndex, memberId);
+            return DiscoveryResultMessage.DescribeFunction(request.Id, result);
+        }
+        catch (JsonRpcParamException ex)
+        {
+            return JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InvalidParams, ex.Message, null);
+        }
+        catch (DiscoveryMemberNotFoundException ex)
+        {
+            var diagnostic = DiagnosticRecord.Create(
+                DiagnosticSeverity.Error,
+                "discovery-member-not-found",
+                DiagnosticSource.Discovery,
+                ex.Message,
+                detail: new Dictionary<string, object?> { ["member"] = request.GetOptionalString("member") },
+                remedy: new[] { "Use list_functions or search_functions to find the correct namespace/type/member name." });
+            return JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InvalidParams, ex.Message, diagnostic);
+        }
+        catch (Exception ex)
+        {
+            return DiscoveryUnexpectedError(request.Id, "describe_function", ex);
+        }
+    }
+
+    /// <summary>
+    /// Review finding (H2): DiscoveryService's reflection can throw for reasons beyond the two typed
+    /// exceptions above (a hostile/unresolvable type in a C++/CLI interop assembly, etc.) -- this runs on
+    /// the add-in's background connection thread (PRD §08's execution-locus decision), so an uncaught
+    /// exception here would take down that connection entirely rather than surfacing as one failed call.
+    /// </summary>
+    private static string DiscoveryUnexpectedError(System.Text.Json.JsonElement id, string method, Exception ex)
+    {
+        var diagnostic = DiagnosticRecord.Create(
+            DiagnosticSeverity.Error,
+            "discovery-unexpected-error",
+            DiagnosticSource.Discovery,
+            $"{method} failed unexpectedly: {ex.Message}",
+            detail: new Dictionary<string, object?> { ["method"] = method },
+            remedy: null);
+        return JsonRpcErrorMessage.ToJson(id, JsonRpcErrorCode.InternalError, diagnostic.Message, diagnostic);
+    }
+
+    /// <summary>
+    /// Review finding (H3): page_size/top_n were passed straight through unvalidated. A caller-supplied
+    /// value &lt;= 0 makes list_functions/search_functions return an empty page whose next_cursor equals
+    /// the cursor just supplied -- an agent paginating in a loop never terminates. A caller-supplied huge
+    /// value returns the entire scoped/matched surface in one response, blowing straight past the
+    /// ~25,000-token MCP output ceiling PRD §08 explicitly designs pagination around. Same clamping
+    /// pattern as <see cref="ClampTimeoutMs"/>.
+    /// </summary>
+    private static int ClampPageSize(int pageSize) => Math.Clamp(pageSize, 1, 500);
+
+    private static string DiscoveryUnavailable(System.Text.Json.JsonElement id) => JsonRpcErrorMessage.ToJson(
+        id,
+        JsonRpcErrorCode.InternalError,
+        "discovery is not available on this connection (no DiscoveryService wired up).",
+        DiagnosticRecord.Create(
+            DiagnosticSeverity.Error,
+            "discovery-unavailable",
+            DiagnosticSource.Discovery,
+            "discovery is not available on this connection (no DiscoveryService wired up).",
+            detail: null,
+            remedy: null));
+
+    private const int DefaultListFunctionsPageSize = 50;
+    private const int DefaultSearchFunctionsTopN = 20;
 
     /// <summary>
     /// Clamps a caller-supplied timeout_ms to [0, DefaultMaxDurationMs] -- shared by both

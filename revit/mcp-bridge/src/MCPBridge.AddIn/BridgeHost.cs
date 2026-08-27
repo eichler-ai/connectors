@@ -2,13 +2,16 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Net.Sockets;
+using System.Reflection;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Autodesk.Revit.UI;
 using MCPBridge.Core.Connection;
+using MCPBridge.Core.Discovery;
 using MCPBridge.Core.Dispatch;
 using MCPBridge.Core.Execution;
 using MCPBridge.Core.Protocol;
@@ -43,6 +46,11 @@ internal sealed class BridgeHost
     private Thread? _workerThread;
     private volatile TcpClient? _activeTcpClient;
     private Timer? _timeoutTimer;
+
+    // Rooted for the same reason _timeoutTimer is a field rather than a local: an unreferenced Timer is
+    // eligible for GC at any point before it fires, one-shot or not.
+    private Timer? _discoveryResyncTimer;
+    private DiscoveryCache? _discoveryCache;
 
     // Backing fields for the status snapshot the MCP Bridge ribbon button reads (see
     // MCPBridgeStatusCommand). Set from the connection thread at the exact same points that already
@@ -98,6 +106,7 @@ internal sealed class BridgeHost
         // Partial mitigation for Roslyn/other-add-in version collisions (see its own doc comment) --
         // must happen before any script can ever compile.
         RoslynAssemblyIsolation.EnsureInitialized();
+        SqliteAssemblyIsolation.EnsureInitialized();
 
         // The document-snapshot ExternalEvent has no circular dependency (its handler doesn't wrap
         // anything else), so it's created directly.
@@ -117,7 +126,77 @@ internal sealed class BridgeHost
         deferredRaiser.Bind(scriptExternalEvent);
 
         var scriptExecutor = new TransactionScriptExecutor(new RoslynScriptRunner());
-        var dispatcher = new RequestDispatcher(_executionManager, scriptBridge, scriptExecutor, windowInventory: new Win32WindowInventory());
+
+        // PRD §08 addendum: discovery is now backed by a persistent SQLite cache (Microsoft.Data.Sqlite +
+        // FTS5) instead of reflecting fresh on every Revit process launch -- live-measured cost of the old
+        // approach was ~1.5s to enumerate types plus ~700ms per full-corpus search_functions scan, paid
+        // again on every restart with nothing carried over. %LOCALAPPDATA%\Connectors\Revit\ is the same
+        // app-data root BrokerDiscoveryOptions.Local() already uses (see its own doc comment) -- one place
+        // per machine, not a second convention. Independent PR review finding: scoped by _revitVersion --
+        // without this, a user with two Revit versions installed launching one after the other would have
+        // the second version's Sync() see the first version's RevitAPI.dll as "gone" and cascade-delete its
+        // entire cached surface out from under a still-running first-version session.
+        // Independent PR review finding (2nd round, M2): Directory.CreateDirectory used to sit OUTSIDE this
+        // guard -- a failure there (a locked-down LOCALAPPDATA policy, a full disk, an offline-redirected
+        // profile) escaped Start() entirely and took the whole bridge down (no connection loop, no ribbon
+        // button, no dialog suppression) over a purely discovery-side path problem, exactly what this guard
+        // exists to prevent. Now inside the same try/catch as opening the cache itself.
+        //
+        // A corrupt/locked cache file (a prior hard crash mid-write, a full disk) must not take down the
+        // whole bridge either -- execute_script and everything else has no dependency on discovery. One
+        // self-heal attempt (delete and recreate) before giving up and running with discovery disabled
+        // entirely; RequestDispatcher accepts a null DiscoveryService for exactly this.
+        var discoveryDbPath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Connectors", "Revit", _revitVersion, "discovery-cache.db");
+        DiscoveryService? discoveryService = null;
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(discoveryDbPath)!);
+            _discoveryCache = new DiscoveryCache(discoveryDbPath);
+        }
+        catch (Exception ex)
+        {
+            LogConnectionDiagnostic($"discovery cache open FAILED, attempting one self-heal (delete and recreate): {ex}");
+            try
+            {
+                // Independent PR review finding (2nd round, M1): DiscoveryCache's own constructor now
+                // disposes its connection before rethrowing on any failure past Open() (the dominant real
+                // corruption case, "database disk image is malformed", throws from PRAGMA/CreateSchema,
+                // AFTER Open() already succeeded) -- without that fix, this File.Delete would routinely hit
+                // a Windows sharing violation against a handle the failed constructor never released, and
+                // self-heal would never actually self-heal.
+                File.Delete(discoveryDbPath);
+                _discoveryCache = new DiscoveryCache(discoveryDbPath);
+            }
+            catch (Exception retryEx)
+            {
+                LogConnectionDiagnostic($"discovery cache self-heal FAILED, continuing with discovery disabled for this session: {retryEx}");
+                _discoveryCache = null;
+            }
+        }
+
+        if (_discoveryCache is not null)
+        {
+            SyncDiscoveryCache("initial");
+            discoveryService = new DiscoveryService(_discoveryCache);
+        }
+
+        // Revit doesn't guarantee add-in load order (PRD §05 already documents the analogous
+        // startup-ordering problem for the broker connection itself) -- an add-in that finishes loading
+        // AFTER this OnStartup call has already returned would otherwise never get picked up until the next
+        // full Revit restart. One deferred, one-shot re-check catches that window without a recurring poll
+        // loop; 8s was chosen as comfortably past typical add-in OnStartup duration without meaningfully
+        // delaying when a late-loading add-in's API becomes discoverable.
+        if (_discoveryCache is not null)
+        {
+            _discoveryResyncTimer = new Timer(
+                _ => SyncDiscoveryCache("deferred"),
+                state: null,
+                dueTime: TimeSpan.FromSeconds(8),
+                period: Timeout.InfiniteTimeSpan);
+        }
+
+        var dispatcher = new RequestDispatcher(_executionManager, scriptBridge, scriptExecutor, windowInventory: new Win32WindowInventory(), discoveryService: discoveryService);
 
         _stopCts = new CancellationTokenSource();
         var stopToken = _stopCts.Token;
@@ -189,23 +268,137 @@ internal sealed class BridgeHost
         _timeoutTimer?.Dispose();
         _timeoutTimer = null;
 
+        _discoveryResyncTimer?.Dispose();
+        _discoveryResyncTimer = null;
+
         _workerThread?.Join(TimeSpan.FromSeconds(5));
         _workerThread = null;
+
+        _discoveryCache?.Dispose();
+        _discoveryCache = null;
+    }
+
+    /// <summary>
+    /// Reflects Revit's core API assemblies plus every currently-loaded add-in assembly into
+    /// <see cref="_discoveryCache"/>'s persistent SQLite store (<see cref="DiscoveryCache.Sync"/> diffs
+    /// against what's already there, so calling this twice -- initial + the deferred re-check above -- costs
+    /// nothing extra for anything unchanged between the two calls).
+    /// </summary>
+    private void SyncDiscoveryCache(string reason)
+    {
+        try
+        {
+            var result = _discoveryCache!.Sync(CollectAssembliesToSync());
+            LogConnectionDiagnostic($"discovery cache sync ({reason}): added={result.Added} updated={result.Updated} removed={result.Removed} unchanged={result.Unchanged}");
+        }
+        catch (Exception ex)
+        {
+            // A sync failure must never take down the connection thread or leave discovery permanently
+            // broken -- worst case this pass's changes (a rebuilt add-in DLL, a newly-loaded add-in) are
+            // missed until the next sync (the deferred one, or implicitly the next Revit restart).
+            LogConnectionDiagnostic($"discovery cache sync ({reason}) FAILED: {ex}");
+        }
+    }
+
+    /// <summary>
+    /// PRD §08: discovery covers Revit's own API (RevitAPI.dll/RevitAPIUI.dll, "core") plus whatever other
+    /// add-ins have loaded into this same process ("addin") -- an agent scripting against a live Revit
+    /// session can call into another add-in's public API just as validly as Revit's own.
+    ///
+    /// <para>
+    /// Independent PR review finding: a name-prefix exclusion list (the original approach) let through
+    /// dozens of Autodesk's own internal, undocumented DLLs (UIFramework, AdWindows,
+    /// Autodesk.Internal.*, RevitAddInUtility, and similar) -- none of them start with an excluded prefix,
+    /// none of them ship an XML-doc sidecar (so <see cref="MCPBridge.Core.Discovery.DiscoveryReflector"/>'s
+    /// no-sidecar escape hatch treats every public type in them as "documented"), and the combined noise
+    /// dominated <c>list_functions</c>' no-args namespace listing over genuine Revit API and real
+    /// third-party add-in namespaces. Filtering on install <em>location</em> instead is a much stronger
+    /// signal: genuine third-party add-ins load from an Addins folder (per-user or per-machine), while
+    /// Autodesk's own internal, non-API DLLs -- including RevitAPI.dll/RevitAPIUI.dll themselves -- sit
+    /// directly in Revit's own install directory. Anything else loaded from that same install directory is
+    /// exactly the noise this exclusion needs to catch.
+    /// </para>
+    ///
+    /// <para>
+    /// Independent PR review finding (2nd round): a legacy-pattern third-party add-in that was installed by
+    /// copying its DLL directly into Revit's own install directory (an old but real workaround some add-ins
+    /// used to dodge assembly-resolution problems) is now silently excluded too, with no way to tell that
+    /// apart from genuine Autodesk noise after the fact -- so excluded assembly names are logged (once per
+    /// sync, not per-assembly-forever) rather than disappearing with zero trace, matching PRD §01's
+    /// observability principle. Also fixed: both path comparisons now use OrdinalIgnoreCase --
+    /// Assembly.Location reflects whatever casing the loader happened to use (a .addin manifest, a registry
+    /// value), which routinely differs from the on-disk casing on Windows' case-insensitive filesystem, and
+    /// an ordinal case-sensitive compare could let exactly the noise this filter exists to catch back in.
+    /// </para>
+    /// </summary>
+    private static IReadOnlyList<(string Kind, Assembly Assembly)> CollectAssembliesToSync()
+    {
+        var coreAssemblies = new[] { typeof(Autodesk.Revit.DB.Document).Assembly, typeof(UIApplication).Assembly };
+        var assemblies = new List<(string Kind, Assembly Assembly)>(coreAssemblies.Select(a => ("core", a)));
+
+        var revitInstallDir = Path.GetDirectoryName(coreAssemblies[0].Location);
+        var excludedPrefixes = new[] { "System.", "Microsoft.", "MCPBridge.", "mscorlib", "netstandard", "WindowsBase", "PresentationCore", "PresentationFramework" };
+        var excludedByInstallDir = new List<string>();
+
+        foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+        {
+            var name = assembly.GetName().Name;
+            if (string.IsNullOrEmpty(name) || string.IsNullOrEmpty(assembly.Location))
+            {
+                continue;
+            }
+
+            if (excludedPrefixes.Any(prefix => name.StartsWith(prefix, StringComparison.Ordinal)))
+            {
+                continue;
+            }
+
+            if (coreAssemblies.Any(core => string.Equals(core.Location, assembly.Location, StringComparison.OrdinalIgnoreCase)))
+            {
+                continue; // already added above as "core".
+            }
+
+            if (revitInstallDir is not null && string.Equals(Path.GetDirectoryName(assembly.Location), revitInstallDir, StringComparison.OrdinalIgnoreCase))
+            {
+                excludedByInstallDir.Add(name);
+                continue; // Autodesk's own internal DLLs living alongside RevitAPI.dll -- not a real add-in.
+            }
+
+            assemblies.Add(("addin", assembly));
+        }
+
+        if (excludedByInstallDir.Count > 0)
+        {
+            LogConnectionDiagnostic($"discovery: excluded {excludedByInstallDir.Count} assembly(ies) loaded from Revit's own install directory: {string.Join(", ", excludedByInstallDir)}");
+        }
+
+        return assemblies;
     }
 
     private void RunConnectionLoop(RequestDispatcher dispatcher, DocumentSnapshotHandler documentSnapshotHandler, ExternalEvent documentSnapshotEvent, CancellationToken stopToken)
     {
+        LogConnectionDiagnostic($"RunConnectionLoop starting. Mode={_discoveryOptions.Mode} ConnectorRoot={_discoveryOptions.ConnectorRoot}");
         var discovery = new BrokerDiscovery(_discoveryOptions);
         var reconnectController = new ReconnectLoopController(_backoffPolicy);
 
         while (!stopToken.IsCancellationRequested)
         {
+            LogConnectionDiagnostic("loop iteration: about to TryDiscover");
             var discoveryResult = discovery.TryDiscover();
             if (!discoveryResult.Found || discoveryResult.BrokerJson is null || discoveryResult.Address is null)
             {
                 // Not found (or found but unreadable/malformed -- BrokerDiscovery already reports both as
                 // "not found"), or a remote-mode fallback address with no token to authenticate with:
                 // treat identically as a failed attempt and back off, per PRD §05's single retry loop.
+                //
+                // Was previously silent -- PRD §01's observability principle ("caught and swallowed" must
+                // still leave a trace, not mean invisible) didn't actually hold here: a broker.json that's
+                // missing, unreadable, or fails to parse produced literally no evidence anywhere that this
+                // loop was even trying, let alone why it kept failing -- discovered live, chasing exactly
+                // that symptom, when even direct filesystem/network checks outside the add-in all
+                // checked out fine and the real cause turned out to be reachable only from inside this
+                // loop's own exception handling.
+                LogConnectionDiagnostic($"broker discovery failed: {discoveryResult.Diagnostic?.Message ?? "(broker.json not found)"}");
                 Backoff(reconnectController, stopToken);
                 continue;
             }
@@ -214,8 +407,12 @@ internal sealed class BridgeHost
             {
                 RunOneConnection(discoveryResult.BrokerJson, discoveryResult.Address, dispatcher, documentSnapshotHandler, documentSnapshotEvent, reconnectController, stopToken);
             }
-            catch (Exception)
+            catch (Exception ex)
             {
+                // Same observability gap, on the other failure path: this used to catch and discard the
+                // exception with zero trace -- an auth rejection, a connect timeout, or any socket-level
+                // failure looked identical to "never even tried" from the outside.
+                LogConnectionDiagnostic($"connection attempt to {discoveryResult.Address.Host}:{discoveryResult.Address.Port} failed: {ex}");
                 // Any failure during this connection's lifetime (auth rejected, socket error, broker
                 // closed unexpectedly) falls through to backoff-and-retry -- the reconnect loop is
                 // indefinite by design (PRD §05), never fatal to this thread.
@@ -230,6 +427,29 @@ internal sealed class BridgeHost
             {
                 Backoff(reconnectController, stopToken);
             }
+        }
+    }
+
+    /// <summary>
+    /// Best-effort append to %LocalAppData%\MCPBridge\connection.log -- the reconnect loop's own
+    /// equivalent of MCPBridgeApplication.TryLogDiagnostic (PRD §01 observability: a caught-and-swallowed
+    /// failure still deserves a trace somewhere, not total silence). Deliberately a separate file from
+    /// startup-errors.log: this loop retries indefinitely and can log far more often than a one-shot
+    /// OnStartup failure ever would, so keeping them apart means a busy connection log never buries a
+    /// startup failure underneath it.
+    /// </summary>
+    private static void LogConnectionDiagnostic(string message)
+    {
+        try
+        {
+            var directory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "MCPBridge");
+            Directory.CreateDirectory(directory);
+            File.AppendAllText(Path.Combine(directory, "connection.log"), $"{DateTimeOffset.UtcNow:O} {message}\n");
+        }
+        catch
+        {
+            // Best-effort diagnostic only -- a failure here must never mask or interfere with the
+            // reconnect loop itself, which already handles its own failures independently.
         }
     }
 

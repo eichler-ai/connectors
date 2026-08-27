@@ -99,4 +99,23 @@ public sealed class JsonRpcRequest
             _ => throw new JsonRpcParamException($"params.{name} must be a number."),
         };
     }
+
+    /// <summary>Reads an optional 32-bit numeric param (PRD §08's page_size/top_n/overload_index), returning <paramref name="defaultValue"/> if absent/null. Throws if present with a non-numeric shape.</summary>
+    public int GetOptionalInt32(string name, int defaultValue) => (int)GetOptionalInt64(name, defaultValue);
+
+    /// <summary>Reads an optional non-empty string param (PRD §08's namespace/type_name/cursor/member/etc.), returning null if absent/null/empty. Throws if present with a non-string shape.</summary>
+    public string? GetOptionalString(string name)
+    {
+        if (_params.ValueKind != JsonValueKind.Object || !_params.TryGetProperty(name, out var value))
+        {
+            return null;
+        }
+
+        return value.ValueKind switch
+        {
+            JsonValueKind.String => string.IsNullOrEmpty(value.GetString()) ? null : value.GetString(),
+            JsonValueKind.Null or JsonValueKind.Undefined => null,
+            _ => throw new JsonRpcParamException($"params.{name} must be a string."),
+        };
+    }
 }
