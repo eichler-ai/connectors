@@ -110,6 +110,37 @@ public sealed class DocumentSnapshotHandler : IExternalEventHandler
     private List<RegisteredDocument> BuildSnapshot(UIApplication app)
     {
         var activeDocument = app.ActiveUIDocument?.Document;
+
+        // Revit does not promise that two API calls asking for "the same" document hand back the same
+        // managed wrapper -- Document is a thin wrapper over a native object, and
+        // Application.Documents's enumeration and ActiveUIDocument.Document can each mint their own.
+        // ReferenceEquals between them was therefore false even for a single open, genuinely active
+        // document, so active was reported false for EVERY document, always.
+        //
+        // Measured, not inferred: with a sole open document that execute_script confirmed WAS the
+        // ActiveUiDocument, an instrumented build logged
+        //     refEquals=False  activeId=doc-C1ED49972F0D4F4C  id=doc-C1ED49972F0D4F4C
+        // on every snapshot -- the two wrappers differ while the §09 identities match exactly.
+        //
+        // Compare the PRD §09 identity as well, which is derived from the document's path rather than
+        // from wrapper identity, and so survives a fresh wrapper. ReferenceEquals is kept as the first
+        // test because it's exact when it does hold, and because it's the only one of the two that can
+        // identify an UNSAVED document (which has no path to derive a stable id from -- see the
+        // residual limitation noted on DocumentIdentity.ResolveCached's tmp- ids below).
+        string? activeDocumentId = null;
+        if (activeDocument is not null)
+        {
+            try
+            {
+                activeDocumentId = DocumentIdentity.ResolveCached(activeDocument, _uncPathResolver);
+            }
+            catch
+            {
+                // Same best-effort posture as BuildEntry: a document mid-transition can throw from the
+                // path accessors this resolves through. Fall back to reference comparison alone.
+            }
+        }
+
         var result = new List<RegisteredDocument>();
 
         foreach (Document document in app.Application.Documents)
@@ -121,13 +152,13 @@ public sealed class DocumentSnapshotHandler : IExternalEventHandler
                 continue;
             }
 
-            result.Add(BuildEntry(document, ReferenceEquals(document, activeDocument)));
+            result.Add(BuildEntry(document, activeDocument, activeDocumentId));
         }
 
         return result;
     }
 
-    private RegisteredDocument BuildEntry(Document document, bool isActive)
+    private RegisteredDocument BuildEntry(Document document, Document? activeDocument, string? activeDocumentId)
     {
         string? path;
         var isWorkshared = false;
@@ -153,6 +184,13 @@ public sealed class DocumentSnapshotHandler : IExternalEventHandler
         }
 
         var documentId = DocumentIdentity.ResolveCached(document, _uncPathResolver);
+
+        // The decision itself lives in Core (ActiveDocumentPredicate) rather than inline here, so it
+        // can carry a regression test: this predicate was wrong in every case for the entire life of
+        // the feature, and the AddIn project is Revit glue that nothing unit-tests. See that class for
+        // why both arms are needed and why tmp- ids are excluded.
+        var isActive = ActiveDocumentPredicate.IsActive(
+            ReferenceEquals(document, activeDocument), documentId, activeDocumentId);
 
         return new RegisteredDocument(documentId, document.Title, string.IsNullOrEmpty(path) ? null : path, isWorkshared, isActive);
     }
