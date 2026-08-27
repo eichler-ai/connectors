@@ -1,0 +1,385 @@
+using System.Linq;
+using MCPBridge.Core.Discovery;
+using MCPBridge.Core.Protocol;
+using MCPBridge.Discovery.Tests.Fixtures;
+using Xunit;
+
+namespace MCPBridge.Discovery.Tests;
+
+/// <summary>
+/// End-to-end coverage of <see cref="DiscoveryService"/> (list_functions/search_functions/describe_function,
+/// PRD §08), backed by a <see cref="DiscoveryCache"/> synced against this test assembly's own Fixtures/*.cs
+/// types -- a portable, self-contained target (no real, proprietary RevitAPI.dll/xml needed) -- joined
+/// against the real XML-doc sidecar the compiler emits from those fixtures' triple-slash comments
+/// (MCPBridge.Discovery.Tests.xml, next to this assembly's own DLL; see the csproj's
+/// GenerateDocumentationFile=true and its own comment). Uses a fresh in-memory (":memory:") cache per test
+/// via <see cref="NewService"/> -- no real file, no cross-test interference.
+/// </summary>
+public class DiscoveryServiceTests
+{
+    private const string FixturesNamespace = "MCPBridge.Discovery.Tests.Fixtures";
+    private const string OtherNamespace = "MCPBridge.Discovery.Tests.Fixtures.Other";
+
+    private static DiscoveryService NewService()
+    {
+        var cache = new DiscoveryCache(":memory:");
+        cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+        return new DiscoveryService(cache);
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // list_functions -- strict one-level-at-a-time tree (PRD §08 addendum)
+    // ---------------------------------------------------------------------------------------------
+
+    [Fact]
+    public void ListFunctions_NoArgs_ReturnsNamespacesOnly()
+    {
+        var service = NewService();
+
+        var result = service.ListFunctions(namespaceFilter: null, typeFilter: null, cursor: null, pageSize: 100);
+
+        Assert.Equal(ListFunctionsTier.Namespaces, result.Tier);
+        Assert.Contains(FixturesNamespace, result.Names);
+        Assert.Contains(OtherNamespace, result.Names);
+        Assert.NotNull(result.Counts);
+        Assert.Equal(result.Names.Count, result.Counts!.Count);
+        Assert.True(result.TotalScoped > 0);
+    }
+
+    [Fact]
+    public void ListFunctions_NamespaceOnly_ReturnsTypeNamesInThatNamespaceOnly()
+    {
+        var service = NewService();
+
+        var result = service.ListFunctions(namespaceFilter: FixturesNamespace, typeFilter: null, cursor: null, pageSize: 500);
+
+        Assert.Equal(ListFunctionsTier.Types, result.Tier);
+        Assert.Contains("Widget", result.Names);
+        Assert.Contains("Gadget", result.Names);
+        Assert.DoesNotContain("Thing", result.Names); // lives in the Other sub-namespace, must not leak in.
+    }
+
+    [Fact]
+    public void ListFunctions_NamespaceAndType_ReturnsDistinctMemberNamesOnly()
+    {
+        var service = NewService();
+
+        var result = service.ListFunctions(namespaceFilter: FixturesNamespace, typeFilter: "Widget", cursor: null, pageSize: 100);
+
+        Assert.Equal(ListFunctionsTier.Members, result.Tier);
+        Assert.Contains("Describe", result.Names); // Widget.Describe has 2 overloads -- must appear once, not twice.
+        Assert.Equal(1, result.Names.Count(n => n == "Describe"));
+        Assert.Contains("Id", result.Names);
+        Assert.Contains("Name", result.Names);
+        Assert.Contains("Changed", result.Names);
+        Assert.DoesNotContain("Hidden", result.Names); // internal -- must never appear
+    }
+
+    [Fact]
+    public void ListFunctions_FullyQualifiedTypeName_StripsNamespacePrefixAndStillResolves()
+    {
+        // params.type_name is documented as bare/prefix-stripped (matching the types tier's own output),
+        // but a caller passing the fully-qualified form back (e.g. copied verbatim from a jsonschema
+        // example, or from describe_function's own "member" convention) must not get a silent empty
+        // result over it.
+        var service = NewService();
+
+        var result = service.ListFunctions(namespaceFilter: FixturesNamespace, typeFilter: FixturesNamespace + ".Widget", cursor: null, pageSize: 100);
+
+        Assert.Equal(ListFunctionsTier.Members, result.Tier);
+        Assert.Equal("Widget", result.TypeName); // echoed back bare, not fully-qualified.
+        Assert.Contains("Describe", result.Names);
+        Assert.Contains("Id", result.Names);
+    }
+
+    [Fact]
+    public void ListFunctions_TypeWithoutNamespace_ThrowsJsonRpcParamException()
+    {
+        var service = NewService();
+
+        Assert.Throws<JsonRpcParamException>(() =>
+            service.ListFunctions(namespaceFilter: null, typeFilter: "Widget", cursor: null, pageSize: 100));
+    }
+
+    [Fact]
+    public void ListFunctions_Pagination_NextCursorPresentThenAbsent()
+    {
+        var service = NewService();
+
+        var page1 = service.ListFunctions(namespaceFilter: FixturesNamespace, typeFilter: "Widget", cursor: null, pageSize: 1);
+        Assert.Single(page1.Names);
+        Assert.NotNull(page1.NextCursor);
+        var totalScoped = page1.TotalScoped;
+
+        var seen = new System.Collections.Generic.HashSet<string>();
+        string? cursor = null;
+        var guard = 0;
+        while (true)
+        {
+            var page = service.ListFunctions(FixturesNamespace, "Widget", cursor, pageSize: 1);
+            foreach (var n in page.Names)
+            {
+                Assert.True(seen.Add(n), $"duplicate name across pages: {n}");
+            }
+
+            if (page.NextCursor is null)
+            {
+                break;
+            }
+
+            cursor = page.NextCursor;
+            Assert.True(++guard < 1000, "pagination did not terminate");
+        }
+
+        Assert.Equal(totalScoped, seen.Count);
+    }
+
+    [Fact]
+    public void ListFunctions_InvalidCursor_ThrowsJsonRpcParamException()
+    {
+        var service = NewService();
+
+        Assert.Throws<JsonRpcParamException>(() =>
+            service.ListFunctions(FixturesNamespace, "Widget", cursor: "not-a-number", pageSize: 50));
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Type-surface filtering (which types count as "the API" at all)
+    // ---------------------------------------------------------------------------------------------
+
+    [Fact]
+    public void PublicTypeNestedInInternalType_IsNeverDiscoverable()
+    {
+        // IsNestedPublic is true for InternalOuter.NestedPublic, but Type.IsVisible is false -- nothing
+        // outside the assembly can reach it, so it must not appear on any discovery path.
+        const string nestedNamespace = FixturesNamespace;
+        const string nestedFullName = FixturesNamespace + ".InternalOuter.NestedPublic";
+        var service = NewService();
+
+        var types = service.ListFunctions(nestedNamespace, null, null, pageSize: 100_000);
+        Assert.DoesNotContain("InternalOuter", types.Names);
+        Assert.DoesNotContain("NestedPublic", types.Names);
+
+        var byType = service.ListFunctions(nestedNamespace, "NestedPublic", null, pageSize: 100);
+        Assert.Empty(byType.Names);
+        Assert.Equal(0, byType.TotalScoped);
+
+        Assert.Throws<DiscoveryMemberNotFoundException>(() =>
+            service.DescribeFunction(nestedFullName + ".NestedPublicWork", null, null));
+    }
+
+    [Fact]
+    public void UndocumentedType_IsHiddenFromBrowsing_ButStillReachableByExplicitLookup()
+    {
+        // The RevitAPI.dll C++/CLI-metadata-noise filter: types with no XML-doc entry are dropped from the
+        // browse surface (the namespace-scoped type list), but must never become unreachable -- an explicit
+        // type_name scope and describe_function both still resolve them.
+        const string undocumented = "Undocumented";
+        const string undocumentedFullName = FixturesNamespace + "." + undocumented;
+        var service = NewService();
+
+        var types = service.ListFunctions(FixturesNamespace, null, null, pageSize: 100_000);
+        Assert.DoesNotContain(undocumented, types.Names);
+
+        var byType = service.ListFunctions(FixturesNamespace, undocumented, null, pageSize: 100);
+        Assert.Contains("UndocumentedWork", byType.Names);
+
+        var described = service.DescribeFunction(undocumentedFullName + ".UndocumentedWork", null, null);
+        Assert.NotNull(described.Single);
+        Assert.Equal("UndocumentedWork", described.Single!.Name);
+    }
+
+    // The no-sidecar escape hatch (an assembly with no XML-doc file gets no documented-types narrowing at
+    // all, rather than an empty discovery surface) is covered by MCPBridge.Core.Tests' DiscoveryDispatchTests:
+    // that project deliberately does not set GenerateDocumentationFile, so every one of its discovery tests
+    // only passes if the escape hatch holds.
+
+    // ---------------------------------------------------------------------------------------------
+    // search_functions
+    // ---------------------------------------------------------------------------------------------
+
+    [Fact]
+    public void SearchFunctions_ExactNameMatch_RanksAboveUnrelatedMatches()
+    {
+        var service = NewService();
+
+        var result = service.SearchFunctions("Describe", namespaceFilter: null, cursor: null, topN: 50);
+
+        Assert.NotEmpty(result.Results);
+        var top = result.Results[0];
+        Assert.Equal("Describe", top.Member.Name);
+        Assert.True(result.Results.Select(r => r.Score).SequenceEqual(result.Results.Select(r => r.Score).OrderByDescending(s => s)));
+    }
+
+    [Fact]
+    public void SearchFunctions_ExactTypeDotMember_RanksHighestTier()
+    {
+        var service = NewService();
+
+        var result = service.SearchFunctions("Gadget.Run", namespaceFilter: null, cursor: null, topN: 50);
+
+        Assert.NotEmpty(result.Results);
+        Assert.Equal("Run", result.Results[0].Member.Name);
+        Assert.Equal("Gadget", result.Results[0].Member.DeclaringType.Split('.').Last());
+        Assert.True(result.Results[0].Score >= 1000);
+    }
+
+    [Fact]
+    public void SearchFunctions_TypeAndMemberTokens_RanksAboveSummaryOnlyMatch()
+    {
+        var service = NewService();
+
+        // "widg desc" -- both tokens are partial (not exact) substring matches against {type name, member
+        // name} for Widget.Describe, so this is deliberately NOT an exact Type.Member pair (tier 1 would
+        // require the tokens to equal the real names) -- it must land in tier 2, still above anything that
+        // only matches via a summary/FTS5 fallback hit (tier 3, capped below 500).
+        var result = service.SearchFunctions("widg desc", namespaceFilter: null, cursor: null, topN: 50);
+
+        Assert.NotEmpty(result.Results);
+        Assert.Equal("Describe", result.Results[0].Member.Name);
+        Assert.InRange(result.Results[0].Score, 500, 999);
+    }
+
+    [Fact]
+    public void SearchFunctions_NamespaceFilter_ExcludesOtherNamespaces()
+    {
+        var service = NewService();
+
+        var result = service.SearchFunctions("Do", namespaceFilter: FixturesNamespace, cursor: null, topN: 50);
+
+        Assert.DoesNotContain(result.Results, r => r.Member.Namespace == OtherNamespace);
+    }
+
+    [Fact]
+    public void SearchFunctions_NoMatches_ReturnsEmptyWithZeroTotal()
+    {
+        var service = NewService();
+
+        var result = service.SearchFunctions("zzzznonexistentqueryzzzz", namespaceFilter: null, cursor: null, topN: 20);
+
+        Assert.Empty(result.Results);
+        Assert.Equal(0, result.TotalMatched);
+        Assert.Null(result.NextCursor);
+    }
+
+    [Fact]
+    public void SearchFunctions_Pagination_TotalMatchedIsStableAcrossPages()
+    {
+        var service = NewService();
+
+        var page1 = service.SearchFunctions("Widget", namespaceFilter: null, cursor: null, topN: 1);
+        Assert.True(page1.TotalMatched >= 1);
+
+        if (page1.NextCursor is not null)
+        {
+            var page2 = service.SearchFunctions("Widget", namespaceFilter: null, cursor: page1.NextCursor, topN: 1);
+            Assert.Equal(page1.TotalMatched, page2.TotalMatched);
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // describe_function
+    // ---------------------------------------------------------------------------------------------
+
+    [Fact]
+    public void DescribeFunction_SingleOverload_ReturnsFullDocShape()
+    {
+        var service = NewService();
+
+        var result = service.DescribeFunction("MCPBridge.Discovery.Tests.Fixtures.Gadget.Run", overloadIndex: null, memberId: null);
+
+        Assert.NotNull(result.Single);
+        Assert.Null(result.Overloads);
+        Assert.Equal("Runs the gadget.", result.Single!.Summary);
+        Assert.Equal(1, result.Single.OverloadCount);
+        Assert.Empty(result.Single.Parameters);
+    }
+
+    [Fact]
+    public void DescribeFunction_MultipleOverloads_NoDisambiguation_ReturnsCompactList()
+    {
+        var service = NewService();
+
+        var result = service.DescribeFunction("MCPBridge.Discovery.Tests.Fixtures.Widget.Describe", overloadIndex: null, memberId: null);
+
+        Assert.Null(result.Single);
+        Assert.NotNull(result.Overloads);
+        Assert.Equal("MCPBridge.Discovery.Tests.Fixtures.Widget.Describe", result.Overloads!.Member);
+        Assert.Equal(2, result.Overloads.Overloads.Count);
+        Assert.All(result.Overloads.Overloads, o => Assert.Contains("Describe", o.Signature));
+    }
+
+    [Fact]
+    public void DescribeFunction_DisambiguatedByOverloadIndex_ReturnsFullDocShape()
+    {
+        var service = NewService();
+
+        var result = service.DescribeFunction("MCPBridge.Discovery.Tests.Fixtures.Widget.Describe", overloadIndex: 0, memberId: null);
+
+        Assert.NotNull(result.Single);
+        Assert.Equal(2, result.Single!.OverloadCount);
+    }
+
+    [Fact]
+    public void DescribeFunction_DisambiguatedByMemberId_MatchesOverloadIndexResolution()
+    {
+        var service = NewService();
+
+        var byIndex = service.DescribeFunction("MCPBridge.Discovery.Tests.Fixtures.Widget.Describe", overloadIndex: 1, memberId: null);
+        var byId = service.DescribeFunction("MCPBridge.Discovery.Tests.Fixtures.Widget.Describe", overloadIndex: null, memberId: byIndex.Single!.MemberId);
+
+        Assert.Equal(byIndex.Single.MemberId, byId.Single!.MemberId);
+        Assert.Equal(byIndex.Single.Signature, byId.Single.Signature);
+    }
+
+    [Fact]
+    public void DescribeFunction_ParameterDescriptionsJoinedFromXmlDoc()
+    {
+        var service = NewService();
+
+        var result = service.DescribeFunction("MCPBridge.Discovery.Tests.Fixtures.Widget.Describe", overloadIndex: 1, memberId: null);
+
+        var param = Assert.Single(result.Single!.Parameters);
+        Assert.Equal("detailLevel", param.Name);
+        Assert.Equal("How much detail to include.", param.Description);
+    }
+
+    [Fact]
+    public void DescribeFunction_UnknownMember_ThrowsNotFound()
+    {
+        var service = NewService();
+
+        Assert.Throws<DiscoveryMemberNotFoundException>(() =>
+            service.DescribeFunction("MCPBridge.Discovery.Tests.Fixtures.Widget.NoSuchMethod", null, null));
+    }
+
+    [Fact]
+    public void DescribeFunction_UnknownType_ThrowsNotFound()
+    {
+        var service = NewService();
+
+        Assert.Throws<DiscoveryMemberNotFoundException>(() =>
+            service.DescribeFunction("MCPBridge.Discovery.Tests.Fixtures.NoSuchType.Foo", null, null));
+    }
+
+    [Fact]
+    public void DescribeFunction_OutOfRangeOverloadIndex_ThrowsNotFound()
+    {
+        var service = NewService();
+
+        Assert.Throws<DiscoveryMemberNotFoundException>(() =>
+            service.DescribeFunction("MCPBridge.Discovery.Tests.Fixtures.Widget.Describe", overloadIndex: 99, memberId: null));
+    }
+
+    [Fact]
+    public void DescribeFunction_Constructor_ResolvesViaCtorKeyword()
+    {
+        var service = NewService();
+
+        var result = service.DescribeFunction("MCPBridge.Discovery.Tests.Fixtures.Widget.ctor", overloadIndex: null, memberId: null);
+
+        // Widget has two constructors -> ambiguous without disambiguation.
+        Assert.NotNull(result.Overloads);
+        Assert.Equal(2, result.Overloads!.Overloads.Count);
+    }
+}

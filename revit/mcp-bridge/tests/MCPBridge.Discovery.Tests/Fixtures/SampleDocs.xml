@@ -1,0 +1,29 @@
+<?xml version="1.0"?>
+<doc>
+  <assembly>
+    <name>SampleDocs</name>
+  </assembly>
+  <members>
+    <member name="T:Sample.Widget">
+      <summary>
+        A sample widget type, for XmlDocIndex parsing tests.
+      </summary>
+    </member>
+    <member name="M:Sample.Widget.#ctor(System.Int32)">
+      <summary>Creates a widget with the given id.</summary>
+      <param name="id">The widget's id.</param>
+    </member>
+    <member name="M:Sample.Widget.Describe(System.Int32)">
+      <summary>
+        Describes the widget
+        across multiple lines
+        of indented text.
+      </summary>
+      <param name="detailLevel">How much detail to include.</param>
+      <returns>A textual description.</returns>
+    </member>
+    <member name="P:Sample.Widget.Id">
+      <summary>The widget's id.</summary>
+    </member>
+  </members>
+</doc>

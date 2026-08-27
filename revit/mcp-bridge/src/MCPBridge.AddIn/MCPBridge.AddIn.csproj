@@ -115,6 +115,29 @@
     checking $(MCPBridgeGitExitCode)=='0' before using the captured value fixes this: only a genuinely
     successful `git rev-parse` populates AssemblyMetadata at all.
   -->
+  <!--
+    Microsoft.Data.Sqlite (MCPBridge.Core.csproj) resolves its native e_sqlite3.dll via SQLitePCLRaw's own
+    runtime probing, which expects the standard NuGet "runtimes\<rid>\native\" layout relative to the
+    loading assembly's directory. That layout survives a normal `dotnet publish`, but this project deploys
+    by folder-copying `dotnet build` output straight into Revit's Addins folder (see
+    CopyLocalLockFileAssemblies's own doc comment above for why a plain build, not publish, is what actually
+    ships here); and more specifically, Revit loads this add-in via its own AddInLoader, an
+    Assembly.LoadFrom-style plugin load with no deps.json-driven host resolution behind it. Confirmed via a
+    live spike inside a real Revit process: SQLitePCLRaw's native resolver simply does not find
+    runtimes\win-x64\native\e_sqlite3.dll under that load model, even though the file is physically present
+    (CopyLocalLockFileAssemblies already copies it there); opening a SqliteConnection throws a
+    DllNotFoundException. Flattening the native DLL into the same directory as the managed DLLs (which
+    SQLitePCLRaw's resolver DOES check) fixes this; Condition on the source existing so a build that doesn't
+    pull in Microsoft.Data.Sqlite/SQLitePCLRaw.bundle_e_sqlite3 at all (e.g. a future test-only config)
+    doesn't fail over a file that was never going to exist.
+  -->
+  <Target Name="MCPBridgeFlattenSqliteNative" AfterTargets="Build" Condition="'$(TargetFramework)'!=''">
+    <Copy
+      SourceFiles="$(TargetDir)runtimes\win-x64\native\e_sqlite3.dll"
+      DestinationFolder="$(TargetDir)"
+      Condition="Exists('$(TargetDir)runtimes\win-x64\native\e_sqlite3.dll')" />
+  </Target>
+
   <Target Name="MCPBridgeEmbedGitCommit" BeforeTargets="GetAssemblyAttributes" Condition="'$(TargetFramework)'!=''">
     <Exec Command="git rev-parse --short HEAD" ConsoleToMSBuild="true" StandardOutputImportance="low" StandardErrorImportance="low" IgnoreExitCode="true">
       <Output TaskParameter="ConsoleOutput" PropertyName="MCPBridgeGitCommit" />

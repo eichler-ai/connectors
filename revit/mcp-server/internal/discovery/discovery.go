@@ -1,0 +1,174 @@
+// Package discovery implements the broker's side of PRD §08 (API discovery
+// tools): routing list_functions/search_functions/describe_function to a
+// live add-in wire connection.
+//
+// Deliberately independent of internal/execution: reflection over
+// RevitAPI.dll/RevitAPIUI.dll never touches a Document or the UI thread
+// (PRD §08 "Execution locus"), so discovery has no bearing on — and must
+// never be routed through — execution.Manager's busy/pending/unrecoverable
+// state machine (PRD §06). Router tracks its own independent set of
+// attached instance connections rather than sharing execution.Manager's.
+package discovery
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"sort"
+	"sync"
+	"time"
+
+	"github.com/eichler-ai/connectors/revit/mcp-server/internal/diag"
+	"github.com/eichler-ai/connectors/revit/mcp-server/internal/transport"
+)
+
+const source = "mcp-server.internal.discovery"
+
+// wireTimeout bounds every discovery wire round trip. Discovery is meant to
+// be fast/live (PRD §08: "trivially cheap live, every call" for
+// describe_function; list_functions/search_functions "stay fast" via
+// bounded scope), not agent-timeout-configurable the way execute_script is.
+const wireTimeout = 15 * time.Second
+
+// Router tracks live add-in wire connections and forwards discovery calls
+// to one of them. Its own map, independent of execution.Manager's — see
+// package doc.
+type Router struct {
+	mu    sync.Mutex
+	conns map[string]*transport.Conn
+}
+
+// NewRouter builds an empty Router.
+func NewRouter() *Router {
+	return &Router{conns: make(map[string]*transport.Conn)}
+}
+
+// AttachInstance registers the wire connection to use for instanceID. A
+// second call for the same instanceID (e.g. after a reconnect) replaces the
+// prior connection.
+func (r *Router) AttachInstance(instanceID string, conn *transport.Conn) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.conns[instanceID] = conn
+}
+
+// DetachInstance drops the wire connection for instanceID.
+func (r *Router) DetachInstance(instanceID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.conns, instanceID)
+}
+
+func errNoInstanceConnected() *diag.Record {
+	return diag.New(diag.SeverityError, "no_instance_connected", source,
+		"discovery needs at least one live Revit instance connected, and none is").
+		WithRemedy("launch Revit with the MCP Bridge add-in loaded, or call list_instances to check connection state")
+}
+
+func errInstanceNotFound(instanceID string) *diag.Record {
+	return diag.New(diag.SeverityError, "instance_not_found", source,
+		fmt.Sprintf("instance %q is not registered with the broker (no live connection)", instanceID)).
+		WithDetail(map[string]any{"instance_id": instanceID}).
+		WithRemedy("confirm the instance_id from a recent register/reconnect, then retry")
+}
+
+func errWireCallFailed(method string, err error) *diag.Record {
+	return diag.New(diag.SeverityError, "wire_call_failed", source,
+		fmt.Sprintf("%s did not complete: %s", method, err.Error())).
+		WithDetail(map[string]any{"method": method}).
+		WithRemedy("retry the call; if this persists the instance may need a Revit restart")
+}
+
+func errWireDecodeFailed(method string, err error) *diag.Record {
+	return diag.New(diag.SeverityError, "wire_response_malformed", source,
+		fmt.Sprintf("%s response could not be decoded: %s", method, err.Error())).
+		WithDetail(map[string]any{"method": method})
+}
+
+func fromRPCError(rpcErr *transport.RPCError) *diag.Record {
+	if rpcErr.Data != nil {
+		return rpcErr.Data
+	}
+	return diag.New(diag.SeverityError, "add_in_error", source,
+		fmt.Sprintf("discovery call failed: %s", rpcErr.Message))
+}
+
+// resolveConn picks the wire connection to use for instanceID: the
+// explicitly named instance if given (error if it isn't attached), else a
+// deterministic pick — sorted instance IDs, first one — from whatever's
+// currently attached (error if nothing is attached at all).
+func (r *Router) resolveConn(instanceID string) (*transport.Conn, *diag.Record) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if instanceID != "" {
+		conn, ok := r.conns[instanceID]
+		if !ok {
+			return nil, errInstanceNotFound(instanceID)
+		}
+		return conn, nil
+	}
+
+	if len(r.conns) == 0 {
+		return nil, errNoInstanceConnected()
+	}
+	ids := make([]string, 0, len(r.conns))
+	for id := range r.conns {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return r.conns[ids[0]], nil
+}
+
+// callWire performs one JSON-RPC round trip for method against conn,
+// returning the raw result JSON unmodified on success — the caller (the MCP
+// tool layer) decodes it into typed output; this package must not
+// double-decode/re-encode, which would risk silently dropping fields the
+// add-in returns that this package doesn't know about.
+func callWire(ctx context.Context, conn *transport.Conn, method string, params map[string]any) (json.RawMessage, *diag.Record) {
+	callCtx, cancel := context.WithTimeout(ctx, wireTimeout)
+	defer cancel()
+
+	raw, rpcErr, err := conn.Call(callCtx, method, params)
+	if err != nil {
+		return nil, errWireCallFailed(method, err)
+	}
+	if rpcErr != nil {
+		return nil, fromRPCError(rpcErr)
+	}
+	// Confirm the result is at least well-formed JSON (a decode-and-discard
+	// check, not a decode-and-reencode) so a malformed add-in response
+	// surfaces as a diagnostic error rather than being handed upstream
+	// as-is and failing unpredictably later.
+	var probe any
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return nil, errWireDecodeFailed(method, err)
+	}
+	return raw, nil
+}
+
+func (r *Router) call(ctx context.Context, instanceID, method string, params map[string]any) (json.RawMessage, *diag.Record) {
+	conn, drec := r.resolveConn(instanceID)
+	if drec != nil {
+		return nil, drec
+	}
+	return callWire(ctx, conn, method, params)
+}
+
+// ListFunctions forwards to the add-in's list_functions wire method. See
+// PRD §08.
+func (r *Router) ListFunctions(ctx context.Context, instanceID string, params map[string]any) (json.RawMessage, *diag.Record) {
+	return r.call(ctx, instanceID, "list_functions", params)
+}
+
+// SearchFunctions forwards to the add-in's search_functions wire method. See
+// PRD §08.
+func (r *Router) SearchFunctions(ctx context.Context, instanceID string, params map[string]any) (json.RawMessage, *diag.Record) {
+	return r.call(ctx, instanceID, "search_functions", params)
+}
+
+// DescribeFunction forwards to the add-in's describe_function wire method.
+// See PRD §08.
+func (r *Router) DescribeFunction(ctx context.Context, instanceID string, params map[string]any) (json.RawMessage, *diag.Record) {
+	return r.call(ctx, instanceID, "describe_function", params)
+}

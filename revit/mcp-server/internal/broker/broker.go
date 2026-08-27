@@ -18,6 +18,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/diag"
+	"github.com/eichler-ai/connectors/revit/mcp-server/internal/discovery"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/execution"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/registry"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/singleton"
@@ -61,6 +62,7 @@ type Broker struct {
 	Token     string
 	Registry  *registry.Registry
 	Execution *execution.Manager
+	Discovery *discovery.Router
 	MCPServer *mcp.Server
 
 	// Logger receives best-effort diagnostic lines (connection lifecycle,
@@ -249,11 +251,13 @@ func (b *Broker) serveAddIn(rwc io.ReadWriteCloser) {
 			Documents:    rp.Documents,
 		})
 		b.Execution.AttachInstance(rp.InstanceID, conn)
+		b.Discovery.AttachInstance(rp.InstanceID, conn)
 	})
 
 	_ = conn.Serve()
 	if instanceID != "" {
 		b.Execution.DetachInstance(instanceID)
+		b.Discovery.DetachInstance(instanceID)
 	}
 }
 
