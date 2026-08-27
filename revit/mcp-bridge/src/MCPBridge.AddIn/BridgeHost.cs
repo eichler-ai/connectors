@@ -382,6 +382,14 @@ internal sealed class BridgeHost
         return assemblies;
     }
 
+    /// <summary>How long a single broker.json discovery attempt (<see cref="TryDiscoverWithTimeout"/>) may
+    /// take before being treated as a transient failure. broker.json lives on local disk in the default
+    /// (local-mode) topology, so this should never be reached under healthy conditions -- it exists purely
+    /// as a circuit-breaker for the host-level I/O stalls (antivirus real-time scanning, virtualized-disk
+    /// contention under a busy VM) confirmed live to occasionally freeze a plain synchronous file read for
+    /// an extended period on this project's own dev VM.</summary>
+    private static readonly TimeSpan DiscoveryTimeout = TimeSpan.FromSeconds(5);
+
     private void RunConnectionLoop(RequestDispatcher dispatcher, DocumentSnapshotHandler documentSnapshotHandler, ExternalEvent documentSnapshotEvent, CancellationToken stopToken)
     {
         LogConnectionDiagnostic($"RunConnectionLoop starting. Mode={_discoveryOptions.Mode} ConnectorRoot={_discoveryOptions.ConnectorRoot}");
@@ -391,7 +399,7 @@ internal sealed class BridgeHost
         while (!stopToken.IsCancellationRequested)
         {
             LogConnectionDiagnostic("loop iteration: about to TryDiscover");
-            var discoveryResult = discovery.TryDiscover();
+            var discoveryResult = TryDiscoverWithTimeout(discovery, stopToken);
             if (!discoveryResult.Found || discoveryResult.BrokerJson is null || discoveryResult.Address is null)
             {
                 // Not found (or found but unreadable/malformed -- BrokerDiscovery already reports both as
@@ -435,6 +443,54 @@ internal sealed class BridgeHost
                 Backoff(reconnectController, stopToken);
             }
         }
+    }
+
+    /// <summary>
+    /// Bounds <see cref="BrokerDiscovery.TryDiscover"/>'s otherwise-unbounded synchronous file read
+    /// (<c>File.Exists</c>/<c>File.ReadAllText</c> against broker.json, with no timeout of its own) to
+    /// <see cref="DiscoveryTimeout"/>. Root-caused live: this connection loop was observed silently
+    /// stalling indefinitely (minutes to, in one case, over two hours) with the last log line always
+    /// exactly "loop iteration: about to TryDiscover" and no follow-up ever -- no exception, no timeout,
+    /// just silence, recoverable only by restarting Revit itself (never by waiting, and never by fixing
+    /// whatever transient condition caused it, since by the time it's noticed the call is already wedged).
+    /// The call itself is a plain synchronous local-disk read with nothing async or thread-pool-related in
+    /// it, so the cause isn't contention for scheduling -- it's that a transient host-level I/O stall (this
+    /// project's dev VM has independently confirmed antivirus real-time scanning and virtualized-storage
+    /// contention as real, recurring sources of exactly this kind of stall) has no bound at all once it
+    /// starts, and every other step in this loop is either already bounded (the TCP connect, the document
+    /// snapshot wait) or fast by construction -- this was the one genuinely unbounded step.
+    ///
+    /// Uses the same "bounded wait, proceed without the value on timeout" shape as the document-snapshot
+    /// wait above (<c>documentsTask.Wait(10_000, stopToken)</c>) rather than inventing a new pattern:
+    /// <c>Task.Run</c> hands the synchronous read to a threadpool thread so this dedicated connection
+    /// thread's own wait can be bounded and cancellation-aware; if the read is still stuck when
+    /// <see cref="DiscoveryTimeout"/> elapses, this treats the attempt as a transient not-found (the same
+    /// outcome <see cref="BrokerDiscovery.TryDiscover"/> itself already returns for a missing/unreadable
+    /// broker.json) and lets the loop's existing backoff-and-retry take over -- the abandoned threadpool
+    /// task is simply left to finish (or never finish) on its own and get garbage-collected; it holds no
+    /// resource this process needs back.
+    /// </summary>
+    private BrokerDiscoveryResult TryDiscoverWithTimeout(BrokerDiscovery discovery, CancellationToken stopToken)
+    {
+        var discoverTask = Task.Run(discovery.TryDiscover, stopToken);
+        try
+        {
+            if (discoverTask.Wait(DiscoveryTimeout, stopToken))
+            {
+                return discoverTask.Result;
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            throw; // Stop() was called during the wait -- let this connection attempt unwind cleanly.
+        }
+        catch (AggregateException ex) when (ex.InnerException is not null)
+        {
+            throw ex.InnerException; // Preserve TryDiscover's own exception shape/stack for the outer catch.
+        }
+
+        LogConnectionDiagnostic($"broker discovery timed out after {DiscoveryTimeout.TotalSeconds:0}s (a stalled broker.json read) -- treating as not found and retrying.");
+        return BrokerDiscoveryResult.NotFound();
     }
 
     /// <summary>
