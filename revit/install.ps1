@@ -110,9 +110,32 @@ function Get-RevitProcess([string]$RevitVersion) {
     }
 }
 
+# Returns $true only if every passed process is ACTUALLY gone afterwards. The return value matters:
+# CloseMainWindow() is a request, not a kill, and it routinely fails to close Revit -- the user hits
+# Cancel on a "save changes?" prompt, a modal dialog owns the UI thread, or the process simply has no
+# main window to send WM_CLOSE to (CloseMainWindow returns false and Wait-Process then just burns its
+# full timeout). This used to return nothing and every caller assumed success, so a failed close fell
+# straight through to Copy-Item over a still-running Revit's own loaded DLLs: either an abort partway
+# through the deploy (files are locked, and $ErrorActionPreference='Stop'), or -- worse, when nothing
+# happened to be locked -- a cheerful "installed for Revit <version>" for a version that is still
+# running the OLD code and will keep doing so until it restarts. Confirmed live: a -Silent install
+# reported success for a running 2027 whose process was untouched. Callers must now check this and
+# route a failure into the deferred-update path below, which exists for exactly this situation.
 function Stop-RevitProcessGracefully($Process) {
-    $Process | ForEach-Object { $_.CloseMainWindow() | Out-Null }
+    # CloseMainWindow() THROWS ("Process has exited, so the requested information is not available")
+    # if the process is already gone -- a real race, since the user is perfectly likely to close Revit
+    # themselves while this script is prompting them about it. With $ErrorActionPreference='Stop' that
+    # exception is terminating and would abort the whole install, for the one outcome we actually
+    # wanted. Per-process try/catch: a process that's already gone is a success, not a failure.
+    foreach ($p in $Process) {
+        try { $p.CloseMainWindow() | Out-Null } catch { }
+    }
     $Process | Wait-Process -Timeout 30 -ErrorAction SilentlyContinue
+    foreach ($p in $Process) {
+        try { $p.Refresh() } catch { continue }
+        if (-not $p.HasExited) { return $false }
+    }
+    return $true
 }
 
 # --- Deferred updates -------------------------------------------------------------------------------
@@ -370,20 +393,36 @@ try {
 
         $proc = Get-RevitProcess $version
         if ($proc) {
+            # Three ways this version can end up still running, all of which must reach the SAME
+            # deferred-update path: the user declines to close it, a -Silent force-close fails, or an
+            # accepted interactive close fails. Only the first was handled before, so a failed close
+            # fell through to the deploy below and either aborted on locked DLLs or reported success
+            # for a version still running the old code. See Stop-RevitProcessGracefully's own comment.
+            $defer = $false
             if ($Silent) {
-                Stop-RevitProcessGracefully $proc
+                $defer = -not (Stop-RevitProcessGracefully $proc)
             } else {
                 $answer = Read-Host "Revit $version is running and must close to update it. Close it now? [Y/n]"
                 if ($answer -eq 'n') {
-                    $pendingDir = Join-Path (Get-PendingUpdateDir $Scope) "addin-$version"
-                    New-Item -ItemType Directory -Force -Path $pendingDir | Out-Null
-                    Copy-Item "$payloadDir\*" $pendingDir -Force -Recurse
-                    Write-Host "Revit $version is still running -- it'll finish updating automatically as soon as you close it."
-                    $deferredVersions += $version
-                    $deferredProcessIds += @($proc | ForEach-Object { $_.Id })
-                    continue
+                    $defer = $true
+                } else {
+                    $defer = -not (Stop-RevitProcessGracefully $proc)
+                    if ($defer) {
+                        Write-Host "Revit $version didn't close -- it may have an unsaved-changes prompt or another dialog open."
+                    }
                 }
-                Stop-RevitProcessGracefully $proc
+            }
+
+            if ($defer) {
+                $pendingDir = Join-Path (Get-PendingUpdateDir $Scope) "addin-$version"
+                New-Item -ItemType Directory -Force -Path $pendingDir | Out-Null
+                Copy-Item "$payloadDir\*" $pendingDir -Force -Recurse
+                if (-not $Silent) {
+                    Write-Host "Revit $version is still running -- it'll finish updating automatically as soon as you close it."
+                }
+                $deferredVersions += $version
+                $deferredProcessIds += @($proc | ForEach-Object { $_.Id })
+                continue
             }
         }
 
