@@ -1,7 +1,7 @@
 # Working with Revit through this connector
 
 You drive one or more **live Revit sessions**. There is no fixed catalog of "create wall" /
-"export IFC" tools — you run C# with `execute_script`, and three discovery commands let you read
+"export IFC" tools — you run C# with `execute_script`, and three discovery tools let you read
 Revit's own API documentation on demand.
 
 Read this once at the start of a Revit task. It is orientation, not reference.
@@ -29,20 +29,14 @@ Two facts that shape everything below:
 
 - **Scripts run on Revit's UI thread, one at a time per instance.** A long script blocks that
   instance. That is why `execute_script` can hand back a `pending`/`running` status instead of a
-  result, and why a second call against a busy instance returns `busy` rather than queueing.
+  result.
 - **The broker knows what's connected; only the add-in can touch a document.** So `list_instances`
   and `get_skills` answer instantly, while anything script-shaped needs a live, idle Revit.
 
-**The add-in dials out to the broker, not the other way round.** On startup it reads the broker's
-`broker.json` (port + auth token, written when the broker starts) and connects, retrying on a
-backoff indefinitely if the broker isn't up yet. So order doesn't matter — start Revit first or the
-broker first — and a broker restart heals itself within seconds without touching Revit. **If
-something isn't connected, waiting a few seconds and re-checking is usually the correct first move**,
-not an error to report.
-
-On each successful connect the add-in sends a `register` snapshot: instance id, Revit version, and
-the documents open *at that instant*. It is a snapshot, not a live feed — a document opened later
-appears only after the next reconnect, which is why `documents[]` can lag reality.
+**The add-in dials out and retries on its own**, so start order doesn't matter and a broker restart
+heals itself. **If something isn't connected, wait a few seconds and re-check** rather than reporting
+a failure. On each connect the add-in sends a snapshot of the documents open *at that instant* — not
+a live feed, so `documents[]` lags a document opened later.
 
 ## Addressing: instances and versions
 
@@ -66,11 +60,14 @@ surfaces. Scripts are always explicitly targeted, so they're unaffected. Discove
 
 ## Running a script
 
-`execute_script` takes `instance_id`, `document_id`, `script`, and optional `timeout_ms` /
-`max_duration_ms`. The last expression is the result.
+`execute_script` takes `instance_id`, `document_id`, `script`, and optional `timeout_ms`,
+`max_duration_ms` and `overwrite_output_files`. `return` a value and it comes back as `output`:
 
 ```csharp
-return Document.Title;          // -> "MCPBridgeTest"
+return Document.Title;
+```
+```json
+{"status":"success","execution_id":"exec-4927...","output":"MCPBridgeTest","files":[],"notices":[]}
 ```
 
 ### What's actually in scope
@@ -82,7 +79,8 @@ return Document.Title;          // -> "MCPBridgeTest"
 | `UIApplication` | `.ActiveUiDocument` → may be null |
 | `CancellationToken` | check it in loops (see below) |
 | `ExportsDirectory`, `ImportsDirectory` | absolute paths, see "Exchanging files" |
-| `Publish(path)` | copy a file into `exports/` and report it back to you |
+| `Publish(path, name?)` | copy a file into `exports/` and report it back; `name` renames it |
+| `DialogResultOverrides` | per-dialog answer override, e.g. `DialogResultOverrides["TaskDialog_X"] = 1001` |
 | the .NET BCL | `System.IO`, `System.Linq`, etc. — fully usable |
 
 Only `System` is imported by default, so use fully-qualified names (`System.IO.File.ReadAllText`)
@@ -114,13 +112,12 @@ Every failure uses one shape. Read `message` for what happened, `remedy` for wha
 - **`message` names the real condition** — a compiler error, an API exception. It is not a wrapper;
   read it literally. Compiler errors mean fix the script, not retry it.
 - **`remedy` is actionable.** Follow it before retrying.
-- **`notices[]` on a *successful* result** means something was auto-resolved for you — a suppressed
-  dialog, an auto-dismissed warning. It worked, but check what was papered over.
+- **`notices[]` on a *successful* result** means something was auto-resolved for you. Dialogs your
+  script triggers are auto-answered with the safe option and reported here (override per dialog with
+  `DialogResultOverrides`). It worked — check what was papered over. A dialog already on screen when
+  your script arrives is a different thing: it blocks Revit's UI thread and needs a human.
 - `status: "cancelled"` is not an error; you asked for it.
 
-**Empty `documents[]`** means no document is open *yet* — it may still be loading, or a modal dialog
-may be blocking Revit (a dialog also stalls scripts at `pending`). Re-check `list_instances` rather
-than retrying the script.
 
 ## Exchanging files
 
@@ -129,7 +126,8 @@ filesystem, not through MCP, so size is not a constraint. **Never hard-code the 
 from the globals; the workspace root has changed before.
 
 **Revit → you.** Write the file, then `Publish` it. Published files come back in the result's
-`files[]` with a path you can open directly:
+`files[]` with a path you can open directly. Each entry carries its own `status`: publishing onto a
+name that already exists **fails that file** unless you pass `overwrite_output_files: true`.
 
 ```csharp
 var p = System.IO.Path.Combine(ExportsDirectory, "rooms.csv");
@@ -155,9 +153,12 @@ answering questions about the API.
 - **`search_functions`** — start here when you know *what* you want, not the name.
   `{"query": "create wall"}` → ranked matches with summaries.
 - **`list_functions`** — drill down. Omit `namespace` for the namespace list; pass `namespace` for its
-  types; pass `namespace` + `type_name` for that type's members. Paginated — pass `cursor` for more.
+  types; pass `namespace` + `type_name` for that type's members.
 - **`describe_function`** — full signature, parameters and docs for one member.
-  `{"member": "Autodesk.Revit.DB.Wall.Create"}`.
+  `{"member": "Autodesk.Revit.DB.Wall.Create"}`. If the member is overloaded you get the overload
+  list back instead — re-call with a `member_id` from it.
+
+`list_functions` and `search_functions` both paginate: pass the `cursor` from the previous response.
 
 **Discovery needs a connected Revit**, and it is **version-specific**. With instances of different
 Revit versions connected, omitting `instance_id` fails rather than guessing:
@@ -173,12 +174,10 @@ Pick one from `candidates` and pass its `instance_id`. Every discovery response 
 
 ## When something isn't working
 
-**`list_instances` is your entry point** — it is the only tool that reports what is actually
-connected, and it works with no Revit running. But note what it *cannot* tell you: it shows
-successful connections only, so a Revit that never connected is simply absent, with no reason given.
-For that, a human at the Revit machine clicks **MCP Bridge → Status** on the ribbon, which shows that
-instance's id, whether it is connected and to which broker, and the loaded build. Ask for it rather
-than guessing.
+**`list_instances` is your entry point**, but it reports *successful connections only* — a Revit that
+never connected is simply absent, with no reason given. For that, ask a human to click
+**MCP Bridge → Status** on the Revit ribbon: it shows that instance's id, whether it's connected and
+to which broker, and the loaded build.
 
 | Symptom | Most likely cause | What to do |
 |---|---|---|
@@ -196,7 +195,6 @@ For a human debugging deeper, the add-in writes `connection.log` and `startup-er
 
 | Tool | Needs Revit? | Use it for |
 |---|---|---|
-| `get_skills` | no | this document |
 | `list_instances` | no | what's connected; get `instance_id` / `document_id` |
 | `execute_script` | yes | run C# against a document |
 | `poll_execution` | yes | finish a long-running script |
