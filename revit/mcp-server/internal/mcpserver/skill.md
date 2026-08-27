@@ -33,6 +33,17 @@ Two facts that shape everything below:
 - **The broker knows what's connected; only the add-in can touch a document.** So `list_instances`
   and `get_skills` answer instantly, while anything script-shaped needs a live, idle Revit.
 
+**The add-in dials out to the broker, not the other way round.** On startup it reads the broker's
+`broker.json` (port + auth token, written when the broker starts) and connects, retrying on a
+backoff indefinitely if the broker isn't up yet. So order doesn't matter — start Revit first or the
+broker first — and a broker restart heals itself within seconds without touching Revit. **If
+something isn't connected, waiting a few seconds and re-checking is usually the correct first move**,
+not an error to report.
+
+On each successful connect the add-in sends a `register` snapshot: instance id, Revit version, and
+the documents open *at that instant*. It is a snapshot, not a live feed — a document opened later
+appears only after the next reconnect, which is why `documents[]` can lag reality.
+
 ## Addressing: instances and versions
 
 Every script call targets `{instance_id, document_id}`. Get both from `list_instances`:
@@ -159,6 +170,27 @@ Revit versions connected, omitting `instance_id` fails rather than guessing:
 
 Pick one from `candidates` and pass its `instance_id`. Every discovery response also reports the
 `revit_version` it reflected, so you always know which surface answered.
+
+## When something isn't working
+
+**`list_instances` is your entry point** — it is the only tool that reports what is actually
+connected, and it works with no Revit running. But note what it *cannot* tell you: it shows
+successful connections only, so a Revit that never connected is simply absent, with no reason given.
+For that, a human at the Revit machine clicks **MCP Bridge → Status** on the ribbon, which shows that
+instance's id, whether it is connected and to which broker, and the loaded build. Ask for it rather
+than guessing.
+
+| Symptom | Most likely cause | What to do |
+|---|---|---|
+| `instances[]` empty | Revit not running, or the add-in didn't load | Wait a few seconds and re-check (the add-in retries on a backoff). If it stays empty, ask the user to confirm Revit is open and check **MCP Bridge → Status**. |
+| Instance present, `documents[]` empty | Document still opening, a modal dialog is blocking Revit, or the snapshot predates the open | Wait and re-check. A dialog needs a human to dismiss it. |
+| Script stays `pending` | Revit's UI thread is blocked — usually a modal dialog, or the user is mid-edit | Don't retry; a second call just returns `busy`. Ask the user to check for an open dialog. |
+| `status: "unresponsive"` | Revit stopped answering heartbeats | Wait; if it persists, Revit needs attention from the user. |
+| `status: "unrecoverable"` | A prior script ignored cancellation | Nothing you send will run. Revit must be restarted; the instance gets a new `instance_id`. |
+| Script fails with `CS0103`/`CS0122`/`CS0246` | A compile error, not an infrastructure problem | Fix the script. Only `System` is imported; the Revit API is not reachable (see the note at the top). |
+
+For a human debugging deeper, the add-in writes `connection.log` and `startup-errors.log` to
+`%LOCALAPPDATA%\MCPBridge\`; the broker's discovery file is `%LOCALAPPDATA%\Connectors\Revit\broker.json`.
 
 ## Quick reference
 

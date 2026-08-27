@@ -78,6 +78,13 @@ func TestSkillFileCoversTheBriefedTopics(t *testing.T) {
 		"file exchange out":      "exports",
 		"file exchange in":       "imports",
 		"discovery usage":        "search_functions",
+		// Connection mechanics and debugging: an agent that can't tell "not
+		// connected yet" from "broken" either reports a false failure or waits
+		// forever, and list_instances alone cannot distinguish them.
+		"connection mechanics":   "broker.json",
+		"self-healing retry":     "backoff",
+		"human status entry":     "Status",
+		"unrecoverable handling": "unrecoverable",
 	}
 	for topic, marker := range topics {
 		if !strings.Contains(skillFile, marker) {
@@ -106,13 +113,28 @@ func TestSkillFileWarnsThatTheRevitApiIsNotCallableYet(t *testing.T) {
 }
 
 func TestSkillFileDoesNotHardcodeTheWorkspacePath(t *testing.T) {
-	// The workspace root has already moved once relative to what the PRD
-	// describes (it is RevitMCPExchange live, not the documented
-	// %LOCALAPPDATA% layout). Telling an agent a literal path invites it to
-	// build paths by hand instead of reading ExportsDirectory/ImportsDirectory.
-	for _, forbidden := range []string{"RevitMCPExchange", "LOCALAPPDATA", "%LocalAppData%"} {
+	// The workspace root has already moved once relative to what PRD §09
+	// describes (RevitMCPExchange live, not the documented %LOCALAPPDATA%
+	// layout). Naming a literal workspace path invites an agent to build paths
+	// by hand instead of reading ExportsDirectory/ImportsDirectory, which is
+	// the only thing guaranteed to stay correct.
+	//
+	// Scoped to WORKSPACE paths on purpose. An earlier version of this test
+	// banned the substring "LOCALAPPDATA" outright, which also caught the
+	// diagnostic-file locations (connection.log, broker.json) added for the
+	// debugging section -- those are read by a human, have no global to read
+	// them from, and are not what this guard is about. Narrowed rather than
+	// deleted: the hazard is agents constructing workspace paths, not the doc
+	// ever naming a path at all.
+	for _, forbidden := range []string{"RevitMCPExchange", `workspaces\`, "workspaces/"} {
 		if strings.Contains(skillFile, forbidden) {
-			t.Errorf("skill file hard-codes %q: point at ExportsDirectory/ImportsDirectory instead", forbidden)
+			t.Errorf("skill file hard-codes workspace path %q: point at ExportsDirectory/ImportsDirectory instead", forbidden)
+		}
+	}
+	// The globals it should point at instead must actually be named.
+	for _, required := range []string{"ExportsDirectory", "ImportsDirectory"} {
+		if !strings.Contains(skillFile, required) {
+			t.Errorf("skill file should tell the reader to use %s", required)
 		}
 	}
 }
