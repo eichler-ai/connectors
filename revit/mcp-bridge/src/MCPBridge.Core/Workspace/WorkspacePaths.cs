@@ -8,10 +8,13 @@ namespace MCPBridge.Core.Workspace;
 /// `%USERPROFILE%\RevitMCPExchange\&lt;document-id&gt;\` in local mode -- a deliberately separate
 /// root from this add-in's own internal app data (`%LOCALAPPDATA%\Connectors\Revit\`, see
 /// <see cref="Connection.BrokerDiscoveryOptions"/>), since this tree is human-facing and meant to
-/// be browsed directly. `logs/`/`scripts/`/`tmp/` from PRD §09's full design are not yet built by
-/// this pass -- nothing currently writes to them, and a directory the code creates and never fills
-/// misleads a human browsing the workspace (independent PR review finding); reinstating them is a
-/// two-line change once something actually needs them.
+/// be browsed directly. `logs/`/`scripts/` from PRD §09's full design are not built here at all --
+/// nothing currently writes to them, and a directory the code creates and never fills misleads a
+/// human browsing the workspace (independent PR review finding); reinstating them is a two-line
+/// change once something actually needs them. `tmp/` (<see cref="Tmp"/>) IS implemented, but has no
+/// production caller yet either -- unlike Logs/Scripts it's kept because PRD §09 already specifies
+/// its per-instance-subfolder shape precisely and it's exercised by tests, not because anything
+/// calls it today.
 ///
 /// Injectable-root factory shape mirrors <see cref="Connection.BrokerDiscoveryOptions.Local"/> so
 /// tests can substitute a temp directory for %USERPROFILE%. Directories are created best-effort,

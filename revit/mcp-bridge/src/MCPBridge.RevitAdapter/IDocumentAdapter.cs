@@ -33,7 +33,7 @@ public interface IDocumentAdapter : IScriptDocument
     /// time would re-mint a brand-new tmp-&lt;guid&gt; on every single call for an unsaved document
     /// (see DocumentIdentity.Resolve's own doc comment), scattering that document's published files
     /// across a different workspace directory on every execute_script call. Real implementations
-    /// (RevitDocumentAdapter) delegate to DocumentIdentityResolver's shared, process-lifetime cache so
+    /// (RevitDocumentAdapter) delegate to DocumentIdentity's shared, process-lifetime cache so
     /// every IDocumentAdapter wrapping the same live Document -- however many times it's freshly
     /// constructed -- agrees on the same id, and so this agrees with whatever `register`/list_instances
     /// already reported for the same document.

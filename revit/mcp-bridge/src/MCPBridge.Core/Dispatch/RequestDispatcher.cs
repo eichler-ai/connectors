@@ -137,10 +137,11 @@ public sealed class RequestDispatcher
             // (only reachable via DocumentSnapshotHandler's raw-Revit-API path, not the
             // IUiApplicationAdapter seam RunScriptWorkItem goes through) plus a way to select/activate the
             // target document -- still deferred, per that file's own comment. Document identity IS now
-            // computed (DocumentIdentity.Resolve, PRD §09) from whichever document actually ends up active,
-            // purely to build that document's exports/ workspace path for Publish -- not to select which
-            // document runs. Silently ignoring a routing mismatch (rather than erroring) is a deliberate
-            // choice: single active-document Revit instances (the common case) work correctly either way.
+            // read (document.DocumentId, backed by DocumentIdentity.ResolveCached's shared cache, PRD §09)
+            // from whichever document actually ends up active, purely to build that document's exports/
+            // workspace path for Publish -- not to select which document runs. Silently ignoring a routing
+            // mismatch (rather than erroring) is a deliberate choice: single active-document Revit
+            // instances (the common case) work correctly either way.
         }
         catch (JsonRpcParamException ex)
         {
@@ -338,7 +339,7 @@ public sealed class RequestDispatcher
         // script containing its own top-level `await` before compiling it -- see
         // ExternalEventBridge<TResult>'s own doc comment and RoslynScriptRunner.RejectTopLevelAwait.
         var outcome = _scriptExecutor
-            .ExecuteAsync(document, uiApplication, uiDocument, scriptText, cancellationToken, workspacePaths.Exports, overwriteOutputFiles, workspacePaths.Imports)
+            .ExecuteAsync(document, uiApplication, uiDocument, scriptText, cancellationToken, workspacePaths.Exports, workspacePaths.Imports, overwriteOutputFiles)
             .GetAwaiter().GetResult();
 
         if (outcome.WasCancelled)

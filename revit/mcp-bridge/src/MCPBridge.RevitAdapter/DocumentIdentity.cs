@@ -96,9 +96,13 @@ public static class DocumentIdentity
     {
         if (!Cache.TryGetValue(document, out var cachedId))
         {
-            var freshId = SafeResolve(document, uncResolver, fallback: null) ?? MintTmp();
-            Cache.Add(document, freshId);
-            return freshId;
+            // GetValue's create-callback is race-safe under concurrent first-resolution for the same
+            // document (unlike TryGetValue+Add, which would throw ArgumentException if two callers
+            // raced the Add) -- ConditionalWeakTable guarantees exactly one value wins and every
+            // caller observes it, even if the callback itself runs more than once. Neither production
+            // call site can actually race today (both run on Revit's UI-thread external-event
+            // handlers), but this removes the assumption instead of relying on it.
+            return Cache.GetValue(document, doc => SafeResolve(doc, uncResolver, fallback: null) ?? MintTmp());
         }
 
         if (!cachedId.StartsWith("tmp-", StringComparison.Ordinal))

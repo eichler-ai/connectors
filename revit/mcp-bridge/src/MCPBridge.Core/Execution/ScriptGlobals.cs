@@ -146,10 +146,15 @@ public sealed class ScriptGlobals
             displayName = SafeGetFileName(sourcePath);
             if (displayName.Length == 0)
             {
-                // Best-effort: fall back to the raw source path as the reported name rather than
-                // failing outright -- the copy attempt below will fail on its own if sourcePath is
-                // genuinely unusable, and that failure is what actually gets reported.
-                displayName = sourcePath;
+                // A rooted sourcePath ending in a separator (or similar) yields no bare file name.
+                // Must fail outright here, not fall back to the raw sourcePath as displayName --
+                // Path.Combine(ExportsDirectory, sourcePath) returns a rooted sourcePath verbatim,
+                // which can point OUTSIDE ExportsDirectory and would then satisfy the
+                // already-in-exports containment check below by coincidence, recording a false
+                // "published" for a file that was never copied. No valid destination name exists,
+                // so there is nothing safe to attempt.
+                _publishedFiles.Add(new PublishedFileRecord(sourcePath, sourcePath, PublishedFileRecord.StatusFailed, $"'{sourcePath}' has no valid file name to publish under."));
+                return;
             }
         }
 
@@ -158,9 +163,19 @@ public sealed class ScriptGlobals
             var destinationPath = Path.Combine(ExportsDirectory, displayName);
             var normalizedSource = NormalizeFullPath(sourcePath);
             var normalizedDestination = NormalizeFullPath(destinationPath);
+            var normalizedExportsDirectory = NormalizeFullPath(ExportsDirectory);
 
             if (string.Equals(normalizedSource, normalizedDestination, StringComparison.OrdinalIgnoreCase))
             {
+                // Defense in depth: displayName is already constrained to a bare file name above,
+                // so destinationPath should always resolve inside ExportsDirectory -- but never treat
+                // "source equals destination" as success without confirming that containment holds.
+                if (!IsWithinDirectory(normalizedDestination, normalizedExportsDirectory))
+                {
+                    _publishedFiles.Add(new PublishedFileRecord(displayName, destinationPath, PublishedFileRecord.StatusFailed, $"'{destinationPath}' resolves outside the exports directory."));
+                    return;
+                }
+
                 // The script already wrote directly into exports/ under this same name -- just
                 // record it, don't copy a file onto itself.
                 _publishedFiles.Add(new PublishedFileRecord(displayName, destinationPath, PublishedFileRecord.StatusPublished, null));
@@ -209,5 +224,13 @@ public sealed class ScriptGlobals
         {
             return path;
         }
+    }
+
+    private static bool IsWithinDirectory(string normalizedPath, string normalizedDirectory)
+    {
+        var directoryWithSeparator = normalizedDirectory.EndsWith(Path.DirectorySeparatorChar)
+            ? normalizedDirectory
+            : normalizedDirectory + Path.DirectorySeparatorChar;
+        return normalizedPath.StartsWith(directoryWithSeparator, StringComparison.OrdinalIgnoreCase);
     }
 }

@@ -4,8 +4,8 @@ namespace MCPBridge.RevitAdapter;
 /// Best-effort resolution of a mapped network drive letter to its UNC form (PRD §09: "a mapped
 /// network drive letter is resolved to its UNC target first ... so the same file opened via
 /// Z:\House.rvt and \\server\share\House.rvt still hashes identically"). Implemented behind this
-/// seam so MCPBridge.Core's DocumentIdentity logic stays unit-testable against a fake mapping
-/// (see FakeUncPathResolver in MCPBridge.Core.Tests), with the real Win32 call
+/// seam so DocumentIdentity's resolution logic (MCPBridge.RevitAdapter) stays unit-testable
+/// against a fake mapping (see FakeUncPathResolver in MCPBridge.Core.Tests), with the real Win32 call
 /// (<see cref="Win32UncPathResolver"/>) confined to RevitAdapter like every other P/Invoke in
 /// this project.
 /// </summary>

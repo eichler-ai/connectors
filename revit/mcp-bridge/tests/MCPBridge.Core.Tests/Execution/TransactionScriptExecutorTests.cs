@@ -461,6 +461,76 @@ public class TransactionScriptExecutorTests
     }
 
     [Fact]
+    public async Task PublishWithSourcePathYieldingEmptyFileName_NeverFalselyPublishes()
+    {
+        // Second-round independent review finding: a rooted sourcePath ending in a directory
+        // separator yields an empty Path.GetFileName. The old fallback ("use the raw sourcePath as
+        // displayName") let Path.Combine(exportsDir, sourcePath) return the rooted sourcePath
+        // verbatim -- outside exportsDir -- which then coincidentally satisfied the
+        // already-in-exports containment check and recorded a false "published" for a file that was
+        // never copied. Must fail outright instead.
+        var executor = NewExecutor();
+        var document = new FakeDocumentAdapter();
+        var uiApp = new FakeUiApplicationAdapter();
+        var tempDir = CreateTempDir();
+        try
+        {
+            var exportsDir = Path.Combine(tempDir, "exports");
+            Directory.CreateDirectory(exportsDir);
+            var sourcePathWithTrailingSeparator = Path.Combine(tempDir, "a-directory") + Path.DirectorySeparatorChar;
+            Directory.CreateDirectory(Path.Combine(tempDir, "a-directory"));
+
+            var script = $"Publish(@\"{sourcePathWithTrailingSeparator}\");";
+            var outcome = await executor.ExecuteAsync(document, uiApp, null, script, CancellationToken.None, exportsDir, overwriteOutputFiles: false);
+
+            Assert.True(outcome.Success); // Publish never throws -- the script itself doesn't fail
+            var failed = Assert.Single(outcome.Files);
+            Assert.Equal(PublishedFileRecord.StatusFailed, failed.Status);
+            Assert.NotNull(failed.Message);
+            Assert.Empty(Directory.GetFiles(exportsDir)); // nothing copied, nothing falsely "published"
+        }
+        finally
+        {
+            Directory.Delete(tempDir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ImportsAndExportsDirectories_AreBothPopulatedAndUsableFromAScript()
+    {
+        // Second-round independent review finding: production wiring (RequestDispatcher ->
+        // ExecuteAsync -> ScriptGlobals) was correct, but had zero test coverage proving
+        // ImportsDirectory/ExportsDirectory are actually populated and reachable by a real script --
+        // this exercises both through the public script surface end-to-end.
+        var executor = NewExecutor();
+        var document = new FakeDocumentAdapter();
+        var uiApp = new FakeUiApplicationAdapter();
+        var tempDir = CreateTempDir();
+        try
+        {
+            var exportsDir = Path.Combine(tempDir, "exports");
+            var importsDir = Path.Combine(tempDir, "imports");
+            Directory.CreateDirectory(exportsDir);
+            Directory.CreateDirectory(importsDir);
+            File.WriteAllText(Path.Combine(importsDir, "seed.txt"), "hello from imports");
+
+            var script = "Publish(System.IO.Path.Combine(ImportsDirectory, \"seed.txt\"), \"from-imports.txt\");";
+            var outcome = await executor.ExecuteAsync(document, uiApp, null, script, CancellationToken.None, exportsDir, importsDir, overwriteOutputFiles: false);
+
+            Assert.True(outcome.Success);
+            var published = Assert.Single(outcome.Files);
+            Assert.Equal(PublishedFileRecord.StatusPublished, published.Status);
+            var publishedPath = Path.Combine(exportsDir, "from-imports.txt");
+            Assert.True(File.Exists(publishedPath));
+            Assert.Equal("hello from imports", File.ReadAllText(publishedPath));
+        }
+        finally
+        {
+            Directory.Delete(tempDir, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task ScriptThatDoesNotPublish_HasEmptyFilesArray_NoExportsDirectoryNeeded()
     {
         // exportsDirectoryPath omitted entirely -- existing callers/tests that don't pass one must

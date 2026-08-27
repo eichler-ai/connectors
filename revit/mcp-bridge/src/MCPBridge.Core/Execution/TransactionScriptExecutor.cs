@@ -45,8 +45,8 @@ public sealed class TransactionScriptExecutor
         string scriptText,
         CancellationToken cancellationToken,
         string? exportsDirectoryPath = null,
-        bool overwriteOutputFiles = false,
-        string? importsDirectoryPath = null)
+        string? importsDirectoryPath = null,
+        bool overwriteOutputFiles = false)
     {
         var group = document.CreateTransactionGroup(TransactionName);
         var transaction = document.CreateTransaction(TransactionName);
