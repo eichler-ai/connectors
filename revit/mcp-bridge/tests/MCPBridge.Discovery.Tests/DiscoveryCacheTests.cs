@@ -228,6 +228,26 @@ public class DiscoveryCacheTests
     }
 
     [Fact]
+    public void Search_FullyQualifiedQuery_DisambiguatesFromSameBareNameInAnotherNamespace()
+    {
+        // Independent PR review finding (2nd round, M3): an earlier version of the fully-qualified-query
+        // fix stripped straight to the bare type name unconditionally, discarding the one piece of
+        // information that made an already-qualified query unambiguous -- it would tie at score 1000
+        // against Fixtures.Other.Gadget.Run (same bare name, same member name, different namespace --
+        // simulating two add-ins vendoring a same-named helper type) instead of resolving to the SPECIFIC
+        // one actually named.
+        using var cache = NewCache();
+        cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+
+        var results = cache.Search(FixturesNamespace + ".Gadget.Run", namespaceFilter: null);
+        var exactMatches = results.Where(r => r.Score >= 1000).ToList();
+
+        var only = Assert.Single(exactMatches);
+        Assert.Equal(FixturesNamespace, only.Member.Namespace);
+        Assert.Equal("MCPBridge.Discovery.Tests.Fixtures.Gadget", only.Member.DeclaringType);
+    }
+
+    [Fact]
     public void Search_NamespaceFilter_ExcludesOtherNamespaces()
     {
         using var cache = NewCache();

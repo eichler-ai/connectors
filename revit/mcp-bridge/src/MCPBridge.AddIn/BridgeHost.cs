@@ -136,17 +136,22 @@ internal sealed class BridgeHost
         // without this, a user with two Revit versions installed launching one after the other would have
         // the second version's Sync() see the first version's RevitAPI.dll as "gone" and cascade-delete its
         // entire cached surface out from under a still-running first-version session.
+        // Independent PR review finding (2nd round, M2): Directory.CreateDirectory used to sit OUTSIDE this
+        // guard -- a failure there (a locked-down LOCALAPPDATA policy, a full disk, an offline-redirected
+        // profile) escaped Start() entirely and took the whole bridge down (no connection loop, no ribbon
+        // button, no dialog suppression) over a purely discovery-side path problem, exactly what this guard
+        // exists to prevent. Now inside the same try/catch as opening the cache itself.
+        //
+        // A corrupt/locked cache file (a prior hard crash mid-write, a full disk) must not take down the
+        // whole bridge either -- execute_script and everything else has no dependency on discovery. One
+        // self-heal attempt (delete and recreate) before giving up and running with discovery disabled
+        // entirely; RequestDispatcher accepts a null DiscoveryService for exactly this.
         var discoveryDbPath = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Connectors", "Revit", _revitVersion, "discovery-cache.db");
-        Directory.CreateDirectory(Path.GetDirectoryName(discoveryDbPath)!);
-
-        // Independent PR review finding: a corrupt/locked cache file (a prior hard crash mid-write, a full
-        // disk) must not take down the whole bridge -- execute_script and everything else has no dependency
-        // on discovery. One self-heal attempt (delete and recreate) before giving up and running with
-        // discovery disabled entirely; RequestDispatcher accepts a null DiscoveryService for exactly this.
         DiscoveryService? discoveryService = null;
         try
         {
+            Directory.CreateDirectory(Path.GetDirectoryName(discoveryDbPath)!);
             _discoveryCache = new DiscoveryCache(discoveryDbPath);
         }
         catch (Exception ex)
@@ -154,6 +159,12 @@ internal sealed class BridgeHost
             LogConnectionDiagnostic($"discovery cache open FAILED, attempting one self-heal (delete and recreate): {ex}");
             try
             {
+                // Independent PR review finding (2nd round, M1): DiscoveryCache's own constructor now
+                // disposes its connection before rethrowing on any failure past Open() (the dominant real
+                // corruption case, "database disk image is malformed", throws from PRAGMA/CreateSchema,
+                // AFTER Open() already succeeded) -- without that fix, this File.Delete would routinely hit
+                // a Windows sharing violation against a handle the failed constructor never released, and
+                // self-heal would never actually self-heal.
                 File.Delete(discoveryDbPath);
                 _discoveryCache = new DiscoveryCache(discoveryDbPath);
             }
@@ -307,6 +318,18 @@ internal sealed class BridgeHost
     /// directly in Revit's own install directory. Anything else loaded from that same install directory is
     /// exactly the noise this exclusion needs to catch.
     /// </para>
+    ///
+    /// <para>
+    /// Independent PR review finding (2nd round): a legacy-pattern third-party add-in that was installed by
+    /// copying its DLL directly into Revit's own install directory (an old but real workaround some add-ins
+    /// used to dodge assembly-resolution problems) is now silently excluded too, with no way to tell that
+    /// apart from genuine Autodesk noise after the fact -- so excluded assembly names are logged (once per
+    /// sync, not per-assembly-forever) rather than disappearing with zero trace, matching PRD §01's
+    /// observability principle. Also fixed: both path comparisons now use OrdinalIgnoreCase --
+    /// Assembly.Location reflects whatever casing the loader happened to use (a .addin manifest, a registry
+    /// value), which routinely differs from the on-disk casing on Windows' case-insensitive filesystem, and
+    /// an ordinal case-sensitive compare could let exactly the noise this filter exists to catch back in.
+    /// </para>
     /// </summary>
     private static IReadOnlyList<(string Kind, Assembly Assembly)> CollectAssembliesToSync()
     {
@@ -315,6 +338,7 @@ internal sealed class BridgeHost
 
         var revitInstallDir = Path.GetDirectoryName(coreAssemblies[0].Location);
         var excludedPrefixes = new[] { "System.", "Microsoft.", "MCPBridge.", "mscorlib", "netstandard", "WindowsBase", "PresentationCore", "PresentationFramework" };
+        var excludedByInstallDir = new List<string>();
 
         foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
         {
@@ -329,17 +353,23 @@ internal sealed class BridgeHost
                 continue;
             }
 
-            if (coreAssemblies.Any(core => core.Location == assembly.Location))
+            if (coreAssemblies.Any(core => string.Equals(core.Location, assembly.Location, StringComparison.OrdinalIgnoreCase)))
             {
                 continue; // already added above as "core".
             }
 
-            if (revitInstallDir is not null && Path.GetDirectoryName(assembly.Location) == revitInstallDir)
+            if (revitInstallDir is not null && string.Equals(Path.GetDirectoryName(assembly.Location), revitInstallDir, StringComparison.OrdinalIgnoreCase))
             {
+                excludedByInstallDir.Add(name);
                 continue; // Autodesk's own internal DLLs living alongside RevitAPI.dll -- not a real add-in.
             }
 
             assemblies.Add(("addin", assembly));
+        }
+
+        if (excludedByInstallDir.Count > 0)
+        {
+            LogConnectionDiagnostic($"discovery: excluded {excludedByInstallDir.Count} assembly(ies) loaded from Revit's own install directory: {string.Join(", ", excludedByInstallDir)}");
         }
 
         return assemblies;

@@ -52,28 +52,65 @@ public sealed class DiscoveryCache : IDisposable
     // review pass flagged, since disposal now waits for any in-flight Sync/query on another thread to finish
     // rather than pulling the connection out from under it.
     private readonly object _lock = new();
+    private bool _disposed;
 
     public DiscoveryCache(string databasePath)
     {
+        // Independent PR review finding (2nd round, M1): the caller's self-heal (delete-and-recreate a
+        // corrupted database) only works if a failure here doesn't leave a live, locked connection handle
+        // behind -- the dominant real corruption failure ("database disk image is malformed") is thrown by
+        // PRAGMA/CreateSchema below, AFTER _connection.Open() already succeeded, and if the constructor
+        // throws without disposing it first, the caller's very next File.Delete() hits a Windows sharing
+        // violation against a handle nothing will ever release. This try/catch is the fix: any failure past
+        // Open() disposes the connection before rethrowing, so the caller's delete actually succeeds.
         _connection = new SqliteConnection($"Data Source={databasePath}");
-        _connection.Open();
-
-        using (var pragma = _connection.CreateCommand())
+        try
         {
-            // Required for the types/members ON DELETE CASCADE below to actually cascade -- SQLite ignores
-            // foreign key actions entirely unless this pragma is set on the connection, every time it opens.
-            pragma.CommandText = "PRAGMA foreign_keys = ON;";
-            pragma.ExecuteNonQuery();
-        }
+            _connection.Open();
 
-        CreateSchema();
+            using (var pragma = _connection.CreateCommand())
+            {
+                // Required for the types/members ON DELETE CASCADE below to actually cascade -- SQLite
+                // ignores foreign key actions entirely unless this pragma is set on the connection, every
+                // time it opens.
+                pragma.CommandText = "PRAGMA foreign_keys = ON;";
+                pragma.ExecuteNonQuery();
+            }
+
+            CreateSchema();
+        }
+        catch
+        {
+            _connection.Dispose();
+            throw;
+        }
     }
 
     public void Dispose()
     {
         lock (_lock)
         {
+            if (_disposed)
+            {
+                return;
+            }
+
+            _disposed = true;
             _connection.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Independent PR review finding (2nd round, L1): the deferred re-sync Timer's non-waiting
+    /// <c>Dispose()</c> means a callback already past this check (waiting on <see cref="_lock"/>) can still
+    /// run after <see cref="Dispose"/> above has released it -- this guard is what actually makes that a
+    /// clean no-op instead of an <see cref="ObjectDisposedException"/> against a torn-down connection.
+    /// </summary>
+    private void ThrowIfDisposed()
+    {
+        if (_disposed)
+        {
+            throw new ObjectDisposedException(nameof(DiscoveryCache));
         }
     }
 
@@ -148,6 +185,7 @@ public sealed class DiscoveryCache : IDisposable
     {
         lock (_lock)
         {
+            ThrowIfDisposed();
             return SyncLocked(currentAssemblies);
         }
     }
@@ -353,6 +391,7 @@ public sealed class DiscoveryCache : IDisposable
     {
         lock (_lock)
         {
+            ThrowIfDisposed();
             using var cmd = _connection.CreateCommand();
             cmd.CommandText = "UPDATE assemblies SET file_hash = @hash WHERE file_path = @path";
             cmd.Parameters.AddWithValue("@hash", bogusHash);
@@ -372,14 +411,22 @@ public sealed class DiscoveryCache : IDisposable
     /// list_functions' tree has no way to *scope into* an empty-string namespace (namespaceFilter treats ""
     /// and null identically, per the mutual-exclusivity check above it), so leaving it in the namespaces tier
     /// created an unreachable dead end an agent could select but never drill into.
+    ///
+    /// <para>
+    /// Independent PR review finding (2nd round, L2): <c>COUNT(DISTINCT name)</c>, not <c>COUNT(*)</c> --
+    /// now that add-ins are included, two loaded add-ins vendoring the same library (or two versions of the
+    /// same helper DLL) can genuinely produce two <c>types</c> rows with the identical namespace+name, which
+    /// a plain row count would double-count.
+    /// </para>
     /// </summary>
     public IReadOnlyList<(string Namespace, int TypeCount)> ListNamespaces()
     {
         lock (_lock)
         {
+            ThrowIfDisposed();
             using var cmd = _connection.CreateCommand();
             cmd.CommandText = """
-                SELECT namespace, COUNT(*) FROM types
+                SELECT namespace, COUNT(DISTINCT name) FROM types
                 WHERE documented = 1 AND namespace != ''
                 GROUP BY namespace
                 ORDER BY namespace COLLATE NOCASE
@@ -395,13 +442,19 @@ public sealed class DiscoveryCache : IDisposable
         }
     }
 
-    /// <summary>Short (unqualified) names of every documented type in one namespace, alphabetical.</summary>
+    /// <summary>
+    /// Short (unqualified) names of every documented type in one namespace, alphabetical. Independent PR
+    /// review finding (2nd round, L2): <c>DISTINCT</c> for the same reason <see cref="ListNamespaces"/>
+    /// uses <c>COUNT(DISTINCT name)</c> -- two duplicate <c>types</c> rows for the same name would otherwise
+    /// show up as a visibly duplicated entry in this list.
+    /// </summary>
     public IReadOnlyList<string> ListTypeNames(string namespaceName)
     {
         lock (_lock)
         {
+            ThrowIfDisposed();
             using var cmd = _connection.CreateCommand();
-            cmd.CommandText = "SELECT name FROM types WHERE namespace = @ns AND documented = 1 ORDER BY name COLLATE NOCASE";
+            cmd.CommandText = "SELECT DISTINCT name FROM types WHERE namespace = @ns AND documented = 1 ORDER BY name COLLATE NOCASE";
             cmd.Parameters.AddWithValue("@ns", namespaceName);
             using var reader = cmd.ExecuteReader();
             var results = new List<string>();
@@ -418,6 +471,7 @@ public sealed class DiscoveryCache : IDisposable
     {
         lock (_lock)
         {
+            ThrowIfDisposed();
             return FindTypeRow(namespaceName, typeName) is not null;
         }
     }
@@ -426,6 +480,7 @@ public sealed class DiscoveryCache : IDisposable
     {
         lock (_lock)
         {
+            ThrowIfDisposed();
             return FindTypeRowByFullName(fullTypeName) is not null;
         }
     }
@@ -441,6 +496,7 @@ public sealed class DiscoveryCache : IDisposable
     {
         lock (_lock)
         {
+            ThrowIfDisposed();
             var typeRow = FindTypeRow(namespaceName, typeName);
             if (typeRow is null)
             {
@@ -460,6 +516,7 @@ public sealed class DiscoveryCache : IDisposable
     {
         lock (_lock)
         {
+            ThrowIfDisposed();
             var typeRow = FindTypeRow(namespaceName, typeName);
             return typeRow is null ? Array.Empty<DiscoveryMemberRow>() : WalkInheritance(typeRow.Value);
         }
@@ -470,6 +527,7 @@ public sealed class DiscoveryCache : IDisposable
     {
         lock (_lock)
         {
+            ThrowIfDisposed();
             var typeRow = FindTypeRowByFullName(fullTypeName);
             return typeRow is null ? Array.Empty<DiscoveryMemberRow>() : WalkInheritance(typeRow.Value);
         }
@@ -617,27 +675,56 @@ public sealed class DiscoveryCache : IDisposable
     {
         lock (_lock)
         {
+            ThrowIfDisposed();
             var queryLower = query.Trim().ToLowerInvariant();
             var tokens = queryLower.Split(new[] { ' ', '.', '_', '-' }, StringSplitOptions.RemoveEmptyEntries);
 
             var results = new List<(DiscoveryMemberRow Member, double Score)>();
             var seenMemberIds = new HashSet<string>(StringComparer.Ordinal);
 
-            // Tier 1: exact Type.Member. typeToken is reduced to its own last dotted segment (independent PR
-            // review finding): a query copied verbatim from a describe_function result or from Revit's own
-            // docs is naturally fully-qualified ("Autodesk.Revit.DB.Wall.Create"), but types.name only ever
-            // stores the bare type name -- without this, a fully-qualified query fell all the way through to
-            // tier 3, since the "autodesk" segment could never substring-match a type/member name in tier 2
-            // either.
+            // Tier 1: exact Type.Member. A query copied verbatim from a describe_function result or from
+            // Revit's own docs is naturally fully-qualified ("Autodesk.Revit.DB.Wall.Create"), but
+            // types.name only ever stores the bare type name -- so the qualified form is tried against
+            // full_name FIRST, and only falls back to a bare-name match if that finds nothing.
+            //
+            // Independent PR review finding (2nd round, M3): an earlier version of this fix stripped
+            // straight to the bare name unconditionally, which meant a query that WAS already
+            // unambiguous ("Autodesk.Revit.DB.Document.Delete") silently discarded the one piece of
+            // information that made it so -- it tied at score 1000 against every OTHER Document.Delete in
+            // any other namespace or add-in, which is a worse outcome than the loose tier-3 fallback the
+            // fix replaced. Trying the qualified form against full_name first, and using ONLY those
+            // results when it matches anything, keeps a genuinely qualified query unambiguous while still
+            // letting a bare "Type.Member" query (nothing before the type name to be a namespace) work
+            // exactly as it always did.
             var lastDot = queryLower.LastIndexOf('.');
             var lastSpace = queryLower.LastIndexOf(' ');
             var splitAt = Math.Max(lastDot, lastSpace);
             if (splitAt > 0 && splitAt < queryLower.Length - 1)
             {
                 var typeToken = queryLower[..splitAt].Trim();
-                var typeTokenBare = typeToken.Contains('.') ? typeToken[(typeToken.LastIndexOf('.') + 1)..] : typeToken;
                 var memberToken = queryLower[(splitAt + 1)..].Trim();
-                foreach (var row in QueryExactTypeMember(typeTokenBare, memberToken, namespaceFilter))
+
+                // A bare type token (no dot at all, e.g. "Wall" in "Wall.Create") can never match
+                // full_name (which is always namespace-qualified, except for a global-namespace type where
+                // it equals the bare name anyway -- matchFullName still finds that case correctly) -- go
+                // straight to the bare-name match rather than wasting a query on a full_name attempt that
+                // can only ever miss.
+                List<DiscoveryMemberRow> exactRows;
+                if (typeToken.Contains('.'))
+                {
+                    exactRows = QueryExactTypeMember(typeToken, memberToken, namespaceFilter, matchFullName: true).ToList();
+                    if (exactRows.Count == 0)
+                    {
+                        var typeTokenBare = typeToken[(typeToken.LastIndexOf('.') + 1)..];
+                        exactRows = QueryExactTypeMember(typeTokenBare, memberToken, namespaceFilter, matchFullName: false).ToList();
+                    }
+                }
+                else
+                {
+                    exactRows = QueryExactTypeMember(typeToken, memberToken, namespaceFilter, matchFullName: false).ToList();
+                }
+
+                foreach (var row in exactRows)
                 {
                     if (seenMemberIds.Add(row.MemberId))
                     {
@@ -679,13 +766,21 @@ public sealed class DiscoveryCache : IDisposable
         }
     }
 
-    private IEnumerable<DiscoveryMemberRow> QueryExactTypeMember(string typeToken, string memberToken, string? namespaceFilter)
+    /// <summary>
+    /// <paramref name="matchFullName"/> selects which column <paramref name="typeToken"/> is compared
+    /// against -- <c>t.full_name</c> for a query that arrived already dotted/qualified (unambiguous: at
+    /// most one type anywhere has a given full name), <c>t.name</c> for a bare type name (can legitimately
+    /// match more than one type across namespaces/add-ins, which is why the qualified form is always tried
+    /// first -- see <see cref="Search"/>'s own comment).
+    /// </summary>
+    private IEnumerable<DiscoveryMemberRow> QueryExactTypeMember(string typeToken, string memberToken, string? namespaceFilter, bool matchFullName)
     {
         using var cmd = _connection.CreateCommand();
-        cmd.CommandText = """
+        var typeColumn = matchFullName ? "t.full_name" : "t.name";
+        cmd.CommandText = $"""
             SELECT m.kind, m.name, m.signature, m.summary, m.member_id, m.returns, m.params_json, t.namespace, t.full_name
             FROM members m JOIN types t ON m.type_id = t.id
-            WHERE t.documented = 1 AND LOWER(t.name) = @typeToken AND LOWER(m.name) = @memberToken
+            WHERE t.documented = 1 AND LOWER({typeColumn}) = @typeToken AND LOWER(m.name) = @memberToken
               AND (@ns IS NULL OR t.namespace = @ns)
             """;
         cmd.Parameters.AddWithValue("@typeToken", typeToken);
