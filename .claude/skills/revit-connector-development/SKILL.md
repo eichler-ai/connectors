@@ -207,6 +207,16 @@ there is now only one SDK on the VM and no ambiguity for bare `dotnet` to fall i
 - **Location.** The official installer puts a runtime in `C:\Program Files\dotnet`, but this VM's SDK lives in `C:\dotnet10`, and a .NET host resolves frameworks **only from its own root** — multi-level lookup was removed in .NET 7+. So `dotnet --list-runtimes` kept showing only 10.0.11 even though 8.0.30 was correctly installed. Fix: copy the `Microsoft.NETCore.App\<ver>` and `Microsoft.WindowsDesktop.App\<ver>` folders from `C:\Program Files\dotnet\shared` into `C:\dotnet10\shared`. Both frameworks — `WindowsDesktop` matters because the TFM is `net8.0-windows`. Re-check with `dotnet --list-runtimes`; it should list both majors under the SDK's own root.
 - **`RollForward` then silently undoes it.** If a project sets `RollForward=LatestMajor` (a plausible workaround when the runtime is missing), that means *roll forward to the highest available major EVEN IF the requested one is present* — so installing the runtime changes nothing, and the gap is now invisible because you believe it's fixed. Removing the property restores the default policy, which prefers the exact major.
 
+**Installing that runtime put a SECOND `dotnet.exe` on `PATH`, and only the ordering saves you.** The runtime installer adds `C:\Program Files\dotnet\` to machine `PATH`. That directory has a `dotnet.exe` but **no SDK**, so which one bare `dotnet` resolves to is now decided purely by `PATH` order:
+
+```
+where.exe dotnet
+  C:\dotnet10\dotnet.exe             <- has the SDK 10.0.400; must stay FIRST
+  C:\Program Files\dotnet\dotnet.exe <- runtime only, no SDK
+```
+
+If that order ever flips (a repair install, a reinstall, a hand-edited `PATH`), bare `dotnet build`/`dotnet test` resolves to the SDK-less one and fails with **"no .NET SDKs were found"** — a *different* signature from the `NETSDK1045` incident below, same underlying disease. Check with `where.exe dotnet` (plural output) and `dotnet --list-sdks` (must show `10.0.400 [C:\dotnet10\sdk]`) before assuming a build failure is your code. The genuinely robust fix, matching the precedent below of removing rather than reordering, is to drop `C:\Program Files\dotnet\` from `PATH` entirely: nothing needs it there once the framework folders are copied into `C:\dotnet10\shared`, since the SDK's host only reads its own root anyway. Left in place for now, deliberately, rather than editing machine `PATH` as a side effect — but it is a live tripwire, not a tidy end state.
+
 **Verify by assertion, not by a green tick.** `MCPBridge.Core.Tests` now contains `RuntimeTargetingTests`, which asserts per TFM that the tests execute on the runtime they were compiled for. This exists because they once didn't: with `RollForward` in place, "274 tests passing on both TFMs" was running .NET 10's `System.Text.Json` twice — the single component whose net8/net10 divergence the multi-target exists for, since `WireEnumNameConverter` was written precisely because net8 lacks .NET 9+'s `JsonStringEnumMemberNameAttribute`. Multi-targeting a test project buys nothing at runtime unless the matching runtime is actually installed and actually selected, and only an assertion tells you which.
 
 **If `NETSDK1045` ever comes back**, don't assume the .NET 10 SDK vanished — first check
