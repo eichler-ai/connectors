@@ -15,7 +15,7 @@ func TestRegisterAndGet(t *testing.T) {
 			{ID: "doc-abc", Title: "Sample.rvt", Active: true},
 		},
 	}
-	r.Register(inst)
+	r.Register(inst, time.Now())
 
 	got, ok := r.Get("inst-1")
 	if !ok {
@@ -39,8 +39,8 @@ func TestGetUnknownInstance(t *testing.T) {
 
 func TestRegisterOverwritesExistingInstance(t *testing.T) {
 	r := New()
-	r.Register(&Instance{InstanceID: "inst-1", PID: 1, RevitVersion: "2027"})
-	r.Register(&Instance{InstanceID: "inst-1", PID: 2, RevitVersion: "2027", Documents: []Document{{ID: "doc-x"}}})
+	r.Register(&Instance{InstanceID: "inst-1", PID: 1, RevitVersion: "2027"}, time.Now())
+	r.Register(&Instance{InstanceID: "inst-1", PID: 2, RevitVersion: "2027", Documents: []Document{{ID: "doc-x"}}}, time.Now())
 
 	got, ok := r.Get("inst-1")
 	if !ok {
@@ -56,7 +56,7 @@ func TestRegisterOverwritesExistingInstance(t *testing.T) {
 
 func TestRemove(t *testing.T) {
 	r := New()
-	r.Register(&Instance{InstanceID: "inst-1"})
+	r.Register(&Instance{InstanceID: "inst-1"}, time.Now())
 	r.Remove("inst-1")
 	if _, ok := r.Get("inst-1"); ok {
 		t.Fatalf("instance should be gone after Remove")
@@ -67,8 +67,8 @@ func TestRemove(t *testing.T) {
 
 func TestList(t *testing.T) {
 	r := New()
-	r.Register(&Instance{InstanceID: "inst-1"})
-	r.Register(&Instance{InstanceID: "inst-2"})
+	r.Register(&Instance{InstanceID: "inst-1"}, time.Now())
+	r.Register(&Instance{InstanceID: "inst-2"}, time.Now())
 
 	list := r.List()
 	if len(list) != 2 {
@@ -86,7 +86,7 @@ func TestList(t *testing.T) {
 func TestRegisterDeepCopiesDocuments(t *testing.T) {
 	r := New()
 	docs := []Document{{ID: "doc-a"}}
-	r.Register(&Instance{InstanceID: "inst-1", Documents: docs})
+	r.Register(&Instance{InstanceID: "inst-1", Documents: docs}, time.Now())
 
 	docs[0].ID = "mutated"
 
@@ -96,9 +96,9 @@ func TestRegisterDeepCopiesDocuments(t *testing.T) {
 	}
 }
 
-func TestWorkshareRoundTrips(t *testing.T) {
+func TestWorksharedRoundTrips(t *testing.T) {
 	r := New()
-	r.Register(&Instance{InstanceID: "inst-1", Documents: []Document{{ID: "doc-a", Workshared: true}}})
+	r.Register(&Instance{InstanceID: "inst-1", Documents: []Document{{ID: "doc-a", Workshared: true}}}, time.Now())
 
 	got, _ := r.Get("inst-1")
 	if !got.Documents[0].Workshared {
@@ -108,7 +108,7 @@ func TestWorkshareRoundTrips(t *testing.T) {
 
 func TestRegisterStampsConnectedSinceWhenZero(t *testing.T) {
 	r := New()
-	r.Register(&Instance{InstanceID: "inst-1"})
+	r.Register(&Instance{InstanceID: "inst-1"}, time.Now())
 
 	got, _ := r.Get("inst-1")
 	if got.ConnectedSince.IsZero() {
@@ -116,16 +116,16 @@ func TestRegisterStampsConnectedSinceWhenZero(t *testing.T) {
 	}
 }
 
-func TestIsResponsive_UnknownInstanceIsResponsive(t *testing.T) {
+func TestIsResponsiveForUnknownInstance(t *testing.T) {
 	r := New()
 	if !r.IsResponsive("does-not-exist", time.Now()) {
 		t.Errorf("an unknown instance_id should be reported responsive -- this method judges liveness, not registration")
 	}
 }
 
-func TestIsResponsive_FallsBackToConnectedSinceBeforeFirstPing(t *testing.T) {
+func TestIsResponsiveFallsBackToConnectedSinceBeforeFirstPing(t *testing.T) {
 	r := New()
-	r.Register(&Instance{InstanceID: "inst-1"})
+	r.Register(&Instance{InstanceID: "inst-1"}, time.Now())
 
 	now := time.Now().Add(UnresponsiveThreshold - time.Second)
 	if !r.IsResponsive("inst-1", now) {
@@ -138,10 +138,10 @@ func TestIsResponsive_FallsBackToConnectedSinceBeforeFirstPing(t *testing.T) {
 	}
 }
 
-func TestIsResponsive_TracksMostRecentPing(t *testing.T) {
+func TestIsResponsiveTracksMostRecentPing(t *testing.T) {
 	r := New()
-	r.Register(&Instance{InstanceID: "inst-1"})
-	r.RecordPing("inst-1")
+	r.Register(&Instance{InstanceID: "inst-1"}, time.Now())
+	r.RecordPing("inst-1", time.Now())
 
 	if !r.IsResponsive("inst-1", time.Now().Add(UnresponsiveThreshold-time.Second)) {
 		t.Errorf("instance pinged recently should be responsive")
@@ -151,9 +151,9 @@ func TestIsResponsive_TracksMostRecentPing(t *testing.T) {
 	}
 }
 
-func TestRecordPing_NoOpForUnregisteredInstance(t *testing.T) {
+func TestRecordPingNoOpForUnregisteredInstance(t *testing.T) {
 	r := New()
-	r.RecordPing("does-not-exist") // must not panic
+	r.RecordPing("does-not-exist", time.Now()) // must not panic
 	if len(r.List()) != 0 {
 		t.Errorf("a ping for an unregistered instance must not create a registry entry")
 	}
@@ -162,10 +162,9 @@ func TestRecordPing_NoOpForUnregisteredInstance(t *testing.T) {
 func TestRegisterResetsLivenessOnReconnect(t *testing.T) {
 	r := New()
 	clock := time.Now()
-	r.now = func() time.Time { return clock }
 
-	r.Register(&Instance{InstanceID: "inst-1"})
-	r.RecordPing("inst-1")
+	r.Register(&Instance{InstanceID: "inst-1"}, clock)
+	r.RecordPing("inst-1", clock)
 
 	// Advance the clock well past the old ping's staleness threshold, then
 	// reconnect (re-register) — if reset didn't clear the old ping, a
@@ -173,26 +172,25 @@ func TestRegisterResetsLivenessOnReconnect(t *testing.T) {
 	// "recently pinged" via the stale timestamp rather than via the fresh
 	// ConnectedSince fallback.
 	clock = clock.Add(UnresponsiveThreshold * 10)
-	r.Register(&Instance{InstanceID: "inst-1"})
+	r.Register(&Instance{InstanceID: "inst-1"}, clock)
 
 	if !r.IsResponsive("inst-1", clock) {
 		t.Errorf("a fresh register should make the instance responsive again via ConnectedSince, not stay keyed to a stale pre-reconnect ping")
 	}
 }
 
-func TestPruneStale_RemovesInstancesPastTheSilenceThreshold(t *testing.T) {
+func TestPruneStaleRemovesInstancesPastTheSilenceThreshold(t *testing.T) {
 	r := New()
 	clock := time.Now()
-	r.now = func() time.Time { return clock }
 
-	r.Register(&Instance{InstanceID: "stale"})
+	r.Register(&Instance{InstanceID: "stale"}, clock)
 
 	// Advance the clock, then register+ping "fresh" — so its last-seen
 	// timestamp is genuinely more recent than "stale"'s, not just
 	// artificially compared against a shifted query time.
 	clock = clock.Add(PruneAfterSilence / 2)
-	r.Register(&Instance{InstanceID: "fresh"})
-	r.RecordPing("fresh")
+	r.Register(&Instance{InstanceID: "fresh"}, clock)
+	r.RecordPing("fresh", clock)
 
 	clock = clock.Add(PruneAfterSilence/2 + time.Second)
 	pruned := r.PruneStale(clock)
@@ -208,9 +206,9 @@ func TestPruneStale_RemovesInstancesPastTheSilenceThreshold(t *testing.T) {
 	}
 }
 
-func TestPruneStale_NothingToPruneReturnsEmpty(t *testing.T) {
+func TestPruneStaleNothingToPruneReturnsEmpty(t *testing.T) {
 	r := New()
-	r.Register(&Instance{InstanceID: "inst-1"})
+	r.Register(&Instance{InstanceID: "inst-1"}, time.Now())
 
 	pruned := r.PruneStale(time.Now())
 	if len(pruned) != 0 {

@@ -91,13 +91,23 @@ func mergedStatus(reg *registry.Registry, mgr *execution.Manager, instanceID str
 // execution.Status's own enum.
 const statusUnresponsive execution.Status = "unresponsive"
 
+// unsavedPathSentinel is the PRD §05 documented value for a document with
+// no on-disk path yet (new/unsaved/detached-not-yet-saved) — an empty
+// string would otherwise require an agent to special-case "" as meaning
+// unsaved rather than reading the documented sentinel.
+const unsavedPathSentinel = "unsaved"
+
 func instanceDocuments(docs []registry.Document) []InstanceDocument {
 	out := make([]InstanceDocument, 0, len(docs))
 	for _, d := range docs {
+		path := d.Path
+		if path == "" {
+			path = unsavedPathSentinel
+		}
 		out = append(out, InstanceDocument{
 			DocumentID: d.ID,
 			Title:      d.Title,
-			Path:       d.Path,
+			Path:       path,
 			Workshared: d.Workshared,
 			Active:     d.Active,
 		})

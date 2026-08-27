@@ -79,7 +79,7 @@ func TestListInstancesToolReturnsRegisteredInstanceIdleByDefault(t *testing.T) {
 		Documents: []registry.Document{
 			{ID: "doc-abc", Title: "Sample.rvt", Path: `C:\Sample.rvt`, Workshared: true, Active: true},
 		},
-	})
+	}, time.Now())
 	cs := connectInstancesClient(t, reg, mgr)
 
 	out := callListInstances(t, cs)
@@ -105,7 +105,7 @@ func TestListInstancesToolReturnsRegisteredInstanceIdleByDefault(t *testing.T) {
 func TestListInstancesToolReflectsBusyExecutionStatus(t *testing.T) {
 	reg := registry.New()
 	mgr := execution.NewManager()
-	reg.Register(&registry.Instance{InstanceID: "inst-1"})
+	reg.Register(&registry.Instance{InstanceID: "inst-1"}, time.Now())
 	attachFakeInstance(t, mgr, "inst-1", func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
 		var p map[string]any
 		json.Unmarshal(params, &p)
@@ -125,17 +125,40 @@ func TestListInstancesToolReflectsBusyExecutionStatus(t *testing.T) {
 func TestListInstancesToolUnresponsiveOverridesIdle(t *testing.T) {
 	reg := registry.New()
 	mgr := execution.NewManager()
-	reg.Register(&registry.Instance{InstanceID: "inst-1"})
 	// Force unresponsive without a real elapsed-time wait: register at a
 	// ConnectedSince far enough in the past that IsResponsive's fallback
 	// (no ping ever recorded) already exceeds the threshold as of now.
 	past := time.Now().Add(-registry.UnresponsiveThreshold - time.Second)
-	reg.Register(&registry.Instance{InstanceID: "inst-1", ConnectedSince: past})
+	reg.Register(&registry.Instance{InstanceID: "inst-1", ConnectedSince: past}, time.Now())
 
 	cs := connectInstancesClient(t, reg, mgr)
 	out := callListInstances(t, cs)
 	if len(out.Instances) != 1 || out.Instances[0].Status != "unresponsive" {
 		t.Errorf("expected exactly 1 instance with status unresponsive, got %+v", out.Instances)
+	}
+}
+
+func TestListInstancesToolUnresponsiveOverridesBusy(t *testing.T) {
+	reg := registry.New()
+	mgr := execution.NewManager()
+	attachFakeInstance(t, mgr, "inst-1", func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
+		var p map[string]any
+		json.Unmarshal(params, &p)
+		return execution.Result{Status: execution.StatusRunning, ExecutionID: p["execution_id"].(string)}, nil
+	})
+	// Same backdated-ConnectedSince trick as the unresponsive-overrides-idle
+	// case above, but with a genuinely busy execution in flight -- proves
+	// the precedence rule, not just that unresponsive works in isolation.
+	past := time.Now().Add(-registry.UnresponsiveThreshold - time.Second)
+	reg.Register(&registry.Instance{InstanceID: "inst-1", ConnectedSince: past}, time.Now())
+	if _, drec := mgr.ExecuteScript(context.Background(), "inst-1", "doc-1", "slow", 100, 60000, false); drec != nil {
+		t.Fatalf("ExecuteScript: %+v", drec)
+	}
+
+	cs := connectInstancesClient(t, reg, mgr)
+	out := callListInstances(t, cs)
+	if len(out.Instances) != 1 || out.Instances[0].Status != "unresponsive" {
+		t.Errorf("expected unresponsive to override a genuinely busy execution, got %+v", out.Instances)
 	}
 }
 
@@ -153,7 +176,7 @@ func TestListInstancesToolUnrecoverableBeatsUnresponsive(t *testing.T) {
 		return execution.Result{Status: execution.StatusUnrecoverable, ExecutionID: p["execution_id"].(string)}, nil
 	})
 	past := time.Now().Add(-registry.UnresponsiveThreshold - time.Second)
-	reg.Register(&registry.Instance{InstanceID: "inst-1", ConnectedSince: past})
+	reg.Register(&registry.Instance{InstanceID: "inst-1", ConnectedSince: past}, time.Now())
 
 	if _, drec := mgr.ExecuteScript(context.Background(), "inst-1", "doc-1", "slow", 50, 60000, false); drec != nil {
 		t.Fatalf("ExecuteScript: %+v", drec)

@@ -17,10 +17,12 @@ import (
 const UnresponsiveThreshold = 30 * time.Second
 
 // PruneAfterSilence is how long an instance can go without a heartbeat
-// ping before it's dropped from the registry entirely (PRD §05) — this is
-// also what naturally reclaims an instance that disconnected and never
-// reconnected, without a separate remove-on-disconnect path that would
-// otherwise flicker list_instances during a normal, healthy reconnect.
+// ping before it's dropped from the registry entirely (PRD §05). A cleanly
+// disconnected instance is already removed immediately by the broker's own
+// connection-teardown path (Remove) — this sweep exists for the case PRD
+// §05 actually describes: a socket that's still open but has gone quiet
+// (Revit wedged without the connection dropping), which Remove alone can
+// never catch.
 const PruneAfterSilence = 5 * time.Minute
 
 // Document mirrors one entry of an instance's `register` document list
@@ -49,12 +51,6 @@ type Registry struct {
 	mu         sync.RWMutex
 	instances  map[string]*Instance
 	lastPingAt map[string]time.Time
-
-	// now is the clock RecordPing/Register use to stamp timestamps.
-	// Overridable in tests only (same pattern as execution.Manager's own
-	// now/afterFunc fields) so liveness-threshold tests don't depend on
-	// real elapsed wall-clock time.
-	now func() time.Time
 }
 
 // New creates an empty Registry.
@@ -62,7 +58,6 @@ func New() *Registry {
 	return &Registry{
 		instances:  make(map[string]*Instance),
 		lastPingAt: make(map[string]time.Time),
-		now:        time.Now,
 	}
 }
 
@@ -77,14 +72,18 @@ func cloneInstance(inst *Instance) *Instance {
 
 // Register records or replaces the entry for inst.InstanceID. A second
 // register for an already-known instance_id (e.g. after a reconnect, per
-// PRD §05) overwrites the prior entry outright rather than merging it.
-func (r *Registry) Register(inst *Instance) {
+// PRD §05) overwrites the prior entry outright rather than merging it. now
+// is the caller-supplied clock reading used to stamp ConnectedSince when
+// inst doesn't already specify one (same caller-supplies-now convention as
+// IsResponsive/PruneStale/RecordPing below — Registry itself schedules
+// nothing and so has no need for an injected clock field).
+func (r *Registry) Register(inst *Instance, now time.Time) {
 	cp := cloneInstance(inst)
+	if cp.ConnectedSince.IsZero() {
+		cp.ConnectedSince = now.UTC()
+	}
 
 	r.mu.Lock()
-	if cp.ConnectedSince.IsZero() {
-		cp.ConnectedSince = r.now().UTC()
-	}
 	defer r.mu.Unlock()
 	r.instances[cp.InstanceID] = cp
 	// A fresh register (first connect or reconnect) supersedes whatever
@@ -125,16 +124,16 @@ func (r *Registry) List() []*Instance {
 	return out
 }
 
-// RecordPing updates instanceID's last-seen timestamp (PRD §05 heartbeat).
-// A no-op if the instance isn't registered — a ping racing a Remove (or one
-// that never registered at all) has nothing to record against.
-func (r *Registry) RecordPing(instanceID string) {
+// RecordPing updates instanceID's last-seen timestamp (PRD §05 heartbeat)
+// to now. A no-op if the instance isn't registered — a ping racing a Remove
+// (or one that never registered at all) has nothing to record against.
+func (r *Registry) RecordPing(instanceID string, now time.Time) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, ok := r.instances[instanceID]; !ok {
 		return
 	}
-	r.lastPingAt[instanceID] = r.now().UTC()
+	r.lastPingAt[instanceID] = now.UTC()
 }
 
 // IsResponsive reports whether instanceID has been heard from recently

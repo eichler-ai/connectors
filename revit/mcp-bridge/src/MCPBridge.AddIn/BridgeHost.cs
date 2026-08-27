@@ -592,7 +592,15 @@ internal sealed class BridgeHost
         // NetworkStream's actual bytes -- the timer callback goes through WriteLine's own _writeLock like
         // every other writer, so it's safe to fire from the timer's own thread pool thread concurrently
         // with this connection's read loop.
-        using var heartbeatTimer = new Timer(
+        //
+        // One-shot-and-self-rearm (period: Timeout.Infinite, re-armed at the end of the callback) rather
+        // than a recurring period: WriteLine's underlying stream.Write blocks indefinitely if the peer
+        // stops draining the socket (a wedged/paused broker) -- with a recurring period, every 10s another
+        // thread-pool thread would pile into the callback and block on _writeLock behind the first one,
+        // unbounded, for as long as that condition persists. Self-rearming caps this at one outstanding
+        // ping attempt at a time.
+        Timer? heartbeatTimer = null;
+        heartbeatTimer = new Timer(
             _ =>
             {
                 try
@@ -605,10 +613,23 @@ internal sealed class BridgeHost
                     // ReadOneLine call will observe that and trigger a reconnect -- same tolerated-write-
                     // failure pattern as the dispatch-response write below.
                 }
+                finally
+                {
+                    try
+                    {
+                        heartbeatTimer?.Change(PingIntervalMs, Timeout.Infinite);
+                    }
+                    catch (ObjectDisposedException)
+                    {
+                        // This connection's loop already exited and disposed the timer between the write
+                        // attempt above and this re-arm -- nothing left to reschedule.
+                    }
+                }
             },
             state: null,
             dueTime: PingIntervalMs,
-            period: PingIntervalMs);
+            period: Timeout.Infinite);
+        using var heartbeatTimerDisposal = heartbeatTimer;
 
         while (!stopToken.IsCancellationRequested)
         {
