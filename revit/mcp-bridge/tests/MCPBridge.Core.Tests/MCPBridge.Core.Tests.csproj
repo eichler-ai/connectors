@@ -11,40 +11,28 @@
          confirmed once by hand. -->
     <TargetFrameworks>net10.0-windows;net8.0-windows</TargetFrameworks>
     <!--
-      The VM deliberately has exactly ONE .NET install (the .NET 10 SDK ; see the
-      revit-connector-development skill for the multi-hour confusion that rule exists to prevent), and
-      it cross-COMPILES the net8 leg happily. It cannot RUN a net8.0 test host, though, so without this
-      `dotnet test` fails the net8 leg with "You must install or update .NET to run this application"
-      ; which would leave the leg untested for a second reason after we just multi-targeted to fix the
-      first. RollForward lets the net8-compiled assemblies execute on the installed .NET 10 runtime.
+      Multi-targeting these tests is the point: the net8.0-windows leg is the reason this project
+      multi-targets at all, and WireEnumNameConverter exists precisely because net8's BCL lacks
+      .NET 9+'s JsonStringEnumMemberNameAttribute.
 
-      FIDELITY CAVEAT, and it is sharper than "runtime differences are unlikely": under RollForward
-      the net8-COMPILED assemblies execute against .NET 10's System.Text.Json ; and System.Text.Json
-      is the single component whose net8/net10 difference is the entire reason WireEnumNameConverter
-      exists. So WireEnumNameConverterTests "passing on both TFMs" is, at runtime, the same STJ twice.
-      What these runs genuinely hold is the net8 COMPILATION (that the source compiles and links
-      against net8's BCL at all, which is the half that actually broke before). They do NOT hold
-      net8 RUNTIME behaviour, and no claim that they do should be made in a PR description.
+      There is deliberately NO RollForward property here. An earlier version set
+      RollForward=LatestMajor so the net8 assemblies could execute on the VM's only runtime (.NET
+      10) ; that made `dotnet test` pass on both legs while running .NET 10's System.Text.Json
+      TWICE, which is the one component whose net8/net10 difference this whole target exists for.
+      It validated the net8 COMPILATION and nothing about net8 runtime behaviour.
 
-      In production the net8 leg runs inside Revit 2025, which hosts .NET 8. CLOSING THIS GAP TAKES
-      TWO STEPS, AND THE FIRST ALONE IS NOT ENOUGH ; an earlier version of this comment said it was,
-      which would have left the gap open while looking closed:
-        1. Install the .NET 8 *runtime* (Microsoft.NETCore.App + Microsoft.WindowsDesktop.App 8.x).
-           A runtime, NOT a second SDK ; that distinction is the whole point, see the skill's
-           "exactly one SDK on the VM" rule, which stays intact.
-        2. Drop RollForward below, or relax it to Disable/Minor. LatestMajor means "roll forward to
-           the highest available major EVEN IF the requested one is present", so with it left in
-           place the net8 assemblies keep executing on .NET 10 after step 1 ; same gap, now
-           invisible because you would believe it was fixed.
-      Then confirm empirically rather than assuming: `dotnet test` should report the net8 assembly
-      running on an 8.x runtime. Until both steps are done, do not cite these runs as cross-runtime
-      evidence.
+      The VM now has the .NET 8 runtime (Microsoft.NETCore.App + Microsoft.WindowsDesktop.App
+      8.0.30) alongside .NET 10, so the default roll-forward policy resolves the net8 leg to a real
+      8.x runtime and the two legs genuinely differ. RuntimeTargetingTests asserts exactly that, per
+      TFM, so this cannot silently regress if anyone reintroduces RollForward.
 
-      What DOES already evidence the net8 leg at runtime is live testing against Revit 2025 itself,
-      which hosts .NET 8: auth (AuthRole), execute_script returning status "success"
-      (ExecutionStatus) and discovery have all round-tripped through this converter there.
+      Still exactly ONE SDK (see the skill's rule) ; a RUNTIME is not an SDK. Note the runtime
+      installs to C:\Program Files\dotnet by default while the SDK lives in C:\dotnet10, and a
+      .NET host only resolves frameworks from ITS OWN root (multi-level lookup was removed in
+      .NET 7+), so the 8.0.30 framework folders were copied under C:\dotnet10\shared to be visible
+      to the SDK's host. `dotnet ;;list-runtimes` (two hyphens ; MSB4025 forbids them in an XML
+      comment) should show both 8.0.30 and 10.0.11.
     -->
-    <RollForward>LatestMajor</RollForward>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>latest</LangVersion>
