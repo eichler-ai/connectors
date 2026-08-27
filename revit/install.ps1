@@ -272,12 +272,14 @@ if ($ApplyPendingUpdate) {
         $priorMarker = if (Test-Path $versionMarkerPath) { Get-Content $versionMarkerPath | ConvertFrom-Json } else { $null }
         $priorDeployed = if ($priorMarker -and $priorMarker.PSObject.Properties['deployed']) { @($priorMarker.deployed) } else { @() }
         $priorSkipped = if ($priorMarker -and $priorMarker.PSObject.Properties['skipped']) { @($priorMarker.skipped) } else { @() }
+        $priorDeferred = if ($priorMarker -and $priorMarker.PSObject.Properties['deferred']) { @($priorMarker.deferred) } else { @() }
         $nowDeployed = @($priorDeployed + @($manifest.versions) | Sort-Object -Unique)
         @{
             version  = $manifest.version
             deployed = $nowDeployed
-            # A version can't be both; anything just deployed leaves the skipped list.
+            # A version can be in exactly one list; anything just applied leaves the other two.
             skipped  = @($priorSkipped | Where-Object { $nowDeployed -notcontains $_ } | Sort-Object -Unique)
+            deferred = @($priorDeferred | Where-Object { $nowDeployed -notcontains $_ } | Sort-Object -Unique)
         } | ConvertTo-Json | Out-File $versionMarkerPath -Encoding utf8
         Remove-Item (Get-PendingUpdateDir $Scope) -Recurse -Force -ErrorAction SilentlyContinue
         Unregister-ScheduledTask -TaskName (Get-PendingUpdateTaskName $Scope) -Confirm:$false -ErrorAction SilentlyContinue
@@ -372,6 +374,12 @@ $installed = if ($marker) { $marker.version } else { $null }
 # than wrongly skipping work.
 $deployedBefore = if ($marker -and $marker.PSObject.Properties['deployed']) { @($marker.deployed) } else { $null }
 $skippedBefore = if ($marker -and $marker.PSObject.Properties['skipped']) { @($marker.skipped) } else { @() }
+# Deferred versions are ACCOUNTED FOR but do NOT need a DLL: the release had a payload for them and
+# staged it, but that version's Revit was still running, so the watcher task applies it once that
+# Revit exits. Leaving them out of both lists made them look new-since-last-install, so every run
+# while an update was pending re-downloaded the release and re-entered the deploy loop -- a bounded
+# dose of the same symptom this whole check exists to prevent.
+$deferredBefore = if ($marker -and $marker.PSObject.Properties['deferred']) { @($marker.deferred) } else { @() }
 
 if ($null -eq $deployedBefore) {
     $versionsNeedingDll = $detectedVersions
@@ -379,7 +387,7 @@ if ($null -eq $deployedBefore) {
 } else {
     $versionsNeedingDll = @($detectedVersions | Where-Object { $deployedBefore -contains $_ })
     $unaccountedVersions = @($detectedVersions | Where-Object {
-        ($deployedBefore -notcontains $_) -and ($skippedBefore -notcontains $_)
+        ($deployedBefore -notcontains $_) -and ($skippedBefore -notcontains $_) -and ($deferredBefore -notcontains $_)
     })
 }
 
@@ -509,6 +517,9 @@ try {
             version  = $releaseTag
             deployed = @($deployedVersions | Sort-Object -Unique)
             skipped  = @($skippedVersions | Sort-Object -Unique)
+            # Staged but not yet applied; the watcher task finishes these. Recorded so they don't
+            # read as new-since-last-install on every subsequent run.
+            deferred = @($deferredVersions | Sort-Object -Unique)
         } | ConvertTo-Json | Out-File $versionMarkerPath -Encoding utf8
     }
     if ($deferredVersions.Count -gt 0) {

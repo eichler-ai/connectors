@@ -119,9 +119,9 @@ public class WireEnumNameConverterTests
         Assert.Equal(NoAttributes.Alpha, JsonSerializer.Deserialize<NoAttributes>("\"Alpha\"", options));
     }
 
-    // The previous fallback test used a NON-aliased enum, so it passed either way and pinned
-    // nothing about aliasing. These two do: an alias is now rejected outright, which is the only
-    // correct answer given ToWire is keyed on the enum value and physically cannot hold both.
+    // The fallback test above uses a NON-aliased enum, so it passes either way and pins nothing
+    // about aliasing. This one does: an alias is now rejected outright, which is the only correct
+    // answer given ToWire is keyed on the enum value and physically cannot hold both.
     private enum AliasedMembers
     {
         [WireEnumName("canonical")] Primary = 1,
@@ -139,6 +139,10 @@ public class WireEnumNameConverterTests
 
         Assert.NotNull(ex);
         var root = ex is TypeInitializationException { InnerException: { } inner } ? inner : ex;
+        // Pin the type too, as the [Flags] test does. The two guards deliberately differ:
+        // [Flags] is NotSupportedException (a shape this converter cannot represent at all),
+        // aliasing is InvalidOperationException (a declaration this enum should not have made).
+        Assert.IsType<InvalidOperationException>(root);
         Assert.Contains(nameof(AliasedMembers.Primary), root.Message);
         Assert.Contains(nameof(AliasedMembers.Secondary), root.Message);
         // The explicit wire name must be named too -- silently discarding it was the real hazard.

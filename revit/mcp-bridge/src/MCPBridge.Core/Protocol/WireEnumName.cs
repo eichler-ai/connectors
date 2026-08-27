@@ -44,7 +44,10 @@ public sealed class WireEnumNameAttribute(string name) : Attribute
 /// round-trips comma-separated composites). Enforced at type-initialization time below
 /// rather than left to produce a confusing half-working round trip.</description></item>
 /// <item><description>ALIASED members (two names sharing one underlying value) are NOT
-/// supported, for the same reason and enforced the same way.</description></item>
+/// supported. Same posture as the <c>[Flags]</c> rule above but a DIFFERENT reason: flags
+/// are rejected because the framework round-trips comma-separated composites, whereas
+/// aliases are rejected because the value-keyed map physically cannot hold two wire names
+/// for one value.</description></item>
 /// <item><description>These enums cannot be used as DICTIONARY KEYS.
 /// <c>JsonStringEnumConverter</c> overrides <c>ReadAsPropertyName</c>/<c>WriteAsPropertyName</c>;
 /// this converter doesn't, so the base implementations throw <c>NotSupportedException</c>.
@@ -74,9 +77,11 @@ public sealed class WireEnumNameConverter<TEnum> : JsonConverter<TEnum> where TE
         {
             var value = (TEnum)field.GetValue(null)!;
 
-            // field.Name, NOT value.ToString(): ToString() returns whichever name the runtime
-            // considers canonical for that value, which for an aliased member can be a DIFFERENT
-            // member's name than the field being read here.
+            // field.Name rather than value.ToString(). MOOT in practice: the alias guard below
+            // rejects every enum in which the two could differ, so past that point they are always
+            // equal. Kept deliberately so nobody "simplifies" it back to ToString() and quietly
+            // reintroduces the dependency on which name the runtime considers canonical, should the
+            // guard ever be relaxed.
             var wireName = field.GetCustomAttribute<WireEnumNameAttribute>()?.Name ?? field.Name;
 
             // ALIASES ARE REJECTED, and this guard is the actual fix -- using field.Name above is
