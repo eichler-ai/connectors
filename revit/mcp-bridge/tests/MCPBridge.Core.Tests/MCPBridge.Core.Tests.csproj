@@ -26,10 +26,23 @@
       against net8's BCL at all, which is the half that actually broke before). They do NOT hold
       net8 RUNTIME behaviour, and no claim that they do should be made in a PR description.
 
-      In production the net8 leg runs inside Revit 2025, which hosts .NET 8. Installing the .NET 8
-      *runtime* (a runtime, NOT a second SDK ; that distinction is the whole point, see the skill's
-      "exactly one SDK" rule) is what would make the runtime half true, and should be done before
-      anyone relies on these runs as cross-runtime evidence.
+      In production the net8 leg runs inside Revit 2025, which hosts .NET 8. CLOSING THIS GAP TAKES
+      TWO STEPS, AND THE FIRST ALONE IS NOT ENOUGH ; an earlier version of this comment said it was,
+      which would have left the gap open while looking closed:
+        1. Install the .NET 8 *runtime* (Microsoft.NETCore.App + Microsoft.WindowsDesktop.App 8.x).
+           A runtime, NOT a second SDK ; that distinction is the whole point, see the skill's
+           "exactly one SDK on the VM" rule, which stays intact.
+        2. Drop RollForward below, or relax it to Disable/Minor. LatestMajor means "roll forward to
+           the highest available major EVEN IF the requested one is present", so with it left in
+           place the net8 assemblies keep executing on .NET 10 after step 1 ; same gap, now
+           invisible because you would believe it was fixed.
+      Then confirm empirically rather than assuming: `dotnet test` should report the net8 assembly
+      running on an 8.x runtime. Until both steps are done, do not cite these runs as cross-runtime
+      evidence.
+
+      What DOES already evidence the net8 leg at runtime is live testing against Revit 2025 itself,
+      which hosts .NET 8: auth (AuthRole), execute_script returning status "success"
+      (ExecutionStatus) and discovery have all round-tripped through this converter there.
     -->
     <RollForward>LatestMajor</RollForward>
     <Nullable>enable</Nullable>
