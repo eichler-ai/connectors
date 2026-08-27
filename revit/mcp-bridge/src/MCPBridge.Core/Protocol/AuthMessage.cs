@@ -10,13 +10,13 @@ namespace MCPBridge.Core.Protocol;
 /// -- modeled as a real type rather than a bare string literal so the valid vocabulary is
 /// named and discoverable, not scattered as magic strings.
 /// </summary>
-[JsonConverter(typeof(JsonStringEnumConverter))]
+[JsonConverter(typeof(WireEnumNameConverter<AuthRole>))]
 public enum AuthRole
 {
-    [JsonStringEnumMemberName("add-in")]
+    [WireEnumName("add-in")]
     AddIn,
 
-    [JsonStringEnumMemberName("agent-client")]
+    [WireEnumName("agent-client")]
     AgentClient,
 }
 

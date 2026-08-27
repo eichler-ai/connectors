@@ -8,6 +8,16 @@
 // never be routed through — execution.Manager's busy/pending/unrecoverable
 // state machine (PRD §06). Router tracks its own independent set of
 // attached instance connections rather than sharing execution.Manager's.
+//
+// Router does hold a read-only reference to internal/registry, unlike
+// execution.Manager -- a narrower, different kind of coupling (instance
+// bookkeeping, not execution state) needed once multi-version support
+// (PRD §11) made it possible for differently-versioned Revit instances to
+// be connected at once: an unscoped discovery call (no instance_id) needs
+// to know whether "any connected instance" is actually safe to pick
+// silently, and every response needs to say which Revit version it
+// reflects so results from different instances are never ambiguous to the
+// caller.
 package discovery
 
 import (
@@ -19,10 +29,22 @@ import (
 	"time"
 
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/diag"
+	"github.com/eichler-ai/connectors/revit/mcp-server/internal/registry"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/transport"
 )
 
 const source = "mcp-server.internal.discovery"
+
+// unknownRevitVersion marks a connected instance whose Revit version isn't
+// known -- either because it's attached to the Router but was never (or no
+// longer) present in the registry. It is deliberately never the empty
+// string: "" is also Go's zero value for RevitVersion, so reusing it here
+// would make "genuinely unknown" indistinguishable from "a real, empty
+// version string" wherever versionsSeen/candidates are built, and would let
+// a blank revit_version leak into the candidates list handed back to the
+// caller. A distinct, self-describing sentinel keeps those two meanings
+// apart and gives the caller something legible instead of "".
+const unknownRevitVersion = "unknown"
 
 // wireTimeout bounds every discovery wire round trip. Discovery is meant to
 // be fast/live (PRD §08: "trivially cheap live, every call" for
@@ -32,15 +54,29 @@ const wireTimeout = 15 * time.Second
 
 // Router tracks live add-in wire connections and forwards discovery calls
 // to one of them. Its own map, independent of execution.Manager's — see
-// package doc.
+// package doc. reg is read-only from this package's perspective (only ever
+// Get, never Register/Remove) — see the package doc for why Router needs it.
 type Router struct {
 	mu    sync.Mutex
 	conns map[string]*transport.Conn
+	reg   *registry.Registry
 }
 
-// NewRouter builds an empty Router.
-func NewRouter() *Router {
-	return &Router{conns: make(map[string]*transport.Conn)}
+// NewRouter builds an empty Router bound to reg. reg must not be nil: the
+// multi-version disambiguation/revit_version behavior (PRD §11) is
+// load-bearing correctness, not an optional extra, and letting it be
+// silently degraded by an absent registry (the pre-existing NewRouter(nil)
+// convention) meant its correctness rested on every call site remembering
+// to pass one. Making the dependency structural -- panic here instead --
+// means a missing registry fails loudly at construction, not silently at
+// query time. Tests that don't care about version disambiguation can pass
+// registry.New() (an empty, real registry) just as cheaply as they
+// previously passed nil.
+func NewRouter(reg *registry.Registry) *Router {
+	if reg == nil {
+		panic("discovery.NewRouter: reg must not be nil")
+	}
+	return &Router{conns: make(map[string]*transport.Conn), reg: reg}
 }
 
 // AttachInstance registers the wire connection to use for instanceID. A
@@ -72,6 +108,20 @@ func errInstanceNotFound(instanceID string) *diag.Record {
 		WithRemedy("confirm the instance_id from a recent register/reconnect, then retry")
 }
 
+// errAmbiguousInstanceVersion is returned when instance_id is omitted and
+// the connected instances span more than one Revit version -- silently
+// picking one (the pre-multi-version behavior) would hand back
+// version-specific API data with nothing telling the caller it's
+// version-specific, and non-deterministic results across repeat calls.
+// candidates lists every connected instance's id and Revit version so the
+// caller can pick one without a separate list_instances round trip.
+func errAmbiguousInstanceVersion(candidates []map[string]string) *diag.Record {
+	return diag.New(diag.SeverityError, "ambiguous_instance_version", source,
+		"instance_id was omitted, but connected instances span more than one Revit version -- discovery results would be silently version-specific").
+		WithDetail(map[string]any{"candidates": candidates}).
+		WithRemedy("pass instance_id to pick a specific instance (see the candidates list, or call list_instances)")
+}
+
 func errWireCallFailed(method string, err error) *diag.Record {
 	return diag.New(diag.SeverityError, "wire_call_failed", source,
 		fmt.Sprintf("%s did not complete: %s", method, err.Error())).
@@ -96,28 +146,50 @@ func fromRPCError(rpcErr *transport.RPCError) *diag.Record {
 // resolveConn picks the wire connection to use for instanceID: the
 // explicitly named instance if given (error if it isn't attached), else a
 // deterministic pick — sorted instance IDs, first one — from whatever's
-// currently attached (error if nothing is attached at all).
-func (r *Router) resolveConn(instanceID string) (*transport.Conn, *diag.Record) {
+// currently attached (error if nothing is attached at all), UNLESS the
+// attached instances span more than one Revit version (PRD §11), in which
+// case an unscoped call is genuinely ambiguous and errors instead of
+// silently picking one (see errAmbiguousInstanceVersion). Also returns the
+// resolved instance's own id, so callers can look up its Revit version for
+// the response without a second, separately-locked pass over the map.
+func (r *Router) resolveConn(instanceID string) (*transport.Conn, string, *diag.Record) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	if instanceID != "" {
 		conn, ok := r.conns[instanceID]
 		if !ok {
-			return nil, errInstanceNotFound(instanceID)
+			return nil, "", errInstanceNotFound(instanceID)
 		}
-		return conn, nil
+		return conn, instanceID, nil
 	}
 
 	if len(r.conns) == 0 {
-		return nil, errNoInstanceConnected()
+		return nil, "", errNoInstanceConnected()
 	}
 	ids := make([]string, 0, len(r.conns))
 	for id := range r.conns {
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
-	return r.conns[ids[0]], nil
+
+	if len(ids) > 1 {
+		versionsSeen := map[string]bool{}
+		candidates := make([]map[string]string, 0, len(ids))
+		for _, id := range ids {
+			version := unknownRevitVersion
+			if inst, ok := r.reg.Get(id); ok && inst.RevitVersion != "" {
+				version = inst.RevitVersion
+			}
+			versionsSeen[version] = true
+			candidates = append(candidates, map[string]string{"instance_id": id, "revit_version": version})
+		}
+		if len(versionsSeen) > 1 {
+			return nil, "", errAmbiguousInstanceVersion(candidates)
+		}
+	}
+
+	return r.conns[ids[0]], ids[0], nil
 }
 
 // callWire performs one JSON-RPC round trip for method against conn,
@@ -147,28 +219,40 @@ func callWire(ctx context.Context, conn *transport.Conn, method string, params m
 	return raw, nil
 }
 
-func (r *Router) call(ctx context.Context, instanceID, method string, params map[string]any) (json.RawMessage, *diag.Record) {
-	conn, drec := r.resolveConn(instanceID)
+// call resolves instanceID (or picks one, per resolveConn) and forwards the
+// wire call, also returning the resolved instance's Revit version (empty if
+// the instance isn't in the registry) so the mcpserver layer can stamp
+// every discovery response with which Revit version it reflects.
+func (r *Router) call(ctx context.Context, instanceID, method string, params map[string]any) (json.RawMessage, string, *diag.Record) {
+	conn, resolvedID, drec := r.resolveConn(instanceID)
 	if drec != nil {
-		return nil, drec
+		return nil, "", drec
 	}
-	return callWire(ctx, conn, method, params)
+	revitVersion := ""
+	if inst, ok := r.reg.Get(resolvedID); ok {
+		revitVersion = inst.RevitVersion
+	}
+	raw, callErr := callWire(ctx, conn, method, params)
+	if callErr != nil {
+		return nil, "", callErr
+	}
+	return raw, revitVersion, nil
 }
 
 // ListFunctions forwards to the add-in's list_functions wire method. See
 // PRD §08.
-func (r *Router) ListFunctions(ctx context.Context, instanceID string, params map[string]any) (json.RawMessage, *diag.Record) {
+func (r *Router) ListFunctions(ctx context.Context, instanceID string, params map[string]any) (json.RawMessage, string, *diag.Record) {
 	return r.call(ctx, instanceID, "list_functions", params)
 }
 
 // SearchFunctions forwards to the add-in's search_functions wire method. See
 // PRD §08.
-func (r *Router) SearchFunctions(ctx context.Context, instanceID string, params map[string]any) (json.RawMessage, *diag.Record) {
+func (r *Router) SearchFunctions(ctx context.Context, instanceID string, params map[string]any) (json.RawMessage, string, *diag.Record) {
 	return r.call(ctx, instanceID, "search_functions", params)
 }
 
 // DescribeFunction forwards to the add-in's describe_function wire method.
 // See PRD §08.
-func (r *Router) DescribeFunction(ctx context.Context, instanceID string, params map[string]any) (json.RawMessage, *diag.Record) {
+func (r *Router) DescribeFunction(ctx context.Context, instanceID string, params map[string]any) (json.RawMessage, string, *diag.Record) {
 	return r.call(ctx, instanceID, "describe_function", params)
 }

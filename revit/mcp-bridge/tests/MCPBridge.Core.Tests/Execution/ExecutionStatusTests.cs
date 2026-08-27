@@ -7,7 +7,9 @@ namespace MCPBridge.Core.Tests.Execution;
 /// <summary>
 /// Cross-component fix: the wire vocabulary must match the Go broker's Status type
 /// (execution.go) exactly -- lowercase, and "success" (not "completed"). See
-/// ExecutionStatus.cs's JsonStringEnumMemberName attributes.
+/// ExecutionStatus.cs's WireEnumName attributes. (The converter's own behaviour --
+/// failure modes, case-sensitivity, the [Flags] and duplicate-name guards -- is covered
+/// separately in WireEnumNameConverterTests; this file pins the vocabulary itself.)
 /// </summary>
 public class ExecutionStatusTests
 {

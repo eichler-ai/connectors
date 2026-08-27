@@ -1,7 +1,38 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net10.0-windows</TargetFramework>
+    <!-- Multi-targeted to match MCPBridge.Core itself (PRD §11). Reviewing this PR surfaced that the
+         net8.0-windows leg ; the entire reason the multi-target exists ; had zero automated coverage:
+         these tests only ever ran against the net10.0-windows build of Core. That is especially wrong
+         for WireEnumNameConverter, which exists SPECIFICALLY because net8 lacks .NET 9+'s
+         JsonStringEnumMemberNameAttribute, so the leg it was written for was the one leg never
+         exercised. `dotnet test` now runs the whole suite once per TFM, which is what makes
+         "byte-identical wire output on both legs" a claim CI can hold rather than one a live session
+         confirmed once by hand. -->
+    <TargetFrameworks>net10.0-windows;net8.0-windows</TargetFrameworks>
+    <!--
+      Multi-targeting these tests is the point: the net8.0-windows leg is the reason this project
+      multi-targets at all, and WireEnumNameConverter exists precisely because net8's BCL lacks
+      .NET 9+'s JsonStringEnumMemberNameAttribute.
+
+      There is deliberately NO RollForward property here. An earlier version set
+      RollForward=LatestMajor so the net8 assemblies could execute on the VM's only runtime (.NET
+      10) ; that made `dotnet test` pass on both legs while running .NET 10's System.Text.Json
+      TWICE, which is the one component whose net8/net10 difference this whole target exists for.
+      It validated the net8 COMPILATION and nothing about net8 runtime behaviour.
+
+      The VM now has the .NET 8 runtime (Microsoft.NETCore.App + Microsoft.WindowsDesktop.App
+      8.0.30) alongside .NET 10, so the default roll-forward policy resolves the net8 leg to a real
+      8.x runtime and the two legs genuinely differ. RuntimeTargetingTests asserts exactly that, per
+      TFM, so this cannot silently regress if anyone reintroduces RollForward.
+
+      Still exactly ONE SDK (see the skill's rule) ; a RUNTIME is not an SDK. Note the runtime
+      installs to C:\Program Files\dotnet by default while the SDK lives in C:\dotnet10, and a
+      .NET host only resolves frameworks from ITS OWN root (multi-level lookup was removed in
+      .NET 7+), so the 8.0.30 framework folders were copied under C:\dotnet10\shared to be visible
+      to the SDK's host. `dotnet ;;list-runtimes` (two hyphens ; MSB4025 forbids them in an XML
+      comment) should show both 8.0.30 and 10.0.11.
+    -->
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>latest</LangVersion>

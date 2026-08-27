@@ -1,1 +1,12 @@
 .claude/worktrees/
+
+# Build output. The Go broker is cross-compiled to a Windows binary for deployment to the dev VM
+# (GOOS=windows GOARCH=amd64), which drops a ~9MB mcp-server-win.exe straight into the source tree
+# where a `git add -A` would happily commit it. Real release artifacts come from the (still unbuilt)
+# release pipeline described in PRD §12, never from a developer's working tree.
+mcp-server-win.exe
+*.exe
+
+# .NET build output, per TFM now that the Bridge multi-targets (PRD §11).
+bin/
+obj/

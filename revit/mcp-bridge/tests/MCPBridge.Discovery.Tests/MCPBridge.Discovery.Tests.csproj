@@ -1,7 +1,14 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net10.0-windows</TargetFramework>
+    <!-- Multi-targeted for the same reason as MCPBridge.Core.Tests: the net8.0-windows leg had no
+         automated coverage at all. The discovery reflection path is TFM-sensitive in a way the rest of
+         Core isn't ; it reflects over a real assembly and its XML-doc sidecar ; so running it on both
+         legs is worth more here than almost anywhere else. -->
+    <TargetFrameworks>net10.0-windows;net8.0-windows</TargetFrameworks>
+    <!-- No RollForward, deliberately ; see MCPBridge.Core.Tests.csproj for the full reasoning. The
+         VM has the .NET 8 runtime installed, so this leg resolves to a real 8.x runtime rather than
+         executing on .NET 10 and quietly testing the same runtime twice. -->
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>latest</LangVersion>

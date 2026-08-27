@@ -65,11 +65,12 @@ if (-not $ScriptPath) {
     $BootstrapCreated = $true
 }
 
-# Only 2027 ships a build today (PRD §11: it's the only version with a verified .NET requirement,
-# net10.0-windows). The detection/deploy loop below is written to cover every year in this list, not
-# just the first one, specifically so adding 2025/2026 (Phase 6, PRD §15) is "add a year + a matching
-# addin-<year>/ build to the release payload," not a rewrite of this script.
-$SupportedRevitVersions = @('2027')
+# 2025 and 2027 ship builds today (PRD §11: both have verified .NET requirements -- net8.0-windows and
+# net10.0-windows respectively). 2026 remains unverified and isn't in this list yet. The detection/deploy
+# loop below is written to cover every year in this list, not just the first one, specifically so adding
+# 2026 (Phase 6, PRD §15) once verified is "add a year + a matching addin-<year>/ build to the release
+# payload," not a rewrite of this script.
+$SupportedRevitVersions = @('2025', '2027')
 
 function Get-AddinsDir([string]$RevitVersion, [string]$InstallScope) {
     if ($InstallScope -eq 'User') {
@@ -109,9 +110,32 @@ function Get-RevitProcess([string]$RevitVersion) {
     }
 }
 
+# Returns $true only if every passed process is ACTUALLY gone afterwards. The return value matters:
+# CloseMainWindow() is a request, not a kill, and it routinely fails to close Revit -- the user hits
+# Cancel on a "save changes?" prompt, a modal dialog owns the UI thread, or the process simply has no
+# main window to send WM_CLOSE to (CloseMainWindow returns false and Wait-Process then just burns its
+# full timeout). This used to return nothing and every caller assumed success, so a failed close fell
+# straight through to Copy-Item over a still-running Revit's own loaded DLLs: either an abort partway
+# through the deploy (files are locked, and $ErrorActionPreference='Stop'), or -- worse, when nothing
+# happened to be locked -- a cheerful "installed for Revit <version>" for a version that is still
+# running the OLD code and will keep doing so until it restarts. Confirmed live: a -Silent install
+# reported success for a running 2027 whose process was untouched. Callers must now check this and
+# route a failure into the deferred-update path below, which exists for exactly this situation.
 function Stop-RevitProcessGracefully($Process) {
-    $Process | ForEach-Object { $_.CloseMainWindow() | Out-Null }
+    # CloseMainWindow() THROWS ("Process has exited, so the requested information is not available")
+    # if the process is already gone -- a real race, since the user is perfectly likely to close Revit
+    # themselves while this script is prompting them about it. With $ErrorActionPreference='Stop' that
+    # exception is terminating and would abort the whole install, for the one outcome we actually
+    # wanted. Per-process try/catch: a process that's already gone is a success, not a failure.
+    foreach ($p in $Process) {
+        try { $p.CloseMainWindow() | Out-Null } catch { }
+    }
     $Process | Wait-Process -Timeout 30 -ErrorAction SilentlyContinue
+    foreach ($p in $Process) {
+        try { $p.Refresh() } catch { continue }
+        if (-not $p.HasExited) { return $false }
+    }
+    return $true
 }
 
 # --- Deferred updates -------------------------------------------------------------------------------
@@ -240,7 +264,23 @@ if ($ApplyPendingUpdate) {
     if ($stillPending.Count -gt 0) {
         @{ version = $manifest.version; versions = $stillPending } | ConvertTo-Json | Out-File $manifestPath -Encoding utf8
     } else {
-        @{ version = $manifest.version } | ConvertTo-Json | Out-File $versionMarkerPath -Encoding utf8
+        # Carry `deployed`/`skipped` forward (see the idempotency check and the marker write further
+        # down). This path completes an install whose deferred half has now landed, so the versions it
+        # just applied join `deployed` -- they now genuinely have files on disk, which is exactly what
+        # that field is asked about. Dropping these fields would silently send the next run back to the
+        # old check-every-detected-version behaviour.
+        $priorMarker = if (Test-Path $versionMarkerPath) { Get-Content $versionMarkerPath | ConvertFrom-Json } else { $null }
+        $priorDeployed = if ($priorMarker -and $priorMarker.PSObject.Properties['deployed']) { @($priorMarker.deployed) } else { @() }
+        $priorSkipped = if ($priorMarker -and $priorMarker.PSObject.Properties['skipped']) { @($priorMarker.skipped) } else { @() }
+        $priorDeferred = if ($priorMarker -and $priorMarker.PSObject.Properties['deferred']) { @($priorMarker.deferred) } else { @() }
+        $nowDeployed = @($priorDeployed + @($manifest.versions) | Sort-Object -Unique)
+        @{
+            version  = $manifest.version
+            deployed = $nowDeployed
+            # A version can be in exactly one list; anything just applied leaves the other two.
+            skipped  = @($priorSkipped | Where-Object { $nowDeployed -notcontains $_ } | Sort-Object -Unique)
+            deferred = @($priorDeferred | Where-Object { $nowDeployed -notcontains $_ } | Sort-Object -Unique)
+        } | ConvertTo-Json | Out-File $versionMarkerPath -Encoding utf8
         Remove-Item (Get-PendingUpdateDir $Scope) -Recurse -Force -ErrorAction SilentlyContinue
         Unregister-ScheduledTask -TaskName (Get-PendingUpdateTaskName $Scope) -Confirm:$false -ErrorAction SilentlyContinue
     }
@@ -309,10 +349,53 @@ if ($LocalPackagePath) {
 # DLL is missing (deleted by hand, a failed prior run, AV quarantine, whatever) must trigger a
 # repair, not a silent no-op that leaves a broken install unfixed forever -- see PRD §12
 # "Self-upgrade" for the three-outcome reasoning this implements.
-$installed = if (Test-Path $versionMarkerPath) { (Get-Content $versionMarkerPath | ConvertFrom-Json).version } else { $null }
-$allDllsPresent = -not ($detectedVersions | Where-Object {
-    -not (Test-Path (Join-Path (Get-AddinsDir $_ $Scope) 'MCPBridge.AddIn.dll'))
-})
+$marker = if (Test-Path $versionMarkerPath) { Get-Content $versionMarkerPath | ConvertFrom-Json } else { $null }
+$installed = if ($marker) { $marker.version } else { $null }
+
+# Only require a DLL for versions the LAST INSTALL ACTUALLY COVERED. Checking every detected version
+# is wrong whenever a release ships no `addin-<year>/` payload for one of them: the deploy loop below
+# skips such a version by design, so its DLL never appears, so this check could never become true, so
+# the "already up to date" short-circuit below could never fire. Every subsequent run would then
+# re-download the release and re-enter the deploy loop -- which for a running Revit prompts the user
+# or, under -Silent, force-closes it. PRD §12's self-upgrade path would be interrupting a perfectly
+# healthy install on every invocation. `install.md` notes the release pipeline doesn't exist yet, so
+# the first releases shipping 2027-only while 2025 is also installed is a realistic first encounter.
+#
+# TWO SEPARATE QUESTIONS, so two separate sets. Conflating them into one `covered` list was the
+# first attempt at this fix and it did not work at all: a SKIPPED version has, by definition, no DLL,
+# so putting it in the set that must have a DLL left the check false forever and reproduced the exact
+# bug it was meant to fix.
+#   1. "Is this version new since the last install?" -> deployed UNION skipped. Anything detected but
+#      in neither was installed after that run (e.g. the user added Revit 2025 later) and must NOT
+#      short-circuit: only a download can reveal whether a payload exists for it.
+#   2. "Must this version have a DLL on disk?" -> deployed ONLY. A skipped version legitimately has
+#      no files, and demanding them is what broke this.
+# Markers predating these fields have neither, so fall back to the old all-detected behaviour rather
+# than wrongly skipping work.
+$deployedBefore = if ($marker -and $marker.PSObject.Properties['deployed']) { @($marker.deployed) } else { $null }
+$skippedBefore = if ($marker -and $marker.PSObject.Properties['skipped']) { @($marker.skipped) } else { @() }
+# Deferred versions are ACCOUNTED FOR but do NOT need a DLL: the release had a payload for them and
+# staged it, but that version's Revit was still running, so the watcher task applies it once that
+# Revit exits. Leaving them out of both lists made them look new-since-last-install, so every run
+# while an update was pending re-downloaded the release and re-entered the deploy loop -- a bounded
+# dose of the same symptom this whole check exists to prevent.
+$deferredBefore = if ($marker -and $marker.PSObject.Properties['deferred']) { @($marker.deferred) } else { @() }
+
+if ($null -eq $deployedBefore) {
+    $versionsNeedingDll = $detectedVersions
+    $unaccountedVersions = @()
+} else {
+    $versionsNeedingDll = @($detectedVersions | Where-Object { $deployedBefore -contains $_ })
+    $unaccountedVersions = @($detectedVersions | Where-Object {
+        ($deployedBefore -notcontains $_) -and ($skippedBefore -notcontains $_) -and ($deferredBefore -notcontains $_)
+    })
+}
+
+$allDllsPresent =
+    ($unaccountedVersions.Count -eq 0) -and
+    -not ($versionsNeedingDll | Where-Object {
+        -not (Test-Path (Join-Path (Get-AddinsDir $_ $Scope) 'MCPBridge.AddIn.dll'))
+    })
 
 if (-not $LocalPackagePath -and $installed -eq $releaseTag -and $allDllsPresent) {
     if (-not $Silent) { Write-Host "Revit MCP Bridge is already up to date ($installed)." }
@@ -369,20 +452,36 @@ try {
 
         $proc = Get-RevitProcess $version
         if ($proc) {
+            # Three ways this version can end up still running, all of which must reach the SAME
+            # deferred-update path: the user declines to close it, a -Silent force-close fails, or an
+            # accepted interactive close fails. Only the first was handled before, so a failed close
+            # fell through to the deploy below and either aborted on locked DLLs or reported success
+            # for a version still running the old code. See Stop-RevitProcessGracefully's own comment.
+            $defer = $false
             if ($Silent) {
-                Stop-RevitProcessGracefully $proc
+                $defer = -not (Stop-RevitProcessGracefully $proc)
             } else {
                 $answer = Read-Host "Revit $version is running and must close to update it. Close it now? [Y/n]"
                 if ($answer -eq 'n') {
-                    $pendingDir = Join-Path (Get-PendingUpdateDir $Scope) "addin-$version"
-                    New-Item -ItemType Directory -Force -Path $pendingDir | Out-Null
-                    Copy-Item "$payloadDir\*" $pendingDir -Force -Recurse
-                    Write-Host "Revit $version is still running -- it'll finish updating automatically as soon as you close it."
-                    $deferredVersions += $version
-                    $deferredProcessIds += @($proc | ForEach-Object { $_.Id })
-                    continue
+                    $defer = $true
+                } else {
+                    $defer = -not (Stop-RevitProcessGracefully $proc)
+                    if ($defer) {
+                        Write-Host "Revit $version didn't close -- it may have an unsaved-changes prompt or another dialog open."
+                    }
                 }
-                Stop-RevitProcessGracefully $proc
+            }
+
+            if ($defer) {
+                $pendingDir = Join-Path (Get-PendingUpdateDir $Scope) "addin-$version"
+                New-Item -ItemType Directory -Force -Path $pendingDir | Out-Null
+                Copy-Item "$payloadDir\*" $pendingDir -Force -Recurse
+                if (-not $Silent) {
+                    Write-Host "Revit $version is still running -- it'll finish updating automatically as soon as you close it."
+                }
+                $deferredVersions += $version
+                $deferredProcessIds += @($proc | ForEach-Object { $_.Id })
+                continue
             }
         }
 
@@ -410,7 +509,18 @@ try {
     # Only mark the release current once at least one version was actually fully deployed -- a
     # version that's only deferred isn't "installed" yet, it's pending (see below).
     if ($deployedVersions.Count -gt 0) {
-        @{ version = $releaseTag } | ConvertTo-Json | Out-File $versionMarkerPath -Encoding utf8
+        # Recorded SEPARATELY, not merged: the idempotency check above needs `deployed` to know which
+        # versions must have a DLL on disk, and `deployed` + `skipped` to know which versions this
+        # release accounted for at all. Merging them into one list is what made the first attempt at
+        # this fix a no-op -- see the comment there.
+        @{
+            version  = $releaseTag
+            deployed = @($deployedVersions | Sort-Object -Unique)
+            skipped  = @($skippedVersions | Sort-Object -Unique)
+            # Staged but not yet applied; the watcher task finishes these. Recorded so they don't
+            # read as new-since-last-install on every subsequent run.
+            deferred = @($deferredVersions | Sort-Object -Unique)
+        } | ConvertTo-Json | Out-File $versionMarkerPath -Encoding utf8
     }
     if ($deferredVersions.Count -gt 0) {
         $manifestPath = Get-PendingUpdateManifestPath $Scope

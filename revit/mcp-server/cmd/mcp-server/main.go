@@ -391,9 +391,9 @@ func runPrimary(ctx context.Context, bindAddr string, port int, dataDir string, 
 	mcpServer := mcp.NewServer(&mcp.Implementation{Name: serverName, Version: version}, nil)
 	execMgr := execution.NewManager()
 	mcpserver.Register(mcpServer, execMgr)
-	discoveryRouter := discovery.NewRouter()
-	mcpserver.RegisterDiscovery(mcpServer, discoveryRouter)
 	reg := registry.New()
+	discoveryRouter := discovery.NewRouter(reg)
+	mcpserver.RegisterDiscovery(mcpServer, discoveryRouter)
 	mcpserver.RegisterInstances(mcpServer, reg, execMgr)
 
 	b := &broker.Broker{

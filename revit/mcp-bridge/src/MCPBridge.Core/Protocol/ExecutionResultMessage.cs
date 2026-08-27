@@ -153,10 +153,10 @@ public static class ExecutionResultMessage
     private static string FormatReturnValue(object value) => value as string ?? value.ToString() ?? "";
 
     // Deliberately a separate small mapping rather than reusing ExecutionStatus's own
-    // [JsonStringEnumMemberName] wire values via JsonSerializer -- "busy" needs to share this same wire
+    // [WireEnumName] wire values via JsonSerializer -- "busy" needs to share this same wire
     // vocabulary (see the class doc comment) but is deliberately not a member of ExecutionStatus, so a
     // single ResultDto.Status : string field (rather than ExecutionStatus) is what lets one type cover
-    // both. Keep in sync with ExecutionStatus's [JsonStringEnumMemberName] attributes if either changes.
+    // both. Keep in sync with ExecutionStatus's [WireEnumName] attributes if either changes.
     private static string ToWireStatus(ExecutionStatus status) => status switch
     {
         ExecutionStatus.Pending => "pending",

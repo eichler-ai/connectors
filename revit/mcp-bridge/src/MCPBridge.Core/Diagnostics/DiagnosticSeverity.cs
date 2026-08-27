@@ -1,4 +1,5 @@
 using System.Text.Json.Serialization;
+using MCPBridge.Core.Protocol;
 
 namespace MCPBridge.Core.Diagnostics;
 
@@ -8,18 +9,18 @@ namespace MCPBridge.Core.Diagnostics;
 /// exactly -- a diagnostic record can be authored by either side and passed through
 /// verbatim to the agent-facing response, so the two sides' spelling must agree.
 /// </summary>
-[JsonConverter(typeof(JsonStringEnumConverter))]
+[JsonConverter(typeof(WireEnumNameConverter<DiagnosticSeverity>))]
 public enum DiagnosticSeverity
 {
-    [JsonStringEnumMemberName("debug")]
+    [WireEnumName("debug")]
     Debug,
 
-    [JsonStringEnumMemberName("info")]
+    [WireEnumName("info")]
     Info,
 
-    [JsonStringEnumMemberName("warning")]
+    [WireEnumName("warning")]
     Warning,
 
-    [JsonStringEnumMemberName("error")]
+    [WireEnumName("error")]
     Error,
 }

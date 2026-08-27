@@ -18,7 +18,7 @@ const discoverySource = "mcp-server.internal.mcpserver"
 
 // ListFunctionsIn is the input schema for the list_functions tool.
 type ListFunctionsIn struct {
-	InstanceID string `json:"instance_id,omitempty" jsonschema:"instance_id of the target Revit instance; if omitted, any currently-connected instance is used"`
+	InstanceID string `json:"instance_id,omitempty" jsonschema:"instance_id of the target Revit instance; if omitted, any connected instance is used as long as all connected instances share one Revit version -- otherwise this errors and lists the candidates, since results would silently be version-specific"`
 	Namespace  string `json:"namespace,omitempty" jsonschema:"omit for the namespace list; provide alone for the type list in that namespace; provide with type_name for that type's member list, e.g. Autodesk.Revit.DB"`
 	TypeName   string `json:"type_name,omitempty" jsonschema:"scope to one type within namespace (namespace is required alongside this) -- bare name (Wall) or fully-qualified (Autodesk.Revit.DB.Wall), both work"`
 	Cursor     string `json:"cursor,omitempty" jsonschema:"opaque pagination cursor echoed back from a prior response's next_cursor"`
@@ -27,7 +27,7 @@ type ListFunctionsIn struct {
 
 // SearchFunctionsIn is the input schema for the search_functions tool.
 type SearchFunctionsIn struct {
-	InstanceID string `json:"instance_id,omitempty" jsonschema:"instance_id of the target Revit instance; if omitted, any currently-connected instance is used"`
+	InstanceID string `json:"instance_id,omitempty" jsonschema:"instance_id of the target Revit instance; if omitted, any connected instance is used as long as all connected instances share one Revit version -- otherwise this errors and lists the candidates, since results would silently be version-specific"`
 	Query      string `json:"query" jsonschema:"fuzzy-matched against member names and XML-doc summary text"`
 	Namespace  string `json:"namespace,omitempty" jsonschema:"scope the search to one namespace, e.g. Autodesk.Revit.DB"`
 	Cursor     string `json:"cursor,omitempty" jsonschema:"opaque pagination cursor echoed back from a prior response's next_cursor"`
@@ -36,7 +36,7 @@ type SearchFunctionsIn struct {
 
 // DescribeFunctionIn is the input schema for the describe_function tool.
 type DescribeFunctionIn struct {
-	InstanceID    string `json:"instance_id,omitempty" jsonschema:"instance_id of the target Revit instance; if omitted, any currently-connected instance is used"`
+	InstanceID    string `json:"instance_id,omitempty" jsonschema:"instance_id of the target Revit instance; if omitted, any connected instance is used as long as all connected instances share one Revit version -- otherwise this errors and lists the candidates, since results would silently be version-specific"`
 	Member        string `json:"member" jsonschema:"fully-qualified Type.Member, e.g. Autodesk.Revit.DB.Document.Delete"`
 	OverloadIndex *int   `json:"overload_index,omitempty" jsonschema:"pick one specific overload by index, when member has more than one"`
 	MemberID      string `json:"member_id,omitempty" jsonschema:"an exact XML-doc-id, e.g. M:Autodesk.Revit.DB.Document.Delete(Autodesk.Revit.DB.ElementId), to pick one specific overload"`
@@ -87,9 +87,16 @@ type ListFunctionsOut struct {
 	// the no-args Namespaces tier, which has no single namespace to name).
 	Namespace string `json:"namespace,omitempty"`
 
-	NextCursor  string       `json:"next_cursor,omitempty"`
-	TotalScoped int          `json:"total_scoped,omitempty"`
-	Error       *diag.Record `json:"error,omitempty"`
+	NextCursor  string `json:"next_cursor,omitempty"`
+	TotalScoped int    `json:"total_scoped,omitempty"`
+
+	// RevitVersion names which connected instance's RevitAPI.dll/.xml this
+	// response reflects (PRD §11) -- set from the broker's own instance
+	// registry, not round-tripped through the add-in's own response, so a
+	// caller that omitted instance_id can tell which version actually
+	// answered without a separate list_instances call. Empty on error.
+	RevitVersion string       `json:"revit_version,omitempty"`
+	Error        *diag.Record `json:"error,omitempty"`
 }
 
 // SearchFunctionsOut is the output schema for the search_functions tool.
@@ -97,6 +104,7 @@ type SearchFunctionsOut struct {
 	Results      []Member     `json:"results,omitempty"`
 	NextCursor   string       `json:"next_cursor,omitempty"`
 	TotalMatched int          `json:"total_matched,omitempty"`
+	RevitVersion string       `json:"revit_version,omitempty"`
 	Error        *diag.Record `json:"error,omitempty"`
 }
 
@@ -106,8 +114,9 @@ type SearchFunctionsOut struct {
 // through as a flexible map rather than a single fixed struct, plus Error
 // for the failure case.
 type DescribeFunctionOut struct {
-	Result map[string]any `json:"result,omitempty"`
-	Error  *diag.Record   `json:"error,omitempty"`
+	Result       map[string]any `json:"result,omitempty"`
+	RevitVersion string         `json:"revit_version,omitempty"`
+	Error        *diag.Record   `json:"error,omitempty"`
 }
 
 // RegisterDiscovery adds list_functions, search_functions, and
@@ -130,7 +139,7 @@ func RegisterDiscovery(s *mcp.Server, r *discovery.Router) {
 		if in.PageSize > 0 {
 			params["page_size"] = in.PageSize
 		}
-		raw, drec := r.ListFunctions(ctx, in.InstanceID, params)
+		raw, revitVersion, drec := r.ListFunctions(ctx, in.InstanceID, params)
 		if drec != nil {
 			out := ListFunctionsOut{Error: drec}
 			return errorCallToolResultFor(out), out, nil
@@ -140,6 +149,7 @@ func RegisterDiscovery(s *mcp.Server, r *discovery.Router) {
 			out = ListFunctionsOut{Error: errWireResponseMalformed("list_functions", err)}
 			return errorCallToolResultFor(out), out, nil
 		}
+		out.RevitVersion = revitVersion
 		return nil, out, nil
 	})
 
@@ -157,7 +167,7 @@ func RegisterDiscovery(s *mcp.Server, r *discovery.Router) {
 		if in.TopN > 0 {
 			params["top_n"] = in.TopN
 		}
-		raw, drec := r.SearchFunctions(ctx, in.InstanceID, params)
+		raw, revitVersion, drec := r.SearchFunctions(ctx, in.InstanceID, params)
 		if drec != nil {
 			out := SearchFunctionsOut{Error: drec}
 			return errorCallToolResultFor(out), out, nil
@@ -167,6 +177,7 @@ func RegisterDiscovery(s *mcp.Server, r *discovery.Router) {
 			out = SearchFunctionsOut{Error: errWireResponseMalformed("search_functions", err)}
 			return errorCallToolResultFor(out), out, nil
 		}
+		out.RevitVersion = revitVersion
 		return nil, out, nil
 	})
 
@@ -181,7 +192,7 @@ func RegisterDiscovery(s *mcp.Server, r *discovery.Router) {
 		if in.MemberID != "" {
 			params["member_id"] = in.MemberID
 		}
-		raw, drec := r.DescribeFunction(ctx, in.InstanceID, params)
+		raw, revitVersion, drec := r.DescribeFunction(ctx, in.InstanceID, params)
 		if drec != nil {
 			out := DescribeFunctionOut{Error: drec}
 			return errorCallToolResultFor(out), out, nil
@@ -191,7 +202,7 @@ func RegisterDiscovery(s *mcp.Server, r *discovery.Router) {
 			out := DescribeFunctionOut{Error: errWireResponseMalformed("describe_function", err)}
 			return errorCallToolResultFor(out), out, nil
 		}
-		return nil, DescribeFunctionOut{Result: result}, nil
+		return nil, DescribeFunctionOut{Result: result, RevitVersion: revitVersion}, nil
 	})
 }
 
