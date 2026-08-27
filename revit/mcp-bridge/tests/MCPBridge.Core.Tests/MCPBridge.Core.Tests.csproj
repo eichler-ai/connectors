@@ -18,12 +18,18 @@
       ; which would leave the leg untested for a second reason after we just multi-targeted to fix the
       first. RollForward lets the net8-compiled assemblies execute on the installed .NET 10 runtime.
 
-      FIDELITY CAVEAT, stated plainly: this validates the net8 COMPILATION (which is what actually
-      differs ; WireEnumNameConverter exists precisely because net8's BCL lacks .NET 9+'s
-      JsonStringEnumMemberNameAttribute), not net8 RUNTIME behaviour. In production the net8 leg runs
-      inside Revit 2025, which hosts .NET 8. Installing the .NET 8 *runtime* (a runtime, NOT a second
-      SDK ; that distinction is the whole point) would close the remaining gap and is worth doing if
-      any runtime-level divergence is ever suspected.
+      FIDELITY CAVEAT, and it is sharper than "runtime differences are unlikely": under RollForward
+      the net8-COMPILED assemblies execute against .NET 10's System.Text.Json ; and System.Text.Json
+      is the single component whose net8/net10 difference is the entire reason WireEnumNameConverter
+      exists. So WireEnumNameConverterTests "passing on both TFMs" is, at runtime, the same STJ twice.
+      What these runs genuinely hold is the net8 COMPILATION (that the source compiles and links
+      against net8's BCL at all, which is the half that actually broke before). They do NOT hold
+      net8 RUNTIME behaviour, and no claim that they do should be made in a PR description.
+
+      In production the net8 leg runs inside Revit 2025, which hosts .NET 8. Installing the .NET 8
+      *runtime* (a runtime, NOT a second SDK ; that distinction is the whole point, see the skill's
+      "exactly one SDK" rule) is what would make the runtime half true, and should be done before
+      anyone relies on these runs as cross-runtime evidence.
     -->
     <RollForward>LatestMajor</RollForward>
     <Nullable>enable</Nullable>

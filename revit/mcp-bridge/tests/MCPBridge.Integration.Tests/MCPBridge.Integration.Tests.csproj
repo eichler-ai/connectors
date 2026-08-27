@@ -1,12 +1,17 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <!-- Deliberately NOT multi-targeted, unlike the other two test projects: this one references
-         MCPBridge.AddIn, whose net8.0-windows leg links against Revit 2025's own assemblies, so a
-         net8 build here would need a 2025 install present just to compile an empty shell. It is a
-         tier-2 project that needs a live Revit session anyway (see the revit-connector-development
-         skill) and is not part of the `dotnet test` dev loop, so multi-targeting it would add a build
-         dependency without adding any coverage. -->
+    <!-- Deliberately NOT multi-targeted, unlike the other two test projects. The reason is ONLY the
+         second one below ; the first would not distinguish this project at all:
+           - NOT "it would need a Revit 2025 install to build". True, but equally true of
+             MCPBridge.Core.Tests and MCPBridge.Discovery.Tests now that they multi-target: both
+             reference MCPBridge.RevitAdapter, whose net8 leg hard-codes a HintPath into
+             "C:\Program Files\Autodesk\Revit 2025". The dev-loop `dotnet test` genuinely gained a
+             Revit-2025 build dependency in this PR; that is a real cost, accepted knowingly, not a
+             property unique to this project.
+           - It is a tier-2 project (see the revit-connector-development skill): an empty shell that
+             needs a live Revit session, and is not run in the `dotnet test` dev loop at all. A second
+             TFM here would add build surface for a suite nothing executes. -->
     <TargetFramework>net10.0-windows</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>

@@ -62,9 +62,11 @@ public class WireEnumNameConverterTests
     [Theory]
     [InlineData("2")]      // an ordinal -- JsonStringEnumConverter WOULD have accepted this
     [InlineData("true")]
-    [InlineData("null")]
     [InlineData("{}")]
     [InlineData("[]")]
+    // "null" deliberately absent: for a non-nullable struct converter STJ short-circuits
+    // JsonTokenType.Null before Read is entered, so that row would pass with or without the
+    // guard below and would test the framework rather than this code.
     public void Read_NonStringToken_ThrowsJsonException(string json)
     {
         // The regression this pins: reader.GetString() throws InvalidOperationException,
@@ -117,6 +119,32 @@ public class WireEnumNameConverterTests
         Assert.Equal(NoAttributes.Alpha, JsonSerializer.Deserialize<NoAttributes>("\"Alpha\"", options));
     }
 
+    // The previous fallback test used a NON-aliased enum, so it passed either way and pinned
+    // nothing about aliasing. These two do: an alias is now rejected outright, which is the only
+    // correct answer given ToWire is keyed on the enum value and physically cannot hold both.
+    private enum AliasedMembers
+    {
+        [WireEnumName("canonical")] Primary = 1,
+        Secondary = 1,
+    }
+
+    [Fact]
+    public void AliasedMembers_AreRejectedNamingBothMembers()
+    {
+        var ex = Record.Exception(() =>
+        {
+            var options = new JsonSerializerOptions { Converters = { new WireEnumNameConverter<AliasedMembers>() } };
+            JsonSerializer.Serialize(AliasedMembers.Primary, options);
+        });
+
+        Assert.NotNull(ex);
+        var root = ex is TypeInitializationException { InnerException: { } inner } ? inner : ex;
+        Assert.Contains(nameof(AliasedMembers.Primary), root.Message);
+        Assert.Contains(nameof(AliasedMembers.Secondary), root.Message);
+        // The explicit wire name must be named too -- silently discarding it was the real hazard.
+        Assert.Contains("canonical", root.Message);
+    }
+
     private enum DuplicateWireNames
     {
         [WireEnumName("same")] First,
@@ -129,9 +157,15 @@ public class WireEnumNameConverterTests
         // The point of the fix: ToDictionary's bare "An item with the same key has already
         // been added" named neither member, and the CLR caches the type-init failure, so a
         // one-character typo became an unexplained protocol outage for the whole process.
-        var options = new JsonSerializerOptions { Converters = { new WireEnumNameConverter<DuplicateWireNames>() } };
-
-        var ex = Record.Exception(() => JsonSerializer.Serialize(DuplicateWireNames.First, options));
+        var ex = Record.Exception(() =>
+        {
+            // Constructed INSIDE the lambda on purpose: WireEnumNameConverter<T> has no static
+            // constructor, so it is beforefieldinit and the CLR may run the field initialisers at
+            // the `new` rather than at first static-field access. Outside the lambda that would
+            // throw before Record.Exception could catch it, failing the test for the wrong reason.
+            var options = new JsonSerializerOptions { Converters = { new WireEnumNameConverter<DuplicateWireNames>() } };
+            JsonSerializer.Serialize(DuplicateWireNames.First, options);
+        });
 
         Assert.NotNull(ex);
         var root = ex is TypeInitializationException { InnerException: { } inner } ? inner : ex;
@@ -146,9 +180,12 @@ public class WireEnumNameConverterTests
     [Fact]
     public void FlagsEnum_IsRejectedUpFrontRatherThanHalfWorking()
     {
-        var options = new JsonSerializerOptions { Converters = { new WireEnumNameConverter<FlagsShaped>() } };
-
-        var ex = Record.Exception(() => JsonSerializer.Serialize(FlagsShaped.A | FlagsShaped.B, options));
+        var ex = Record.Exception(() =>
+        {
+            // Inside the lambda for the beforefieldinit reason described above.
+            var options = new JsonSerializerOptions { Converters = { new WireEnumNameConverter<FlagsShaped>() } };
+            JsonSerializer.Serialize(FlagsShaped.A | FlagsShaped.B, options);
+        });
 
         Assert.NotNull(ex);
         var root = ex is TypeInitializationException { InnerException: { } inner } ? inner : ex;

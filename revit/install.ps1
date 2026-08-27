@@ -264,17 +264,20 @@ if ($ApplyPendingUpdate) {
     if ($stillPending.Count -gt 0) {
         @{ version = $manifest.version; versions = $stillPending } | ConvertTo-Json | Out-File $manifestPath -Encoding utf8
     } else {
-        # Carry `covered` forward (see the idempotency check and the marker write further down). This
-        # path completes an install whose deferred half has now landed, so the versions it just applied
-        # are covered too. Dropping the field here would silently send the next run back to the old
-        # check-every-detected-version behaviour.
-        $priorCovered = if (Test-Path $versionMarkerPath) {
-            $m = Get-Content $versionMarkerPath | ConvertFrom-Json
-            if ($m.PSObject.Properties['covered']) { @($m.covered) } else { @() }
-        } else { @() }
+        # Carry `deployed`/`skipped` forward (see the idempotency check and the marker write further
+        # down). This path completes an install whose deferred half has now landed, so the versions it
+        # just applied join `deployed` -- they now genuinely have files on disk, which is exactly what
+        # that field is asked about. Dropping these fields would silently send the next run back to the
+        # old check-every-detected-version behaviour.
+        $priorMarker = if (Test-Path $versionMarkerPath) { Get-Content $versionMarkerPath | ConvertFrom-Json } else { $null }
+        $priorDeployed = if ($priorMarker -and $priorMarker.PSObject.Properties['deployed']) { @($priorMarker.deployed) } else { @() }
+        $priorSkipped = if ($priorMarker -and $priorMarker.PSObject.Properties['skipped']) { @($priorMarker.skipped) } else { @() }
+        $nowDeployed = @($priorDeployed + @($manifest.versions) | Sort-Object -Unique)
         @{
-            version = $manifest.version
-            covered = @($priorCovered + @($manifest.versions) | Sort-Object -Unique)
+            version  = $manifest.version
+            deployed = $nowDeployed
+            # A version can't be both; anything just deployed leaves the skipped list.
+            skipped  = @($priorSkipped | Where-Object { $nowDeployed -notcontains $_ } | Sort-Object -Unique)
         } | ConvertTo-Json | Out-File $versionMarkerPath -Encoding utf8
         Remove-Item (Get-PendingUpdateDir $Scope) -Recurse -Force -ErrorAction SilentlyContinue
         Unregister-ScheduledTask -TaskName (Get-PendingUpdateTaskName $Scope) -Confirm:$false -ErrorAction SilentlyContinue
@@ -356,15 +359,32 @@ $installed = if ($marker) { $marker.version } else { $null }
 # healthy install on every invocation. `install.md` notes the release pipeline doesn't exist yet, so
 # the first releases shipping 2027-only while 2025 is also installed is a realistic first encounter.
 #
-# `covered` = versions the marker's release deployed to, PLUS versions it explicitly had no payload
-# for. Anything detected but in NEITHER list is new since that install (e.g. the user installed Revit
-# 2025 afterwards) and must NOT short-circuit -- that genuinely needs a download to find out whether
-# a payload exists for it. Markers written before this field existed have no `covered`, so fall back
-# to the old all-detected behaviour rather than wrongly skipping work.
-$coveredVersions = if ($marker -and $marker.PSObject.Properties['covered']) { @($marker.covered) } else { $detectedVersions }
-$versionsNeedingDll = $detectedVersions | Where-Object { $coveredVersions -contains $_ }
+# TWO SEPARATE QUESTIONS, so two separate sets. Conflating them into one `covered` list was the
+# first attempt at this fix and it did not work at all: a SKIPPED version has, by definition, no DLL,
+# so putting it in the set that must have a DLL left the check false forever and reproduced the exact
+# bug it was meant to fix.
+#   1. "Is this version new since the last install?" -> deployed UNION skipped. Anything detected but
+#      in neither was installed after that run (e.g. the user added Revit 2025 later) and must NOT
+#      short-circuit: only a download can reveal whether a payload exists for it.
+#   2. "Must this version have a DLL on disk?" -> deployed ONLY. A skipped version legitimately has
+#      no files, and demanding them is what broke this.
+# Markers predating these fields have neither, so fall back to the old all-detected behaviour rather
+# than wrongly skipping work.
+$deployedBefore = if ($marker -and $marker.PSObject.Properties['deployed']) { @($marker.deployed) } else { $null }
+$skippedBefore = if ($marker -and $marker.PSObject.Properties['skipped']) { @($marker.skipped) } else { @() }
+
+if ($null -eq $deployedBefore) {
+    $versionsNeedingDll = $detectedVersions
+    $unaccountedVersions = @()
+} else {
+    $versionsNeedingDll = @($detectedVersions | Where-Object { $deployedBefore -contains $_ })
+    $unaccountedVersions = @($detectedVersions | Where-Object {
+        ($deployedBefore -notcontains $_) -and ($skippedBefore -notcontains $_)
+    })
+}
+
 $allDllsPresent =
-    -not ($detectedVersions | Where-Object { $coveredVersions -notcontains $_ }) -and
+    ($unaccountedVersions.Count -eq 0) -and
     -not ($versionsNeedingDll | Where-Object {
         -not (Test-Path (Join-Path (Get-AddinsDir $_ $Scope) 'MCPBridge.AddIn.dll'))
     })
@@ -481,14 +501,14 @@ try {
     # Only mark the release current once at least one version was actually fully deployed -- a
     # version that's only deferred isn't "installed" yet, it's pending (see below).
     if ($deployedVersions.Count -gt 0) {
-        # `covered` records what this release could actually account for: versions it deployed to, plus
-        # versions it deliberately skipped for lack of an `addin-<year>/` payload. The idempotency check
-        # above needs both to tell "no payload exists for this version, nothing more to do" apart from
-        # "this version is new since the last install and hasn't been tried yet". Without it, a
-        # release that skips any detected version makes every future run redo the whole install.
+        # Recorded SEPARATELY, not merged: the idempotency check above needs `deployed` to know which
+        # versions must have a DLL on disk, and `deployed` + `skipped` to know which versions this
+        # release accounted for at all. Merging them into one list is what made the first attempt at
+        # this fix a no-op -- see the comment there.
         @{
-            version = $releaseTag
-            covered = @($deployedVersions + $skippedVersions | Sort-Object -Unique)
+            version  = $releaseTag
+            deployed = @($deployedVersions | Sort-Object -Unique)
+            skipped  = @($skippedVersions | Sort-Object -Unique)
         } | ConvertTo-Json | Out-File $versionMarkerPath -Encoding utf8
     }
     if ($deferredVersions.Count -gt 0) {

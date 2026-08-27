@@ -43,6 +43,13 @@ public sealed class WireEnumNameAttribute(string name) : Attribute
 /// <item><description><c>[Flags]</c> enums are NOT supported (the framework converter
 /// round-trips comma-separated composites). Enforced at type-initialization time below
 /// rather than left to produce a confusing half-working round trip.</description></item>
+/// <item><description>ALIASED members (two names sharing one underlying value) are NOT
+/// supported, for the same reason and enforced the same way.</description></item>
+/// <item><description>These enums cannot be used as DICTIONARY KEYS.
+/// <c>JsonStringEnumConverter</c> overrides <c>ReadAsPropertyName</c>/<c>WriteAsPropertyName</c>;
+/// this converter doesn't, so the base implementations throw <c>NotSupportedException</c>.
+/// Latent -- nothing keys a dictionary on these today -- but listed here because that is
+/// exactly what this block is for.</description></item>
 /// </list>
 /// </summary>
 public sealed class WireEnumNameConverter<TEnum> : JsonConverter<TEnum> where TEnum : struct, Enum
@@ -61,15 +68,33 @@ public sealed class WireEnumNameConverter<TEnum> : JsonConverter<TEnum> where TE
         }
 
         var map = new Dictionary<TEnum, string>();
+        var declaredBy = new Dictionary<TEnum, string>();
+
         foreach (var field in typeof(TEnum).GetFields(BindingFlags.Public | BindingFlags.Static))
         {
             var value = (TEnum)field.GetValue(null)!;
 
-            // field.Name, NOT value.ToString(): for an aliased member (two names sharing one
-            // underlying value) ToString() returns whichever name the runtime considers
-            // canonical, which can silently be a DIFFERENT member's name than the one being
-            // read here.
+            // field.Name, NOT value.ToString(): ToString() returns whichever name the runtime
+            // considers canonical for that value, which for an aliased member can be a DIFFERENT
+            // member's name than the field being read here.
             var wireName = field.GetCustomAttribute<WireEnumNameAttribute>()?.Name ?? field.Name;
+
+            // ALIASES ARE REJECTED, and this guard is the actual fix -- using field.Name above is
+            // not, on its own, sufficient. This map is keyed on the enum VALUE, so two members
+            // sharing one underlying value collapse into a single slot no matter which name each
+            // contributes: the last field declared simply wins, silently discarding the other's
+            // wire name (including an explicit [WireEnumName], which would then also be unreadable,
+            // since FromWire is derived from this map). There is no correct arbitrary winner, so
+            // don't pick one. Same posture as the [Flags] and duplicate-wire-name guards.
+            if (declaredBy.TryGetValue(value, out var firstField))
+            {
+                throw new InvalidOperationException(
+                    $"{typeof(TEnum).FullName} declares {firstField} and {field.Name} with the same underlying value, " +
+                    $"so they cannot have distinct wire names (\"{map[value]}\" and \"{wireName}\"). " +
+                    "Aliased members are not supported: give each wire value exactly one member.");
+            }
+
+            declaredBy[value] = field.Name;
             map[value] = wireName;
         }
 
@@ -118,8 +143,9 @@ public sealed class WireEnumNameConverter<TEnum> : JsonConverter<TEnum> where TE
                 "Wire values are the lowercase names listed on the enum; integer/ordinal values are not accepted.");
         }
 
-        var raw = reader.GetString();
-        if (raw is not null && FromWire.TryGetValue(raw, out var value))
+        // Non-null by construction: the token is known to be a String here.
+        var raw = reader.GetString()!;
+        if (FromWire.TryGetValue(raw, out var value))
         {
             return value;
         }
