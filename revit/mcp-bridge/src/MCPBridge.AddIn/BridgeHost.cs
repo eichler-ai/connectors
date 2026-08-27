@@ -82,6 +82,14 @@ internal sealed class BridgeHost
     /// <summary>How often <see cref="_timeoutTimer"/> re-checks max_duration_ms/the cancellation grace period.</summary>
     private static readonly TimeSpan TimeoutCheckInterval = TimeSpan.FromSeconds(1);
 
+    /// <summary>
+    /// How often a `ping` notification (PRD §05 heartbeat) is sent on an established connection.
+    /// Not independently configurable from the Go broker's <c>registry.UnresponsiveThreshold</c> (30s,
+    /// three missed pings) -- the two constants aren't coupled across languages, so changing one should
+    /// prompt reconsidering the other.
+    /// </summary>
+    private const int PingIntervalMs = 10_000;
+
     public BridgeHost(
         Guid instanceId,
         ExecutionManager executionManager,
@@ -573,6 +581,34 @@ internal sealed class BridgeHost
         _brokerAddress = $"{address.Host}:{address.Port}";
         Interlocked.Exchange(ref _connectedSinceUtcTicks, DateTimeOffset.UtcNow.Ticks);
         _isConnected = true;
+
+        // Heartbeat (PRD §05): a periodic `ping` notification so the broker can tell a live-but-wedged
+        // Revit process apart from a merely-quiet one. Scoped as a `using var` local, not a field like
+        // _timeoutTimer/_discoveryResyncTimer -- its whole lifetime is this one connection attempt, so
+        // the local variable itself keeps it rooted for exactly as long as it needs to be, and it's
+        // disposed automatically on every exit path from this method (clean return, exception, or
+        // falling through) rather than needing a separate cleanup step, so a stale timer from a dead
+        // connection never keeps firing writes against it. This thread is the only writer of the
+        // NetworkStream's actual bytes -- the timer callback goes through WriteLine's own _writeLock like
+        // every other writer, so it's safe to fire from the timer's own thread pool thread concurrently
+        // with this connection's read loop.
+        using var heartbeatTimer = new Timer(
+            _ =>
+            {
+                try
+                {
+                    WriteLine(stream, PingMessage.ToJson());
+                }
+                catch
+                {
+                    // A failed ping write means the connection is already dead; the read loop's own next
+                    // ReadOneLine call will observe that and trigger a reconnect -- same tolerated-write-
+                    // failure pattern as the dispatch-response write below.
+                }
+            },
+            state: null,
+            dueTime: PingIntervalMs,
+            period: PingIntervalMs);
 
         while (!stopToken.IsCancellationRequested)
         {

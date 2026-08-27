@@ -235,23 +235,30 @@ func (b *Broker) serveAddIn(rwc io.ReadWriteCloser) {
 	var instanceID string
 
 	conn.SetNotificationHandler(func(method string, params json.RawMessage) {
-		if method != "register" {
-			return
+		switch method {
+		case "register":
+			var rp registerParams
+			if err := json.Unmarshal(params, &rp); err != nil {
+				b.logf("broker: malformed register notification: %v", err)
+				return
+			}
+			instanceID = rp.InstanceID
+			b.Registry.Register(&registry.Instance{
+				InstanceID:   rp.InstanceID,
+				PID:          rp.PID,
+				RevitVersion: rp.RevitVersion,
+				Documents:    rp.Documents,
+			})
+			b.Execution.AttachInstance(rp.InstanceID, conn)
+			b.Discovery.AttachInstance(rp.InstanceID, conn)
+		case "ping":
+			// Heartbeat (PRD §05) — instanceID is only known once this
+			// connection's own register has arrived; a ping can't
+			// meaningfully precede that.
+			if instanceID != "" {
+				b.Registry.RecordPing(instanceID)
+			}
 		}
-		var rp registerParams
-		if err := json.Unmarshal(params, &rp); err != nil {
-			b.logf("broker: malformed register notification: %v", err)
-			return
-		}
-		instanceID = rp.InstanceID
-		b.Registry.Register(&registry.Instance{
-			InstanceID:   rp.InstanceID,
-			PID:          rp.PID,
-			RevitVersion: rp.RevitVersion,
-			Documents:    rp.Documents,
-		})
-		b.Execution.AttachInstance(rp.InstanceID, conn)
-		b.Discovery.AttachInstance(rp.InstanceID, conn)
 	})
 
 	_ = conn.Serve()
