@@ -132,14 +132,43 @@ internal sealed class BridgeHost
         // approach was ~1.5s to enumerate types plus ~700ms per full-corpus search_functions scan, paid
         // again on every restart with nothing carried over. %LOCALAPPDATA%\Connectors\Revit\ is the same
         // app-data root BrokerDiscoveryOptions.Local() already uses (see its own doc comment) -- one place
-        // per machine, not a second convention.
+        // per machine, not a second convention. Independent PR review finding: scoped by _revitVersion --
+        // without this, a user with two Revit versions installed launching one after the other would have
+        // the second version's Sync() see the first version's RevitAPI.dll as "gone" and cascade-delete its
+        // entire cached surface out from under a still-running first-version session.
         var discoveryDbPath = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Connectors", "Revit", "discovery-cache.db");
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Connectors", "Revit", _revitVersion, "discovery-cache.db");
         Directory.CreateDirectory(Path.GetDirectoryName(discoveryDbPath)!);
-        _discoveryCache = new DiscoveryCache(discoveryDbPath);
-        SyncDiscoveryCache("initial");
 
-        var discoveryService = new DiscoveryService(_discoveryCache);
+        // Independent PR review finding: a corrupt/locked cache file (a prior hard crash mid-write, a full
+        // disk) must not take down the whole bridge -- execute_script and everything else has no dependency
+        // on discovery. One self-heal attempt (delete and recreate) before giving up and running with
+        // discovery disabled entirely; RequestDispatcher accepts a null DiscoveryService for exactly this.
+        DiscoveryService? discoveryService = null;
+        try
+        {
+            _discoveryCache = new DiscoveryCache(discoveryDbPath);
+        }
+        catch (Exception ex)
+        {
+            LogConnectionDiagnostic($"discovery cache open FAILED, attempting one self-heal (delete and recreate): {ex}");
+            try
+            {
+                File.Delete(discoveryDbPath);
+                _discoveryCache = new DiscoveryCache(discoveryDbPath);
+            }
+            catch (Exception retryEx)
+            {
+                LogConnectionDiagnostic($"discovery cache self-heal FAILED, continuing with discovery disabled for this session: {retryEx}");
+                _discoveryCache = null;
+            }
+        }
+
+        if (_discoveryCache is not null)
+        {
+            SyncDiscoveryCache("initial");
+            discoveryService = new DiscoveryService(_discoveryCache);
+        }
 
         // Revit doesn't guarantee add-in load order (PRD §05 already documents the analogous
         // startup-ordering problem for the broker connection itself) -- an add-in that finishes loading
@@ -147,11 +176,14 @@ internal sealed class BridgeHost
         // full Revit restart. One deferred, one-shot re-check catches that window without a recurring poll
         // loop; 8s was chosen as comfortably past typical add-in OnStartup duration without meaningfully
         // delaying when a late-loading add-in's API becomes discoverable.
-        _discoveryResyncTimer = new Timer(
-            _ => SyncDiscoveryCache("deferred"),
-            state: null,
-            dueTime: TimeSpan.FromSeconds(8),
-            period: Timeout.InfiniteTimeSpan);
+        if (_discoveryCache is not null)
+        {
+            _discoveryResyncTimer = new Timer(
+                _ => SyncDiscoveryCache("deferred"),
+                state: null,
+                dueTime: TimeSpan.FromSeconds(8),
+                period: Timeout.InfiniteTimeSpan);
+        }
 
         var dispatcher = new RequestDispatcher(_executionManager, scriptBridge, scriptExecutor, windowInventory: new Win32WindowInventory(), discoveryService: discoveryService);
 
@@ -260,23 +292,28 @@ internal sealed class BridgeHost
     /// <summary>
     /// PRD §08: discovery covers Revit's own API (RevitAPI.dll/RevitAPIUI.dll, "core") plus whatever other
     /// add-ins have loaded into this same process ("addin") -- an agent scripting against a live Revit
-    /// session can call into another add-in's public API just as validly as Revit's own. The filter below
-    /// excludes .NET/BCL assemblies (never anyone's "API" in the sense this feature means) and this add-in's
-    /// own assemblies (already covered structurally -- MCPBridge itself isn't something a script would
-    /// reflect-discover its own bridge through) by a simple name-prefix check; not exhaustive (a
-    /// vendored/renamed BCL assembly could slip through), but good enough to avoid flooding the discovery
-    /// surface with framework noise, and any false positive just becomes a few extra harmless namespaces
-    /// rather than a correctness problem -- DiscoveryCache.Sync silently skips anything with no
-    /// <see cref="System.Reflection.Assembly.Location"/> (dynamic assemblies) regardless.
+    /// session can call into another add-in's public API just as validly as Revit's own.
+    ///
+    /// <para>
+    /// Independent PR review finding: a name-prefix exclusion list (the original approach) let through
+    /// dozens of Autodesk's own internal, undocumented DLLs (UIFramework, AdWindows,
+    /// Autodesk.Internal.*, RevitAddInUtility, and similar) -- none of them start with an excluded prefix,
+    /// none of them ship an XML-doc sidecar (so <see cref="MCPBridge.Core.Discovery.DiscoveryReflector"/>'s
+    /// no-sidecar escape hatch treats every public type in them as "documented"), and the combined noise
+    /// dominated <c>list_functions</c>' no-args namespace listing over genuine Revit API and real
+    /// third-party add-in namespaces. Filtering on install <em>location</em> instead is a much stronger
+    /// signal: genuine third-party add-ins load from an Addins folder (per-user or per-machine), while
+    /// Autodesk's own internal, non-API DLLs -- including RevitAPI.dll/RevitAPIUI.dll themselves -- sit
+    /// directly in Revit's own install directory. Anything else loaded from that same install directory is
+    /// exactly the noise this exclusion needs to catch.
+    /// </para>
     /// </summary>
     private static IReadOnlyList<(string Kind, Assembly Assembly)> CollectAssembliesToSync()
     {
-        var assemblies = new List<(string Kind, Assembly Assembly)>
-        {
-            ("core", typeof(Autodesk.Revit.DB.Document).Assembly),
-            ("core", typeof(UIApplication).Assembly),
-        };
+        var coreAssemblies = new[] { typeof(Autodesk.Revit.DB.Document).Assembly, typeof(UIApplication).Assembly };
+        var assemblies = new List<(string Kind, Assembly Assembly)>(coreAssemblies.Select(a => ("core", a)));
 
+        var revitInstallDir = Path.GetDirectoryName(coreAssemblies[0].Location);
         var excludedPrefixes = new[] { "System.", "Microsoft.", "MCPBridge.", "mscorlib", "netstandard", "WindowsBase", "PresentationCore", "PresentationFramework" };
 
         foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
@@ -292,9 +329,14 @@ internal sealed class BridgeHost
                 continue;
             }
 
-            if (name is "RevitAPI" or "RevitAPIUI")
+            if (coreAssemblies.Any(core => core.Location == assembly.Location))
             {
-                continue; // already added above as "core", with an explicit typeof(...) reference rather than a name-string match.
+                continue; // already added above as "core".
+            }
+
+            if (revitInstallDir is not null && Path.GetDirectoryName(assembly.Location) == revitInstallDir)
+            {
+                continue; // Autodesk's own internal DLLs living alongside RevitAPI.dll -- not a real add-in.
             }
 
             assemblies.Add(("addin", assembly));

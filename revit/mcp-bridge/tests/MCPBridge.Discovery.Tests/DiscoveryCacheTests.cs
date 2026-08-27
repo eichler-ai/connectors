@@ -104,6 +104,20 @@ public class DiscoveryCacheTests
     }
 
     [Fact]
+    public void ListNamespaces_ExcludesTheEmptyGlobalNamespace()
+    {
+        // Independent PR review finding: list_functions' tree has no way to scope INTO an empty-string
+        // namespace (namespaceFilter treats "" and null identically), so leaving it in the namespaces tier
+        // created an entry an agent could see but never drill into -- a dead end, not just noise.
+        using var cache = NewCache();
+        cache.Sync(new[] { ("core", typeof(global::GlobalNamespaceType).Assembly) });
+
+        var namespaces = cache.ListNamespaces();
+
+        Assert.DoesNotContain(namespaces, n => n.Namespace == "");
+    }
+
+    [Fact]
     public void ListTypeNames_ScopesToOneNamespaceOnly()
     {
         using var cache = NewCache();
@@ -175,6 +189,42 @@ public class DiscoveryCacheTests
         Assert.NotEmpty(results);
         Assert.Contains(results, r => r.Member.Name == "LongSummaryMethod");
         Assert.All(results, r => Assert.True(r.Score < 500)); // never tier 1 or 2 -- name-based tiers would require "padding" to literally appear in a type/member name, which it doesn't.
+    }
+
+    [Fact]
+    public void Search_Fts5Tier_StrongerMatchScoresHigherThanWeakerMatch()
+    {
+        // Independent PR review finding: bm25() returns a negative value, more negative = better match. An
+        // earlier version of the tier-3 score normalization had the fold backwards -- OrderByDescending
+        // (DiscoveryService's own ranking) actually surfaced the WEAKEST tier-3 hits first. "padding" appears
+        // ~28 times in LongSummaryMethod's summary (a strong, high-term-frequency match) and exactly once in
+        // AdjustLayout's (a weak match) -- neither name contains "padding", so both can only be found via the
+        // FTS5 tier, making this a clean same-query, same-tier comparison.
+        using var cache = NewCache();
+        cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+
+        var results = cache.Search("padding", namespaceFilter: null).OrderByDescending(r => r.Score).ToList();
+
+        var strong = results.Single(r => r.Member.Name == "LongSummaryMethod");
+        var weak = results.Single(r => r.Member.Name == "AdjustLayout");
+        Assert.True(strong.Score > weak.Score, $"stronger match ({strong.Score}) must outrank weaker match ({weak.Score})");
+    }
+
+    [Fact]
+    public void Search_FullyQualifiedTypeDotMember_StillResolvesTierOne()
+    {
+        // Independent PR review finding: a query copied verbatim from a describe_function result or from
+        // Revit's own docs is naturally fully-qualified ("Namespace.Type.Member"), but types.name only ever
+        // stores the bare type name -- without stripping to the type token's own last dotted segment, this
+        // fell all the way through to the loose tier-3 fallback instead of resolving as an exact match.
+        using var cache = NewCache();
+        cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+
+        var results = cache.Search(FixturesNamespace + ".Gadget.Run", namespaceFilter: null);
+
+        var top = results.OrderByDescending(r => r.Score).First();
+        Assert.Equal("Run", top.Member.Name);
+        Assert.True(top.Score >= 1000);
     }
 
     [Fact]

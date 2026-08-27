@@ -67,6 +67,11 @@ public class Widget
     {
     }
 
+    /// <summary>Adjusts the widget's layout, removing a single layer of padding if one is present.</summary>
+    public void AdjustLayout()
+    {
+    }
+
     // Deliberately not public -- must never appear in discovery results.
     internal void Hidden()
     {

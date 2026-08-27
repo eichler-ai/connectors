@@ -19,10 +19,10 @@ const discoverySource = "mcp-server.internal.mcpserver"
 // ListFunctionsIn is the input schema for the list_functions tool.
 type ListFunctionsIn struct {
 	InstanceID string `json:"instance_id,omitempty" jsonschema:"instance_id of the target Revit instance; if omitted, any currently-connected instance is used"`
-	Namespace  string `json:"namespace,omitempty" jsonschema:"scope to a namespace, e.g. Autodesk.Revit.DB"`
-	TypeName   string `json:"type_name,omitempty" jsonschema:"scope to one fully-qualified type, e.g. Autodesk.Revit.DB.Wall"`
+	Namespace  string `json:"namespace,omitempty" jsonschema:"omit for the namespace list; provide alone for the type list in that namespace; provide with type_name for that type's member list, e.g. Autodesk.Revit.DB"`
+	TypeName   string `json:"type_name,omitempty" jsonschema:"scope to one type within namespace (namespace is required alongside this) -- bare name (Wall) or fully-qualified (Autodesk.Revit.DB.Wall), both work"`
 	Cursor     string `json:"cursor,omitempty" jsonschema:"opaque pagination cursor echoed back from a prior response's next_cursor"`
-	PageSize   int    `json:"page_size,omitempty" jsonschema:"members per page; default 50"`
+	PageSize   int    `json:"page_size,omitempty" jsonschema:"items per page; default 50"`
 }
 
 // SearchFunctionsIn is the input schema for the search_functions tool.
@@ -115,7 +115,7 @@ type DescribeFunctionOut struct {
 func RegisterDiscovery(s *mcp.Server, r *discovery.Router) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "list_functions",
-		Description: "List Revit API members, optionally scoped by namespace or type, with pagination. Use to browse the API surface instead of guessing method names.",
+		Description: "Browse the Revit API as a strict one-level-at-a-time tree, with pagination: no args returns namespace names; +namespace returns type names in it; +namespace+type_name returns member names of it. describe_function gets full signature/summary detail on one specific member.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in ListFunctionsIn) (*mcp.CallToolResult, ListFunctionsOut, error) {
 		params := map[string]any{}
 		if in.Namespace != "" {

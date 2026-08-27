@@ -147,6 +147,25 @@ public static class DiscoveryReflector
 
         var baseFullName = t.BaseType is null ? null : (t.BaseType.FullName ?? t.BaseType.Name)?.Replace('+', '.');
 
+        // Independent PR review finding: this must be its OWN try/catch, separate from the type-level fields
+        // above. The original in-memory DiscoveryService caught a member-reflection failure here specifically
+        // and kept the type (with an empty member list) rather than dropping it -- a type whose member
+        // enumeration throws (a C++/CLI interop type with an unresolvable reference is the realistic case)
+        // is still real and still worth being able to find via list_functions/describe_function, just with
+        // nothing more specific to say about its members. Wrapping the WHOLE ReflectType call in one
+        // try/catch (as an earlier version of this extraction did) silently regressed that: the caller's own
+        // catch would drop the type entirely instead, making it vanish from the discovery surface rather
+        // than degrade gracefully.
+        List<ReflectedMember> members;
+        try
+        {
+            members = ReflectMembers(t, docIndex);
+        }
+        catch
+        {
+            members = new List<ReflectedMember>();
+        }
+
         return new ReflectedType
         {
             Namespace = t.Namespace ?? "",
@@ -155,7 +174,7 @@ public static class DiscoveryReflector
             MemberId = typeMemberId,
             Documented = documented,
             BaseFullName = baseFullName,
-            Members = ReflectMembers(t, docIndex),
+            Members = members,
         };
     }
 

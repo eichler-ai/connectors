@@ -45,6 +45,14 @@ public sealed class DiscoveryCache : IDisposable
 {
     private readonly SqliteConnection _connection;
 
+    // Independent PR review finding: SqliteConnection/SqliteCommand aren't thread-safe, and this cache is
+    // genuinely accessed from two threads -- the connection thread serving list_functions/search_functions,
+    // and the threadpool timer driving the deferred re-sync (BridgeHost). Every public member below takes
+    // this lock; Dispose() takes it too, which also closes the "Stop() tears down mid-sync" gap the same
+    // review pass flagged, since disposal now waits for any in-flight Sync/query on another thread to finish
+    // rather than pulling the connection out from under it.
+    private readonly object _lock = new();
+
     public DiscoveryCache(string databasePath)
     {
         _connection = new SqliteConnection($"Data Source={databasePath}");
@@ -61,7 +69,13 @@ public sealed class DiscoveryCache : IDisposable
         CreateSchema();
     }
 
-    public void Dispose() => _connection.Dispose();
+    public void Dispose()
+    {
+        lock (_lock)
+        {
+            _connection.Dispose();
+        }
+    }
 
     private void CreateSchema()
     {
@@ -131,6 +145,14 @@ public sealed class DiscoveryCache : IDisposable
     /// </para>
     /// </summary>
     public DiscoverySyncResult Sync(IReadOnlyList<(string Kind, Assembly Assembly)> currentAssemblies)
+    {
+        lock (_lock)
+        {
+            return SyncLocked(currentAssemblies);
+        }
+    }
+
+    private DiscoverySyncResult SyncLocked(IReadOnlyList<(string Kind, Assembly Assembly)> currentAssemblies)
     {
         var now = DateTimeOffset.UtcNow.ToString("O");
 
@@ -329,56 +351,84 @@ public sealed class DiscoveryCache : IDisposable
     /// </summary>
     public void SetStoredHashForTesting(string assemblyLocation, string bogusHash)
     {
-        using var cmd = _connection.CreateCommand();
-        cmd.CommandText = "UPDATE assemblies SET file_hash = @hash WHERE file_path = @path";
-        cmd.Parameters.AddWithValue("@hash", bogusHash);
-        cmd.Parameters.AddWithValue("@path", assemblyLocation);
-        cmd.ExecuteNonQuery();
+        lock (_lock)
+        {
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = "UPDATE assemblies SET file_hash = @hash WHERE file_path = @path";
+            cmd.Parameters.AddWithValue("@hash", bogusHash);
+            cmd.Parameters.AddWithValue("@path", assemblyLocation);
+            cmd.ExecuteNonQuery();
+        }
     }
 
     // -------------------------------------------------------------------------------------------------
     // list_functions queries
     // -------------------------------------------------------------------------------------------------
 
-    /// <summary>Every namespace with at least one documented type, alphabetical, with a per-namespace documented-type count.</summary>
+    /// <summary>
+    /// Every namespace with at least one documented type, alphabetical, with a per-namespace documented-type
+    /// count. Independent PR review finding: the global/no-namespace bucket (types whose <c>Type.Namespace</c>
+    /// is null -- e.g. some C++/CLI interop artifacts) is excluded here, not just left in as one more row:
+    /// list_functions' tree has no way to *scope into* an empty-string namespace (namespaceFilter treats ""
+    /// and null identically, per the mutual-exclusivity check above it), so leaving it in the namespaces tier
+    /// created an unreachable dead end an agent could select but never drill into.
+    /// </summary>
     public IReadOnlyList<(string Namespace, int TypeCount)> ListNamespaces()
     {
-        using var cmd = _connection.CreateCommand();
-        cmd.CommandText = """
-            SELECT namespace, COUNT(*) FROM types
-            WHERE documented = 1
-            GROUP BY namespace
-            ORDER BY namespace COLLATE NOCASE
-            """;
-        using var reader = cmd.ExecuteReader();
-        var results = new List<(string, int)>();
-        while (reader.Read())
+        lock (_lock)
         {
-            results.Add((reader.GetString(0), (int)reader.GetInt64(1)));
-        }
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = """
+                SELECT namespace, COUNT(*) FROM types
+                WHERE documented = 1 AND namespace != ''
+                GROUP BY namespace
+                ORDER BY namespace COLLATE NOCASE
+                """;
+            using var reader = cmd.ExecuteReader();
+            var results = new List<(string, int)>();
+            while (reader.Read())
+            {
+                results.Add((reader.GetString(0), (int)reader.GetInt64(1)));
+            }
 
-        return results;
+            return results;
+        }
     }
 
     /// <summary>Short (unqualified) names of every documented type in one namespace, alphabetical.</summary>
     public IReadOnlyList<string> ListTypeNames(string namespaceName)
     {
-        using var cmd = _connection.CreateCommand();
-        cmd.CommandText = "SELECT name FROM types WHERE namespace = @ns AND documented = 1 ORDER BY name COLLATE NOCASE";
-        cmd.Parameters.AddWithValue("@ns", namespaceName);
-        using var reader = cmd.ExecuteReader();
-        var results = new List<string>();
-        while (reader.Read())
+        lock (_lock)
         {
-            results.Add(reader.GetString(0));
-        }
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = "SELECT name FROM types WHERE namespace = @ns AND documented = 1 ORDER BY name COLLATE NOCASE";
+            cmd.Parameters.AddWithValue("@ns", namespaceName);
+            using var reader = cmd.ExecuteReader();
+            var results = new List<string>();
+            while (reader.Read())
+            {
+                results.Add(reader.GetString(0));
+            }
 
-        return results;
+            return results;
+        }
     }
 
-    public bool TypeExists(string namespaceName, string typeName) => FindTypeRow(namespaceName, typeName) is not null;
+    public bool TypeExists(string namespaceName, string typeName)
+    {
+        lock (_lock)
+        {
+            return FindTypeRow(namespaceName, typeName) is not null;
+        }
+    }
 
-    public bool TypeExistsByFullName(string fullTypeName) => FindTypeRowByFullName(fullTypeName) is not null;
+    public bool TypeExistsByFullName(string fullTypeName)
+    {
+        lock (_lock)
+        {
+            return FindTypeRowByFullName(fullTypeName) is not null;
+        }
+    }
 
     /// <summary>
     /// Distinct member names (constructors excluded from name-dedup collapse the same way overload text
@@ -389,39 +439,64 @@ public sealed class DiscoveryCache : IDisposable
     /// </summary>
     public IReadOnlyList<string> ListMemberNames(string namespaceName, string typeName)
     {
-        var typeRow = FindTypeRow(namespaceName, typeName);
-        if (typeRow is null)
+        lock (_lock)
         {
-            return Array.Empty<string>();
-        }
+            var typeRow = FindTypeRow(namespaceName, typeName);
+            if (typeRow is null)
+            {
+                return Array.Empty<string>();
+            }
 
-        return WalkInheritance(typeRow.Value)
-            .Select(m => m.Name)
-            .Distinct(StringComparer.Ordinal)
-            .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
-            .ToList();
+            return WalkInheritance(typeRow.Value)
+                .Select(m => m.Name)
+                .Distinct(StringComparer.Ordinal)
+                .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
     }
 
     /// <summary>All members (every overload) declared on the type OR any base type still within the reflected surface -- used by describe_function to resolve a member name to its candidate overload(s). Scoped by namespace+short type name (list_functions' own scoping shape).</summary>
     public IReadOnlyList<DiscoveryMemberRow> GetMembersIncludingInherited(string namespaceName, string typeName)
     {
-        var typeRow = FindTypeRow(namespaceName, typeName);
-        return typeRow is null ? Array.Empty<DiscoveryMemberRow>() : WalkInheritance(typeRow.Value);
+        lock (_lock)
+        {
+            var typeRow = FindTypeRow(namespaceName, typeName);
+            return typeRow is null ? Array.Empty<DiscoveryMemberRow>() : WalkInheritance(typeRow.Value);
+        }
     }
 
     /// <summary>Same as <see cref="GetMembersIncludingInherited(string,string)"/>, scoped by a fully-qualified dotted type name instead -- describe_function's own scoping shape ("Namespace.Type.Member" -- see its own doc comment).</summary>
     public IReadOnlyList<DiscoveryMemberRow> GetMembersIncludingInheritedByFullName(string fullTypeName)
     {
-        var typeRow = FindTypeRowByFullName(fullTypeName);
-        return typeRow is null ? Array.Empty<DiscoveryMemberRow>() : WalkInheritance(typeRow.Value);
+        lock (_lock)
+        {
+            var typeRow = FindTypeRowByFullName(fullTypeName);
+            return typeRow is null ? Array.Empty<DiscoveryMemberRow>() : WalkInheritance(typeRow.Value);
+        }
     }
 
     private readonly record struct TypeRow(long Id, string Namespace, string Name, string FullName, string? BaseFullName);
 
+    /// <summary>
+    /// Independent PR review finding: <c>full_name</c> (and namespace+name) is only unique for the core
+    /// RevitAPI/RevitAPIUI surface -- once add-in assemblies are included too, two loaded add-ins vendoring
+    /// the same library (or two versions of the same helper DLL) can genuinely produce two <c>types</c> rows
+    /// with an identical namespace+name/full_name. <c>LIMIT 1</c> with no ordering made which row won
+    /// arbitrary (SQLite row order isn't a stable contract) and could silently resolve a lookup against the
+    /// wrong assembly's version of a type. Ties now break deterministically: core wins over any add-in, then
+    /// lowest assembly_id (insertion order) -- not a full fix for the underlying ambiguity, but at least a
+    /// stable, predictable answer instead of a coin flip that can change between runs.
+    /// </summary>
     private TypeRow? FindTypeRow(string namespaceName, string typeName)
     {
         using var cmd = _connection.CreateCommand();
-        cmd.CommandText = "SELECT id, namespace, name, full_name, base_full_name FROM types WHERE namespace = @ns AND name = @name LIMIT 1";
+        cmd.CommandText = """
+            SELECT t.id, t.namespace, t.name, t.full_name, t.base_full_name
+            FROM types t JOIN assemblies a ON t.assembly_id = a.id
+            WHERE t.namespace = @ns AND t.name = @name
+            ORDER BY (a.kind != 'core'), t.assembly_id
+            LIMIT 1
+            """;
         cmd.Parameters.AddWithValue("@ns", namespaceName);
         cmd.Parameters.AddWithValue("@name", typeName);
         using var reader = cmd.ExecuteReader();
@@ -431,7 +506,13 @@ public sealed class DiscoveryCache : IDisposable
     private TypeRow? FindTypeRowByFullName(string fullTypeName)
     {
         using var cmd = _connection.CreateCommand();
-        cmd.CommandText = "SELECT id, namespace, name, full_name, base_full_name FROM types WHERE full_name = @fullName LIMIT 1";
+        cmd.CommandText = """
+            SELECT t.id, t.namespace, t.name, t.full_name, t.base_full_name
+            FROM types t JOIN assemblies a ON t.assembly_id = a.id
+            WHERE t.full_name = @fullName
+            ORDER BY (a.kind != 'core'), t.assembly_id
+            LIMIT 1
+            """;
         cmd.Parameters.AddWithValue("@fullName", fullTypeName);
         using var reader = cmd.ExecuteReader();
         return reader.Read() ? ReadTypeRow(reader) : null;
@@ -534,54 +615,68 @@ public sealed class DiscoveryCache : IDisposable
     /// </summary>
     public IReadOnlyList<(DiscoveryMemberRow Member, double Score)> Search(string query, string? namespaceFilter)
     {
-        var queryLower = query.Trim().ToLowerInvariant();
-        var tokens = queryLower.Split(new[] { ' ', '.', '_', '-' }, StringSplitOptions.RemoveEmptyEntries);
-
-        var results = new List<(DiscoveryMemberRow Member, double Score)>();
-        var seenMemberIds = new HashSet<string>(StringComparer.Ordinal);
-
-        // Tier 1: exact Type.Member.
-        var lastDot = queryLower.LastIndexOf('.');
-        var lastSpace = queryLower.LastIndexOf(' ');
-        var splitAt = Math.Max(lastDot, lastSpace);
-        if (splitAt > 0 && splitAt < queryLower.Length - 1)
+        lock (_lock)
         {
-            var typeToken = queryLower[..splitAt].Trim();
-            var memberToken = queryLower[(splitAt + 1)..].Trim();
-            foreach (var row in QueryExactTypeMember(typeToken, memberToken, namespaceFilter))
+            var queryLower = query.Trim().ToLowerInvariant();
+            var tokens = queryLower.Split(new[] { ' ', '.', '_', '-' }, StringSplitOptions.RemoveEmptyEntries);
+
+            var results = new List<(DiscoveryMemberRow Member, double Score)>();
+            var seenMemberIds = new HashSet<string>(StringComparer.Ordinal);
+
+            // Tier 1: exact Type.Member. typeToken is reduced to its own last dotted segment (independent PR
+            // review finding): a query copied verbatim from a describe_function result or from Revit's own
+            // docs is naturally fully-qualified ("Autodesk.Revit.DB.Wall.Create"), but types.name only ever
+            // stores the bare type name -- without this, a fully-qualified query fell all the way through to
+            // tier 3, since the "autodesk" segment could never substring-match a type/member name in tier 2
+            // either.
+            var lastDot = queryLower.LastIndexOf('.');
+            var lastSpace = queryLower.LastIndexOf(' ');
+            var splitAt = Math.Max(lastDot, lastSpace);
+            if (splitAt > 0 && splitAt < queryLower.Length - 1)
+            {
+                var typeToken = queryLower[..splitAt].Trim();
+                var typeTokenBare = typeToken.Contains('.') ? typeToken[(typeToken.LastIndexOf('.') + 1)..] : typeToken;
+                var memberToken = queryLower[(splitAt + 1)..].Trim();
+                foreach (var row in QueryExactTypeMember(typeTokenBare, memberToken, namespaceFilter))
+                {
+                    if (seenMemberIds.Add(row.MemberId))
+                    {
+                        results.Add((row, 1000));
+                    }
+                }
+            }
+
+            // Tier 2: all tokens matched across {type name, member name}.
+            if (tokens.Length > 0)
+            {
+                foreach (var row in QueryTokenMatch(tokens, namespaceFilter))
+                {
+                    if (seenMemberIds.Add(row.MemberId))
+                    {
+                        results.Add((row, 500));
+                    }
+                }
+            }
+
+            // Tier 3: FTS5 BM25 fallback.
+            foreach (var (row, rank) in QueryFts(queryLower, namespaceFilter))
             {
                 if (seenMemberIds.Add(row.MemberId))
                 {
-                    results.Add((row, 1000));
+                    // Independent PR review finding: bm25() returns a negative value, more negative = better
+                    // match. The original fold (499/(1+betterness)) had this backwards -- it mapped a
+                    // STRONGER match to a LOWER score, so OrderByDescending(Score) in DiscoveryService
+                    // actually surfaced the WEAKEST tier-3 hits first. betterness increasing -> normalized
+                    // increasing (asymptotic toward, never reaching, tier 2's floor of 500) fixes the
+                    // direction while preserving the same bounded-below-500 contract.
+                    var betterness = Math.Max(0, -rank);
+                    var normalized = 499.0 * betterness / (1.0 + betterness);
+                    results.Add((row, normalized));
                 }
             }
-        }
 
-        // Tier 2: all tokens matched across {type name, member name}.
-        if (tokens.Length > 0)
-        {
-            foreach (var row in QueryTokenMatch(tokens, namespaceFilter))
-            {
-                if (seenMemberIds.Add(row.MemberId))
-                {
-                    results.Add((row, 500));
-                }
-            }
+            return results;
         }
-
-        // Tier 3: FTS5 BM25 fallback.
-        foreach (var (row, rank) in QueryFts(queryLower, namespaceFilter))
-        {
-            if (seenMemberIds.Add(row.MemberId))
-            {
-                // bm25() returns a negative value, more negative = better match; fold into a positive
-                // [0,499) band strictly below tier 2's floor of 500, preserving relative FTS5 ordering.
-                var normalized = 499.0 / (1.0 + Math.Max(0, -rank));
-                results.Add((row, normalized));
-            }
-        }
-
-        return results;
     }
 
     private IEnumerable<DiscoveryMemberRow> QueryExactTypeMember(string typeToken, string memberToken, string? namespaceFilter)
