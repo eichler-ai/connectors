@@ -19,6 +19,13 @@ namespace MCPBridge.Core.Execution;
 /// folded into the same notices[] list, so a script's result always shows everything that was
 /// auto-resolved on its behalf in one place -- including on a cancelled run, since a dialog may well be
 /// what the script was stuck behind when it got cancelled.
+///
+/// PRD §09: files published via ScriptGlobals.Publish are a sibling list, files[] -- read directly off
+/// the ScriptGlobals instance this method itself constructs, once the run finishes. Unlike dialog
+/// overrides (ActiveDialogContext), Publish's state doesn't need a static bridge to reach here: this
+/// method already holds the one ScriptGlobals instance for this run, so it can just read it back --
+/// no other component (an OnStartup-registered handler with no reference to this run, the way
+/// DialogBoxShowing's handler has none) needs to reach into it from outside.
 /// </summary>
 public sealed class TransactionScriptExecutor
 {
@@ -38,7 +45,8 @@ public sealed class TransactionScriptExecutor
         string scriptText,
         CancellationToken cancellationToken,
         string? exportsDirectoryPath = null,
-        bool overwriteOutputFiles = false)
+        bool overwriteOutputFiles = false,
+        string? importsDirectoryPath = null)
     {
         var group = document.CreateTransactionGroup(TransactionName);
         var transaction = document.CreateTransaction(TransactionName);
@@ -46,12 +54,10 @@ public sealed class TransactionScriptExecutor
         group.Start();
         transaction.Start();
 
-        var globals = new ScriptGlobals(document, uiApplication, uiDocument, cancellationToken);
+        var globals = new ScriptGlobals(
+            document, uiApplication, uiDocument, cancellationToken,
+            exportsDirectoryPath, importsDirectoryPath, overwriteOutputFiles);
         ActiveDialogContext.SetActive(globals.DialogResultOverrides);
-        if (exportsDirectoryPath is not null)
-        {
-            ActiveExportContext.SetActive(exportsDirectoryPath, overwriteOutputFiles);
-        }
 
         try
         {
@@ -66,7 +72,7 @@ public sealed class TransactionScriptExecutor
                 // Same reasoning applies to files[] (PRD §09): a script may have published a file before
                 // it threw/was cancelled, and that publication must still be reported here.
                 var dialogNotices = ActiveDialogContext.DrainRecorded();
-                var publishedFiles = ActiveExportContext.DrainRecorded();
+                var publishedFiles = globals.PublishedFiles;
                 if (dialogNotices.Count == 0 && publishedFiles.Count == 0)
                 {
                     return outcome;
@@ -85,8 +91,8 @@ public sealed class TransactionScriptExecutor
             catch (Exception ex)
             {
                 RollBackBoth(transaction, group);
-                var (failedNotices, failedFiles) = CombinedNoticesAndFiles(transaction.CommitFailures);
-                return ScriptExecutionOutcome.Failed(ex, outcome.StdOut, failedNotices, failedFiles);
+                var failedNotices = CombinedNotices(transaction.CommitFailures);
+                return ScriptExecutionOutcome.Failed(ex, outcome.StdOut, failedNotices, globals.PublishedFiles);
             }
 
             var commitFailures = transaction.CommitFailures;
@@ -99,22 +105,21 @@ public sealed class TransactionScriptExecutor
                 group.RollBack();
                 var errorMessage = commitFailures.LastOrDefault(f => f.IsError)?.Message
                     ?? "A transaction failure forced a rollback.";
-                var (rolledBackNotices, rolledBackFiles) = CombinedNoticesAndFiles(commitFailures);
-                return ScriptExecutionOutcome.Failed(new InvalidOperationException(errorMessage), outcome.StdOut, rolledBackNotices, rolledBackFiles);
+                var rolledBackNotices = CombinedNotices(commitFailures);
+                return ScriptExecutionOutcome.Failed(new InvalidOperationException(errorMessage), outcome.StdOut, rolledBackNotices, globals.PublishedFiles);
             }
 
             group.Assimilate();
-            var (completedNotices, completedFiles) = CombinedNoticesAndFiles(commitFailures);
-            return ScriptExecutionOutcome.Completed(outcome.ReturnValue, outcome.StdOut, completedNotices, completedFiles);
+            var completedNotices = CombinedNotices(commitFailures);
+            return ScriptExecutionOutcome.Completed(outcome.ReturnValue, outcome.StdOut, completedNotices, globals.PublishedFiles);
         }
         finally
         {
             ActiveDialogContext.ClearActive();
-            ActiveExportContext.ClearActive();
         }
     }
 
-    private static (IReadOnlyList<DiagnosticRecord> Notices, IReadOnlyList<PublishedFileRecord> Files) CombinedNoticesAndFiles(IReadOnlyList<FailureSummary> commitFailures)
+    private static List<DiagnosticRecord> CombinedNotices(IReadOnlyList<FailureSummary> commitFailures)
     {
         var failureNotices = commitFailures.Select(ToDiagnosticRecord).ToList();
         var dialogNotices = ActiveDialogContext.DrainRecorded();
@@ -123,8 +128,7 @@ public sealed class TransactionScriptExecutor
             failureNotices.AddRange(dialogNotices);
         }
 
-        var publishedFiles = ActiveExportContext.DrainRecorded();
-        return (failureNotices, publishedFiles);
+        return failureNotices;
     }
 
     private static DiagnosticRecord ToDiagnosticRecord(FailureSummary failure) => DiagnosticRecord.Create(

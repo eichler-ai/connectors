@@ -146,7 +146,7 @@ func TestExecuteScriptToolOverwriteOutputFilesAndFilesRoundTrip(t *testing.T) {
 			"status":       "success",
 			"execution_id": p["execution_id"],
 			"files": []map[string]any{
-				{"name": "view.png", "path": "exports/view.png", "status": "success"},
+				{"name": "view.png", "path": "exports/view.png", "status": "published"},
 			},
 		}, nil
 	})
@@ -178,7 +178,7 @@ func TestExecuteScriptToolOverwriteOutputFilesAndFilesRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(sc, &out); err != nil {
 		t.Fatalf("decoding structured content: %v", err)
 	}
-	if len(out.Files) != 1 || out.Files[0].Name != "view.png" || out.Files[0].Path != "exports/view.png" || out.Files[0].Status != "success" {
+	if len(out.Files) != 1 || out.Files[0].Name != "view.png" || out.Files[0].Path != "exports/view.png" || out.Files[0].Status != "published" {
 		t.Errorf("Files = %+v", out.Files)
 	}
 }

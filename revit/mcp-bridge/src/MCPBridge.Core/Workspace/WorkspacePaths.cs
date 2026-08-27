@@ -1,15 +1,17 @@
 using System;
-using System.Collections.Concurrent;
 using System.IO;
 
 namespace MCPBridge.Core.Workspace;
 
 /// <summary>
-/// The per-document file-exchange workspace tree (PRD §09): `imports/`, `exports/`, `logs/`,
-/// `scripts/`, and `tmp/&lt;instance-id&gt;/`, rooted at `%USERPROFILE%\RevitMCPExchange\&lt;document-id&gt;\`
-/// in local mode -- a deliberately separate root from this add-in's own internal app data
-/// (`%LOCALAPPDATA%\Connectors\Revit\`, see <see cref="Connection.BrokerDiscoveryOptions"/>),
-/// since this tree is human-facing and meant to be browsed directly.
+/// The per-document file-exchange workspace tree (PRD §09): `imports/` and `exports/`, rooted at
+/// `%USERPROFILE%\RevitMCPExchange\&lt;document-id&gt;\` in local mode -- a deliberately separate
+/// root from this add-in's own internal app data (`%LOCALAPPDATA%\Connectors\Revit\`, see
+/// <see cref="Connection.BrokerDiscoveryOptions"/>), since this tree is human-facing and meant to
+/// be browsed directly. `logs/`/`scripts/`/`tmp/` from PRD §09's full design are not yet built by
+/// this pass -- nothing currently writes to them, and a directory the code creates and never fills
+/// misleads a human browsing the workspace (independent PR review finding); reinstating them is a
+/// two-line change once something actually needs them.
 ///
 /// Injectable-root factory shape mirrors <see cref="Connection.BrokerDiscoveryOptions.Local"/> so
 /// tests can substitute a temp directory for %USERPROFILE%. Directories are created best-effort,
@@ -19,8 +21,6 @@ namespace MCPBridge.Core.Workspace;
 /// </summary>
 public sealed class WorkspacePaths
 {
-    private static readonly ConcurrentDictionary<string, string> Aliases = new(StringComparer.Ordinal);
-
     public string DocumentId { get; }
     public string InstanceId { get; }
 
@@ -51,27 +51,20 @@ public sealed class WorkspacePaths
     /// <summary>Images, IFC, families written by scripts via ScriptGlobals.Publish; never auto-deleted.</summary>
     public string Exports => EnsureDirectory(Path.Combine(DocumentRoot, "exports"));
 
-    /// <summary>Per-execution NDJSON logs; ages out (not implemented in this pass).</summary>
-    public string Logs => EnsureDirectory(Path.Combine(DocumentRoot, "logs"));
-
-    /// <summary>History of executed script text; ages out (not implemented in this pass).</summary>
-    public string Scripts => EnsureDirectory(Path.Combine(DocumentRoot, "scripts"));
-
     /// <summary>
-    /// Scratch space for one instance sharing this workspace (PRD §09: "tmp/ is the one directory
-    /// that isn't [collision-free on its own], so it gets an instance_id subfolder"). Defaults to
-    /// this instance's own <see cref="InstanceId"/> if none is given.
+    /// Scratch space for this instance sharing this workspace (PRD §09: "tmp/ is the one directory
+    /// that isn't [collision-free on its own], so it gets an instance_id subfolder"). Independent PR
+    /// review finding: an earlier version let a caller compute a DIFFERENT instance's tmp path via an
+    /// optional override parameter -- no real caller wants that; this always uses the instance this
+    /// WorkspacePaths was constructed for.
     /// </summary>
-    public string Tmp(string? instanceId = null) =>
-        EnsureDirectory(Path.Combine(DocumentRoot, "tmp", instanceId ?? InstanceId));
+    public string Tmp() => EnsureDirectory(Path.Combine(DocumentRoot, "tmp", InstanceId));
 
-    /// <summary>Touches every directory except the per-instance tmp/ one, so they all exist up front.</summary>
+    /// <summary>Touches every directory this workspace currently has, so they all exist up front.</summary>
     public void EnsureDirectoriesExist()
     {
         _ = Imports;
         _ = Exports;
-        _ = Logs;
-        _ = Scripts;
     }
 
     private static string EnsureDirectory(string path)
@@ -88,47 +81,4 @@ public sealed class WorkspacePaths
 
         return path;
     }
-
-    /// <summary>
-    /// Best-effort "promotion on first save" support (PRD §09): renames an existing document-root
-    /// folder in place from its old identity to its new one, so exports/logs/scripts carry over
-    /// rather than orphaning under a stale `tmp-&lt;guid&gt;` id. Never throws -- any failure (the
-    /// destination already exists, a locked file, a permissions issue) degrades to leaving the old
-    /// folder in place; the caller is still expected to register an alias regardless, so an agent
-    /// still holding the old id keeps working via <see cref="ResolveAlias"/>.
-    /// </summary>
-    public static bool TryPromoteDocumentRoot(string oldDocumentId, string newDocumentId, string? userProfileRoot = null)
-    {
-        try
-        {
-            var root = userProfileRoot ?? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-            var workspaceRoot = Path.Combine(root, "RevitMCPExchange");
-            var oldPath = Path.Combine(workspaceRoot, oldDocumentId);
-            var newPath = Path.Combine(workspaceRoot, newDocumentId);
-
-            if (!Directory.Exists(oldPath) || Directory.Exists(newPath))
-            {
-                return false;
-            }
-
-            Directory.Move(oldPath, newPath);
-            return true;
-        }
-        catch
-        {
-            return false;
-        }
-    }
-
-    /// <summary>
-    /// Registers a short-lived, in-memory-only alias from an old document_id to its new one (PRD
-    /// §09: "the broker keeps a short-lived alias from the old ID to the new one ... only needs to
-    /// survive one save-to-next-poll window"). Not persisted across a process restart by design.
-    /// </summary>
-    public static void RegisterAlias(string oldDocumentId, string newDocumentId) =>
-        Aliases[oldDocumentId] = newDocumentId;
-
-    /// <summary>Resolves a possibly-stale document_id through any alias registered for it, or returns it unchanged.</summary>
-    public static string ResolveAlias(string documentId) =>
-        Aliases.TryGetValue(documentId, out var resolved) ? resolved : documentId;
 }

@@ -5,7 +5,6 @@ using System.Threading.Tasks;
 using MCPBridge.Core.Diagnostics;
 using MCPBridge.Core.Discovery;
 using MCPBridge.Core.Execution;
-using MCPBridge.Core.Identity;
 using MCPBridge.Core.Protocol;
 using MCPBridge.Core.Workspace;
 using MCPBridge.RevitAdapter;
@@ -70,13 +69,6 @@ public sealed class RequestDispatcher
     // passes a real DiscoveryService built from Revit's already-loaded assemblies.
     private readonly DiscoveryService? _discoveryService;
 
-    // PRD §09: resolves a mapped network drive letter to its UNC form before hashing a saved,
-    // non-workshared document's path into its document_id. null (the default) means "no UNC
-    // resolution, just passthrough" -- matches this codebase's optional-feature convention (see
-    // _windowInventory/_discoveryService above); production wiring (BridgeHost) passes a real
-    // Win32UncPathResolver.
-    private readonly IUncPathResolver _uncPathResolver;
-
     // Static for this process's lifetime (PRD §09: tmp/<instance-id>/ scopes scratch space per
     // instance sharing a workspace) -- safe to accept once at construction rather than per-call.
     private readonly string _instanceId;
@@ -89,7 +81,6 @@ public sealed class RequestDispatcher
         Func<TimeSpan, Task>? delay = null,
         IWindowInventory? windowInventory = null,
         DiscoveryService? discoveryService = null,
-        IUncPathResolver? uncPathResolver = null,
         string? instanceId = null)
     {
         _executionManager = executionManager;
@@ -99,14 +90,7 @@ public sealed class RequestDispatcher
         _delay = delay ?? Task.Delay;
         _windowInventory = windowInventory;
         _discoveryService = discoveryService;
-        _uncPathResolver = uncPathResolver ?? new PassthroughUncPathResolver();
         _instanceId = instanceId ?? "";
-    }
-
-    /// <summary>Default when no real IUncPathResolver is wired up (e.g. most existing unit tests) -- returns every path unchanged.</summary>
-    private sealed class PassthroughUncPathResolver : IUncPathResolver
-    {
-        public string Resolve(string path) => path;
     }
 
     /// <summary>How often <see cref="HandlePollExecutionAsync"/> re-checks the record while waiting out timeout_ms.</summary>
@@ -341,17 +325,20 @@ public sealed class RequestDispatcher
             return ScriptExecutionOutcome.Failed(new InvalidOperationException(diagnostic.Message), "");
         }
 
-        // PRD §09: document identity is resolved here purely to build THIS document's exports/
-        // workspace path for Publish -- not to select/route which document the script runs against
+        // PRD §09: document.DocumentId is used here purely to build THIS document's imports/exports
+        // workspace paths for Publish -- not to select/route which document the script runs against
         // (that's still whatever ActiveUiDocument already is, per the KNOWN LIMITATION comment above).
-        var documentId = DocumentIdentity.Resolve(document, _uncPathResolver);
-        var workspacePaths = WorkspacePaths.Local(documentId, _instanceId);
+        // Independent PR review finding: document.DocumentId (not a fresh DocumentIdentity.Resolve
+        // call here) is what makes this stable across calls -- see DocumentIdentity.ResolveCached's
+        // own doc comment for why resolving fresh on every execution was wrong.
+        var workspacePaths = WorkspacePaths.Local(document.DocumentId, _instanceId);
+        workspacePaths.EnsureDirectoriesExist();
 
         // .GetAwaiter().GetResult() is deadlock-safe here only because RoslynScriptRunner rejects any
         // script containing its own top-level `await` before compiling it -- see
         // ExternalEventBridge<TResult>'s own doc comment and RoslynScriptRunner.RejectTopLevelAwait.
         var outcome = _scriptExecutor
-            .ExecuteAsync(document, uiApplication, uiDocument, scriptText, cancellationToken, workspacePaths.Exports, overwriteOutputFiles)
+            .ExecuteAsync(document, uiApplication, uiDocument, scriptText, cancellationToken, workspacePaths.Exports, overwriteOutputFiles, workspacePaths.Imports)
             .GetAwaiter().GetResult();
 
         if (outcome.WasCancelled)

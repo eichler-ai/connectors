@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using MCPBridge.Core.Execution;
@@ -280,6 +281,186 @@ public class TransactionScriptExecutorTests
     }
 
     [Fact]
+    public async Task TwoPublishCalls_FirstFailsSecondSucceeds_BothIndependentlyReported_ScriptStillSucceeds()
+    {
+        // PRD §09's headline batch claim: a failure on one file never rolls back or blocks another.
+        var executor = NewExecutor();
+        var document = new FakeDocumentAdapter();
+        var uiApp = new FakeUiApplicationAdapter();
+        var tempDir = CreateTempDir();
+        try
+        {
+            var sourceA = Path.Combine(tempDir, "a.txt");
+            File.WriteAllText(sourceA, "a");
+            var sourceB = Path.Combine(tempDir, "b.txt");
+            File.WriteAllText(sourceB, "b");
+            var exportsDir = Path.Combine(tempDir, "exports");
+            Directory.CreateDirectory(exportsDir);
+            File.WriteAllText(Path.Combine(exportsDir, "a.txt"), "existing"); // collides with sourceA's publish
+
+            var script = $"Publish(@\"{sourceA}\"); Publish(@\"{sourceB}\");";
+            var outcome = await executor.ExecuteAsync(document, uiApp, null, script, CancellationToken.None, exportsDir, overwriteOutputFiles: false);
+
+            Assert.True(outcome.Success);
+            Assert.Equal(2, outcome.Files.Count);
+            var failedA = outcome.Files.Single(f => f.Name == "a.txt");
+            Assert.Equal(PublishedFileRecord.StatusFailed, failedA.Status);
+            var publishedB = outcome.Files.Single(f => f.Name == "b.txt");
+            Assert.Equal(PublishedFileRecord.StatusPublished, publishedB.Status);
+            Assert.True(File.Exists(Path.Combine(exportsDir, "b.txt")));
+        }
+        finally
+        {
+            Directory.Delete(tempDir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ScriptThatWritesDirectlyIntoExports_ThenPublishesSamePath_RegistersWithoutCopyingOntoItself()
+    {
+        var executor = NewExecutor();
+        var document = new FakeDocumentAdapter();
+        var uiApp = new FakeUiApplicationAdapter();
+        var tempDir = CreateTempDir();
+        try
+        {
+            var exportsDir = Path.Combine(tempDir, "exports");
+            Directory.CreateDirectory(exportsDir);
+            var alreadyThere = Path.Combine(exportsDir, "already-there.txt");
+
+            var script = $"System.IO.File.WriteAllText(@\"{alreadyThere}\", \"hi\"); Publish(@\"{alreadyThere}\");";
+            var outcome = await executor.ExecuteAsync(document, uiApp, null, script, CancellationToken.None, exportsDir, overwriteOutputFiles: false);
+
+            Assert.True(outcome.Success);
+            var published = Assert.Single(outcome.Files);
+            Assert.Equal(PublishedFileRecord.StatusPublished, published.Status);
+            Assert.Equal("hi", File.ReadAllText(Path.Combine(exportsDir, "already-there.txt")));
+        }
+        finally
+        {
+            Directory.Delete(tempDir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task PublishWithNameParameter_RenamesOnPublish()
+    {
+        var executor = NewExecutor();
+        var document = new FakeDocumentAdapter();
+        var uiApp = new FakeUiApplicationAdapter();
+        var tempDir = CreateTempDir();
+        try
+        {
+            var sourcePath = Path.Combine(tempDir, "source.txt");
+            File.WriteAllText(sourcePath, "hello");
+            var exportsDir = Path.Combine(tempDir, "exports");
+            Directory.CreateDirectory(exportsDir);
+
+            var script = $"Publish(@\"{sourcePath}\", \"renamed.png\");";
+            var outcome = await executor.ExecuteAsync(document, uiApp, null, script, CancellationToken.None, exportsDir, overwriteOutputFiles: false);
+
+            Assert.True(outcome.Success);
+            var published = Assert.Single(outcome.Files);
+            Assert.Equal(PublishedFileRecord.StatusPublished, published.Status);
+            Assert.Equal("renamed.png", published.Name);
+            Assert.True(File.Exists(Path.Combine(exportsDir, "renamed.png")));
+            Assert.False(File.Exists(Path.Combine(exportsDir, "source.txt")));
+        }
+        finally
+        {
+            Directory.Delete(tempDir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task PublishWithTraversalName_IsConstrainedToBareFileName_NeverEscapesExports()
+    {
+        // Independent PR review finding: an absolute path or ..\.. in `name` must not place the
+        // published file outside this document's exports directory.
+        var executor = NewExecutor();
+        var document = new FakeDocumentAdapter();
+        var uiApp = new FakeUiApplicationAdapter();
+        var tempDir = CreateTempDir();
+        try
+        {
+            var sourcePath = Path.Combine(tempDir, "source.txt");
+            File.WriteAllText(sourcePath, "hello");
+            var exportsDir = Path.Combine(tempDir, "exports");
+            Directory.CreateDirectory(exportsDir);
+            var escapeAttempt = Path.Combine("..", "..", "evil.txt");
+
+            var script = $"Publish(@\"{sourcePath}\", @\"{escapeAttempt}\");";
+            var outcome = await executor.ExecuteAsync(document, uiApp, null, script, CancellationToken.None, exportsDir, overwriteOutputFiles: false);
+
+            Assert.True(outcome.Success);
+            var published = Assert.Single(outcome.Files);
+            Assert.Equal(PublishedFileRecord.StatusPublished, published.Status);
+            Assert.Equal("evil.txt", published.Name); // traversal stripped down to the bare file name
+            Assert.True(File.Exists(Path.Combine(exportsDir, "evil.txt")));
+            Assert.False(File.Exists(Path.Combine(tempDir, "evil.txt"))); // never escaped exportsDir
+        }
+        finally
+        {
+            Directory.Delete(tempDir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task PublishWithNonexistentSource_NeverThrows_RecordsFailed()
+    {
+        var executor = NewExecutor();
+        var document = new FakeDocumentAdapter();
+        var uiApp = new FakeUiApplicationAdapter();
+        var tempDir = CreateTempDir();
+        try
+        {
+            var exportsDir = Path.Combine(tempDir, "exports");
+            Directory.CreateDirectory(exportsDir);
+            var missingSource = Path.Combine(tempDir, "does-not-exist.txt");
+
+            var script = $"Publish(@\"{missingSource}\");";
+            var outcome = await executor.ExecuteAsync(document, uiApp, null, script, CancellationToken.None, exportsDir, overwriteOutputFiles: false);
+
+            Assert.True(outcome.Success); // Publish never throws -- the script itself doesn't fail
+            var failed = Assert.Single(outcome.Files);
+            Assert.Equal(PublishedFileRecord.StatusFailed, failed.Status);
+            Assert.NotNull(failed.Message);
+        }
+        finally
+        {
+            Directory.Delete(tempDir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task PublishWithDirectoryAsSource_NeverThrows_RecordsFailed()
+    {
+        var executor = NewExecutor();
+        var document = new FakeDocumentAdapter();
+        var uiApp = new FakeUiApplicationAdapter();
+        var tempDir = CreateTempDir();
+        try
+        {
+            var exportsDir = Path.Combine(tempDir, "exports");
+            Directory.CreateDirectory(exportsDir);
+            var directoryAsSource = Path.Combine(tempDir, "a-directory");
+            Directory.CreateDirectory(directoryAsSource);
+
+            var script = $"Publish(@\"{directoryAsSource}\");";
+            var outcome = await executor.ExecuteAsync(document, uiApp, null, script, CancellationToken.None, exportsDir, overwriteOutputFiles: false);
+
+            Assert.True(outcome.Success); // Publish never throws -- the script itself doesn't fail
+            var failed = Assert.Single(outcome.Files);
+            Assert.Equal(PublishedFileRecord.StatusFailed, failed.Status);
+            Assert.NotNull(failed.Message);
+        }
+        finally
+        {
+            Directory.Delete(tempDir, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task ScriptThatDoesNotPublish_HasEmptyFilesArray_NoExportsDirectoryNeeded()
     {
         // exportsDirectoryPath omitted entirely -- existing callers/tests that don't pass one must
@@ -310,6 +491,7 @@ public class TransactionScriptExecutorTests
         public string? PathName => _inner.PathName;
         public bool IsWorkshared => _inner.IsWorkshared;
         public string? CentralModelPath => _inner.CentralModelPath;
+        public string DocumentId => _inner.DocumentId;
 
         public MCPBridge.RevitAdapter.ITransactionAdapter CreateTransaction(string name) => _riggedTransaction;
 

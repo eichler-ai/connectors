@@ -203,7 +203,6 @@ internal sealed class BridgeHost
             scriptExecutor,
             windowInventory: new Win32WindowInventory(),
             discoveryService: discoveryService,
-            uncPathResolver: uncPathResolver,
             instanceId: _instanceId.ToString());
 
         _stopCts = new CancellationTokenSource();

@@ -99,7 +99,7 @@ func TestExecuteScriptForwardsOverwriteOutputFilesAndFiles(t *testing.T) {
 			"status":       "success",
 			"execution_id": gotParams["execution_id"],
 			"files": []map[string]any{
-				{"name": "view.png", "path": "exports/view.png", "status": "success"},
+				{"name": "view.png", "path": "exports/view.png", "status": "published"},
 				{"name": "clash.png", "path": "exports/clash.png", "status": "failed", "message": "already exists; overwrite_output_files is false"},
 			},
 		}, nil
@@ -119,7 +119,7 @@ func TestExecuteScriptForwardsOverwriteOutputFilesAndFiles(t *testing.T) {
 	if len(res.Files) != 2 {
 		t.Fatalf("Files = %+v, want 2 entries", res.Files)
 	}
-	if res.Files[0] != (FileRecord{Name: "view.png", Path: "exports/view.png", Status: "success"}) {
+	if res.Files[0] != (FileRecord{Name: "view.png", Path: "exports/view.png", Status: "published"}) {
 		t.Errorf("Files[0] = %+v", res.Files[0])
 	}
 	if res.Files[1] != (FileRecord{Name: "clash.png", Path: "exports/clash.png", Status: "failed", Message: "already exists; overwrite_output_files is false"}) {

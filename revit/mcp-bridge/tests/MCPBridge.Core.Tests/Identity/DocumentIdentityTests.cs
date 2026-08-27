@@ -1,6 +1,6 @@
 using System;
-using MCPBridge.Core.Identity;
 using MCPBridge.Core.Tests.Fakes;
+using MCPBridge.RevitAdapter;
 using Xunit;
 
 namespace MCPBridge.Core.Tests.Identity;
@@ -39,6 +39,25 @@ public class DocumentIdentityTests
             PathName = @"C:\Users\alice\Local\Central_alice.rvt",
         };
         Assert.NotEqual(idFromCentral, DocumentIdentity.Resolve(differentCentral, PassthroughUnc));
+    }
+
+    [Fact]
+    public void Workshared_MappedDriveLetterCentralPath_HashesSameAsItsUncEquivalent()
+    {
+        // Independent PR review finding: the workshared branch used to skip UNC resolution
+        // entirely, so the same central model reached via a mapped drive letter and via its UNC
+        // form would hash differently -- exactly the "two instances, one central model, different
+        // drive letters" scenario PRD §09 calls out as the case that matters most.
+        var unc = new FakeUncPathResolver();
+        unc.Map("Z:", @"\\server\connectors");
+
+        var viaDriveLetter = new FakeDocumentAdapter { IsWorkshared = true, CentralModelPath = @"Z:\Central.rvt" };
+        var viaUnc = new FakeDocumentAdapter { IsWorkshared = true, CentralModelPath = @"\\server\connectors\Central.rvt" };
+
+        var idViaDriveLetter = DocumentIdentity.Resolve(viaDriveLetter, unc);
+        var idViaUnc = DocumentIdentity.Resolve(viaUnc, unc);
+
+        Assert.Equal(idViaUnc, idViaDriveLetter);
     }
 
     [Fact]

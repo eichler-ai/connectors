@@ -9,6 +9,7 @@ public sealed class FakeDocumentAdapter : IDocumentAdapter
     public string? PathName { get; init; }
     public bool IsWorkshared { get; init; }
     public string? CentralModelPath { get; init; }
+    public string DocumentId { get; init; } = "doc-fake0000000000";
     public FakeTransactionAdapter? LastTransaction { get; private set; }
     public FakeTransactionGroupAdapter? LastTransactionGroup { get; private set; }
 
