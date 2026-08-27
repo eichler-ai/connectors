@@ -19,6 +19,13 @@ namespace MCPBridge.Core.Execution;
 /// folded into the same notices[] list, so a script's result always shows everything that was
 /// auto-resolved on its behalf in one place -- including on a cancelled run, since a dialog may well be
 /// what the script was stuck behind when it got cancelled.
+///
+/// PRD §09: files published via ScriptGlobals.Publish are a sibling list, files[] -- read directly off
+/// the ScriptGlobals instance this method itself constructs, once the run finishes. Unlike dialog
+/// overrides (ActiveDialogContext), Publish's state doesn't need a static bridge to reach here: this
+/// method already holds the one ScriptGlobals instance for this run, so it can just read it back --
+/// no other component (an OnStartup-registered handler with no reference to this run, the way
+/// DialogBoxShowing's handler has none) needs to reach into it from outside.
 /// </summary>
 public sealed class TransactionScriptExecutor
 {
@@ -36,7 +43,10 @@ public sealed class TransactionScriptExecutor
         IUiApplicationAdapter uiApplication,
         IUiDocumentAdapter? uiDocument,
         string scriptText,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? exportsDirectoryPath = null,
+        string? importsDirectoryPath = null,
+        bool overwriteOutputFiles = false)
     {
         var group = document.CreateTransactionGroup(TransactionName);
         var transaction = document.CreateTransaction(TransactionName);
@@ -44,8 +54,11 @@ public sealed class TransactionScriptExecutor
         group.Start();
         transaction.Start();
 
-        var globals = new ScriptGlobals(document, uiApplication, uiDocument, cancellationToken);
+        var globals = new ScriptGlobals(
+            document, uiApplication, uiDocument, cancellationToken,
+            exportsDirectoryPath, importsDirectoryPath, overwriteOutputFiles);
         ActiveDialogContext.SetActive(globals.DialogResultOverrides);
+
         try
         {
             var outcome = await _runner.RunAsync(scriptText, globals, cancellationToken).ConfigureAwait(false);
@@ -56,15 +69,18 @@ public sealed class TransactionScriptExecutor
                 // Commit() never ran -- no failures-API notices to fold in, but a dialog may still have
                 // fired mid-script before it failed or was cancelled (PRD §07: this is precisely the
                 // headline case -- a script stuck behind a dialog gets auto-cancelled by max_duration_ms).
+                // Same reasoning applies to files[] (PRD §09): a script may have published a file before
+                // it threw/was cancelled, and that publication must still be reported here.
                 var dialogNotices = ActiveDialogContext.DrainRecorded();
-                if (dialogNotices.Count == 0)
+                var publishedFiles = globals.PublishedFiles;
+                if (dialogNotices.Count == 0 && publishedFiles.Count == 0)
                 {
                     return outcome;
                 }
 
                 return outcome.WasCancelled
-                    ? ScriptExecutionOutcome.Cancelled(outcome.StdOut, dialogNotices)
-                    : ScriptExecutionOutcome.Failed(outcome.Exception!, outcome.StdOut, dialogNotices);
+                    ? ScriptExecutionOutcome.Cancelled(outcome.StdOut, dialogNotices, publishedFiles)
+                    : ScriptExecutionOutcome.Failed(outcome.Exception!, outcome.StdOut, dialogNotices, publishedFiles);
             }
 
             TransactionCommitResult commitResult;
@@ -75,7 +91,8 @@ public sealed class TransactionScriptExecutor
             catch (Exception ex)
             {
                 RollBackBoth(transaction, group);
-                return ScriptExecutionOutcome.Failed(ex, outcome.StdOut, CombinedNotices(transaction.CommitFailures));
+                var failedNotices = CombinedNotices(transaction.CommitFailures);
+                return ScriptExecutionOutcome.Failed(ex, outcome.StdOut, failedNotices, globals.PublishedFiles);
             }
 
             var commitFailures = transaction.CommitFailures;
@@ -88,11 +105,13 @@ public sealed class TransactionScriptExecutor
                 group.RollBack();
                 var errorMessage = commitFailures.LastOrDefault(f => f.IsError)?.Message
                     ?? "A transaction failure forced a rollback.";
-                return ScriptExecutionOutcome.Failed(new InvalidOperationException(errorMessage), outcome.StdOut, CombinedNotices(commitFailures));
+                var rolledBackNotices = CombinedNotices(commitFailures);
+                return ScriptExecutionOutcome.Failed(new InvalidOperationException(errorMessage), outcome.StdOut, rolledBackNotices, globals.PublishedFiles);
             }
 
             group.Assimilate();
-            return ScriptExecutionOutcome.Completed(outcome.ReturnValue, outcome.StdOut, CombinedNotices(commitFailures));
+            var completedNotices = CombinedNotices(commitFailures);
+            return ScriptExecutionOutcome.Completed(outcome.ReturnValue, outcome.StdOut, completedNotices, globals.PublishedFiles);
         }
         finally
         {
@@ -100,16 +119,15 @@ public sealed class TransactionScriptExecutor
         }
     }
 
-    private static IReadOnlyList<DiagnosticRecord> CombinedNotices(IReadOnlyList<FailureSummary> commitFailures)
+    private static List<DiagnosticRecord> CombinedNotices(IReadOnlyList<FailureSummary> commitFailures)
     {
         var failureNotices = commitFailures.Select(ToDiagnosticRecord).ToList();
         var dialogNotices = ActiveDialogContext.DrainRecorded();
-        if (dialogNotices.Count == 0)
+        if (dialogNotices.Count > 0)
         {
-            return failureNotices;
+            failureNotices.AddRange(dialogNotices);
         }
 
-        failureNotices.AddRange(dialogNotices);
         return failureNotices;
     }
 

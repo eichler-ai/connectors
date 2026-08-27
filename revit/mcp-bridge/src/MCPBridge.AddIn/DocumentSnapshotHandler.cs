@@ -1,10 +1,10 @@
 using System;
 using System.Collections.Generic;
-using System.Runtime.CompilerServices;
 using System.Threading.Tasks;
 using Autodesk.Revit.DB;
 using Autodesk.Revit.UI;
 using MCPBridge.Core.Protocol;
+using MCPBridge.RevitAdapter;
 
 namespace MCPBridge.AddIn;
 
@@ -24,23 +24,23 @@ namespace MCPBridge.AddIn;
 /// RevitDocumentAdapter and friends), so there is no testability reason to route it through that seam --
 /// using the real Revit API types directly here is both simpler and unavoidable.
 ///
-/// KNOWN SIMPLIFICATION: document_id here is a placeholder, not the real §09 identity scheme (normalized
-/// central-model-path hashing, doc-/tmp- promotion-on-first-save, alias tracking, etc. -- explicitly
-/// Phase 3 scope). Every document -- saved or unsaved -- gets a "doc-"/"tmp-" + GUID minted the first
-/// time this handler sees it and cached for the life of the process (a ConditionalWeakTable keyed by the
-/// live Document reference), which is close in spirit to "session-scoped GUID minted on open" but not
-/// wired to Revit's actual document-open event, only to however often BridgeHost happens to call this
-/// snapshot. Deliberately NOT derived from the document's path (an earlier version hashed it): nothing at
-/// Phase 1 needs the id to be reproducible across a process restart or a different open of the same
-/// file -- only stable across repeated register calls for the SAME still-open Document within THIS
-/// process, which a reference-keyed cache already guarantees identically, without the extra hashing code
-/// path or its cost. Good enough for Phase 1's register notification; revisit fully when §09 lands.
+/// document_id goes through the real §09 identity scheme via DocumentIdentity.ResolveCached
+/// (MCPBridge.RevitAdapter) -- the SAME shared, process-lifetime cache RevitDocumentAdapter.DocumentId
+/// uses to build the exports/imports workspace for execute_script/Publish, so both agree on the same id
+/// for the same live document. See that method's own doc comment for the caching/re-resolve contract:
+/// a `tmp-` id is re-resolved on every call (a document may have been saved since the last one) and, if
+/// that now returns a `doc-` id, the cache updates to it; a `doc-` id is treated as final.
 /// </summary>
 public sealed class DocumentSnapshotHandler : IExternalEventHandler
 {
     private readonly object _lock = new();
-    private readonly ConditionalWeakTable<Document, string> _documentIds = new();
+    private readonly IUncPathResolver _uncPathResolver;
     private TaskCompletionSource<List<RegisteredDocument>>? _pending;
+
+    public DocumentSnapshotHandler(IUncPathResolver? uncPathResolver = null)
+    {
+        _uncPathResolver = uncPathResolver ?? new Win32UncPathResolver();
+    }
 
     /// <summary>
     /// Queues a snapshot request and raises <paramref name="externalEvent"/> (which must be an
@@ -152,8 +152,7 @@ public sealed class DocumentSnapshotHandler : IExternalEventHandler
             path = null;
         }
 
-        var prefix = string.IsNullOrEmpty(path) ? "tmp-" : "doc-";
-        var documentId = _documentIds.GetValue(document, _ => prefix + Guid.NewGuid());
+        var documentId = DocumentIdentity.ResolveCached(document, _uncPathResolver);
 
         return new RegisteredDocument(documentId, document.Title, string.IsNullOrEmpty(path) ? null : path, isWorkshared, isActive);
     }

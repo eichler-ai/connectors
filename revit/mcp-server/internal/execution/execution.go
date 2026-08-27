@@ -61,7 +61,19 @@ type Result struct {
 	ExecutionID string        `json:"execution_id"`
 	Output      string        `json:"output,omitempty"`
 	Notices     []diag.Record `json:"notices,omitempty"`
+	Files       []FileRecord  `json:"files,omitempty"`
 	ErrorDetail *diag.Record  `json:"error,omitempty"`
+}
+
+// FileRecord mirrors the add-in's per-published-file report (PRD §09):
+// one entry per Publish() call a script made, independent of the run's
+// own overall success/failure — see ScriptExecutionOutcome.Files on the
+// C# side for the invariant this preserves.
+type FileRecord struct {
+	Name    string `json:"name"`
+	Path    string `json:"path"`
+	Status  string `json:"status"`
+	Message string `json:"message,omitempty"`
 }
 
 type record struct {
@@ -207,7 +219,7 @@ func fromRPCError(executionID string, rpcErr *transport.RPCError) *diag.Record {
 // calls return an explicit error rather than queuing or reporting busy,
 // per §06 — the instance stays unrecoverable until a Revit restart mints a
 // fresh instance_id (§05).
-func (m *Manager) ExecuteScript(ctx context.Context, instanceID, documentID, script string, timeoutMs, maxDurationMs int) (*Result, *diag.Record) {
+func (m *Manager) ExecuteScript(ctx context.Context, instanceID, documentID, script string, timeoutMs, maxDurationMs int, overwriteOutputFiles bool) (*Result, *diag.Record) {
 	m.mu.Lock()
 	if m.unrecoverable[instanceID] {
 		m.mu.Unlock()
@@ -232,11 +244,12 @@ func (m *Manager) ExecuteScript(ctx context.Context, instanceID, documentID, scr
 	}
 
 	params := map[string]any{
-		"execution_id":    executionID,
-		"document_id":     documentID,
-		"script":          script,
-		"timeout_ms":      timeoutMs,
-		"max_duration_ms": maxDurationMs,
+		"execution_id":           executionID,
+		"document_id":            documentID,
+		"script":                 script,
+		"timeout_ms":             timeoutMs,
+		"max_duration_ms":        maxDurationMs,
+		"overwrite_output_files": overwriteOutputFiles,
 	}
 	res, drec := m.callWire(ctx, conn, "execute_script", executionID, timeoutMs, params)
 	if drec != nil {

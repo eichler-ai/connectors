@@ -146,16 +146,16 @@ public sealed class ExecutionManager
         Transition(executionId, "mark-running", record => record.MarkRunning(now), clearActive: false);
 
     /// <summary>See <see cref="Transition"/> for why this never throws on a terminal race.</summary>
-    public DiagnosticRecord? CompleteSuccess(string executionId, DateTimeOffset now, object? result, string? stdOut, IReadOnlyList<DiagnosticRecord> notices) =>
-        Transition(executionId, "complete-success", record => record.MarkCompleted(now, result, stdOut, notices), clearActive: true);
+    public DiagnosticRecord? CompleteSuccess(string executionId, DateTimeOffset now, object? result, string? stdOut, IReadOnlyList<DiagnosticRecord> notices, IReadOnlyList<PublishedFileRecord>? files = null) =>
+        Transition(executionId, "complete-success", record => record.MarkCompleted(now, result, stdOut, notices, files), clearActive: true);
 
     /// <summary>See <see cref="Transition"/> for why this never throws on a terminal race.</summary>
-    public DiagnosticRecord? CompleteError(string executionId, DateTimeOffset now, DiagnosticRecord error, string? stdOut, IReadOnlyList<DiagnosticRecord>? notices = null) =>
-        Transition(executionId, "complete-error", record => record.MarkError(now, error, stdOut, notices), clearActive: true);
+    public DiagnosticRecord? CompleteError(string executionId, DateTimeOffset now, DiagnosticRecord error, string? stdOut, IReadOnlyList<DiagnosticRecord>? notices = null, IReadOnlyList<PublishedFileRecord>? files = null) =>
+        Transition(executionId, "complete-error", record => record.MarkError(now, error, stdOut, notices, files), clearActive: true);
 
     /// <summary>See <see cref="Transition"/> for why this never throws on a terminal race.</summary>
-    public DiagnosticRecord? CompleteCancelled(string executionId, DateTimeOffset now, string? stdOut, IReadOnlyList<DiagnosticRecord>? notices = null) =>
-        Transition(executionId, "complete-cancelled", record => record.MarkCancelled(now, stdOut, notices), clearActive: true);
+    public DiagnosticRecord? CompleteCancelled(string executionId, DateTimeOffset now, string? stdOut, IReadOnlyList<DiagnosticRecord>? notices = null, IReadOnlyList<PublishedFileRecord>? files = null) =>
+        Transition(executionId, "complete-cancelled", record => record.MarkCancelled(now, stdOut, notices, files), clearActive: true);
 
     /// <summary>
     /// Shared guard for every finishing-path record mutation (MarkRunning/CompleteSuccess/

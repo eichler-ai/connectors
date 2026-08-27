@@ -281,28 +281,58 @@ Revit's public API surface is roughly 1,700 types — an unscoped `list_function
 
 ## 09. File exchange
 
-No established convention exists for CAD-tool-to-agent file exchange — this is original design, not a researched pattern. Keyed by document identity rather than instance PID, so relative paths an agent has already referenced stay valid across a save/reopen (PIDs are ephemeral, document identity isn't). Shown below for local mode; in remote mode the add-in writes the identical structure rooted at the shared folder instead (e.g. `\\psf\connectors\Connectors\Revit\...`), per §05. The root is namespaced per-connector (`Connectors\Revit\`) rather than `Connectors\` alone, since the repo this add-in ships from is expected to host connectors for other host apps later, each needing its own non-colliding app-data space.
+No established convention exists for CAD-tool-to-agent file exchange — this is original design, not a researched pattern. Keyed by document identity rather than instance PID, so relative paths an agent has already referenced stay valid across a save/reopen (PIDs are ephemeral, document identity isn't).
+
+The workspace tree lives under a **separate root from the rest of this add-in's app data**, deliberately: `imports/`/`exports/` are content a human is meant to browse and manage directly with their own filesystem tools (below), unlike `broker.json`/`instances.json`/the discovery cache (§08), which are internal bookkeeping nobody browses and stay exactly where they already are. Burying human-facing files in `%LOCALAPPDATA%` alongside that internal state would work but be needlessly unfriendly, so the workspace root is `%USERPROFILE%\RevitMCPExchange\` instead — visible in a normal Explorer session, not three folders deep in an AppData path. Shown below for local mode; in remote mode the add-in writes the identical structure rooted at the shared folder instead (e.g. `\\psf\connectors\RevitMCPExchange\...`), per §05.
 
 ```
-%LOCALAPPDATA%\Connectors\Revit\
-  instances.json              # live registry: instance/doc → connection state
-  workspaces\
-    <document-id>\
-      exports\                # images, IFC, families written by scripts
-      logs\                   # per-execution NDJSON logs, timestamped — one shared diagnostic-record shape (§01) per line
-      scripts\                # history of executed script text, timestamped
-      tmp\<instance-id>\      # scratch, per instance sharing this workspace; cleared on document close or age-out
+%LOCALAPPDATA%\Connectors\Revit\        # internal bookkeeping — never browsed by a human
+  instances.json                        # live registry: instance/doc → connection state
+  <revit-version>\discovery-cache.db    # §08
+
+%USERPROFILE%\RevitMCPExchange\         # human-facing — the file-exchange workspace tree
+  <document-id>\
+    imports\                # files placed here for a script to consume; never auto-deleted
+    exports\                # images, IFC, families written by scripts; never auto-deleted
+    logs\                   # per-execution NDJSON logs, timestamped — one shared diagnostic-record shape (§01) per line; age out
+    scripts\                # history of executed script text, timestamped; age out
+    tmp\<instance-id>\      # scratch, per instance sharing this workspace; cleared on document close or age-out
 ```
 
-Scripts reference files by path relative to their document's `workspaces/<document-id>/` root; the broker resolves these into an actual path in every MCP tool response, per the mechanism below.
+Retention splits by ownership, not by a uniform rule: `imports/`/`exports/` hold content someone deliberately asked for — a human's upload, a script's requested output — and auto-deleting either would be a far worse surprise than the disk space they cost, so they're purely user-managed via normal filesystem tools. `logs/`/`scripts/` are audit-trail bookkeeping nobody asked for and nobody owns, generated on every single execution regardless of whether anyone ever reads them — those age out the same way `tmp/` already does.
+
+Scripts reference files by path relative to their document's `RevitMCPExchange/<document-id>/` root; the broker resolves these into an actual path in every MCP tool response, per the mechanism below. Every `execute_script`/`poll_execution` result also carries a `files[]` array alongside `notices[]` (§01) — one entry per file the script published as an output (below), each with its own per-file `status`, never a single aggregate success/failure for the whole set.
 
 ### Getting bytes to the agent
 
 A resolved path is not the same thing as file content — whether the agent can act on a bare path depends on whether it has its own filesystem access to wherever that path points, and neither of the two obvious transfer mechanisms (embedding content in a JSON-RPC response, or MCP resources) handles a large export gracefully: both would force a full binary blob through a single stdio message, materialized in memory on both ends, for a payload that couldn't usefully enter the agent's context window anyway even if it arrived. So large-file exchange is designed around *not* routing bytes through MCP at all, wherever possible:
 
-- **Primary mechanism — shared filesystem.** In local mode this is automatic: the workspace directory is already on the one disk everything shares. In remote mode it's the same fix already used for this project's own dev environment — a Parallels shared folder, referenced by its **UNC path** (`\\psf\connectors\` on the Windows/VM side) rather than a locally-mapped drive letter, since drive-letter assignment isn't guaranteed stable — Parallels' own default "Home on 'Mac'" share already claims `Z:` in this dev environment's default configuration, and the connectors share itself landed on `X:` only because `Z:` was taken; either could reassign on a reboot or reconfiguration. The broker, which knows both roots, rewrites every path the add-in reports (Windows-native) into the agent-host-native form (e.g. `\\psf\connectors\Connectors\Revit\workspaces\doc-1a2b\exports\view.png` → `/Volumes/RevitShare/Connectors/Revit/workspaces/doc-1a2b/exports/view.png`) before it ever reaches the agent. The agent then reads the file with its own filesystem tools, entirely outside the MCP channel — no size limit, no memory-doubling, genuinely graceful for a 1GB export.
+- **Primary mechanism — shared filesystem.** In local mode this is automatic: the workspace directory is already on the one disk everything shares. In remote mode it's the same fix already used for this project's own dev environment — a Parallels shared folder, referenced by its **UNC path** (`\\psf\connectors\` on the Windows/VM side) rather than a locally-mapped drive letter, since drive-letter assignment isn't guaranteed stable — Parallels' own default "Home on 'Mac'" share already claims `Z:` in this dev environment's default configuration, and the connectors share itself landed on `X:` only because `Z:` was taken; either could reassign on a reboot or reconfiguration. The broker, which knows both roots, rewrites every path the add-in reports (Windows-native) into the agent-host-native form (e.g. `\\psf\connectors\RevitMCPExchange\doc-1a2b\exports\view.png` → `/Volumes/RevitShare/RevitMCPExchange/doc-1a2b/exports/view.png`) before it ever reaches the agent. The agent then reads the file with its own filesystem tools, entirely outside the MCP channel — no size limit, no memory-doubling, genuinely graceful for a 1GB export.
 - **Fallback — `read_file(document_id, relative_path, offset?, length?)`.** For the case with no shared filesystem at all. Chunked/range-based from the outset, never whole-file-in-one-response; a request exceeding a configurable size threshold with no range specified is rejected with guidance to use the shared-path mechanism instead, rather than attempting the transfer and choking on it.
 - **MCP resources** are optional polish for hosts that support them, layered on the same chunked-read primitive — not the primary mechanism. Confirmed: Claude Code does support `resources/list`/`resources/read` (referenced via `@server:protocol://path`), but caps MCP output at 25,000 tokens by default (500,000 characters even with an explicit size declaration) — roughly 100–350KB depending on encoding, nowhere near a 1GB export. This isn't a gap in Claude Code's support; it confirms resources were never going to be the large-file mechanism regardless of host, which is exactly why the shared-filesystem path above is primary and not a fallback.
+
+> **Scoped out of the current implementation pass.** `read_file` and MCP resources only have a real trigger condition once remote mode exists — an agent host with no direct filesystem access to the shared workspace at all. Local mode (the only mode targeted so far) already gives the agent's own host direct disk access, so building either now would be speculative work for a mode not yet in scope; document identity, the workspace tree, and `Publish`/`files[]` below are the actual current build.
+
+### Uploading files to a script
+
+The reverse direction is deliberately the mirror image of the download story above, for the same reason: an agent has no business piping a large file's bytes through a JSON-RPC message any more than it has business receiving them that way. There is no `upload_file`-style tool that accepts file content as a parameter. Instead:
+
+1. The agent-side host places the file(s) into `imports/` using its own filesystem tools, resolved through the same shared root as everywhere else in this section (in local mode this is trivial, since the workspace is already on the one disk everything shares; in remote mode it's the same UNC-path mechanism used for exports above, just written instead of read).
+2. The agent calls `execute_script` with a script that reads from the now-present path under `imports/` via ordinary `System.IO` — no different from a script reading any other file it was told about. A script doesn't need to be told or construct that path itself: the globals object §06 already exposes `Document`/`UIApplication`/`CancellationToken` through also exposes `ImportsDirectory` (alongside `ExportsDirectory`, below) directly, so a script can do `System.IO.File.ReadAllBytes(System.IO.Path.Combine(ImportsDirectory, "model.csv"))` without the agent needing to know or embed the workspace's absolute path.
+
+Because "the user should be able to upload or download multiple files, though a single file is by far the more common case" was an explicit requirement, both directions are batch-shaped from the outset rather than a single-path parameter with a list bolted on later: a set of files, not one file, is the base case, and per-file status (below) is what a batch of independent file operations naturally needs.
+
+### Publishing script outputs
+
+A script doesn't construct an `exports/` path itself — it calls `Publish(path, name?)` on the same globals object §06 already exposes `Document`/`UIApplication`/`CancellationToken` through. `Publish` copies (never moves — a script may still want to reference or log its own working file afterward) the file into that document's `exports/` directory and registers it for the response; if the script already wrote directly into `exports/`, `Publish` recognizes the file is already there and just registers it rather than copying it onto itself. Every registered file becomes one entry in the result's `files[]` array (above), each with its own `status` — a failure on one file (disk full, a locked target, a bad source path) never rolls back or blocks the others, the same per-file-independence reasoning behind the upload/download batching above.
+
+**Collisions** are controlled by `overwrite_output_files` (default `false`), a request-level flag on `execute_script` applied uniformly across every file `Publish` touches during that run — not a per-file override, which would be more mechanism than this needs. With the default, a `Publish` call that would overwrite an existing file becomes a `status: "failed"` entry with a message naming the flag, never a silent skip (§01) and never an abort of the rest of the batch. Most real usage is iterative — an agent re-running a script against the same output name expects to overwrite — so `overwrite_output_files: true` is expected to be the common case in practice; the default stays `false` regardless, since a script silently clobbering a prior export is a worse surprise than an explicit failure asking for the flag.
+
+### Browsing a workspace
+
+`list_workspace_files(document_id, subdirectory?)` returns an array of `{name, size, modified_at}` for one workspace directory — metadata only, never content, the same restraint as everything else in this section. It exists so an agent can discover what's already in `imports/`/`exports/` (e.g. confirming a human's upload landed, or checking what a prior script run already produced) without needing a script round-trip just to list a directory.
+
+> **Scoped out of the current implementation pass**, for the same reason as `read_file` above: in local mode, the agent's own host already has direct filesystem access to the workspace tree and can list a directory with its own tools — a script round-trip (`Directory.GetFiles(...)` returned as output) already covers this today with nothing new to build. This tool earns its keep once remote mode exists and that direct access goes away.
 
 ### Document identity
 
@@ -310,14 +340,14 @@ A resolved path is not the same thing as file content — whether the agent can 
 
 | Document state | Identity source | ID form |
 |---|---|---|
-| Saved, non-workshared | Local file path, normalized (resolved, case-insensitive) then hashed | `doc-<hash>` |
+| Saved, non-workshared | Local file path, compared case-insensitively (`OrdinalIgnoreCase` — Windows paths are case-preserving but not case-sensitive); a mapped network drive letter is resolved to its UNC target first (`WNetGetConnection`, best-effort — the same P/Invoke-with-safe-fallback pattern §07 already uses for its window-enumeration fallback) so the same file opened via `Z:\House.rvt` and `\\server\share\House.rvt` still hashes identically | `doc-<hash>` |
 | Saved, workshared (local or cloud/ACC central) | **Central model path** (`Document.GetWorksharingCentralModelPath`) or cloud model URN — never the local copy's path, which is per-user and regenerated on every fresh local copy | `doc-<hash>` |
 | Unsaved / new / detached-and-not-yet-saved | No stable path exists yet — session-scoped GUID minted on open | `tmp-<guid>` |
 | Family document (.rfa) | Same rules as above, applied to the family file's own saved/unsaved state | `doc-<hash>` or `tmp-<guid>` |
 
 The `doc-`/`tmp-` prefix is deliberate — it's visible in every `list_instances` response and every workspace path, so an agent (or a human debugging) can tell at a glance whether a given ID is durable or session-only without a lookup.
 
-> **Promotion on first save.** When a `tmp-` document gets its first save (or a detached document is saved under a new name), the add-in recomputes the canonical `doc-<hash>` from the new path and **renames the existing workspace folder in place** — exports, logs, and script history all carry over rather than orphaning under the old ephemeral ID. The broker keeps a short-lived alias from the old ID to the new one, so a `document_id` an agent is still holding from before the save resolves to "superseded, use `doc-<new-hash>`" instead of a bare not-found error. The same rename-and-alias path handles a later Save-As to a different location, too — it isn't a special case.
+> **Promotion on first save — simplified from the original design.** An earlier version of this section specified renaming the workspace folder in place plus a short-lived old-id-to-new-id alias on a `tmp-` document's first save. Independent PR review found that design unreachable in practice — identity is only re-resolved on the next `register`/`execute_script` call after the save, by which point the old workspace folder the rename would have targeted was never the one anything actually wrote into (see the file-exchange PR's own fix for why identity must be resolved once and cached per live document, not recomputed per call) — and found the alias was never consulted anywhere in production. The actual, simpler behavior: a `tmp-` document's already-published files stay under its `tmp-` workspace for the rest of that session; once re-resolution picks up the save (a fresh `doc-<hash>`), the document gets a new workspace going forward, with no rename and no alias. A later Save-As to a different location behaves the same way. Real rename-in-place promotion remains a plausible future enhancement if this proves to matter in practice — not designed now, matching this doc's other v1/v2 splits.
 
 ### Shared workspaces & linked models
 

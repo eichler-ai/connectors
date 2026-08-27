@@ -129,6 +129,60 @@ func TestExecuteScriptToolAddInReportedErrorIsToolError(t *testing.T) {
 	}
 }
 
+// TestExecuteScriptToolOverwriteOutputFilesAndFilesRoundTrip is a regression
+// test for PRD §09's file-exchange wire fields: overwrite_output_files set
+// on the tool call must reach the add-in's execute_script params, and a
+// files[] array in the add-in's reply must round-trip into
+// ExecutionOut.Files via toolResult/the full tool handler path — the same
+// shape as document_id/notices already round-trip.
+func TestExecuteScriptToolOverwriteOutputFilesAndFilesRoundTrip(t *testing.T) {
+	mgr := execution.NewManager()
+	var gotOverwrite bool
+	attachFakeInstance(t, mgr, "inst-1", func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
+		var p map[string]any
+		json.Unmarshal(params, &p)
+		gotOverwrite, _ = p["overwrite_output_files"].(bool)
+		return map[string]any{
+			"status":       "success",
+			"execution_id": p["execution_id"],
+			"files": []map[string]any{
+				{"name": "view.png", "path": "exports/view.png", "status": "published"},
+			},
+		}, nil
+	})
+	cs := connectClient(t, mgr)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	res, err := cs.CallTool(ctx, &mcp.CallToolParams{
+		Name: "execute_script",
+		Arguments: map[string]any{
+			"instance_id":            "inst-1",
+			"document_id":            "doc-1",
+			"script":                 "Publish(\"a.png\");",
+			"overwrite_output_files": true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected tool error: %+v", res.Content)
+	}
+	if !gotOverwrite {
+		t.Error("overwrite_output_files did not reach the wire params as true")
+	}
+
+	var out ExecutionOut
+	sc, _ := json.Marshal(res.StructuredContent)
+	if err := json.Unmarshal(sc, &out); err != nil {
+		t.Fatalf("decoding structured content: %v", err)
+	}
+	if len(out.Files) != 1 || out.Files[0].Name != "view.png" || out.Files[0].Path != "exports/view.png" || out.Files[0].Status != "published" {
+		t.Errorf("Files = %+v", out.Files)
+	}
+}
+
 func TestExecuteScriptToolUnknownInstanceIsToolError(t *testing.T) {
 	mgr := execution.NewManager()
 	cs := connectClient(t, mgr)

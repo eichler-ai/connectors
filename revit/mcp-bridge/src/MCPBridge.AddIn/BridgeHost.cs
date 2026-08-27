@@ -110,7 +110,8 @@ internal sealed class BridgeHost
 
         // The document-snapshot ExternalEvent has no circular dependency (its handler doesn't wrap
         // anything else), so it's created directly.
-        var documentSnapshotHandler = new DocumentSnapshotHandler();
+        var uncPathResolver = new Win32UncPathResolver();
+        var documentSnapshotHandler = new DocumentSnapshotHandler(uncPathResolver);
         var documentSnapshotEvent = ExternalEvent.Create(documentSnapshotHandler);
 
         // The script-execution ExternalEvent has a genuine circular dependency: ExternalEventBridge needs
@@ -196,7 +197,13 @@ internal sealed class BridgeHost
                 period: Timeout.InfiniteTimeSpan);
         }
 
-        var dispatcher = new RequestDispatcher(_executionManager, scriptBridge, scriptExecutor, windowInventory: new Win32WindowInventory(), discoveryService: discoveryService);
+        var dispatcher = new RequestDispatcher(
+            _executionManager,
+            scriptBridge,
+            scriptExecutor,
+            windowInventory: new Win32WindowInventory(),
+            discoveryService: discoveryService,
+            instanceId: _instanceId.ToString());
 
         _stopCts = new CancellationTokenSource();
         var stopToken = _stopCts.Token;

@@ -31,6 +31,9 @@ public sealed class ExecutionRecord
     public DiagnosticRecord? Error { get; private set; }
     public IReadOnlyList<DiagnosticRecord> Notices { get; private set; } = Array.Empty<DiagnosticRecord>();
 
+    /// <summary>Files published via ScriptGlobals.Publish during this execution (PRD §09) -- a sibling list to Notices.</summary>
+    public IReadOnlyList<PublishedFileRecord> Files { get; private set; } = Array.Empty<PublishedFileRecord>();
+
     private ExecutionRecord(string executionId, string scriptText, long maxDurationMs, DateTimeOffset createdAt)
     {
         ExecutionId = executionId;
@@ -50,7 +53,7 @@ public sealed class ExecutionRecord
         StartedAt = now;
     }
 
-    public void MarkCompleted(DateTimeOffset now, object? result, string? stdOut, IReadOnlyList<DiagnosticRecord> notices)
+    public void MarkCompleted(DateTimeOffset now, object? result, string? stdOut, IReadOnlyList<DiagnosticRecord> notices, IReadOnlyList<PublishedFileRecord>? files = null)
     {
         RequireNonTerminal();
         Status = ExecutionStatus.Completed;
@@ -58,9 +61,10 @@ public sealed class ExecutionRecord
         Result = result;
         StdOut = stdOut;
         Notices = notices;
+        Files = files ?? Array.Empty<PublishedFileRecord>();
     }
 
-    public void MarkError(DateTimeOffset now, DiagnosticRecord error, string? stdOut, IReadOnlyList<DiagnosticRecord>? notices = null)
+    public void MarkError(DateTimeOffset now, DiagnosticRecord error, string? stdOut, IReadOnlyList<DiagnosticRecord>? notices = null, IReadOnlyList<PublishedFileRecord>? files = null)
     {
         RequireNonTerminal();
         Status = ExecutionStatus.Error;
@@ -68,15 +72,17 @@ public sealed class ExecutionRecord
         Error = error;
         StdOut = stdOut;
         Notices = notices ?? Array.Empty<DiagnosticRecord>();
+        Files = files ?? Array.Empty<PublishedFileRecord>();
     }
 
-    public void MarkCancelled(DateTimeOffset now, string? stdOut, IReadOnlyList<DiagnosticRecord>? notices = null)
+    public void MarkCancelled(DateTimeOffset now, string? stdOut, IReadOnlyList<DiagnosticRecord>? notices = null, IReadOnlyList<PublishedFileRecord>? files = null)
     {
         RequireNonTerminal();
         Status = ExecutionStatus.Cancelled;
         CompletedAt = now;
         StdOut = stdOut;
         Notices = notices ?? Array.Empty<DiagnosticRecord>();
+        Files = files ?? Array.Empty<PublishedFileRecord>();
     }
 
     public void MarkUnrecoverable(DateTimeOffset now, DiagnosticRecord diagnostic)
