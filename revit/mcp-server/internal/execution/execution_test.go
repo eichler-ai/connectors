@@ -768,3 +768,71 @@ func TestCancelExecutionGraceEscalationIsNoOpIfAlreadyTerminal(t *testing.T) {
 		t.Error("instance must not be latched unrecoverable when cancellation already resolved cooperatively")
 	}
 }
+
+func TestStatusForInstance_IdleWhenNoActiveExecution(t *testing.T) {
+	m := NewManager()
+	if got := m.StatusForInstance("inst-1"); got != StatusIdle {
+		t.Errorf("StatusForInstance = %q, want idle for an instance with no active execution", got)
+	}
+}
+
+func TestStatusForInstance_PendingWhileQueued(t *testing.T) {
+	_, conn := newFakeInstance(t, func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
+		var p map[string]any
+		json.Unmarshal(params, &p)
+		return Result{Status: StatusPending, ExecutionID: p["execution_id"].(string)}, nil
+	})
+	m := NewManager()
+	m.AttachInstance("inst-1", conn)
+
+	_, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "sleep forever", 100, 60000, false)
+	if drec != nil {
+		t.Fatalf("ExecuteScript: %+v", drec)
+	}
+
+	if got := m.StatusForInstance("inst-1"); got != StatusPending {
+		t.Errorf("StatusForInstance = %q, want pending", got)
+	}
+}
+
+func TestStatusForInstance_BusyWhileRunning(t *testing.T) {
+	_, conn := newFakeInstance(t, func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
+		var p map[string]any
+		json.Unmarshal(params, &p)
+		return Result{Status: StatusRunning, ExecutionID: p["execution_id"].(string)}, nil
+	})
+	m := NewManager()
+	m.AttachInstance("inst-1", conn)
+
+	_, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "slow", 100, 60000, false)
+	if drec != nil {
+		t.Fatalf("ExecuteScript: %+v", drec)
+	}
+
+	if got := m.StatusForInstance("inst-1"); got != StatusBusy {
+		t.Errorf("StatusForInstance = %q, want busy for an execution the add-in reported as running", got)
+	}
+}
+
+func TestStatusForInstance_UnrecoverableBeatsEverythingElse(t *testing.T) {
+	_, conn := newFakeInstance(t, func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
+		var p map[string]any
+		json.Unmarshal(params, &p)
+		return Result{Status: StatusRunning, ExecutionID: p["execution_id"].(string)}, nil
+	})
+	m := NewManager()
+	m.AttachInstance("inst-1", conn)
+
+	start, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "slow", 50, 60000, false)
+	if drec != nil {
+		t.Fatalf("ExecuteScript: %+v", drec)
+	}
+	// Simulate the add-in's cancellation grace period lapsing -- the
+	// instance is still "active" (activeByInstance still points at this
+	// execution) but must report unrecoverable, not pending/busy.
+	m.settle("inst-1", start.ExecutionID, &Result{Status: StatusUnrecoverable, ExecutionID: start.ExecutionID})
+
+	if got := m.StatusForInstance("inst-1"); got != StatusUnrecoverable {
+		t.Errorf("StatusForInstance = %q, want unrecoverable", got)
+	}
+}

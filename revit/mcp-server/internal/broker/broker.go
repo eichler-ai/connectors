@@ -235,29 +235,44 @@ func (b *Broker) serveAddIn(rwc io.ReadWriteCloser) {
 	var instanceID string
 
 	conn.SetNotificationHandler(func(method string, params json.RawMessage) {
-		if method != "register" {
-			return
+		switch method {
+		case "register":
+			var rp registerParams
+			if err := json.Unmarshal(params, &rp); err != nil {
+				b.logf("broker: malformed register notification: %v", err)
+				return
+			}
+			instanceID = rp.InstanceID
+			b.Registry.Register(&registry.Instance{
+				InstanceID:   rp.InstanceID,
+				PID:          rp.PID,
+				RevitVersion: rp.RevitVersion,
+				Documents:    rp.Documents,
+			}, time.Now())
+			b.Execution.AttachInstance(rp.InstanceID, conn)
+			b.Discovery.AttachInstance(rp.InstanceID, conn)
+		case "ping":
+			// Heartbeat (PRD §05) — instanceID is only known once this
+			// connection's own register has arrived; a ping can't
+			// meaningfully precede that.
+			if instanceID != "" {
+				b.Registry.RecordPing(instanceID, time.Now())
+			}
 		}
-		var rp registerParams
-		if err := json.Unmarshal(params, &rp); err != nil {
-			b.logf("broker: malformed register notification: %v", err)
-			return
-		}
-		instanceID = rp.InstanceID
-		b.Registry.Register(&registry.Instance{
-			InstanceID:   rp.InstanceID,
-			PID:          rp.PID,
-			RevitVersion: rp.RevitVersion,
-			Documents:    rp.Documents,
-		})
-		b.Execution.AttachInstance(rp.InstanceID, conn)
-		b.Discovery.AttachInstance(rp.InstanceID, conn)
 	})
 
 	_ = conn.Serve()
 	if instanceID != "" {
 		b.Execution.DetachInstance(instanceID)
 		b.Discovery.DetachInstance(instanceID)
+		// A cleanly torn-down connection is immediate, certain proof this
+		// instance is gone -- remove it from the registry now rather than
+		// leaving it to age out via the heartbeat prune sweep (PRD §05),
+		// which exists for the different case of a socket that's still
+		// open but has gone quiet. A genuine reconnect creates a brand-new
+		// entry via Register regardless, so removing the old one first
+		// doesn't introduce any flicker for the normal, healthy case.
+		b.Registry.Remove(instanceID)
 	}
 }
 

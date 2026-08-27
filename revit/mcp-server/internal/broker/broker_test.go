@@ -193,12 +193,87 @@ func TestRegisterPopulatesRegistryAndAttachesExecution(t *testing.T) {
 	}
 }
 
+// TestPingNotificationReachesRegistry proves the broker's "ping" notification
+// case actually calls Registry.RecordPing, not just that RecordPing itself
+// works in isolation (already covered in registry_test.go) -- this is the
+// exact class of silent wire-wiring bug this PR's own Workshared fix caught
+// elsewhere, so the seam between the notification switch and the registry
+// call needs its own coverage.
+//
+// This can only be proven by letting real time actually pass: ConnectedSince
+// (stamped by the wire register itself, not settable through the protocol)
+// has to genuinely age past UnresponsiveThreshold before a ping's arrival is
+// distinguishable from the ConnectedSince fallback alone -- there's no way
+// to fake that with a virtual/future query time, since a ping's timestamp is
+// always real wall-clock "now". Kept to just over the threshold (not
+// PruneAfterSilence) to bound the real sleep this test needs; skipped in
+// -short runs since it's a genuine ~31s wall-clock wait, not a slow-but-
+// parallelizable one.
+func TestPingNotificationReachesRegistry(t *testing.T) {
+	if testing.Short() {
+		t.Skip("real ~31s wall-clock wait; run without -short")
+	}
+	b, ln := newTestBroker(t)
+	conn, br, resp := dialAndAuth(t, ln.Addr().String(), testToken, RoleAddIn)
+	defer conn.Close()
+	if resp.Error != nil {
+		t.Fatalf("auth failed: %+v", resp.Error)
+	}
+
+	rest := &tail{r: br, conn: conn}
+	addinConn := transport.NewConn(rest)
+	addinConn.SetRequestHandler(func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
+		return map[string]any{"status": "success"}, nil
+	})
+	go addinConn.Serve()
+
+	if err := addinConn.Notify("register", registerParams{InstanceID: "inst-ping"}); err != nil {
+		t.Fatalf("Notify register: %v", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, ok := b.Registry.Get("inst-ping"); ok {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	time.Sleep(registry.UnresponsiveThreshold + time.Second)
+	if b.Registry.IsResponsive("inst-ping", time.Now()) {
+		t.Fatalf("test setup: instance should have gone unresponsive via the ConnectedSince fallback by now")
+	}
+
+	if err := addinConn.Notify("ping", struct{}{}); err != nil {
+		t.Fatalf("Notify ping: %v", err)
+	}
+
+	// Poll for RecordPing's effect: a ping recorded at real "now" makes
+	// IsResponsive(id, now) true again -- but only if the notification
+	// actually reached Registry.RecordPing.
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if b.Registry.IsResponsive("inst-ping", time.Now()) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("ping notification never reached Registry.RecordPing (IsResponsive still reflects pre-ping staleness)")
+}
+
 // TestRegisterThenImmediateCloseDetachesCleanly is a regression test for a
 // race between the register notification handler and the connection
 // closing right after: if AttachInstance hadn't reliably completed before
 // Serve() observed the close and ran DetachInstance, the instance would be
 // left permanently attached to a dead connection (a leaked, unroutable
 // registration) instead of cleanly detached.
+//
+// Since a cleanly closed connection now also removes the instance from the
+// registry immediately (rather than leaving it to age out via the
+// heartbeat prune sweep), this test's own assertion is the mirror image of
+// what it originally checked: the registry entry must NOT still be present
+// after the close, and execute_script against it must report
+// instance_not_found -- both are evidence AttachInstance/Register
+// completed and then were cleanly torn down, not evidence of a leak.
 func TestRegisterThenImmediateCloseDetachesCleanly(t *testing.T) {
 	b, ln := newTestBroker(t)
 	conn, br, resp := dialAndAuth(t, ln.Addr().String(), testToken, RoleAddIn)
@@ -222,15 +297,19 @@ func TestRegisterThenImmediateCloseDetachesCleanly(t *testing.T) {
 	addinConn.Close()
 	conn.Close()
 
+	// The registry entry must settle to absent (Remove runs once Serve()
+	// observes the close), not linger present -- confirms the connection
+	// teardown path actually ran to completion rather than the close
+	// racing ahead of the register handler.
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if _, ok := b.Registry.Get("inst-fastclose"); ok {
+		if _, ok := b.Registry.Get("inst-fastclose"); !ok {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if _, ok := b.Registry.Get("inst-fastclose"); !ok {
-		t.Fatal("instance never appeared in registry")
+	if _, ok := b.Registry.Get("inst-fastclose"); ok {
+		t.Fatal("instance should have been removed from the registry after the connection closed")
 	}
 
 	// Confirm it was also detached from the execution manager — not left

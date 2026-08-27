@@ -393,10 +393,12 @@ func runPrimary(ctx context.Context, bindAddr string, port int, dataDir string, 
 	mcpserver.Register(mcpServer, execMgr)
 	discoveryRouter := discovery.NewRouter()
 	mcpserver.RegisterDiscovery(mcpServer, discoveryRouter)
+	reg := registry.New()
+	mcpserver.RegisterInstances(mcpServer, reg, execMgr)
 
 	b := &broker.Broker{
 		Token:     token,
-		Registry:  registry.New(),
+		Registry:  reg,
 		Execution: execMgr,
 		Discovery: discoveryRouter,
 		MCPServer: mcpServer,
@@ -405,6 +407,24 @@ func runPrimary(ctx context.Context, bindAddr string, port int, dataDir string, 
 
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- b.Serve(ctx, ln) }()
+
+	// Heartbeat prune sweep (PRD §05) — reclaims instances that have gone
+	// silent (wedged, or disconnected and never reconnected) from the
+	// registry so list_instances doesn't accumulate stale entries forever.
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if pruned := reg.PruneStale(time.Now()); len(pruned) > 0 {
+					logger.Printf("registry: pruned %d stale instance(s): %v", len(pruned), pruned)
+				}
+			}
+		}
+	}()
 
 	// The primary's own MCP session runs over its own stdio, exactly like
 	// every secondary's proxied session runs over TCP (PRD §05: "From the

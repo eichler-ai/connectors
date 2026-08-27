@@ -38,6 +38,13 @@ const (
 	StatusError         Status = "error"
 	StatusCancelled     Status = "cancelled"
 	StatusUnrecoverable Status = "unrecoverable"
+
+	// StatusIdle is an instance-level state (list_instances, PRD §05) — an
+	// instance with no active execution. It's never returned as an
+	// execute_script/poll_execution/cancel_execution *result*, only from
+	// StatusForInstance below; kept in this same enum since it shares the
+	// same underlying concept, not to be confused with the per-call shapes.
+	StatusIdle Status = "idle"
 )
 
 // IsTerminal reports whether s is a final state — no further
@@ -154,6 +161,33 @@ func (m *Manager) DetachInstance(instanceID string) {
 	if m.activeByInstance[instanceID] != "" {
 		delete(m.activeByInstance, instanceID)
 	}
+}
+
+// StatusForInstance derives the instance-level status list_instances (PRD
+// §05) needs, from state this Manager already tracks internally:
+// unrecoverable (the latch from a grace-period escalation, §06) beats
+// everything else; otherwise an active execution's own last-known status
+// (pending, or running — surfaced here as StatusBusy, the instance-level
+// name for "actively occupying the UI thread right now") is reported;
+// otherwise the instance is idle. Heartbeat-derived unresponsiveness is
+// layered on top of this by the caller (registry.IsResponsive), not here —
+// this method only knows about execution state, not connection liveness.
+func (m *Manager) StatusForInstance(instanceID string) Status {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.unrecoverable[instanceID] {
+		return StatusUnrecoverable
+	}
+	executionID, busy := m.activeByInstance[instanceID]
+	if !busy {
+		return StatusIdle
+	}
+	rec, ok := m.executions[executionID]
+	if !ok || rec.status == StatusPending {
+		return StatusPending
+	}
+	return StatusBusy
 }
 
 const source = "mcp-server.internal.execution"
