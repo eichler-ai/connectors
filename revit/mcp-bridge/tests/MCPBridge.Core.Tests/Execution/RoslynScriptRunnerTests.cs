@@ -333,6 +333,43 @@ public class RoslynScriptRunnerTests
         Assert.Contains(expectedNamedMember, outcome.Exception!.Message);
     }
 
+    [Theory]
+    // Target-typed `new` -- an ImplicitObjectCreationExpressionSyntax, NOT an
+    // ObjectCreationExpressionSyntax. The first version of ScriptApiDenylist matched the latter by
+    // syntax shape and this walked straight past it: confirmed LIVE against a real document, where it
+    // successfully opened a competing Transaction. That is the exact invariant the whole "expose the
+    // real Document" design rests on, so it is pinned per denied type, not just once.
+    [InlineData("Autodesk.Revit.DB.Transaction t = new(Document, \"x\"); return 1;", "Transaction")]
+    [InlineData("Autodesk.Revit.DB.TransactionGroup g = new(Document, \"x\"); return 1;", "TransactionGroup")]
+    [InlineData("Autodesk.Revit.DB.SubTransaction s = new(Document); return 1;", "SubTransaction")]
+    // A using-alias is another spelling the semantic check must see through.
+    [InlineData("using Tx = Autodesk.Revit.DB.Transaction; var t = new Tx(Document, \"x\"); return 1;", "Transaction")]
+    public async Task RunAsync_TransactionOpenedBySomeOtherSpellingOfNew_IsStillRejected(string script, string expectedNamedType)
+    {
+        var runner = NewRunner();
+
+        var outcome = await runner.RunAsync(script, NewGlobals(), CancellationToken.None);
+
+        Assert.IsType<ScriptApiDenylistViolationException>(outcome.Exception);
+        Assert.Contains(expectedNamedType, outcome.Exception!.Message);
+    }
+
+    [Fact]
+    public async Task RunAsync_DeniedMemberReferencedAsAMethodGroup_IsStillRejected()
+    {
+        // `Document.Close` without parentheses is never an InvocationExpressionSyntax, so the first
+        // version of the denylist -- which only inspected invocations -- missed it entirely. Confirmed
+        // live: the script compiled and ran, handing itself a delegate straight to Document.Close.
+        // Binding to the symbol rather than the syntax shape is what closes this.
+        var runner = NewRunner();
+
+        var outcome = await runner.RunAsync(
+            "System.Func<bool> f = Document.Close; return f != null;", NewGlobals(), CancellationToken.None);
+
+        Assert.IsType<ScriptApiDenylistViolationException>(outcome.Exception);
+        Assert.Contains("Close", outcome.Exception!.Message);
+    }
+
     [Fact]
     public async Task RunAsync_DeniedScript_NeverCached_NeverCompiled()
     {

@@ -1,7 +1,6 @@
 using System.Collections.Generic;
 using System.Linq;
 using Microsoft.CodeAnalysis;
-using Microsoft.CodeAnalysis.CSharp.Syntax;
 
 namespace MCPBridge.Core.Execution;
 
@@ -97,23 +96,41 @@ internal static class ScriptApiDenylist
 
             foreach (var node in tree.GetRoot().DescendantNodes())
             {
-                switch (node)
+                // Resolve what this node BINDS TO and judge that, rather than matching syntax shapes.
+                // Both checks below key off the bound symbol for the same reason: syntax-shape matching
+                // is what an adversary (or an ordinary script written in a slightly different style)
+                // walks straight past. Two such gaps were found live in this very file's first version,
+                // and both actually worked against a real document:
+                //
+                //   Autodesk.Revit.DB.Transaction t = new(Document, "x");   // target-typed `new`:
+                //       ImplicitObjectCreationExpressionSyntax, NOT ObjectCreationExpressionSyntax
+                //   System.Func<bool> f = Document.Close;                   // method group:
+                //       never an InvocationExpressionSyntax at all
+                //
+                // A constructor is just an IMethodSymbol whose MethodKind is Constructor, so binding to
+                // symbols catches every spelling of `new` (explicit, target-typed, via a using-alias)
+                // through one code path, and catches a denied method whether it is called or merely
+                // referenced.
+                var symbol = semanticModel.GetSymbolInfo(node).Symbol;
+                if (symbol is not IMethodSymbol method)
                 {
-                    case ObjectCreationExpressionSyntax creation:
-                        CheckConstruction(semanticModel, creation);
-                        break;
-                    case InvocationExpressionSyntax invocation:
-                        CheckInvocation(semanticModel, invocation);
-                        break;
+                    continue;
                 }
+
+                CheckConstruction(method);
+                CheckDeniedMember(method);
             }
         }
     }
 
-    private static void CheckConstruction(SemanticModel semanticModel, ObjectCreationExpressionSyntax creation)
+    private static void CheckConstruction(IMethodSymbol method)
     {
-        var type = semanticModel.GetTypeInfo(creation).Type;
-        var typeName = FullName(type);
+        if (method.MethodKind != MethodKind.Constructor)
+        {
+            return;
+        }
+
+        var typeName = FullName(method.ContainingType);
         if (typeName is null || !DeniedConstructedTypes.Contains(typeName))
         {
             return;
@@ -128,13 +145,8 @@ internal static class ScriptApiDenylist
             "and rolled back if it throws.");
     }
 
-    private static void CheckInvocation(SemanticModel semanticModel, InvocationExpressionSyntax invocation)
+    private static void CheckDeniedMember(IMethodSymbol method)
     {
-        if (semanticModel.GetSymbolInfo(invocation).Symbol is not IMethodSymbol method)
-        {
-            return;
-        }
-
         var containingType = FullName(method.ContainingType);
         if (containingType is null
             || !DeniedMembersByType.TryGetValue(containingType, out var deniedMembers)
