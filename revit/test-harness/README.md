@@ -79,7 +79,20 @@ unexpectedly skipping, this is the first thing to check.
   script-supplied callback), `TestConfirmationTierCannotBeSelfGranted` (reaching the live
   `ScriptGlobals` via `Delegate.Target` and starting a nested run with the confirmation flag set),
   and `TestScriptCannotTamperWithDialogSuppression` (mutating the static dialog context).
-  Twelve test functions across the two files in total.
+- `fixtures_test.go` — the fixture-system helpers PRD §13's coverage-plan corpus bundles share:
+  `createBlankFixtureDocument` (creates one blank, writable document via `CreateProjectDocument`,
+  returns its Title -- the only way a later `execute_script` call can find it again, since a created
+  document has no `document_id`) and `fixtureLookupPreamble` (the by-Title re-find every subtest in
+  a bundle needs). Call `createBlankFixtureDocument` ONCE per bundle, not once per subtest.
+- `phase_a_test.go` — the first coverage-plan corpus bundle, `TestPhaseACoreCRUDAndQuery` (core
+  CRUD + query): `CreateWall`, `QueryElementsByCategory`, `GetSetParameter`, `DeleteElement`,
+  `CreateSharedParameter`, `EditGroupPropagatesToAllInstances`. Every script here was run live via
+  `mcp__revit__execute_script` before being committed -- see the file's own comments for two real
+  API corrections (a nonexistent `Application.CreateSharedParameterFile()`, and
+  `BuiltInParameterGroup` having been removed from this API version) and a substantial finding on
+  how model-group member edits actually propagate (there is no group-edit-scope API; the real
+  mechanism is `UngroupMembers` → edit → `NewGroup` → reassign `.GroupType` on other instances).
+  Thirteen test functions across the three files in total.
 
 `TestApplicationCreatesDocuments` is the first case whose subtests are *heterogeneous* — each
 asserting a different thing about one capability — rather than table-driven over a single shape
