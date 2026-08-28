@@ -108,7 +108,7 @@ return new Autodesk.Revit.DB.FilteredElementCollector(doc)
 ```
 
 Two limits worth knowing before you build on this. **A document you create is not covered by your
-script's transaction** — that transaction is opened on the document this call targets, so writing to the
+script's transaction** — that transaction is opened on the instance's active document, so writing to the
 new one throws `ModificationOutsideTransactionException`, and you cannot open your own transaction for it
 either (see below). You can create and read; you cannot yet write. And **a created document has no
 `document_id`** — it will not show up in `list_instances`, and you cannot point a later `execute_script`

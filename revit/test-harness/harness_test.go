@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"flag"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -528,14 +529,25 @@ var app = UIApplication.Application;
 return new {
   appType = app.GetType().FullName,
   version = app.VersionNumber,
-  projectTemplate = app.DefaultProjectTemplate
+  projectTemplate = app.DefaultProjectTemplate,
+  projectTemplateUsable = app.DefaultProjectTemplate.Length > 0 && System.IO.File.Exists(app.DefaultProjectTemplate)
 };
 `)
 		if out.Status != "success" {
 			t.Fatalf("expected status=success, got %q (output: %s)", out.Status, out.Output)
 		}
-		if !strings.Contains(out.Output, "appType = Autodesk.Revit.ApplicationServices.Application") {
+		// Matched with the trailing comma so this cannot be satisfied by some
+		// longer type name that merely starts the same way.
+		if !strings.Contains(out.Output, "appType = Autodesk.Revit.ApplicationServices.Application,") {
 			t.Fatalf("UIApplication.Application is not the real Application type; output: %s", out.Output)
+		}
+		// DefaultProjectTemplate is what the three subtests below build on, and it
+		// is per-install: it can be blank, or name a template this machine never
+		// shipped. Asserted here so that shows up once, as a clear environment
+		// failure, rather than three times as an opaque "expected status=success"
+		// from whichever script tried to use it.
+		if !strings.Contains(out.Output, "projectTemplateUsable = True") {
+			t.Fatalf("Application.DefaultProjectTemplate does not name a file that exists on this machine; output: %s", out.Output)
 		}
 	})
 
@@ -553,8 +565,7 @@ return new {
   docType = doc.GetType().FullName,
   isFamily = doc.IsFamilyDocument,
   unsaved = doc.PathName.Length == 0,
-  hasLevels = levels > 0,
-  isBlank = object.ReferenceEquals(doc, Document) == false
+  hasLevels = levels > 0
 };
 `)
 		if out.Status != "success" {
@@ -565,7 +576,6 @@ return new {
 			"isFamily = False",
 			"unsaved = True",
 			"hasLevels = True",
-			"isBlank = True",
 		} {
 			if !strings.Contains(out.Output, want) {
 				t.Errorf("wanted %q in output: %s", want, out.Output)
@@ -608,8 +618,7 @@ try {
 	// one-shot snapshot taken at connect, PRD §05) and execute_script does not
 	// route by document_id anyway -- every script runs against ActiveUIDocument
 	// (RequestDispatcher's own KNOWN LIMITATION comment). A script also cannot
-	// change that: UIApplication.OpenAndActivateDocument throws "The active
-	// document is currently modifiable" from inside the ambient transaction.
+	// change that -- see CannotChangeTheActiveDocumentFromAScript below.
 	// What DOES work is in-script addressing: the document stays in
 	// Application.Documents for the rest of the session, so a later script finds it
 	// there by title. That is the mechanism, and this pins it.
@@ -626,17 +635,59 @@ return app.NewProjectDocument(app.DefaultProjectTemplate).Title;
 			t.Fatalf("created document reported no title, so nothing can address it later")
 		}
 
+		// strconv.Quote, not a raw splice: a title carrying a quote, a backslash or
+		// a newline would otherwise produce a C# syntax error, and the failure
+		// would reach the reader as an opaque "expected status=success" with
+		// nothing pointing at the quoting. Revit's own ProjectN titles never do
+		// this today; a document the operator saved under some other name could.
+		//
+		// The match is title AND unsaved, not title alone -- an unrelated open
+		// document sharing the title would otherwise satisfy this subtest without
+		// the created one having survived at all. Counted rather than
+		// short-circuited so the failure message can say whether it found none or
+		// found several.
 		found := runScript(t, c, instanceID, documentID, `
+int matches = 0;
 foreach (Autodesk.Revit.DB.Document d in UIApplication.Application.Documents) {
-  if (d.Title == "`+title+`") { return "found"; }
+  if (d.Title == `+strconv.Quote(title)+` && d.PathName.Length == 0) { matches++; }
 }
-return "missing";
+return "matches = " + matches;
 `)
 		if found.Status != "success" {
 			t.Fatalf("expected status=success, got %q (output: %s)", found.Status, found.Output)
 		}
-		if !strings.Contains(found.Output, "found") {
-			t.Fatalf("document %q created by an earlier execute_script call was gone by the next one, so nothing can address it; output: %s", title, found.Output)
+		if !strings.Contains(found.Output, "matches = 1") {
+			t.Fatalf("expected exactly one unsaved open document titled %q -- it was created by an earlier execute_script call, so if it is gone, nothing can address a fixture document across calls; output: %s", title, found.Output)
+		}
+	})
+
+	// The third limit, pinned rather than merely written down: a script cannot
+	// make a created document the active one, so it cannot route around
+	// execute_script targeting ActiveUIDocument. Attempted against the ACTIVE
+	// document's OWN path deliberately -- that document is already open and
+	// already active, so if the call unexpectedly succeeded it would be a no-op
+	// rather than switching the session out from under a person.
+	t.Run("CannotChangeTheActiveDocumentFromAScript", func(t *testing.T) {
+		out := runScript(t, c, instanceID, documentID, `
+if (Document.PathName.Length == 0) { return "unsaved-active-document"; }
+try {
+  UIApplication.OpenAndActivateDocument(Document.PathName);
+  return "activated";
+} catch (Autodesk.Revit.Exceptions.InvalidOperationException ex) {
+  // Autodesk.Revit.Exceptions.InvalidOperationException, NOT System's -- they
+  // share a short name, so ex.GetType().Name reads identically in a probe and
+  // catching the wrong one fails with the very message you were expecting.
+  return "refused: " + ex.Message;
+}
+`)
+		if out.Status != "success" {
+			t.Fatalf("expected status=success, got %q (output: %s)", out.Status, out.Output)
+		}
+		if strings.Contains(out.Output, "unsaved-active-document") {
+			t.Skip("the active document has never been saved, so it has no path to re-activate by")
+		}
+		if !strings.Contains(out.Output, "refused:") {
+			t.Fatalf("OpenAndActivateDocument was not refused from inside the ambient transaction; if that is now genuinely allowed, PRD §14's account of fixture addressing needs revisiting; output: %s", out.Output)
 		}
 	})
 
@@ -668,7 +719,7 @@ return new {
   docType = doc.GetType().FullName,
   isFamily = doc.IsFamilyDocument,
   hasFamilyManager = doc.FamilyManager != null,
-  hasParameters = doc.FamilyManager.Parameters.Size > 0
+  hasTypes = doc.FamilyManager.Types != null
 };
 `)
 		if out.Status != "success" {
@@ -681,7 +732,7 @@ return new {
 			"docType = Autodesk.Revit.DB.Document",
 			"isFamily = True",
 			"hasFamilyManager = True",
-			"hasParameters = True",
+			"hasTypes = True",
 		} {
 			if !strings.Contains(out.Output, want) {
 				t.Errorf("wanted %q in output: %s", want, out.Output)

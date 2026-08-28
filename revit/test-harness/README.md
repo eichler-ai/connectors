@@ -72,8 +72,9 @@ unexpectedly skipping, this is the first thing to check.
   `TestLifecycleGateRequiresConfirmation`, `TestLifecycleGateCoversTheNewlyAddedMembers`,
   `TestApplicationCreatesDocuments`.
 
-`TestApplicationCreatesDocuments` is the first case organized as a bundle of `t.Run` subtests
-rather than one flat function — the shape PRD §13's corpus plan calls for. It covers the
+`TestApplicationCreatesDocuments` is the first case whose subtests are *heterogeneous* — each
+asserting a different thing about one capability — rather than table-driven over a single shape
+the way the two bundles above it are. That is the shape PRD §13's corpus plan calls for. It covers the
 top-level `Autodesk.Revit.ApplicationServices.Application` (reached as `UIApplication.Application`)
 and its `NewProjectDocument`/`NewFamilyDocument`, and it also pins the two boundaries a corpus
 fixture system runs into: a created document is outside the executor's ambient transaction, and
