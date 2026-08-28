@@ -21,7 +21,8 @@ namespace MCPBridge.Core.Execution;
 /// the PRD:
 ///
 /// - A small bounded LRU (<see cref="ScriptCompilationCache"/>) caches the *compiled*
-///   Script&lt;object&gt; per unique script text, so a verbatim re-run skips
+///   Script&lt;object&gt; -- plus everything else derived purely from the script text, see
+///   <see cref="CompiledScript"/> -- per unique script text, so a verbatim re-run skips
 ///   parse/bind, bounded so it doesn't grow unbounded across a long session.
 /// - Every *run* -- cached compilation or not -- emits a fresh assembly and loads it into
 ///   its own short-lived, collectible AssemblyLoadContext, unloaded once the run completes
