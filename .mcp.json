@@ -1,12 +1,12 @@
 {
   "mcpServers": {
     "revit": {
-      "command": "/Users/nicholas/dev/eichler/connectors/revit/mcp-server/mcp-server-mac",
+      "command": "${CLAUDE_PROJECT_DIR}/revit/mcp-server/mcp-server-mac",
       "args": [
         "-mode", "remote",
-        "-bind", "10.211.55.2",
+        "-bind", "${MCPBRIDGE_MAC_IP:-10.211.55.2}",
         "-port", "56900",
-        "-app-data-dir", "/Users/nicholas/dev/eichler/connectors/Connectors/Revit"
+        "-app-data-dir", "${CLAUDE_PROJECT_DIR}/Connectors/Revit"
       ]
     }
   }
