@@ -26,6 +26,12 @@ namespace MCPBridge.Core.Execution;
 /// method already holds the one ScriptGlobals instance for this run, so it can just read it back --
 /// no other component (an OnStartup-registered handler with no reference to this run, the way
 /// DialogBoxShowing's handler has none) needs to reach into it from outside.
+///
+/// PRD §14: this class is also what makes confirm_lifecycle_actions meaningful. The rollback described
+/// above is precisely the boundary the confirmation gate is drawn around -- it covers document CONTENT,
+/// so a script that throws undoes its work automatically, and the gated members (Close/Save/SaveAs/
+/// SynchronizeWithCentral/Print/RelinquishOwnership) are gated because they act outside it and nothing
+/// here can undo them. The flag is just forwarded to RoslynScriptRunner, which decides per run.
 /// </summary>
 public sealed class TransactionScriptExecutor
 {
@@ -46,7 +52,8 @@ public sealed class TransactionScriptExecutor
         CancellationToken cancellationToken,
         string? exportsDirectoryPath = null,
         string? importsDirectoryPath = null,
-        bool overwriteOutputFiles = false)
+        bool overwriteOutputFiles = false,
+        bool confirmLifecycleActions = false)
     {
         var group = document.CreateTransactionGroup(TransactionName);
         var transaction = document.CreateTransaction(TransactionName);
@@ -61,7 +68,9 @@ public sealed class TransactionScriptExecutor
 
         try
         {
-            var outcome = await _runner.RunAsync(scriptText, globals, cancellationToken).ConfigureAwait(false);
+            var outcome = await _runner
+                .RunAsync(scriptText, globals, cancellationToken, confirmLifecycleActions)
+                .ConfigureAwait(false);
 
             if (!outcome.Success)
             {

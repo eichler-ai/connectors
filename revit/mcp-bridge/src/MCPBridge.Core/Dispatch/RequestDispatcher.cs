@@ -118,6 +118,7 @@ public sealed class RequestDispatcher
         long maxDurationMs;
         long timeoutMs;
         bool overwriteOutputFiles;
+        bool confirmLifecycleActions;
         try
         {
             executionId = request.GetRequiredString("execution_id");
@@ -128,6 +129,14 @@ public sealed class RequestDispatcher
             // PRD §09: applies uniformly across every file ScriptGlobals.Publish touches during this
             // run -- not a per-file override.
             overwriteOutputFiles = request.GetOptionalBool("overwrite_output_files", false);
+
+            // PRD §14: opt-in for the confirmation-gated lifecycle members (Document.Close/Save/SaveAs/
+            // SynchronizeWithCentral/Print, WorksharingUtils.RelinquishOwnership). Per-REQUEST, not
+            // per-script: the same script text may arrive once without it and again with it, so it is
+            // read here on every call and forwarded down to the run, never folded into the compilation
+            // cache. Defaults to false -- an agent that never heard of the flag cannot trip these members
+            // by accident, which is the entire point of gating them.
+            confirmLifecycleActions = request.GetOptionalBool("confirm_lifecycle_actions", false);
 
             // KNOWN LIMITATION (second live-wiring review finding, still true after PRD §09's file-exchange
             // work): document_id is part of the wire contract (the broker always sends it) but is not read
@@ -168,7 +177,7 @@ public sealed class RequestDispatcher
                 return ExecutionResultMessage.FromInstanceUnrecoverable(request.Id, outcome.Diagnostic!);
         }
 
-        var workTask = RunScriptWorkItemAsync(executionId, script, overwriteOutputFiles);
+        var workTask = RunScriptWorkItemAsync(executionId, script, overwriteOutputFiles, confirmLifecycleActions);
 
         // PRD §06: a script finishing inside timeout_ms returns the completed result inline; one that
         // doesn't returns the current {status, execution_id} instead of hanging the call. The timeout
@@ -257,9 +266,11 @@ public sealed class RequestDispatcher
         };
     }
 
-    private Task RunScriptWorkItemAsync(string executionId, string scriptText, bool overwriteOutputFiles)
+    private Task RunScriptWorkItemAsync(string executionId, string scriptText, bool overwriteOutputFiles, bool confirmLifecycleActions)
     {
-        var runTask = _bridge.RunAsync(executionId, uiApplication => RunScriptWorkItem(executionId, scriptText, overwriteOutputFiles, uiApplication));
+        var runTask = _bridge.RunAsync(
+            executionId,
+            uiApplication => RunScriptWorkItem(executionId, scriptText, overwriteOutputFiles, confirmLifecycleActions, uiApplication));
 
         // Hard requirement 2: ANY fault on this Task -- including ExternalEventRaiseDeniedException, which
         // RunScriptWorkItem below never gets a chance to observe or react to since it never even ran --
@@ -286,7 +297,12 @@ public sealed class RequestDispatcher
             TaskScheduler.Default);
     }
 
-    private ScriptExecutionOutcome RunScriptWorkItem(string executionId, string scriptText, bool overwriteOutputFiles, IUiApplicationAdapter uiApplication)
+    private ScriptExecutionOutcome RunScriptWorkItem(
+        string executionId,
+        string scriptText,
+        bool overwriteOutputFiles,
+        bool confirmLifecycleActions,
+        IUiApplicationAdapter uiApplication)
     {
         // Hard requirement 1: check cancellation before touching the model at all -- a still-Pending
         // execution can have been resolved directly to Cancelled by ExecutionManager.ApplyCancellation
@@ -339,7 +355,20 @@ public sealed class RequestDispatcher
         // script containing its own top-level `await` before compiling it -- see
         // ExternalEventBridge<TResult>'s own doc comment and RoslynScriptRunner.RejectTopLevelAwait.
         var outcome = _scriptExecutor
-            .ExecuteAsync(document, uiApplication, uiDocument, scriptText, cancellationToken, workspacePaths.Exports, workspacePaths.Imports, overwriteOutputFiles)
+            .ExecuteAsync(
+                document,
+                uiApplication,
+                uiDocument,
+                scriptText,
+                cancellationToken,
+                // Named from here on: four optional arguments in a row, two of them adjacent bools, is
+                // a swap this compiles straight through (overwriteOutputFiles and confirmLifecycleActions
+                // are both bool, and reversing them would silently confirm lifecycle actions nobody asked
+                // to confirm).
+                exportsDirectoryPath: workspacePaths.Exports,
+                importsDirectoryPath: workspacePaths.Imports,
+                overwriteOutputFiles: overwriteOutputFiles,
+                confirmLifecycleActions: confirmLifecycleActions)
             .GetAwaiter().GetResult();
 
         if (outcome.WasCancelled)
@@ -352,18 +381,59 @@ public sealed class RequestDispatcher
         }
         else
         {
+            var (code, remedy) = FailureCodeAndRemedy(outcome.Exception);
             var diagnostic = DiagnosticRecord.Create(
                 DiagnosticSeverity.Error,
-                "script-execution-failed",
+                code,
                 DiagnosticSource.Execution,
                 outcome.Exception?.Message ?? $"execution {executionId} failed with no exception detail.",
                 detail: new Dictionary<string, object?> { ["execution_id"] = executionId },
-                remedy: null);
+                remedy: remedy);
             _executionManager.CompleteError(executionId, _now(), diagnostic, outcome.StdOut, outcome.Notices, outcome.Files);
         }
 
         return outcome;
     }
+
+    /// <summary>
+    /// The PRD §01 <c>code</c> and <c>remedy</c> for one failed execution.
+    ///
+    /// Independent PR review finding: every script failure used to be reported as
+    /// <c>script-execution-failed</c> with a null remedy, so the codes an agent is told to match on --
+    /// <c>script-api-denied</c> and <c>script-lifecycle-confirmation-required</c> (skill.md, PRD §14) --
+    /// only ever appeared as a SUBSTRING of <c>message</c> and never in the field that names them. A
+    /// refusal an agent can lift by resending with one extra argument is worthless if the agent has to
+    /// pattern-match prose to notice it, and worse, the confirmation refusal had the most obvious remedy
+    /// of any error in the connector and carried none.
+    ///
+    /// Only exceptions that CARRY a code get one; anything else keeps the generic
+    /// <c>script-execution-failed</c>, which is the honest answer for an arbitrary exception thrown by
+    /// script code. ScriptAwaitNotAllowedException is here for exactly the same reason as the denylist
+    /// pair -- it reaches this call site by the same route, defines its own code, and had the same gap.
+    /// </summary>
+    private static (string Code, string[]? Remedy) FailureCodeAndRemedy(Exception? exception) => exception switch
+    {
+        ScriptApiDenylistViolationException denial when denial.Code == ScriptApiDenylistViolationException.ConfirmationRequiredCode =>
+            (denial.Code, new[]
+            {
+                "Resend the identical execute_script call with confirm_lifecycle_actions: true if this " +
+                "action is genuinely intended.",
+                $"Otherwise remove the use of {denial.DeniedMember} from the script.",
+            }),
+        ScriptApiDenylistViolationException denial =>
+            (denial.Code, new[]
+            {
+                $"Remove {denial.DeniedMember} from the script; no argument to execute_script permits it.",
+                "Make document changes directly instead -- the connector already runs every script inside " +
+                "its own Transaction, which is committed on success and rolled back if the script throws.",
+            }),
+        ScriptAwaitNotAllowedException =>
+            (ScriptAwaitNotAllowedException.Code, new[]
+            {
+                "Rewrite the script without async/await; call the synchronous form of whatever it awaited.",
+            }),
+        _ => ("script-execution-failed", null),
+    };
 
     /// <summary>
     /// Second live-wiring review finding: poll_execution previously ignored timeout_ms entirely and

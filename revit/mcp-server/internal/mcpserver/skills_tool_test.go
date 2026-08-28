@@ -99,32 +99,68 @@ func TestSkillFileCoversTheBriefedTopics(t *testing.T) {
 
 // The single most important correctness property of this document: it must
 // accurately describe what execute_script can and cannot reach, in both
-// directions. The sanctioned Document global is a narrow seam (Title only),
-// and passing it where a real Revit API type is expected fails to compile
-// live with CS1503 (confirmed live against a real instance -- a draft of
-// this file claimed CS0122, which is wrong: that's a protection-level error,
-// not the type-mismatch this actually produces). But the API IS reachable
-// via reflection into the document adapter's private field, and real writes
-// through it succeed (also confirmed live). An agent that read an earlier
-// version of this file believing the API was flatly unreachable would burn
-// turns avoiding a technique that actually works -- as costly a failure mode
-// as the original "don't bother, it won't compile" caveat existed to prevent
-// in the first place. Both halves are pinned so neither regresses silently.
+// directions. As of PRD §14 (Phase 3) the Document global IS the real
+// Autodesk.Revit.DB.Document, and the one thing genuinely forbidden is a
+// script opening its own transaction -- enforced by ScriptApiDenylist at
+// compile time.
+//
+// This file's history is the reason this test exists at all, and it argues
+// for pinning TOPICS rather than wording. It once shipped a full session
+// claiming the API was "not callable from a script" and naming CS0122; both
+// were wrong. The correction (reflection into a private field, CS1503) was
+// then pinned here by its literal wording -- and that pinning is exactly what
+// this Phase 3 change had to come back and rewrite, because the technique it
+// named is now obsolete rather than merely reworded. So: pin that both halves
+// of the capability story are PRESENT, keep forbidding the specific claims
+// known to be false, and do not pin the mechanism of the day.
 func TestSkillFileAccuratelyDescribesRevitApiReachability(t *testing.T) {
 	for _, marker := range []string{
-		"FilteredElementCollector", // named as the concrete thing that fails through the sanctioned seam
-		"CS1503",                   // the actual compiler error that produces, not CS0122
-		"GetField",                 // the reflection technique that actually reaches the real API
+		"FilteredElementCollector",   // the headline example -- now one that WORKS, verbatim
+		"Autodesk.Revit.DB.Document", // the Document global's real type, stated as such
+		"script-api-denied",          // the error code an agent will actually see and must recognise
 	} {
 		if !strings.Contains(skillFile, marker) {
 			t.Errorf("skill file no longer mentions %q: both halves of the capability story "+
-				"(what's blocked, what actually works) must survive future edits", marker)
+				"(what works, what's denied) must survive future edits", marker)
 		}
 	}
-	for _, forbidden := range []string{"not callable from a script", "API is not reachable", "CS0122"} {
+	// The denylist half must name what is actually restricted, not just that a
+	// denylist exists -- an agent hitting it needs to recognise the case.
+	// Still topics, not wording: both members were named here before the
+	// restriction on them split into two kinds (PRD §14) and both are still
+	// named now, which is the point -- what changed is that
+	// SynchronizeWithCentral is confirmation-gated rather than flatly refused,
+	// not whether the guide tells an agent about it.
+	for _, marker := range []string{"Transaction", "SynchronizeWithCentral"} {
+		if !strings.Contains(skillFile, marker) {
+			t.Errorf("skill file no longer names %q among what a script may not do freely", marker)
+		}
+	}
+	// The two restrictions are not interchangeable and an agent that cannot
+	// tell them apart fails in one of two bad ways: giving up on a permitted
+	// operation, or retrying a structurally impossible one forever. So the
+	// guide must carry the gated half's own error code AND the parameter that
+	// lifts it -- a rewrite that collapsed the two back into one flat "denied"
+	// table would drop these while every other assertion here still passed.
+	for _, marker := range []string{
+		"script-lifecycle-confirmation-required",
+		"confirm_lifecycle_actions",
+	} {
+		if !strings.Contains(skillFile, marker) {
+			t.Errorf("skill file no longer mentions %q: an agent that hits the lifecycle gate needs both "+
+				"the code it will see and the argument that lifts it", marker)
+		}
+	}
+	for _, forbidden := range []string{
+		"not callable from a script", // false since before Phase 3
+		"API is not reachable",       // ditto
+		"CS0122",                     // never the real error
+		"GetField",                   // the pre-Phase-3 reflection workaround, now obsolete AND unnecessary
+		"Title` only",                // the old narrow-seam description of the Document global
+	} {
 		if strings.Contains(skillFile, forbidden) {
-			t.Errorf("skill file contains %q: this claim is false as of this test (Revit API IS reachable "+
-				"via reflection, and the real compile error is CS1503 not CS0122) -- fix the prose, not this test",
+			t.Errorf("skill file contains %q: that claim is false as of Phase 3 (PRD §14) -- the Document "+
+				"global is the real Autodesk.Revit.DB.Document and needs no reflection. Fix the prose, not this test",
 				forbidden)
 		}
 	}

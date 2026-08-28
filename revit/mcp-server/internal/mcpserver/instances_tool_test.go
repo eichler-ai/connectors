@@ -111,7 +111,7 @@ func TestListInstancesToolReflectsBusyExecutionStatus(t *testing.T) {
 		json.Unmarshal(params, &p)
 		return execution.Result{Status: execution.StatusRunning, ExecutionID: p["execution_id"].(string)}, nil
 	})
-	if _, drec := mgr.ExecuteScript(context.Background(), "inst-1", "doc-1", "slow", 100, 60000, false); drec != nil {
+	if _, drec := mgr.ExecuteScript(context.Background(), "inst-1", "doc-1", "slow", 100, 60000, execution.ScriptOptions{}); drec != nil {
 		t.Fatalf("ExecuteScript: %+v", drec)
 	}
 
@@ -151,7 +151,7 @@ func TestListInstancesToolUnresponsiveOverridesBusy(t *testing.T) {
 	// the precedence rule, not just that unresponsive works in isolation.
 	past := time.Now().Add(-registry.UnresponsiveThreshold - time.Second)
 	reg.Register(&registry.Instance{InstanceID: "inst-1", ConnectedSince: past}, time.Now())
-	if _, drec := mgr.ExecuteScript(context.Background(), "inst-1", "doc-1", "slow", 100, 60000, false); drec != nil {
+	if _, drec := mgr.ExecuteScript(context.Background(), "inst-1", "doc-1", "slow", 100, 60000, execution.ScriptOptions{}); drec != nil {
 		t.Fatalf("ExecuteScript: %+v", drec)
 	}
 
@@ -178,7 +178,7 @@ func TestListInstancesToolUnrecoverableBeatsUnresponsive(t *testing.T) {
 	past := time.Now().Add(-registry.UnresponsiveThreshold - time.Second)
 	reg.Register(&registry.Instance{InstanceID: "inst-1", ConnectedSince: past}, time.Now())
 
-	if _, drec := mgr.ExecuteScript(context.Background(), "inst-1", "doc-1", "slow", 50, 60000, false); drec != nil {
+	if _, drec := mgr.ExecuteScript(context.Background(), "inst-1", "doc-1", "slow", 50, 60000, execution.ScriptOptions{}); drec != nil {
 		t.Fatalf("ExecuteScript: %+v", drec)
 	}
 

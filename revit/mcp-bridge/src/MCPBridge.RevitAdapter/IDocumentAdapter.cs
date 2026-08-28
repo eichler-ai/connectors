@@ -2,13 +2,22 @@ namespace MCPBridge.RevitAdapter;
 
 /// <summary>
 /// Thin seam over Autodesk.Revit.DB.Document (PRD §06/§09), used by TransactionScriptExecutor to build
-/// the ambient Transaction/TransactionGroup it wraps every script run in. NOT what a script itself sees
-/// -- that's the narrower <see cref="IScriptDocument"/> (this interface's CreateTransaction/
-/// CreateTransactionGroup would always fail if a script called them directly, since the executor has
-/// already opened one; see IScriptDocument's doc comment).
+/// the ambient Transaction/TransactionGroup it wraps every script run in.
+///
+/// Phase 3 (PRD §14, "Real Revit API access from scripts"): <see cref="RawDocument"/> is the sanctioned
+/// way to reach the real Autodesk.Revit.DB.Document a script now binds to as its `Document` global. It
+/// replaces the unsupported reflection-into-a-private-field workaround `skill.md` used to document.
+/// CreateTransaction/CreateTransactionGroup remain executor-only concerns -- they are OUR adapter methods,
+/// not real Revit API, and were never reachable from a script anyway; what actually keeps real Document
+/// exposure safe is ScriptApiDenylist (MCPBridge.Core), which rejects at compile time any script that
+/// opens its own Autodesk.Revit.DB.Transaction/TransactionGroup/SubTransaction against the same document
+/// the executor has already opened one on.
 /// </summary>
-public interface IDocumentAdapter : IScriptDocument
+public interface IDocumentAdapter
 {
+    /// <summary>Human-readable title, for diagnostics only -- not a stable identity.</summary>
+    string Title { get; }
+
     ITransactionAdapter CreateTransaction(string name);
 
     ITransactionGroupAdapter CreateTransactionGroup(string name);

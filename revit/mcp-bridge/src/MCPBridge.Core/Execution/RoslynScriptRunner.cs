@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.IO;
 using System.Linq;
@@ -20,7 +21,8 @@ namespace MCPBridge.Core.Execution;
 /// the PRD:
 ///
 /// - A small bounded LRU (<see cref="ScriptCompilationCache"/>) caches the *compiled*
-///   Script&lt;object&gt; per unique script text, so a verbatim re-run skips
+///   Script&lt;object&gt; -- plus everything else derived purely from the script text, see
+///   <see cref="CompiledScript"/> -- per unique script text, so a verbatim re-run skips
 ///   parse/bind, bounded so it doesn't grow unbounded across a long session.
 /// - Every *run* -- cached compilation or not -- emits a fresh assembly and loads it into
 ///   its own short-lived, collectible AssemblyLoadContext, unloaded once the run completes
@@ -66,7 +68,23 @@ public sealed class RoslynScriptRunner
     private readonly Action? _compileCounter;
     private readonly ScriptOptions _options;
 
-    public RoslynScriptRunner(int cacheCapacity = 32, Func<AssemblyLoadContext>? alcFactory = null, Action? compileCounter = null)
+    /// <param name="additionalMetadataReferencePaths">
+    /// Extra assemblies to make bindable from script scope, referenced by FILE PATH (metadata only)
+    /// rather than as loaded assemblies. Unused in production and null by default: inside a live Revit
+    /// process RevitAPI/RevitAPIUI are already loaded, so <see cref="LoadableReferences"/> picks them up
+    /// on its own. It exists for MCPBridge.Core.Tests, which cannot get them that way -- RevitAPI.dll is
+    /// a mixed-mode C++/CLI assembly that only Revit's own native host can load (Assembly.LoadFrom on it
+    /// elsewhere throws "An attempt was made to load a program with an incorrect format", confirmed
+    /// live). Roslyn, however, only ever reads its managed METADATA, which works fine from the file. That
+    /// is what keeps the compile-time ScriptApiDenylist checks fully unit-testable with no live Revit
+    /// (PRD §14) -- the scripts in those tests are rejected before anything is ever emitted or executed,
+    /// so nothing needs the assembly to actually load.
+    /// </param>
+    public RoslynScriptRunner(
+        int cacheCapacity = 32,
+        Func<AssemblyLoadContext>? alcFactory = null,
+        Action? compileCounter = null,
+        IEnumerable<string>? additionalMetadataReferencePaths = null)
     {
         _cache = new ScriptCompilationCache(cacheCapacity);
         _alcFactory = alcFactory ?? (() => new AssemblyLoadContext($"mcpbridge-script-{Guid.NewGuid()}", isCollectible: true));
@@ -74,6 +92,12 @@ public sealed class RoslynScriptRunner
         _options = ScriptOptions.Default
             .WithReferences(LoadableReferences())
             .WithImports("System");
+
+        if (additionalMetadataReferencePaths is not null)
+        {
+            _options = _options.AddReferences(
+                additionalMetadataReferencePaths.Select(path => MetadataReference.CreateFromFile(path)));
+        }
     }
 
     private static Assembly[] LoadableReferences() =>
@@ -81,12 +105,24 @@ public sealed class RoslynScriptRunner
             .Where(a => !a.IsDynamic && !string.IsNullOrEmpty(a.Location))
             .ToArray();
 
-    public async Task<ScriptExecutionOutcome> RunAsync(string scriptText, ScriptGlobals globals, CancellationToken cancellationToken)
+    /// <param name="confirmLifecycleActions">
+    /// The request's own <c>confirm_lifecycle_actions</c> flag (PRD §14). PER-REQUEST by nature -- the same
+    /// script text can arrive once without it and again with it -- which is exactly why it is a parameter of
+    /// RUN rather than of compile: compilation is cached by script text, so folding this decision into
+    /// GetOrCompile would let one run's answer be reused for a request that asked something different.
+    /// Detection of whether the script needs it IS cached (it depends only on the text); only the decision
+    /// is made here.
+    /// </param>
+    public async Task<ScriptExecutionOutcome> RunAsync(
+        string scriptText,
+        ScriptGlobals globals,
+        CancellationToken cancellationToken,
+        bool confirmLifecycleActions = false)
     {
-        Script<object> script;
+        CompiledScript compiled;
         try
         {
-            script = GetOrCompile(scriptText);
+            compiled = GetOrCompile(scriptText);
         }
         catch (CompilationErrorException ex)
         {
@@ -96,7 +132,28 @@ public sealed class RoslynScriptRunner
         {
             return ScriptExecutionOutcome.Failed(ex, stdOut: "");
         }
+        catch (ScriptApiDenylistViolationException ex)
+        {
+            // Surfaced through the identical path as the two above (PRD §14): the caller
+            // (TransactionScriptExecutor) rolls back its ambient Transaction/TransactionGroup exactly as
+            // it does for any other pre-execution failure, so the denylist needed no new failure handling.
+            return ScriptExecutionOutcome.Failed(ex, stdOut: "");
+        }
 
+        // PRD §14, the per-request half of the denylist. Deliberately placed here -- after compilation
+        // (cached or not), before the ALC is created and before anything is emitted or executed -- so a
+        // refused run has the same "nothing happened" property as the unconditional compile-time
+        // rejections above: TransactionScriptExecutor rolls its ambient transaction back and the document
+        // is untouched. Note this is reached identically on a cache HIT and a cache MISS, which is the
+        // whole point: an unconfirmed rerun of a script that was confirmed a moment ago is still refused.
+        if (compiled.Analysis.RequiresLifecycleConfirmation && !confirmLifecycleActions)
+        {
+            return ScriptExecutionOutcome.Failed(
+                ScriptApiDenylistViolationException.LifecycleConfirmationRequired(compiled.Analysis.LifecycleMembers),
+                stdOut: "");
+        }
+
+        var script = compiled.Script;
         var alc = _alcFactory();
         var originalOut = Console.Out;
         var writer = new StringWriter();
@@ -192,7 +249,7 @@ public sealed class RoslynScriptRunner
         return await resultTask.ConfigureAwait(false);
     }
 
-    private Script<object> GetOrCompile(string scriptText)
+    private CompiledScript GetOrCompile(string scriptText)
     {
         // The await check only needs to run on a genuine cache miss: the cache key is the verbatim script
         // text, and only a script that already passed RejectTopLevelAwait below is ever inserted into it
@@ -218,9 +275,23 @@ public sealed class RoslynScriptRunner
                 ImmutableArray.CreateRange(errors));
         }
 
+        // PRD §14: the denylist needs bound symbols, so it runs only once Compile() has reported no
+        // errors -- before that, every expression would resolve to an error symbol and the check could
+        // only re-report ordinary compile errors as denylist violations. Placed before _compileCounter/
+        // _cache.Set for the same reason RejectTopLevelAwait sits before them: a script rejected
+        // UNCONDITIONALLY (transaction construction -- Analyze throws for that) must never be counted as
+        // a successful compilation nor enter the cache, or an identical later run would hit the cache and
+        // skip the check entirely.
+        //
+        // What Analyze RETURNS (the confirmation-gated lifecycle members it found) is the opposite case:
+        // it is cached on purpose, because it is a property of this script text and cannot change between
+        // runs. Only the decision made from it is per-run -- see RunAsync.
+        var analysis = ScriptApiDenylist.Analyze(script.GetCompilation());
+
         _compileCounter?.Invoke();
-        _cache.Set(scriptText, script);
-        return script;
+        var compiled = new CompiledScript(script, analysis);
+        _cache.Set(scriptText, compiled);
+        return compiled;
     }
 
     /// <summary>

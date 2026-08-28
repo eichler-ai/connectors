@@ -67,14 +67,20 @@ unexpectedly skipping, this is the first thing to check.
 - `mcpclient/` — the MCP-over-stdio client the tests use (subprocess spawn, JSON-RPC framing,
   `tools/call`). Deliberately hand-rolled and minimal rather than pulling in an SDK, so it's
   obvious exactly what's being exercised.
-- `harness_test.go` — the cases themselves, currently: `TestCreateLevel`.
+- `harness_test.go` — the cases themselves, currently: `TestCreateLevel`,
+  `TestScriptGlobalsExposeRealRevitObjects`, `TestDenylistRejectsOwnTransaction`,
+  `TestLifecycleGateRequiresConfirmation`.
+
+The last two exist here rather than in `MCPBridge.Core.Tests` because they cannot exist there.
+Since PRD §14 shipped, `ScriptGlobals.Document` is the real `Autodesk.Revit.DB.Document` — sealed,
+non-constructible outside a live Revit session, and living in a mixed-mode assembly a plain test
+host cannot even load. Any assertion about what a script actually *gets* from the globals, or how a
+denied script surfaces end to end, therefore belongs in this tier by construction.
 
 No `corpus/`/`runner/`/`fixtures/` yet — PRD §13's tutorial-workflow corpus (place a wall, tag a
-room, etc.) needs a *sanctioned* way for scripts to reach real Revit API elements, which doesn't
-exist yet (the only way there today is an unsupported reflection workaround, see PRD §14's "Real
-Revit API access from scripts" finding and `harness_test.go`'s own `TestCreateLevel` doc comment —
-that test uses the workaround to prove the harness's own plumbing works, which is a different
-thing from the corpus being buildable on it). What's testable today without that
-(registration, discovery, file exchange, error shapes, execution status transitions) is a
-genuine regression suite in its own right and doesn't need that structure — a data-driven corpus
-format is worth introducing once there are enough cases for one to earn its keep, not before.
+room, etc.) was blocked on there being no *sanctioned* way for scripts to reach real Revit API
+elements; that is resolved (PRD §14, "Real Revit API access from scripts"), so the corpus is now
+buildable, just not built. What's testable today (registration, discovery, file exchange, error
+shapes, execution status transitions, the sanctioned globals, denylist rejections) is a genuine
+regression suite in its own right and doesn't need that structure — a data-driven corpus format is
+worth introducing once there are enough cases for one to earn its keep, not before.

@@ -2,7 +2,17 @@ using MCPBridge.RevitAdapter;
 
 namespace MCPBridge.Core.Tests.Fakes;
 
-/// <summary>Fake behind the RevitAdapter seam (per the revit-connector-development skill's testing strategy) -- records calls instead of touching a live Document.</summary>
+/// <summary>
+/// Fake behind the RevitAdapter seam (per the revit-connector-development skill's testing strategy) --
+/// records calls instead of touching a live Document.
+///
+/// Deliberately does NOT implement IRawDocumentSource (PRD §14): it has no real
+/// Autodesk.Revit.DB.Document and never can, since Document is sealed and non-constructible outside a
+/// live Revit session. ScriptGlobals turns that absence into a clear, signposted error naming
+/// revit/test-harness. Just as importantly, not implementing it keeps MCPBridge.Core.Tests.dll free of
+/// a direct RevitAPI assembly reference -- see IRawDocumentSource's doc comment for why that matters
+/// (with one, xUnit silently skips this entire assembly and `dotnet test` still exits 0).
+/// </summary>
 public sealed class FakeDocumentAdapter : IDocumentAdapter
 {
     public string Title { get; init; } = "FakeDocument";

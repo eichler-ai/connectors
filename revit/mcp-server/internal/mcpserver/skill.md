@@ -6,24 +6,23 @@ Revit's own API documentation on demand.
 
 Read this once at the start of a Revit task. It is orientation, not reference.
 
-> **Read this first — current capability.** `execute_script` compiles real C#, but the `Document`
-> global is not `Autodesk.Revit.DB.Document` — it's a narrow, sanctioned seam exposing only
-> `Title`. Passing it anywhere a real Revit API type is expected fails to compile, e.g.
-> `new FilteredElementCollector(Document)` → `CS1503: cannot convert from
-> 'MCPBridge.RevitAdapter.IScriptDocument' to 'Autodesk.Revit.DB.Document'`.
->
-> **The real Revit API is reachable, just not through that sanctioned seam.** Reflecting into the
-> document adapter's private field gets you the real `Autodesk.Revit.DB.Document`, and real API
-> calls against it work — including writes (`Level.Create`, live-verified: it rides the same
-> ambient transaction the executor already wraps every script in, so you don't open your own):
+> **Read this first — current capability.** `execute_script` compiles real C#, and the `Document`
+> global **is** `Autodesk.Revit.DB.Document` — the real thing, not a wrapper. Pass it straight
+> into any Revit API that wants a document:
 > ```csharp
-> var field = Document.GetType().GetField("_document",
->     System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-> var realDoc = (Autodesk.Revit.DB.Document)field.GetValue(Document);
+> var walls = new FilteredElementCollector(Document)
+>     .OfClass(typeof(Wall)).GetElementCount();
+> var level = Level.Create(Document, 42.0);   // writes work too
+> return new { walls, levelId = level.Id.Value };
 > ```
-> This is **not a documented contract** — it depends on an implementation detail (the field's
-> name) that could change without notice, and it's how you reach the API today, not the intended
-> long-term design. If it stops working, that's the seam changing, not you doing it wrong.
+> `UIApplication` and `UIDocument` are likewise the real `Autodesk.Revit.UI` types (`UIDocument`
+> may be null). Only `System` is imported, so either fully-qualify (`Autodesk.Revit.DB.Wall`) or
+> nothing will resolve — see "Running a script" below.
+>
+> **You never open a transaction.** Every script already runs inside a `Transaction` and
+> `TransactionGroup` this connector opens for you: your changes commit automatically if the script
+> succeeds and roll back if it throws. Revit allows only one open transaction per document, so
+> constructing your own is **rejected before your script runs** — see "What you may not do" below.
 
 ---
 
@@ -71,7 +70,8 @@ surfaces. Scripts are always explicitly targeted, so they're unaffected. Discove
 ## Running a script
 
 `execute_script` takes `instance_id`, `document_id`, `script`, and optional `timeout_ms`,
-`max_duration_ms` and `overwrite_output_files`. `return` a value and it comes back as `output`:
+`max_duration_ms`, `overwrite_output_files` and `confirm_lifecycle_actions`. `return` a value and it
+comes back as `output`:
 
 ```csharp
 return Document.Title;
@@ -84,17 +84,65 @@ return Document.Title;
 
 | In scope | Type / use |
 |---|---|
-| `Document` | `Title` only |
-| `UIDocument` | `.Document` → same as above; may be null |
-| `UIApplication` | `.ActiveUiDocument` → may be null |
+| `Document` | `Autodesk.Revit.DB.Document` — the real one, full API |
+| `UIDocument` | `Autodesk.Revit.UI.UIDocument`; may be null |
+| `UIApplication` | `Autodesk.Revit.UI.UIApplication` |
 | `CancellationToken` | check it in loops (see below) |
 | `ExportsDirectory`, `ImportsDirectory` | absolute paths, see "Exchanging files" |
 | `Publish(path, name?)` | copy a file into `exports/` and report it back; `name` renames it |
 | `DialogResultOverrides` | per-dialog answer override, e.g. `DialogResultOverrides["TaskDialog_X"] = 1001` |
 | the .NET BCL | `System.IO`, `System.Linq`, etc. — fully usable |
 
-Only `System` is imported by default, so use fully-qualified names (`System.IO.File.ReadAllText`)
-or you'll get `CS0246`. Each run is wrapped in a transaction automatically; you cannot open your own.
+Only `System` is imported by default, so use fully-qualified names (`Autodesk.Revit.DB.Wall`,
+`System.IO.File.ReadAllText`) or you'll get `CS0246`. Use `using` *directives* freely at the top of
+your script if you'd rather: `using Autodesk.Revit.DB;`.
+
+### What you may not do without saying so
+
+Two different things here, and the difference matters. Both are caught **before your script runs**, by a
+semantic check over the compiled code — so a refused script changes nothing and the transaction it would
+have run in is rolled back cleanly.
+
+**1. Flatly rejected — `new Transaction(...)`, `new TransactionGroup(...)`, `new SubTransaction(...)`.**
+Your script is already inside one, and Revit allows only one open transaction per document, so your own
+can never work. There is no flag for this. Just make your changes directly; they commit on success and
+roll back on failure. The error record's `code` is `script-api-denied`.
+
+**2. Allowed, but only if you confirm — the document-lifecycle and worksharing calls.**
+
+| Gated | What it escapes to |
+|---|---|
+| `Document.Close`, `.Dispose` | the session a person has open in front of them |
+| `Document.Save`, `.SaveAs` | the filesystem |
+| `Document.SynchronizeWithCentral` | the shared central model your teammates see |
+| `Document.SaveAsCloudModel` | a cloud project other people can open |
+| `Document.Print`, `.PrintToFile`, `PrintManager.SubmitPrint` | a physical device |
+| `UIDocument.SaveAndClose` | the filesystem, then that person's session |
+| `UIApplication.PostCommand` | anything, after your script's transaction has already closed |
+| `WorksharingUtils.RelinquishOwnership` | another user's ability to edit |
+
+**Why these and nothing else:** everything else you change is covered by the transaction wrapped around
+your script, so if the script throws, your changes are undone automatically. These are not — they act
+outside this document's own content, and no exception takes them back. That one question ("would a thrown
+exception actually undo this?") is the whole rule.
+
+Call one without confirming and the run is refused before it starts. The error record's `code` is
+`script-lifecycle-confirmation-required` — match on that field, not on the message text — its `message`
+names every gated member you used, and its `remedy` spells out the resend. To go ahead, resend the
+**same** call with the flag:
+
+```json
+{"instance_id":"...","document_id":"...","script":"Document.Save(); return \"saved\";",
+ "confirm_lifecycle_actions": true}
+```
+
+It applies to that one call only — confirming once does not confirm the next one, even for identical
+script text. So treat the refusal as a real question, not a step to skip: if saving/closing/syncing is
+what was actually asked for, confirm and proceed; if it crept into a script written for some other
+purpose, remove it instead.
+
+Everything else in the Revit API is fair game. These two lists are deliberately short and may grow; they
+are about preventing damage nothing can undo, not sandboxing.
 
 **Long scripts.** If the call exceeds `timeout_ms` you get `{"status":"running","execution_id":...}`.
 Call `poll_execution` with that id until a terminal status. `cancel_execution` requests a stop — but
@@ -121,6 +169,9 @@ Every failure uses one shape. Read `message` for what happened, `remedy` for wha
 
 - **`message` names the real condition** — a compiler error, an API exception. It is not a wrapper;
   read it literally. Compiler errors mean fix the script, not retry it.
+- **`code` is what you match on**, not the message. Most script failures are the generic
+  `script-execution-failed`; a refusal carries its own — `script-api-denied` (change the script) or
+  `script-lifecycle-confirmation-required` (resend with the flag), see "What you may not do".
 - **`remedy` is actionable.** Follow it before retrying.
 - **`notices[]` on a *successful* result** means something was auto-resolved for you. Dialogs your
   script triggers are auto-answered with the safe option and reported here (override per dialog with
@@ -156,9 +207,9 @@ Don't know the path yet? Run `return ImportsDirectory;` first, then write your f
 
 ## Discovering the API
 
-Reflect over Revit's real installed assemblies rather than guessing names. Remember the note at the
-top: what you find here is callable, just not through the sanctioned `Document` global directly —
-use it to plan a script and look up exact signatures before reaching for the reflection technique.
+Reflect over Revit's real installed assemblies rather than guessing names. What you find here is
+directly callable from a script against the `Document` global — use it to look up exact signatures
+and overloads before writing one, which is far cheaper than a round trip through a `CS1503`.
 
 - **`search_functions`** — start here when you know *what* you want, not the name.
   `{"query": "create wall"}` → ranked matches with summaries.
@@ -196,7 +247,9 @@ to which broker, and the loaded build.
 | Script stays `pending` | Revit's UI thread is blocked — usually a modal dialog, or the user is mid-edit | Don't retry; a second call just returns `busy`. Ask the user to check for an open dialog. |
 | `status: "unresponsive"` | Revit stopped answering heartbeats | Wait; if it persists, Revit needs attention from the user. |
 | `status: "unrecoverable"` | A prior script ignored cancellation | Nothing you send will run. Revit must be restarted; the instance gets a new `instance_id`. |
-| Script fails with `CS0103`/`CS1503`/`CS0246` | A compile error, not an infrastructure problem | Fix the script. `CS1503` on `Document` usually means you passed the sanctioned global where a real `Autodesk.Revit.DB.Document` is expected — see the reflection technique at the top. Only `System` is imported by default otherwise. |
+| Script fails with `CS0103`/`CS1503`/`CS0246` | A compile error, not an infrastructure problem | Fix the script. `CS0246` almost always means an unqualified Revit type — only `System` is imported, so write `Autodesk.Revit.DB.Wall` or add `using Autodesk.Revit.DB;`. Use `describe_function` to check an overload rather than guessing at a `CS1503`. |
+| Error `code` is `script-api-denied` | You used something flatly rejected — most often opening your own `Transaction` | See "What you may not do". Nothing ran and nothing changed; no argument lifts this, the script has to change. |
+| Error `code` is `script-lifecycle-confirmation-required` | You used a gated document-lifecycle or worksharing member without confirming | Nothing ran and nothing changed. If the action is genuinely intended, resend the **identical** call with `confirm_lifecycle_actions: true`; otherwise drop that call. The `message` names every gated member you used. |
 
 For a human debugging deeper, the add-in always writes `connection.log` and `startup-errors.log` to
 `%LOCALAPPDATA%\Connectors\Revit\` on the machine running Revit, regardless of local/remote mode. The

@@ -131,46 +131,125 @@ type executeScriptOut struct {
 	Output      string `json:"output"`
 }
 
-// TestCreateLevel is this harness's first, most basic case: a real
-// model-modifying write (Level.Create) succeeds through execute_script.
-//
-// The script reflects into RevitDocumentAdapter's private _document field
-// to reach the real Autodesk.Revit.DB.Document rather than calling a
-// sanctioned API -- because there isn't one yet. ScriptGlobals.Document is
-// still IScriptDocument (Title only) as of this test; real Document access
-// is the Phase 3 design this case exists to validate ahead of. Once that
-// design ships, replace the reflection with the real accessor and this
-// comment -- deliberately not hidden behind a helper, so it's impossible to
-// miss when Phase 3 lands (see skill.md's "verify against the running
-// connector, not the PRD" lesson).
-func TestCreateLevel(t *testing.T) {
+// Note there is deliberately no Error field here. A script that fails to
+// compile (including a ScriptApiDenylist rejection) does not come back as a
+// successful tool call carrying an error record in structuredContent -- the
+// whole tool call is an MCP error and the PRD §01 record arrives as its text
+// content instead. See runRejectedScript, which is what reads it.
+
+// targetDocument returns a connected instance and one open document, or
+// skips -- the shared preamble for every case below.
+func targetDocument(t *testing.T) (*mcpclient.Client, string, string) {
+	t.Helper()
 	c, instances := startClient(t)
 	inst := instances.Instances[0]
 	if len(inst.Documents) == 0 {
 		t.Skip("connected instance has no open document")
 	}
-	doc := inst.Documents[0]
+	return c, inst.InstanceID, inst.Documents[0].DocumentID
+}
 
-	script := `
-var field = Document.GetType().GetField("_document", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-if (field == null) { return new { ok = false, stage = "reflect-field" }; }
-var realDoc = (Autodesk.Revit.DB.Document)field.GetValue(Document);
-var before = new Autodesk.Revit.DB.FilteredElementCollector(realDoc).OfClass(typeof(Autodesk.Revit.DB.Level)).GetElementCount();
-var level = Autodesk.Revit.DB.Level.Create(realDoc, 999.0);
-var after = new Autodesk.Revit.DB.FilteredElementCollector(realDoc).OfClass(typeof(Autodesk.Revit.DB.Level)).GetElementCount();
-return new { ok = after == before + 1, levelId = level.Id.Value, before, after };
-`
+// runScript executes one script that is expected to SUCCEED.
+func runScript(t *testing.T, c *mcpclient.Client, instanceID, documentID, script string) executeScriptOut {
+	t.Helper()
+	return decodeToolResult[executeScriptOut](t, callExecuteScript(t, c, instanceID, documentID, script))
+}
 
-	raw, err := c.CallTool("execute_script", map[string]any{
-		"instance_id": inst.InstanceID,
-		"document_id": doc.DocumentID,
+// rejectedScript is the PRD §01 diagnostic record a refused execution comes
+// back as. `code` and `remedy` are read as fields here, deliberately: they were
+// both wrong on the wire while every message-substring assertion in this file
+// passed -- every failure reported code:"script-execution-failed" and no remedy
+// at all, so the codes skill.md tells an agent to match on existed only inside
+// the prose. A test that greps the message cannot see that.
+type rejectedScript struct {
+	Text  string
+	Error struct {
+		Code    string   `json:"code"`
+		Message string   `json:"message"`
+		Remedy  []string `json:"remedy"`
+	} `json:"error"`
+}
+
+// runRejectedScript executes one script that is expected to be REJECTED, and
+// returns everything the connector said about why.
+//
+// A rejected script does not come back as a successful tool call carrying
+// status:"failed" -- it comes back as an MCP tool ERROR whose text content is
+// the PRD §01 diagnostic record. That is why this cannot go through
+// decodeToolResult, which fails the test on isError by design -- correctly, for
+// every case that expects a result.
+func runRejectedScript(t *testing.T, c *mcpclient.Client, instanceID, documentID, script string) rejectedScript {
+	t.Helper()
+	return rejectionOf(t, callExecuteScript(t, c, instanceID, documentID, script))
+}
+
+func rejectionOf(t *testing.T, raw json.RawMessage) rejectedScript {
+	t.Helper()
+	var tr toolResult
+	if err := json.Unmarshal(raw, &tr); err != nil {
+		t.Fatalf("decode tool envelope: %v\nraw: %s", err, raw)
+	}
+	if !tr.IsError {
+		t.Fatalf("script was expected to be rejected but the call succeeded: %s", raw)
+	}
+	if len(tr.Content) == 0 {
+		t.Fatalf("rejection carried no content at all, so nothing tells an agent what happened: %s", raw)
+	}
+
+	out := rejectedScript{Text: tr.Content[0].Text}
+	if err := json.Unmarshal([]byte(tr.Content[0].Text), &out); err != nil {
+		t.Fatalf("rejection text is not the PRD §01 record it is supposed to be: %v\ntext: %s", err, tr.Content[0].Text)
+	}
+	return out
+}
+
+func callExecuteScript(t *testing.T, c *mcpclient.Client, instanceID, documentID, script string) json.RawMessage {
+	t.Helper()
+	return callExecuteScriptWith(t, c, instanceID, documentID, script, nil)
+}
+
+// callExecuteScriptWith is callExecuteScript plus any extra tool arguments —
+// today only confirm_lifecycle_actions (PRD §14). Kept as a separate helper so
+// every existing case keeps sending the exact argument set it sent before:
+// the confirmation gate's whole contract is that a request WITHOUT the flag is
+// refused, and a helper that started passing it by default would quietly
+// dismantle that.
+func callExecuteScriptWith(t *testing.T, c *mcpclient.Client, instanceID, documentID, script string, extra map[string]any) json.RawMessage {
+	t.Helper()
+	args := map[string]any{
+		"instance_id": instanceID,
+		"document_id": documentID,
 		"script":      script,
-	}, 20*time.Second)
+	}
+	for k, v := range extra {
+		args[k] = v
+	}
+	raw, err := c.CallTool("execute_script", args, 20*time.Second)
 	if err != nil {
 		t.Fatalf("execute_script: %v", err)
 	}
+	return raw
+}
 
-	out := decodeToolResult[executeScriptOut](t, raw)
+// TestCreateLevel is this harness's first, most basic case: a real
+// model-modifying write (Level.Create) succeeds through execute_script.
+//
+// As of PRD §14 (Phase 3) this uses the SANCTIONED `Document` global, which
+// is the real Autodesk.Revit.DB.Document. It previously reflected into
+// RevitDocumentAdapter's private _document field because no sanctioned
+// accessor existed; that workaround is gone along with the narrow
+// IScriptDocument seam it worked around.
+func TestCreateLevel(t *testing.T) {
+	c, instanceID, documentID := targetDocument(t)
+
+	script := `
+var before = new Autodesk.Revit.DB.FilteredElementCollector(Document).OfClass(typeof(Autodesk.Revit.DB.Level)).GetElementCount();
+var level = Autodesk.Revit.DB.Level.Create(Document, 999.0);
+var after = new Autodesk.Revit.DB.FilteredElementCollector(Document).OfClass(typeof(Autodesk.Revit.DB.Level)).GetElementCount();
+return new { ok = after == before + 1, levelId = level.Id.Value, before, after };
+`
+
+	out := runScript(t, c, instanceID, documentID, script)
 	if out.Status != "success" {
 		t.Fatalf("expected status=success, got %q (output: %s)", out.Status, out.Output)
 	}
@@ -183,5 +262,223 @@ return new { ok = after == before + 1, levelId = level.Id.Value, before, after }
 	// happens to have today.
 	if !strings.Contains(out.Output, "ok = True") {
 		t.Fatalf("level was not created as expected; output: %s", out.Output)
+	}
+}
+
+// TestScriptGlobalsExposeRealRevitObjects covers what MCPBridge.Core.Tests
+// no longer can. Those assertions (a script reading Document.Title and
+// getting the document's real title back) used to run against
+// FakeDocumentAdapter in tier 1; once `Document` became the real
+// Autodesk.Revit.DB.Document that stopped being fakeable at all -- Document
+// is sealed and non-constructible outside a live Revit session, and
+// RevitAPI.dll is a mixed-mode assembly a test host cannot even load. So
+// this is the tier that can still make them (PRD §14).
+func TestScriptGlobalsExposeRealRevitObjects(t *testing.T) {
+	c, instanceID, documentID := targetDocument(t)
+
+	// Each global is asserted to be the REAL Revit type, by name, not merely
+	// non-null: a narrow adapter would also answer .Title, so the type check
+	// is what actually distinguishes the Phase 3 seam from the old one.
+	script := `
+return new {
+  docType = Document.GetType().FullName,
+  uiAppType = UIApplication.GetType().FullName,
+  uiDocType = UIDocument == null ? "null" : UIDocument.GetType().FullName,
+  title = Document.Title,
+  sameDoc = object.ReferenceEquals(Document, UIDocument.Document)
+};
+`
+
+	out := runScript(t, c, instanceID, documentID, script)
+	if out.Status != "success" {
+		t.Fatalf("expected status=success, got %q (output: %s)", out.Status, out.Output)
+	}
+	for _, want := range []string{
+		"docType = Autodesk.Revit.DB.Document",
+		"uiAppType = Autodesk.Revit.UI.UIApplication",
+		"uiDocType = Autodesk.Revit.UI.UIDocument",
+	} {
+		if !strings.Contains(out.Output, want) {
+			t.Errorf("globals do not expose the real Revit types: wanted %q in output: %s", want, out.Output)
+		}
+	}
+}
+
+// TestDenylistRejectsOwnTransaction is the live half of the ScriptApiDenylist
+// coverage. Tier 1 proves the check fires and that the executor rolls back;
+// only here can we prove the whole path -- that a rejected script comes back
+// to the agent as a clear, named diagnostic rather than a crash, a hang, or
+// (worst) a silent no-op that leaves the ambient transaction in an odd state
+// and the next script failing for an unrelated-looking reason.
+func TestDenylistRejectsOwnTransaction(t *testing.T) {
+	c, instanceID, documentID := targetDocument(t)
+
+	for _, tc := range []struct{ name, member, script string }{
+		{"Transaction", "Autodesk.Revit.DB.Transaction", `using (var tx = new Autodesk.Revit.DB.Transaction(Document, "mine")) { tx.Start(); tx.Commit(); } return "ran";`},
+		{"TransactionGroup", "Autodesk.Revit.DB.TransactionGroup", `using (var tg = new Autodesk.Revit.DB.TransactionGroup(Document, "mine")) { tg.Start(); tg.Assimilate(); } return "ran";`},
+		{"SubTransaction", "Autodesk.Revit.DB.SubTransaction", `using (var st = new Autodesk.Revit.DB.SubTransaction(Document)) { st.Start(); st.Commit(); } return "ran";`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rej := runRejectedScript(t, c, instanceID, documentID, tc.script)
+			// The code an agent keys off, and the member it actually used --
+			// a rejection that named neither would be unactionable (PRD §01).
+			if rej.Error.Code != "script-api-denied" {
+				t.Errorf("record's code = %q, want script-api-denied; result: %s", rej.Error.Code, rej.Text)
+			}
+			if !strings.Contains(rej.Text, tc.member) {
+				t.Errorf("rejection does not name %q, so an agent cannot tell what it did wrong; result: %s", tc.member, rej.Text)
+			}
+			if len(rej.Error.Remedy) == 0 {
+				t.Errorf("rejection carries no remedy, though there is a concrete next step; result: %s", rej.Text)
+			}
+		})
+	}
+
+	// A `dynamic` argument makes constructor overload resolution late-bound,
+	// which an independent PR review flagged as a way past a check keyed on the
+	// bound symbol. Live, it is not: this is refused like any other spelling of
+	// `new` (Roslyn still reports the constructor symbol, and Analyze now falls
+	// back to the constructed TYPE if it ever stops doing so). Pinned live as
+	// well as in tier 1 because check 1 is the one refusal that can never be
+	// opted into, and `dynamic` genuinely works in scripts here.
+	t.Run("LateBoundConstructorArgument", func(t *testing.T) {
+		rej := runRejectedScript(t, c, instanceID, documentID,
+			`dynamic d = Document; var tx = new Autodesk.Revit.DB.Transaction(d, "mine"); return "constructed";`)
+		if rej.Error.Code != "script-api-denied" {
+			t.Errorf("record's code = %q, want script-api-denied; result: %s", rej.Error.Code, rej.Text)
+		}
+	})
+
+	// Confirmation is for the lifecycle members only; it must not become a
+	// general "ignore the denylist" switch. Live-checked because that is the
+	// one place a broker-side wiring mistake (forwarding the flag into some
+	// broader allow) would actually show up.
+	t.Run("ConfirmationDoesNotUnlockTransactions", func(t *testing.T) {
+		raw := callExecuteScriptWith(t, c, instanceID, documentID,
+			`using (var tx = new Autodesk.Revit.DB.Transaction(Document, "mine")) { tx.Start(); tx.Commit(); } return "ran";`,
+			map[string]any{"confirm_lifecycle_actions": true})
+		var tr toolResult
+		if err := json.Unmarshal(raw, &tr); err != nil {
+			t.Fatalf("decode tool envelope: %v\nraw: %s", err, raw)
+		}
+		if !tr.IsError {
+			t.Fatalf("confirm_lifecycle_actions let a script open its own Transaction: %s", raw)
+		}
+		if len(tr.Content) == 0 || !strings.Contains(tr.Content[0].Text, "script-api-denied") {
+			t.Errorf("expected the unconditional script-api-denied rejection; result: %s", raw)
+		}
+	})
+
+	// The instance must still be usable afterwards -- a rejection happens
+	// before compilation completes, so the ambient transaction is rolled
+	// back cleanly and the next script runs normally.
+	out := runScript(t, c, instanceID, documentID, `return Document.Title;`)
+	if out.Status != "success" {
+		t.Fatalf("instance unusable after denylist rejections: status=%q output=%s", out.Status, out.Output)
+	}
+}
+
+// TestLifecycleGateRequiresConfirmation is the live half of PRD §14's
+// confirmation gate: the same script text must be REFUSED without
+// confirm_lifecycle_actions and RUN with it, end to end through the real
+// broker and a real Revit.
+//
+// It has to be here rather than in MCPBridge.Core.Tests for the same reason
+// the denylist case above does -- tier 1 can prove the gate's decision but
+// cannot execute a script that names Revit types at all (RevitAPI.dll is
+// mixed-mode and won't load in a test host), so "and then it actually ran" is
+// only assertable against a live Revit.
+//
+// WHY A METHOD GROUP RATHER THAN A CALL. The confirmed script binds
+// Document.Close to a delegate and never invokes it. That is deliberate, and
+// it is not a weaker test of the gate: the gate's job is to decide whether the
+// compiled script may proceed to execution, and detection fires on the method
+// group exactly as it does on a call (that bypass shape is pinned in tier 1
+// too). Actually invoking one of these members live would close, save, print,
+// or relinquish a real document on a real machine -- effects that, by the very
+// definition that put them behind this gate, nothing here could undo
+// afterwards. A regression suite must not need a human to repair the model it
+// ran against.
+func TestLifecycleGateRequiresConfirmation(t *testing.T) {
+	c, instanceID, documentID := targetDocument(t)
+
+	const script = `System.Func<bool> close = Document.Close; return close != null ? "bound" : "null";`
+
+	// Unconfirmed: refused, before anything runs.
+	rej := runRejectedScript(t, c, instanceID, documentID, script)
+	if rej.Error.Code != "script-lifecycle-confirmation-required" {
+		t.Errorf("record's code = %q, want script-lifecycle-confirmation-required -- an agent matching on the field, as skill.md tells it to, cannot see this is retryable; result: %s", rej.Error.Code, rej.Text)
+	}
+	if !strings.Contains(strings.Join(rej.Error.Remedy, " "), "confirm_lifecycle_actions: true") {
+		t.Errorf("remedy does not tell the agent to resend with confirm_lifecycle_actions, which is the whole point of a retryable refusal (PRD §01); result: %s", rej.Text)
+	}
+	if !strings.Contains(rej.Text, "Autodesk.Revit.DB.Document.Close") {
+		t.Errorf("refusal does not name the member the script used; result: %s", rej.Text)
+	}
+
+	// Confirmed: the identical text runs.
+	out := decodeToolResult[executeScriptOut](t, callExecuteScriptWith(t, c, instanceID, documentID, script,
+		map[string]any{"confirm_lifecycle_actions": true}))
+	if out.Status != "success" {
+		t.Fatalf("confirmed lifecycle script did not run: status=%q output=%s", out.Status, out.Output)
+	}
+	if !strings.Contains(out.Output, "bound") {
+		t.Errorf("confirmed script ran but did not return its own result; output=%s", out.Output)
+	}
+
+	// And the confirmation is per-request, not sticky: the same text, resent
+	// without the flag, is refused again. A cached-compilation implementation
+	// that folded the decision into the compile step would pass every
+	// assertion above and fail this one.
+	again := runRejectedScript(t, c, instanceID, documentID, script)
+	if again.Error.Code != "script-lifecycle-confirmation-required" {
+		t.Errorf("confirmation leaked to a later unconfirmed run of the same script; result: %s", again.Text)
+	}
+}
+
+// TestLifecycleGateCoversTheNewlyAddedMembers checks the five members added to
+// the gated tier after an independent PR review proposed them (PRD §14):
+// Document.SaveAsCloudModel/Dispose, PrintManager.SubmitPrint,
+// UIDocument.SaveAndClose, UIApplication.PostCommand. Each exists with these
+// signatures in the live Revit 2027 API (verified with describe_function before
+// being added), and each answers "no" to the list's membership question -- a
+// thrown exception undoes none of them.
+//
+// Every script here binds a METHOD GROUP and never invokes it, for the same
+// reason TestLifecycleGateRequiresConfirmation does: detection fires on the
+// reference exactly as on a call, and actually invoking any of these would
+// close, save, print, or cloud-publish a real model on a real machine, which
+// nothing in a regression suite could undo afterwards.
+func TestLifecycleGateCoversTheNewlyAddedMembers(t *testing.T) {
+	c, instanceID, documentID := targetDocument(t)
+
+	for _, tc := range []struct{ name, member, script string }{
+		{"SaveAsCloudModel", "Autodesk.Revit.DB.Document.SaveAsCloudModel",
+			`System.Action<System.Guid, System.Guid, string, string> f = Document.SaveAsCloudModel; return f != null ? "bound" : "null";`},
+		{"Dispose", "Autodesk.Revit.DB.Document.Dispose",
+			`System.Action f = Document.Dispose; return f != null ? "bound" : "null";`},
+		{"SubmitPrint", "Autodesk.Revit.DB.PrintManager.SubmitPrint",
+			`System.Func<bool> f = Document.PrintManager.SubmitPrint; return f != null ? "bound" : "null";`},
+		{"SaveAndClose", "Autodesk.Revit.UI.UIDocument.SaveAndClose",
+			`System.Func<bool> f = UIDocument.SaveAndClose; return f != null ? "bound" : "null";`},
+		{"PostCommand", "Autodesk.Revit.UI.UIApplication.PostCommand",
+			`System.Action<Autodesk.Revit.UI.RevitCommandId> f = UIApplication.PostCommand; return f != null ? "bound" : "null";`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rej := runRejectedScript(t, c, instanceID, documentID, tc.script)
+			if rej.Error.Code != "script-lifecycle-confirmation-required" {
+				t.Errorf("record's code = %q, want script-lifecycle-confirmation-required; result: %s", rej.Error.Code, rej.Text)
+			}
+			if !strings.Contains(rej.Text, tc.member) {
+				t.Errorf("refusal does not name %q; result: %s", tc.member, rej.Text)
+			}
+
+			// The same text, confirmed, gets through the gate and runs.
+			out := decodeToolResult[executeScriptOut](t, callExecuteScriptWith(t, c, instanceID, documentID, tc.script,
+				map[string]any{"confirm_lifecycle_actions": true}))
+			if out.Status != "success" || !strings.Contains(out.Output, "bound") {
+				t.Fatalf("confirmed script did not run: status=%q output=%s", out.Status, out.Output)
+			}
+		})
 	}
 }
