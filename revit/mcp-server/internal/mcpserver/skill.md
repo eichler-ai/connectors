@@ -87,7 +87,7 @@ return Document.Title;
 | `Document` | `Autodesk.Revit.DB.Document` — the real one, full API |
 | `UIDocument` | `Autodesk.Revit.UI.UIDocument`; may be null |
 | `UIApplication` | `Autodesk.Revit.UI.UIApplication` |
-| `UIApplication.Application` | `Autodesk.Revit.ApplicationServices.Application` — the top-level app object, see below |
+| ↳ `UIApplication.Application` | reached *through* the above, not its own global: `Autodesk.Revit.ApplicationServices.Application` |
 | `CancellationToken` | check it in loops (see below) |
 | `ExportsDirectory`, `ImportsDirectory` | absolute paths, see "Exchanging files" |
 | `Publish(path, name?)` | copy a file into `exports/` and report it back; `name` renames it |
@@ -96,24 +96,21 @@ return Document.Title;
 
 **Creating documents.** `UIApplication.Application` is the real top-level
 `Autodesk.Revit.ApplicationServices.Application`, so `NewProjectDocument(path)` and
-`NewFamilyDocument(path)` work and need no confirmation — nothing persists until you save, and saving
-is gated separately. Get the template paths from Revit rather than guessing them: `DefaultProjectTemplate`
-is a full `.rte` path, `FamilyTemplatePath` is the directory the `.rft` templates live under.
+`NewFamilyDocument(path)` work and need no confirmation — nothing persists until you save, and saving is
+gated separately. Ask Revit for the template paths rather than guessing: `DefaultProjectTemplate` is a
+full `.rte` path, `FamilyTemplatePath` the directory holding the `.rft` templates.
 
 ```csharp
 var app = UIApplication.Application;
-var doc = app.NewProjectDocument(app.DefaultProjectTemplate);
-return new Autodesk.Revit.DB.FilteredElementCollector(doc)
-    .OfClass(typeof(Autodesk.Revit.DB.Level)).GetElementCount();
+var doc = app.NewProjectDocument(app.DefaultProjectTemplate);   // real, queryable Document
 ```
 
-Two limits worth knowing before you build on this. **A document you create is not covered by your
-script's transaction** — that transaction is opened on the instance's active document, so writing to the
-new one throws `ModificationOutsideTransactionException`, and you cannot open your own transaction for it
-either (see below). You can create and read; you cannot yet write. And **a created document has no
-`document_id`** — it will not show up in `list_instances`, and you cannot point a later `execute_script`
-call at it. It does stay open for the rest of the session, so a later script can find it again by walking
-`UIApplication.Application.Documents` and matching on `Title` or `PathName`.
+Two limits before you build on this. **A created document is not covered by your script's
+transaction** — that one is opened on the instance's *active* document, so writing to the new one throws
+`ModificationOutsideTransactionException`, and you cannot open your own for it either (see below). Create
+and read, yes; write, not yet. **And it has no `document_id`** — it never appears in `list_instances` and
+you cannot point a later call at it. It does stay open for the session, so a later script finds it by
+walking `UIApplication.Application.Documents` and matching `Title` or `PathName`.
 
 Only `System` is imported by default, so use fully-qualified names (`Autodesk.Revit.DB.Wall`,
 `System.IO.File.ReadAllText`) or you'll get `CS0246`. Use `using` *directives* freely at the top of
@@ -128,10 +125,10 @@ have run in is rolled back cleanly.
 **1. Flatly rejected — `new Transaction(...)`, `new TransactionGroup(...)`, `new SubTransaction(...)`.**
 Your script is already inside one, and Revit allows only one open transaction per document, so your own
 can never work. There is no flag for this. Just make your changes directly; they commit on success and
-roll back on failure. The error record's `code` is `script-api-denied`. This refusal does not look at
-which document you were opening the transaction *for*, so it also blocks the one case Revit itself would
-allow — a transaction on a document you just created with `NewProjectDocument`. That is a known limit,
-not an oversight; it is why a created document is read-only from a script today.
+roll back on failure. The error record's `code` is `script-api-denied`. The refusal ignores *which*
+document you were opening the transaction for, so it also blocks the one case Revit would allow — a
+transaction on a document you just created. Known limit, not an oversight; it is why a created document
+is read-only from a script today.
 
 **2. Allowed, but only if you confirm — the document-lifecycle and worksharing calls.**
 
