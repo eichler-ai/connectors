@@ -1146,3 +1146,40 @@ return "ambient = " + ambient + ";";
 		}
 	})
 }
+
+// TestDialogsAreStillAutoSuppressed is the positive counterpart to
+// TestScriptCannotTamperWithDialogSuppression: making ActiveDialogContext
+// internal must not break the feature it exists for. Only the AddIn's
+// DialogSuppressionHandler and the executor call it now, both across
+// InternalsVisibleTo, and this is what proves that seam still carries.
+//
+// TaskDialog.Show is a genuinely modal Revit dialog raised on the same UI thread
+// the script runs on: with suppression working, the handler answers it (default
+// safe result) and the script returns; with it broken, this call would block
+// Revit's UI thread until a human clicked the dialog, and the harness would time
+// out instead of failing an assertion. So the fact that this case terminates at
+// all is half the assertion, and the auto-answered notice is the other half --
+// PRD §01's "never handled invisibly" means the run must also SAY it answered.
+//
+// Tier 2 by construction: DialogBoxShowing only ever fires inside a live Revit
+// process, and nothing about this path is observable from a unit test.
+func TestDialogsAreStillAutoSuppressed(t *testing.T) {
+	c, instanceID, documentID := targetDocument(t)
+
+	out := runScript(t, c, instanceID, documentID, `
+Autodesk.Revit.UI.TaskDialog.Show("MCPBridge harness", "auto-suppression probe");
+return "returned from a modal dialog";`)
+	if out.Status != "success" {
+		t.Fatalf("a script raising a modal dialog did not complete: status=%q output=%s", out.Status, out.Output)
+	}
+
+	var found bool
+	for _, n := range out.Notices {
+		if n.Code == "dialog-auto-answered" && strings.Contains(n.Message, "auto-suppression probe") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("the dialog was answered but not REPORTED -- the PRD §01 record of what Revit asked is missing from notices[]: %+v", out.Notices)
+	}
+}

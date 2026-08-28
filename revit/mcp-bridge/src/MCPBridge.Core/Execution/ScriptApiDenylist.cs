@@ -77,7 +77,17 @@ namespace MCPBridge.Core.Execution;
 /// It is also a GUARD, not a sandbox: a determined script can still reach a denied member through
 /// reflection, exactly as scripts previously reached the real Document that way. That is accepted --
 /// the purpose is to stop an agent from doing something destructive by accident or by plausible-looking
-/// mistake, which is the realistic failure mode, not to contain hostile code.
+/// mistake, which is the realistic failure mode, not to contain hostile code. Reflection reaches the
+/// CONNECTOR'S OWN internals too, not just Revit's API, and that is the bigger half of what is being
+/// accepted here: <see cref="ManagedDocumentTransactions"/> is internal, but reflection over it grants
+/// commit/rollback authority on every document this run manages INCLUDING the ambient one -- so a
+/// script willing to use reflection can commit the ambient document's transaction mid-run and defeat
+/// the roll-back-on-throw guarantee on a document a human may have open. Same accepted position, same
+/// reason (deliberate, not accidental); see ManagedDocumentTransactions' own class comment and PRD §14,
+/// which record it as well. What is NOT accepted, and is fixed structurally rather than by accepting
+/// it, is any route that reaches those internals WITHOUT reflection -- a public type that is, hands
+/// out, or is itself such machinery (three live instances found and closed by review, all now pinned
+/// in revit/test-harness/denylist_bypass_test.go).
 /// </summary>
 internal static class ScriptApiDenylist
 {

@@ -67,10 +67,19 @@ unexpectedly skipping, this is the first thing to check.
 - `mcpclient/` — the MCP-over-stdio client the tests use (subprocess spawn, JSON-RPC framing,
   `tools/call`). Deliberately hand-rolled and minimal rather than pulling in an SDK, so it's
   obvious exactly what's being exercised.
-- `harness_test.go` — the cases themselves, currently: `TestCreateLevel`,
-  `TestScriptGlobalsExposeRealRevitObjects`, `TestDenylistRejectsOwnTransaction`,
+- `harness_test.go` — the shared client/setup helpers plus the capability cases, currently:
+  `TestCreateLevel`, `TestScriptGlobalsExposeRealRevitObjects`, `TestDenylistRejectsOwnTransaction`,
   `TestLifecycleGateRequiresConfirmation`, `TestLifecycleGateCoversTheNewlyAddedMembers`,
-  `TestApplicationCreatesDocuments`.
+  `TestApplicationCreatesDocuments`, `TestCreatedDocumentIsWritable`,
+  `TestDialogsAreStillAutoSuppressed`.
+- `denylist_bypass_test.go` — the bypass-reproduction cases, one per *shape* of reach an
+  independent review found live (never one per type name — that axis is what let a hole survive a
+  whole review round): `TestConnectorOwnTypesAreNotReachableFromAScript` (constructing our own
+  adapters), `TestConnectorCapabilitiesAreNotReachableThroughACallback` (capturing one through a
+  script-supplied callback), `TestConfirmationTierCannotBeSelfGranted` (reaching the live
+  `ScriptGlobals` via `Delegate.Target` and starting a nested run with the confirmation flag set),
+  and `TestScriptCannotTamperWithDialogSuppression` (mutating the static dialog context).
+  Twelve test functions across the two files in total.
 
 `TestApplicationCreatesDocuments` is the first case whose subtests are *heterogeneous* — each
 asserting a different thing about one capability — rather than table-driven over a single shape
