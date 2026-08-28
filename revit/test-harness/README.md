@@ -70,8 +70,11 @@ unexpectedly skipping, this is the first thing to check.
 - `harness_test.go` — the cases themselves, currently: `TestCreateLevel`.
 
 No `corpus/`/`runner/`/`fixtures/` yet — PRD §13's tutorial-workflow corpus (place a wall, tag a
-room, etc.) needs real Revit API access from scripts, which doesn't exist yet (see
-`harness_test.go`'s own `TestCreateLevel` doc comment). What's testable today without that
+room, etc.) needs a *sanctioned* way for scripts to reach real Revit API elements, which doesn't
+exist yet (the only way there today is an unsupported reflection workaround, see PRD §14's "Real
+Revit API access from scripts" finding and `harness_test.go`'s own `TestCreateLevel` doc comment —
+that test uses the workaround to prove the harness's own plumbing works, which is a different
+thing from the corpus being buildable on it). What's testable today without that
 (registration, discovery, file exchange, error shapes, execution status transitions) is a
 genuine regression suite in its own right and doesn't need that structure — a data-driven corpus
 format is worth introducing once there are enough cases for one to earn its keep, not before.

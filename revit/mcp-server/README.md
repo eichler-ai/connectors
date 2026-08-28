@@ -2,17 +2,18 @@
 
 The standalone Go process that speaks MCP to Claude/agents and TCP/NDJSON to one or more Revit MCP Bridge instances. See PRD §04 (Architecture), §05 (Connection & multiplexing) — [`../docs/PRD.md`](../docs/PRD.md).
 
-Layout (Phase 1 — "Core loop", PRD §15 phase 1; see the `revit-connector-development` skill for the build process):
+Layout (see the `revit-connector-development` skill for the build process):
 
 - `cmd/mcp-server/` — main entrypoint: flag/env parsing (`-mode local|remote`, `-bind`, `-port`, `-app-data-dir`), singleton lock acquisition, and either running as primary (binds the TCP listener, mints the token, writes `broker.json`, runs the MCP server over stdio) or as secondary (dials the primary and transparently pipes its own stdio through that TCP connection).
 - `internal/diag/` — the shared diagnostic-record shape (PRD §01: `severity`/`code`/`source`/`message`/`detail`/`remedy`), reused everywhere an error or notice is reported.
 - `internal/transport/` — JSON-RPC 2.0 message types, NDJSON framing (PRD §05 "Framing"), and `Conn`, a bidirectional request/response-correlating peer connection used for both add-in and agent-client-proxy wire traffic.
-- `internal/registry/` — in-memory instance registry keyed by `instance_id`, populated from `register` notifications. Phase 1 scope only: no heartbeat, no `list_instances` tool, no pruning (Phase 2, PRD §15).
-- `internal/singleton/` — lock-or-proxy logic (PRD §05): OS-level exclusive lock file (`lock_unix.go`/`lock_windows.go`), auth token generation/validation, `broker.json` read/write, and the platform-appropriate app-data directory (PRD §09).
+- `internal/registry/` — in-memory instance registry keyed by `instance_id`, populated from `register`/`ping` notifications: heartbeat-derived status (`idle`/`unresponsive`), document snapshots, and staleness pruning (PRD §05).
+- `internal/singleton/` — lock-or-proxy logic (PRD §05): OS-level exclusive lock file (`lock_unix.go`/`lock_windows.go`), auth token generation/validation, `broker.json` read/write, and the platform-appropriate app-data directory (PRD §09) — local mode only; remote mode's directory is caller-supplied via `-app-data-dir`.
 - `internal/execution/` — routes `execute_script`/`poll_execution`/`cancel_execution` to the right instance's wire connection; implements the two-shape response contract and per-instance busy detection from PRD §06.
-- `internal/broker/` — TCP connection handling: the mandatory auth-token gate (PRD §10), `register` notification handling into the registry + execution manager, and running an MCP server session over every authenticated agent-client (secondary-broker-proxy) connection.
-- `internal/mcpserver/` — registers `execute_script`/`poll_execution`/`cancel_execution` against the official MCP Go SDK's `Server`, delegating to `internal/execution`.
+- `internal/discovery/` — routes `list_functions`/`search_functions`/`describe_function` (PRD §08) to a live add-in connection, independent of `internal/execution`'s busy/pending state machine; also resolves multi-version disambiguation when instances of different Revit versions are connected at once (PRD §11).
+- `internal/broker/` — TCP connection handling: the mandatory auth-token gate (PRD §10), `register`/`ping` notification handling into the registry + execution/discovery managers, and running an MCP server session over every authenticated agent-client (secondary-broker-proxy) connection.
+- `internal/mcpserver/` — registers every agent-facing tool against the official MCP Go SDK's `Server`: `execute_script`/`poll_execution`/`cancel_execution` (`tools.go`), `list_instances` (`instances_tool.go`), `list_functions`/`search_functions`/`describe_function` (`discovery_tools.go`), and `get_skills` (`skills_tool.go`, serving the embedded connector guide at `skill.md` — see its own "keep updated" rules in the `revit-connector-development` skill).
 
-Not yet built (later phases per PRD §15): `internal/pathmap/` (local/remote path translation, PRD §09, Phase 3), `list_instances`/heartbeat (Phase 2), `list_functions`/`search_functions`/`describe_function` (Phase 3).
+Not yet built: `internal/pathmap/` (local/remote path translation for file exchange across the shared drive in remote mode — the discovery-file-location split exists via `-app-data-dir`, but no path rewriting beyond that yet, PRD §09), and PRD §13's validation corpus (`../test-harness/` currently has a live MCP harness with one case, `TestCreateLevel` — see its own README — not the tutorial-workflow corpus PRD §13 describes, which needs a sanctioned way for scripts to reach real Revit API elements that doesn't exist yet — see PRD §14's "Real Revit API access from scripts" finding, since the only way there today is an unsupported reflection workaround, not something a corpus should depend on).
 
-Run `go test ./...` from this directory.
+Run `go test ./...` from this directory (tier-1, mocked-transport tests only — `../test-harness/` is the tier-2 live suite, excluded by its own `harness` build tag).

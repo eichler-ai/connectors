@@ -72,15 +72,22 @@ public sealed class MCPBridgeApplication : IExternalApplication
         }
     }
 
-    /// <summary>Best-effort append to %LOCALAPPDATA%\MCPBridge\startup-errors.log -- shared by OnStartup's
-    /// own failure path and CreateStatusRibbonButton's (PRD §01 observability: a caught-and-swallowed
-    /// failure still deserves a trace somewhere, not total silence, even when it must not fail the whole
-    /// add-in load).</summary>
+    /// <summary>Best-effort append to %LOCALAPPDATA%\Connectors\Revit\startup-errors.log -- shared by
+    /// OnStartup's own failure path and CreateStatusRibbonButton's (PRD §01 observability: a
+    /// caught-and-swallowed failure still deserves a trace somewhere, not total silence, even when it
+    /// must not fail the whole add-in load). Deliberately always the LOCAL per-machine directory
+    /// (CONVENTIONS.md's app-data layout), not the resolved discoveryOptions' ConnectorRoot -- a human
+    /// debugging on this machine needs to find this file here regardless of local/remote topology, and
+    /// in remote mode ConnectorRoot points at a shared network drive, which would be actively worse for
+    /// that. Reuses BrokerDiscoveryOptions.Local()'s own path computation rather than hand-rolling
+    /// "Connectors"/"Revit" a second time, so the two can't drift apart (a docs-sync audit found this
+    /// directory literally hardcoded as "MCPBridge" here, diverging from the documented convention --
+    /// this is that fix).</summary>
     private static void TryLogDiagnostic(string message)
     {
         try
         {
-            var directory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "MCPBridge");
+            var directory = BrokerDiscoveryOptions.Local().ConnectorRoot;
             Directory.CreateDirectory(directory);
             File.AppendAllText(Path.Combine(directory, "startup-errors.log"), $"{DateTimeOffset.UtcNow:O} {message}\n");
         }

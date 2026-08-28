@@ -9,8 +9,9 @@ Two components:
 
 Plus:
 
-- [`install/`](./install/) — deployment scripts (Revit install, MCP Server registration)
-- [`test-harness/`](./test-harness/) — live integration test harness and corpus
+- [`install.ps1`](./install.ps1) / [`install.md`](./install.md) — Windows installer (add-in + broker, MCP registration via the `claude` CLI)
+- [`install-mac.sh`](./install-mac.sh) — Mac-side setup for this project's own Mac+Parallels dev topology (PRD §12 "Mac + Parallels")
+- [`test-harness/`](./test-harness/) — live MCP test harness (see its own README)
 
 ## Design
 
@@ -22,4 +23,8 @@ See the `revit-connector-development` skill (`.claude/skills/revit-connector-dev
 
 ## Status
 
-Pre-implementation. See the PRD's Phased Roadmap (§15) for what's next.
+Phases 1–3 shipped and merged: core execution loop, dialog suppression + multi-instance, API
+discovery + file exchange, plus Revit 2025 multi-version support (Phase 6, partial — 2026 and
+Marketplace submission remain open). Validation corpus (Phase 4) has its harness scaffolding but
+no corpus yet; signed distribution (Phase 5) hasn't started. See the PRD's Phased Roadmap (§15)
+for the authoritative per-phase status.
