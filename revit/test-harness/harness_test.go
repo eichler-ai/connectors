@@ -129,28 +129,13 @@ type executeScriptOut struct {
 	ExecutionID string `json:"execution_id"`
 	Status      string `json:"status"`
 	Output      string `json:"output"`
-	// The PRD §01 diagnostic record for a failed script -- where a compile
-	// error, an await rejection, or a ScriptApiDenylist violation actually
-	// surfaces. Absent on success.
-	Error *struct {
-		Severity string `json:"severity"`
-		Code     string `json:"code"`
-		Source   string `json:"source"`
-		Message  string `json:"message"`
-		Remedy   string `json:"remedy"`
-	} `json:"error"`
 }
 
-// failureText is everything a failed execution said, for assertions that
-// don't want to care whether a given detail landed in the diagnostic
-// record's message or in the script's own captured output.
-func (o executeScriptOut) failureText() string {
-	text := o.Output
-	if o.Error != nil {
-		text += " | " + o.Error.Code + " | " + o.Error.Message + " | " + o.Error.Remedy
-	}
-	return text
-}
+// Note there is deliberately no Error field here. A script that fails to
+// compile (including a ScriptApiDenylist rejection) does not come back as a
+// successful tool call carrying an error record in structuredContent -- the
+// whole tool call is an MCP error and the PRD §01 record arrives as its text
+// content instead. See runRejectedScript, which is what reads it.
 
 // targetDocument returns a connected instance and one open document, or
 // skips -- the shared preamble for every case below.
@@ -164,10 +149,39 @@ func targetDocument(t *testing.T) (*mcpclient.Client, string, string) {
 	return c, inst.InstanceID, inst.Documents[0].DocumentID
 }
 
-// runScript executes one script and returns its decoded result, failing on
-// transport errors but NOT on a failed script status -- several cases below
-// assert specifically that a script is rejected.
+// runScript executes one script that is expected to SUCCEED.
 func runScript(t *testing.T, c *mcpclient.Client, instanceID, documentID, script string) executeScriptOut {
+	t.Helper()
+	return decodeToolResult[executeScriptOut](t, callExecuteScript(t, c, instanceID, documentID, script))
+}
+
+// runRejectedScript executes one script that is expected to be REJECTED, and
+// returns everything the connector said about why.
+//
+// A rejected script does not come back as a successful tool call carrying
+// status:"failed" -- it comes back as an MCP tool ERROR whose text content is
+// the PRD §01 diagnostic record (confirmed live: isError with
+// code:"script-execution-failed" and the ScriptApiDenylist message). That is
+// why this cannot go through decodeToolResult, which fails the test on
+// isError by design -- correctly, for every case that expects a result.
+func runRejectedScript(t *testing.T, c *mcpclient.Client, instanceID, documentID, script string) string {
+	t.Helper()
+	raw := callExecuteScript(t, c, instanceID, documentID, script)
+
+	var tr toolResult
+	if err := json.Unmarshal(raw, &tr); err != nil {
+		t.Fatalf("decode tool envelope: %v\nraw: %s", err, raw)
+	}
+	if !tr.IsError {
+		t.Fatalf("script was expected to be rejected but the call succeeded: %s", raw)
+	}
+	if len(tr.Content) == 0 {
+		t.Fatalf("rejection carried no content at all, so nothing tells an agent what happened: %s", raw)
+	}
+	return tr.Content[0].Text
+}
+
+func callExecuteScript(t *testing.T, c *mcpclient.Client, instanceID, documentID, script string) json.RawMessage {
 	t.Helper()
 	raw, err := c.CallTool("execute_script", map[string]any{
 		"instance_id": instanceID,
@@ -177,7 +191,7 @@ func runScript(t *testing.T, c *mcpclient.Client, instanceID, documentID, script
 	if err != nil {
 		t.Fatalf("execute_script: %v", err)
 	}
-	return decodeToolResult[executeScriptOut](t, raw)
+	return raw
 }
 
 // TestCreateLevel is this harness's first, most basic case: a real
@@ -262,20 +276,22 @@ return new {
 func TestDenylistRejectsOwnTransaction(t *testing.T) {
 	c, instanceID, documentID := targetDocument(t)
 
-	for _, tc := range []struct{ name, script string }{
-		{"Transaction", `using (var tx = new Autodesk.Revit.DB.Transaction(Document, "mine")) { tx.Start(); tx.Commit(); } return "ran";`},
-		{"TransactionGroup", `using (var tg = new Autodesk.Revit.DB.TransactionGroup(Document, "mine")) { tg.Start(); tg.Assimilate(); } return "ran";`},
-		{"SubTransaction", `using (var st = new Autodesk.Revit.DB.SubTransaction(Document)) { st.Start(); st.Commit(); } return "ran";`},
-		{"Document.Close", `Document.Close(); return "ran";`},
-		{"Document.SaveAs", `Document.SaveAs("C:\\Temp\\should-never-happen.rvt"); return "ran";`},
+	for _, tc := range []struct{ name, member, script string }{
+		{"Transaction", "Autodesk.Revit.DB.Transaction", `using (var tx = new Autodesk.Revit.DB.Transaction(Document, "mine")) { tx.Start(); tx.Commit(); } return "ran";`},
+		{"TransactionGroup", "Autodesk.Revit.DB.TransactionGroup", `using (var tg = new Autodesk.Revit.DB.TransactionGroup(Document, "mine")) { tg.Start(); tg.Assimilate(); } return "ran";`},
+		{"SubTransaction", "Autodesk.Revit.DB.SubTransaction", `using (var st = new Autodesk.Revit.DB.SubTransaction(Document)) { st.Start(); st.Commit(); } return "ran";`},
+		{"Document.Close", "Autodesk.Revit.DB.Document.Close", `Document.Close(); return "ran";`},
+		{"Document.SaveAs", "Autodesk.Revit.DB.Document.SaveAs", `Document.SaveAs("C:\\Temp\\should-never-happen.rvt"); return "ran";`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			out := runScript(t, c, instanceID, documentID, tc.script)
-			if out.Status == "success" {
-				t.Fatalf("denylisted script was allowed to run; output: %s", out.Output)
+			text := runRejectedScript(t, c, instanceID, documentID, tc.script)
+			// The code an agent keys off, and the member it actually used --
+			// a rejection that named neither would be unactionable (PRD §01).
+			if !strings.Contains(text, "script-api-denied") {
+				t.Errorf("rejection does not name the denylist code; result: %s", text)
 			}
-			if !strings.Contains(out.failureText(), "script-api-denied") {
-				t.Errorf("rejection does not name the denylist code; result: %s", out.failureText())
+			if !strings.Contains(text, tc.member) {
+				t.Errorf("rejection does not name %q, so an agent cannot tell what it did wrong; result: %s", tc.member, text)
 			}
 		})
 	}
