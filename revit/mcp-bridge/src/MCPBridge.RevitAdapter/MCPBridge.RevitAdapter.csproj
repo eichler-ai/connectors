@@ -49,4 +49,30 @@
     </Reference>
   </ItemGroup>
 
+  <!--
+    The adapter interfaces (IDocumentAdapter, IUiApplicationAdapter, IUiDocumentAdapter,
+    IDocumentCreationSource, ITransactionAdapter, ITransactionGroupAdapter, IScriptExecutionCallback,
+    IRaw*Source) and RevitScriptExecutionHandler are internal because they are reachable from agent
+    script scope otherwise ; RoslynScriptRunner.LoadableReferences() references every assembly loaded in
+    the Revit AppDomain, this one included. Round 1 of PR #25's review made only the IMPLEMENTATIONS
+    internal, on the reasoning that "a script can name an interface it can never obtain an instance of" ;
+    round 2 disproved that live: RevitScriptExecutionHandler was a public type that HANDED a real
+    IUiApplicationAdapter to arbitrary caller-supplied code (an IScriptExecutionCallback the script
+    itself implements), so no internal type ever had to be named. See IDocumentAdapter's doc comment.
+    These grants keep MCPBridge.Core (the seam's only real consumer), MCPBridge.AddIn (BridgeHost's
+    wiring) and MCPBridge.Core.Tests working ; a Roslyn script submission assembly is never named here
+    and cannot choose its own name, so it gains nothing.
+  -->
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
+      <_Parameter1>MCPBridge.Core</_Parameter1>
+    </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
+      <_Parameter1>MCPBridge.AddIn</_Parameter1>
+    </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
+      <_Parameter1>MCPBridge.Core.Tests</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
+
 </Project>

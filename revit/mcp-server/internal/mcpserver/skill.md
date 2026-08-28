@@ -92,36 +92,53 @@ return Document.Title;
 | `ExportsDirectory`, `ImportsDirectory` | absolute paths, see "Exchanging files" |
 | `Publish(path, name?)` | copy a file into `exports/` and report it back; `name` renames it |
 | `DialogResultOverrides` | per-dialog answer override, e.g. `DialogResultOverrides["TaskDialog_X"] = 1001` |
+| `CreateProjectDocument(template?)`, `CreateFamilyDocument(template)` | create a **writable** new document — see "Creating documents" |
 | the .NET BCL | `System.IO`, `System.Linq`, etc. — fully usable |
 
 Only `System` is imported by default, so use fully-qualified names (`Autodesk.Revit.DB.Wall`,
 `System.IO.File.ReadAllText`) or you'll get `CS0246`. Use `using` *directives* freely at the top of
 your script if you'd rather: `using Autodesk.Revit.DB;`.
 
-**Creating documents.** `UIApplication.Application` is the real top-level
-`Autodesk.Revit.ApplicationServices.Application`, so `NewProjectDocument(path)` and
-`NewFamilyDocument(path)` work and need no confirmation — nothing persists until you save, and saving is
-gated separately. Ask Revit for the template paths rather than guessing: `DefaultProjectTemplate` is a
-full `.rte` path, and `FamilyTemplatePath` is the **root of the family-template tree**, not a flat
-folder of `.rft` files — the templates sit in language/discipline subdirectories under it, so search it
-recursively (`SearchOption.AllDirectories`).
+**Creating documents — use `CreateProjectDocument` / `CreateFamilyDocument`.** These script globals
+create the document *and* open a transaction the connector manages for it, so you can write to it
+immediately; it commits when your script returns and rolls back if it throws, exactly like the active
+document. No confirmation needed — nothing persists until you save, which is gated separately.
 
 ```csharp
-var app = UIApplication.Application;
-var doc = app.NewProjectDocument(app.DefaultProjectTemplate);   // real, queryable Document
+var doc = CreateProjectDocument();               // blank, writable, from Revit's default template
+Autodesk.Revit.DB.Level.Create(doc, 10.0);       // just write to it — no transaction of your own
 ```
 
-Two limits before you build on this. **A created document is not covered by your script's
-transaction** — that one is opened on the instance's *active* document, so writing to the new one throws
-`ModificationOutsideTransactionException`, and you cannot open your own for it either (see below). Create
-and read, yes; write, not yet. **And it has no `document_id`** — it never appears in `list_instances` and
-you cannot point a later call at it. It does stay open for the session, so a later script finds it by
-walking `UIApplication.Application.Documents` and matching `Title` or `PathName`.
+`CreateProjectDocument()` defaults to the install's default project template; pass a path for another.
+`CreateFamilyDocument(path)` needs a path — there is no default family template.
+
+**The raw `UIApplication.Application.NewProjectDocument`/`NewFamilyDocument` still work and are
+READ-ONLY** — the only difference between the two paths. Nothing opens a transaction for what they
+return, and you may not open one yourself (see below), so writing throws
+`ModificationOutsideTransactionException`. Use them only to inspect.
+
+Ask Revit for template paths rather than guessing: `Application.DefaultProjectTemplate` is a full `.rte`
+path, and `Application.FamilyTemplatePath` is the **root of the family-template tree**, not a flat
+folder of `.rft` files — templates sit in subdirectories, so search recursively
+(`SearchOption.AllDirectories`).
+
+However you made it, a created document **has no `document_id`** — it never appears in `list_instances`
+and you cannot point a later call at it. It stays open for the session, so a later script finds it by
+walking `UIApplication.Application.Documents` and matching `Title` or `PathName` — to **read** only: a
+created document is writable only inside the script that created it.
+
+**With several documents in play**, all of them commit after your script returns — created ones first,
+the active one last. If one commit fails the rest are rolled back, but a commit that already succeeded
+cannot be undone, so an earlier one can keep its changes; you then get a
+`script-partial-commit` notice naming which documents kept theirs and which did not; the ordering means
+the active document is always the one rolled back.
 
 **There is no cleanup path, so create sparingly.** `Document.Close` and `.Dispose` are both
-confirmation-gated (see below), which means a script cannot quietly tidy up after itself: every
-document you create stays open in the live Revit session a person is sitting in front of, until they
-restart Revit. Don't create documents in a loop.
+confirmation-gated (see below), so a script cannot quietly tidy up after itself: every document you
+create stays open in the person's live Revit session until they restart Revit. Worse for a created one:
+**Revit itself** refuses `Close` while its managed transaction is open, even with
+`confirm_lifecycle_actions: true` — for a throwaway you can close, use the raw read-only path. Don't
+create documents in a loop.
 
 ### What you may not do without saying so
 
@@ -133,11 +150,9 @@ have run in is rolled back cleanly.
 Your script is already inside one, and Revit allows only one open transaction per document, so your own
 can never work. There is no flag for this. Just make your changes directly; they commit on success and
 roll back on failure. The error record's `code` is `script-api-denied`. The refusal ignores *which*
-document you were opening the transaction for, so it also blocks the one case Revit would allow — a
-transaction on a document you just created. Known limit, not an oversight (tracked as issue #24); it is
-why a created document is read-only from a script today. The planned fix keeps this rule exactly as it
-is — the connector will open a managed transaction for each document your script creates, so you still
-never construct one yourself.
+document you meant it for, including one you just created. That is not a gap to work around: use
+`CreateProjectDocument`/`CreateFamilyDocument` above and the connector owns that document's transaction
+for you, so there is never a reason to construct one.
 
 **2. Allowed, but only if you confirm — the document-lifecycle and worksharing calls.**
 

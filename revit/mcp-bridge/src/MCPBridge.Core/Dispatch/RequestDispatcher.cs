@@ -73,7 +73,7 @@ public sealed class RequestDispatcher
     // instance sharing a workspace) -- safe to accept once at construction rather than per-call.
     private readonly string _instanceId;
 
-    public RequestDispatcher(
+    internal RequestDispatcher(
         ExecutionManager executionManager,
         ExternalEventBridge<ScriptExecutionOutcome> bridge,
         TransactionScriptExecutor scriptExecutor,

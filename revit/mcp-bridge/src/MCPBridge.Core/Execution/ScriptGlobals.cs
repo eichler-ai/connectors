@@ -23,6 +23,14 @@ namespace MCPBridge.Core.Execution;
 /// queries, geometry) rides the executor's existing ambient transaction and needs no new
 /// transaction-ownership scheme -- confirmed live before this shipped (PRD §14).
 ///
+/// ISSUE #24 adds the one exception to "everything rides the ambient transaction": a document
+/// the script CREATES is a different document, and Revit's one-open-transaction rule is
+/// per-document, so the ambient pair does not cover it. Hence CreateProjectDocument/
+/// CreateFamilyDocument below -- they create the document AND have the executor open a
+/// managed transaction for it, in one step. That keeps the denylist rule above completely
+/// unconditional: the script still never constructs a transaction, because it never needs to.
+/// The raw Application.NewProjectDocument path is untouched and stays read-only.
+///
 /// WHY THIS ONE FILE REFERENCES RevitAPI/RevitAPIUI DIRECTLY, and why that is not a
 /// precedent: MCPBridge.Core is otherwise entirely decoupled from Revit, working only
 /// against the MCPBridge.RevitAdapter interfaces so its decision logic stays unit-testable
@@ -38,6 +46,7 @@ public sealed class ScriptGlobals
     private readonly IDocumentAdapter _documentAdapter;
     private readonly IUiApplicationAdapter _uiApplicationAdapter;
     private readonly IUiDocumentAdapter? _uiDocumentAdapter;
+    private readonly ManagedDocumentTransactions? _documentTransactions;
 
     // Property casing here is a public, external contract (PRD §06): an agent-authored script
     // binds to these identifiers by name in its scope, so it must match the PRD's published
@@ -70,6 +79,51 @@ public sealed class ScriptGlobals
             : Raw<IRawUiDocumentSource>(_uiDocumentAdapter, nameof(UIDocument)).RawUiDocument;
 
     public CancellationToken CancellationToken { get; }
+
+    /// <summary>
+    /// Creates a NEW, blank, WRITABLE project document (issue #24) -- the connector opens and manages a
+    /// Transaction/TransactionGroup for it in the same step, so the script can modify it immediately.
+    ///
+    /// USE THIS RATHER THAN `UIApplication.Application.NewProjectDocument(...)` whenever the script
+    /// intends to write to the document. Both still work and both return a real Document; the raw
+    /// Application member is READ-ONLY from a script, because nothing opens a transaction for what it
+    /// returns and a script may never open one itself (ScriptApiDenylist check 1, unconditional). This
+    /// is the difference between the two paths, and it is the only difference.
+    ///
+    /// <paramref name="templatePath"/> defaults to the Revit install's own DefaultProjectTemplate --
+    /// the PRD §13 fixture-system case, where the point is a blank document needing no template asset.
+    ///
+    /// The document is committed when the script returns normally and rolled back if it throws, exactly
+    /// like the ambient document. It is unsaved and in-memory; it stays in Application.Documents for the
+    /// rest of the session, which is how a later execute_script call addresses it (by Title -- there is
+    /// no document_id for a created document, PRD §14).
+    /// </summary>
+    public Autodesk.Revit.DB.Document CreateProjectDocument(string? templatePath = null) =>
+        Raw<IRawDocumentSource>(
+            RequireDocumentTransactions(nameof(CreateProjectDocument)).CreateAndOpenProjectDocument(templatePath),
+            nameof(CreateProjectDocument)).RawDocument;
+
+    /// <summary>
+    /// Family-document counterpart of <see cref="CreateProjectDocument"/> -- see that method for the
+    /// writable-vs-read-only distinction against the raw Application members. Unlike a project document
+    /// there is no install-wide default family template, so <paramref name="templatePath"/> is required.
+    /// </summary>
+    public Autodesk.Revit.DB.Document CreateFamilyDocument(string templatePath) =>
+        Raw<IRawDocumentSource>(
+            RequireDocumentTransactions(nameof(CreateFamilyDocument)).CreateAndOpenFamilyDocument(templatePath),
+            nameof(CreateFamilyDocument)).RawDocument;
+
+    /// <summary>
+    /// The managed-transaction set for this run, or a signposted failure if none was supplied. Null
+    /// only when ScriptGlobals was constructed outside TransactionScriptExecutor (tests that don't
+    /// exercise document creation) -- never during a real run.
+    /// </summary>
+    private ManagedDocumentTransactions RequireDocumentTransactions(string memberName) =>
+        _documentTransactions
+        ?? throw new NotSupportedException(
+            $"`{memberName}` needs the executor's managed-transaction set, which this ScriptGlobals was " +
+            "constructed without. Only TransactionScriptExecutor supplies one; a script always runs " +
+            "through it, so this cannot happen during a real execute_script run.");
 
     /// <summary>
     /// Resolves an adapter's raw-Revit-object capability, or fails with a message that says exactly
@@ -131,15 +185,25 @@ public sealed class ScriptGlobals
     /// </summary>
     public IDictionary<string, int> DialogResultOverrides { get; } = new Dictionary<string, int>();
 
-    public ScriptGlobals(
+    /// <summary>
+    /// INTERNAL, though the CLASS stays public. Roslyn needs the globals TYPE public so a script can bind
+    /// these members by name in its own scope; it never constructs one -- TransactionScriptExecutor passes
+    /// the instance in. The constructor takes a <see cref="ManagedDocumentTransactions"/>, which is
+    /// internal precisely so an agent script cannot get hold of the executor's transaction set (see that
+    /// class's doc comment for the live-verified bypass this closes), and a public constructor taking an
+    /// internal parameter type would not compile anyway.
+    /// </summary>
+    internal ScriptGlobals(
         IDocumentAdapter document,
         IUiApplicationAdapter uiApplication,
         IUiDocumentAdapter? uiDocument,
         CancellationToken cancellationToken,
         string? exportsDirectoryPath = null,
         string? importsDirectoryPath = null,
-        bool overwriteOutputFiles = false)
+        bool overwriteOutputFiles = false,
+        ManagedDocumentTransactions? documentTransactions = null)
     {
+        _documentTransactions = documentTransactions;
         _documentAdapter = document;
         _uiApplicationAdapter = uiApplication;
         _uiDocumentAdapter = uiDocument;

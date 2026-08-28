@@ -7,7 +7,7 @@ namespace MCPBridge.RevitAdapter;
 /// Core implements this; RevitAdapter is only responsible for calling it on the
 /// UI thread with real adapters wrapping the live UIApplication.
 /// </summary>
-public interface IScriptExecutionCallback
+internal interface IScriptExecutionCallback
 {
     void OnExecute(IUiApplicationAdapter uiApplication);
 }

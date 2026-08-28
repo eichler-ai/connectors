@@ -6,6 +6,7 @@ using System.Threading.Tasks;
 using MCPBridge.Core.Execution;
 using MCPBridge.Core.Tests.Fakes;
 using MCPBridge.RevitAdapter;
+using Microsoft.CodeAnalysis.Scripting;
 using Xunit;
 
 namespace MCPBridge.Core.Tests.Execution;
@@ -136,6 +137,34 @@ public class TransactionScriptExecutorTests
         Assert.False(outcome.Success);
         Assert.Equal(new[] { "Start", "Commit", "RollBack" }, transaction.Calls);
         Assert.Equal(new[] { "Start", "RollBack" }, riggedDocument.LastTransactionGroup!.Calls);
+    }
+
+    [Fact]
+    public async Task PartialCommitNotice_DoesNotClaimSurvivingChanges_WhenNothingCommitted()
+    {
+        // SECOND-ROUND REVIEW FINDING. This notice is also emitted when the FIRST (here: only) document
+        // fails to commit AND its own rollback throws -- an unknown-state document is the case an agent
+        // most needs told about, so it cannot be the case that gets no notice. But CommittedDocuments is
+        // empty there, and the message still read "...failed to commit after 0 other document(s) had
+        // already committed ... so those changes remain" -- claiming surviving changes that do not
+        // exist, in the one notice whose whole purpose is being honest about partial state.
+        var executor = NewExecutor();
+        var document = new FakeDocumentAdapter();
+        var uiApp = new FakeUiApplicationAdapter();
+        var transaction = (FakeTransactionAdapter)document.CreateTransaction("pre-created");
+        transaction.ThrowOnCommit = true;
+        transaction.ThrowOnRollBack = true;
+        var riggedDocument = new RiggedDocumentAdapter(document, transaction);
+
+        var outcome = await executor.ExecuteAsync(riggedDocument, uiApp, null, "1 + 1", CancellationToken.None);
+
+        Assert.False(outcome.Success);
+        var notice = Assert.Single(outcome.Notices, n => n.Code == "script-partial-commit");
+        Assert.DoesNotContain("those changes remain", notice.Message);
+        Assert.DoesNotContain("0 other document(s)", notice.Message);
+        Assert.Contains("no changes were kept", notice.Message);
+        // The unknown-state half of the report is unaffected -- it is why the notice fires at all here.
+        Assert.Contains("state unknown", notice.Message);
     }
 
     [Fact]
@@ -611,6 +640,95 @@ public class TransactionScriptExecutorTests
 
         Assert.True(outcome.Success);
         Assert.Empty(outcome.Files);
+    }
+
+    [Fact]
+    public async Task CreateProjectDocument_IsNotADenylistViolation()
+    {
+        // ISSUE #24's central claim, and the one thing about it that IS tier-1 checkable: the new
+        // creation helper is an ordinary method call on ScriptGlobals, not an
+        // Autodesk.Revit.DB.Transaction construction, so ScriptApiDenylist's check 1 -- which stays
+        // completely unconditional and textually unchanged -- has nothing to bind to and does not fire.
+        // Asserting it rather than assuming it, because the whole approach was chosen on the premise
+        // that the denylist needs no narrowing.
+        //
+        // The run still FAILS in this tier: executing the call needs the real
+        // Autodesk.Revit.DB.Document return type, and RevitAPI.dll is mixed-mode and unloadable outside
+        // Revit (see RevitApiReference). That is fine -- the assertion is about WHICH failure, and the
+        // create-and-write path proper is proven live in revit/test-harness.
+        var executor = NewExecutor();
+        var document = new FakeDocumentAdapter();
+        var uiApp = new FakeUiApplicationAdapter();
+
+        var outcome = await executor.ExecuteAsync(
+            document, uiApp, null, "CreateProjectDocument();", CancellationToken.None);
+
+        Assert.IsNotType<ScriptApiDenylistViolationException>(outcome.Exception);
+        // ALSO not a compile error, or this assertion would pass vacuously (independent PR review
+        // finding): a typo in the script text above would fail to bind, produce a
+        // CompilationErrorException, and satisfy the denylist assertion while proving nothing about the
+        // denylist. Ruling that out is what makes this test say "the call COMPILED and check 1 did not
+        // fire". The precise runtime exception is deliberately not asserted -- it comes from the JIT
+        // failing to load mixed-mode RevitAPI.dll, which is an environment detail, not this claim.
+        Assert.IsNotType<CompilationErrorException>(outcome.Exception);
+    }
+
+    [Fact]
+    public async Task CreateFamilyDocument_IsNotADenylistViolation()
+    {
+        var executor = NewExecutor();
+        var document = new FakeDocumentAdapter();
+        var uiApp = new FakeUiApplicationAdapter();
+
+        var outcome = await executor.ExecuteAsync(
+            document, uiApp, null, "CreateFamilyDocument(@\"C:\\t.rft\");", CancellationToken.None);
+
+        Assert.IsNotType<ScriptApiDenylistViolationException>(outcome.Exception);
+        Assert.IsNotType<CompilationErrorException>(outcome.Exception);
+    }
+
+    [Fact]
+    public async Task EveryDocumentIsRolledBack_WhenTheRunnerItselfThrows()
+    {
+        // The self-review fix that moved RollBackAll() into ExecuteAsync's `finally` had no
+        // executor-level test -- only the two unit properties that ENABLE it (RollBackAll's
+        // idempotence, and CommitAll leaving the set empty). This closes that, and the seam is real
+        // rather than manufactured: RoslynScriptRunner takes an alcFactory, and it is invoked BEFORE
+        // RunAsync's own try block, so a throwing factory makes RunAsync throw instead of returning a
+        // failed outcome -- exactly the shape the `finally` exists for. Without it the ambient
+        // document's Transaction and TransactionGroup are left open in the live Revit session.
+        var executor = new TransactionScriptExecutor(new RoslynScriptRunner(
+            alcFactory: () => throw new InvalidOperationException("simulated load-context failure"),
+            additionalMetadataReferencePaths: RevitApiReference.Paths));
+        var document = new FakeDocumentAdapter();
+        var uiApp = new FakeUiApplicationAdapter();
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            executor.ExecuteAsync(document, uiApp, null, "1 + 1", CancellationToken.None));
+
+        Assert.Equal(new[] { "Start", "RollBack" }, document.LastTransaction!.Calls);
+        Assert.Equal(new[] { "Start", "RollBack" }, document.LastTransactionGroup!.Calls);
+    }
+
+    [Fact]
+    public async Task ConstructingATransaction_IsStillRefused_EvenAgainstACreatedDocument()
+    {
+        // The other half of the same claim: nothing about issue #24 loosened check 1. A script may
+        // still not open its own Transaction, whatever document it names -- including one it created
+        // itself, which is exactly the case the connector now covers on the script's behalf.
+        var executor = NewExecutor();
+        var document = new FakeDocumentAdapter();
+        var uiApp = new FakeUiApplicationAdapter();
+
+        var outcome = await executor.ExecuteAsync(
+            document,
+            uiApp,
+            null,
+            "var d = CreateProjectDocument(); new Autodesk.Revit.DB.Transaction(d, \"x\");",
+            CancellationToken.None);
+
+        Assert.False(outcome.Success);
+        Assert.IsType<ScriptApiDenylistViolationException>(outcome.Exception);
     }
 
     /// <summary>Test-only helper: a document adapter that hands out a pre-built (rigged) transaction instead of a fresh one.</summary>

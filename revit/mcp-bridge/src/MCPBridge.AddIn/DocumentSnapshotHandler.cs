@@ -30,6 +30,16 @@ namespace MCPBridge.AddIn;
 /// for the same live document. See that method's own doc comment for the caching/re-resolve contract:
 /// a `tmp-` id is re-resolved on every call (a document may have been saved since the last one) and, if
 /// that now returns a `doc-` id, the cache updates to it; a `doc-` id is treated as final.
+///
+/// WHY THIS ONE MAY STAY PUBLIC, even though it has the exact SHAPE of the callback-capture bypass
+/// that made RevitScriptExecutionHandler internal (a public IExternalEventHandler with a public
+/// Execute(UIApplication), constructible by a script and accepting a caller-supplied
+/// IUncPathResolver): what it yields is DATA, not capability. Every RegisteredDocument is strings and
+/// bools, and IUncPathResolver only ever sees and returns a path string -- a script holding the
+/// UIApplication global can already read all of it directly. The rule the other handler broke is that
+/// a public type here must not RETURN OR YIELD an adapter/transaction-producing object, directly or
+/// through a caller-supplied callback; passing out plain data is not that. Re-check this paragraph if
+/// anything here ever starts handing a Document, an adapter, or a delegate over one to its caller.
 /// </summary>
 public sealed class DocumentSnapshotHandler : IExternalEventHandler
 {

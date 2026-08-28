@@ -2,8 +2,19 @@ using Autodesk.Revit.DB;
 
 namespace MCPBridge.RevitAdapter;
 
-/// <summary>Real implementation wrapping Autodesk.Revit.DB.Document. Not unit-tested (see RevitTransactionAdapter).</summary>
-public sealed class RevitDocumentAdapter : IDocumentAdapter, IRawDocumentSource
+/// <summary>
+/// Real implementation wrapping Autodesk.Revit.DB.Document. Not unit-tested (see RevitTransactionAdapter).
+///
+/// INTERNAL, DELIBERATELY, AND THIS IS A SECURITY BOUNDARY -- see IDocumentAdapter's own comment for the
+/// live evidence. RoslynScriptRunner.LoadableReferences() references every assembly loaded in the Revit
+/// AppDomain, which includes this one, so while this type was public an agent script could name and
+/// construct it directly and call CreateTransaction/CreateTransactionGroup below -- opening a real,
+/// unmanaged Revit transaction that ScriptApiDenylist never sees, because the `new Transaction(...)`
+/// happens HERE, in our code, not in the script's own syntax tree the denylist walks. Every consumer of
+/// this class lives in this same assembly and reaches it through IDocumentAdapter, so `internal` costs
+/// nothing and closes the hole structurally: a script cannot name a type it cannot see.
+/// </summary>
+internal sealed class RevitDocumentAdapter : IDocumentAdapter, IRawDocumentSource
 {
     private readonly Document _document;
     private readonly IUncPathResolver _uncPathResolver;

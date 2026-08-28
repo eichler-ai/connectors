@@ -2,8 +2,12 @@ using Autodesk.Revit.UI;
 
 namespace MCPBridge.RevitAdapter;
 
-/// <summary>Real implementation wrapping Autodesk.Revit.UI.UIDocument. Not unit-tested (see RevitTransactionAdapter).</summary>
-public sealed class RevitUiDocumentAdapter : IUiDocumentAdapter, IRawUiDocumentSource
+/// <summary>
+/// Real implementation wrapping Autodesk.Revit.UI.UIDocument. Not unit-tested (see RevitTransactionAdapter).
+/// Internal for the same reason as <see cref="RevitDocumentAdapter"/>: it hands out one, so a script able
+/// to construct this could reach that type's transaction factories through it.
+/// </summary>
+internal sealed class RevitUiDocumentAdapter : IUiDocumentAdapter, IRawUiDocumentSource
 {
     private readonly UIDocument _uiDocument;
 

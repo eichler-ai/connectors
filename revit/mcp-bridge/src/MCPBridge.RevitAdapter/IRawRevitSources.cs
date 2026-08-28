@@ -28,21 +28,21 @@ namespace MCPBridge.RevitAdapter;
 /// implement one, never returning null (PRD §01: a null here would surface inside an agent's script as
 /// an unexplained NullReferenceException).
 /// </summary>
-public interface IRawDocumentSource
+internal interface IRawDocumentSource
 {
     /// <summary>The real Autodesk.Revit.DB.Document behind this adapter.</summary>
     Autodesk.Revit.DB.Document RawDocument { get; }
 }
 
 /// <summary>See <see cref="IRawDocumentSource"/> for why this is a separate interface.</summary>
-public interface IRawUiApplicationSource
+internal interface IRawUiApplicationSource
 {
     /// <summary>The real Autodesk.Revit.UI.UIApplication behind this adapter.</summary>
     Autodesk.Revit.UI.UIApplication RawUiApplication { get; }
 }
 
 /// <summary>See <see cref="IRawDocumentSource"/> for why this is a separate interface.</summary>
-public interface IRawUiDocumentSource
+internal interface IRawUiDocumentSource
 {
     /// <summary>The real Autodesk.Revit.UI.UIDocument behind this adapter.</summary>
     Autodesk.Revit.UI.UIDocument RawUiDocument { get; }

@@ -57,8 +57,31 @@ namespace MCPBridge.Core.Execution;
 /// unloaded -- verified end-to-end with a WeakReference GC test in
 /// RoslynScriptRunnerTests (RunAsync_MemoryIsActuallyReclaimed_AfterUnload), not just "was
 /// Unload() called".
+///
+/// INTERNAL, AND THAT IS A SECURITY BOUNDARY, NOT A STYLE CHOICE (third-round review finding,
+/// live-verified before and after). While this type was public, a script could start a NESTED run
+/// and self-grant the confirmation-gated tier, with no reflection and without naming a single
+/// internal type:
+///
+///     var g = (MCPBridge.Core.Execution.ScriptGlobals)((System.Action&lt;string, string&gt;)Publish).Target;
+///     new MCPBridge.Core.Execution.RoslynScriptRunner()
+///         .RunAsync("...", g, CancellationToken, confirmLifecycleActions: true)
+///         .GetAwaiter().GetResult();
+///
+/// Two public surfaces composed into it. ScriptGlobals has to stay public -- Roslyn binds a
+/// script's globals by name against a public type -- and Delegate.Target is public on every
+/// delegate, so a method-group delegate over any ScriptGlobals instance member (Publish here)
+/// hands the script the LIVE globals object. From there, a public RunAsync taking the
+/// confirmation flag as an ordinary parameter let the SCRIPT decide what only the REQUEST is
+/// allowed to decide. Confirmed live against Revit 2027 before the fix: an execute_script call
+/// that never set confirm_lifecycle_actions ran a nested script binding Document.Save and
+/// reported success. Check 1 (transaction construction) was never affected -- the nested compile
+/// still runs the full ScriptApiDenylist.Analyze, which refuses it unconditionally -- so what
+/// this closes is the gated tier specifically. Pinned by
+/// revit/test-harness/denylist_bypass_test.go (TestConfirmationTierCannotBeSelfGranted); the
+/// only production caller is TransactionScriptExecutor, itself internal for the same reason.
 /// </summary>
-public sealed class RoslynScriptRunner
+internal sealed class RoslynScriptRunner
 {
     private const string SubmissionTypeName = "Submission#0";
     private const string FactoryMethodName = "<Factory>";

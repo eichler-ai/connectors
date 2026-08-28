@@ -17,8 +17,32 @@ namespace MCPBridge.Core.Execution;
 /// answered with the default-safe policy -- gets recorded here too (PRD §07 discussion: the agent
 /// needs to see what Revit was asking, even though the add-in already answered on its behalf). Drained
 /// once per script run by TransactionScriptExecutor and folded into that execution's notices[].
+///
+/// INTERNAL, AND THAT IS A SECURITY BOUNDARY, NOT A STYLE CHOICE (third-round review finding,
+/// live-verified before and after). While this was a PUBLIC static class, a script could call these
+/// members by name -- no reflection, no internal type -- and two things followed, both confirmed
+/// live against Revit 2027 in a run that reported status "success":
+///
+///  - `ActiveDialogContext.ClearActive();` mid-script switched auto-suppression OFF (the AddIn's
+///    DialogSuppressionHandler answers a dialog only while IsActive), so the next real modal dialog
+///    would DISPLAY and block the very UI thread the script is running on -- wedging Revit with no
+///    guarantee a human is present to click it. A denial of service in one line.
+///  - `ActiveDialogContext.DrainRecorded();` mid-script emptied the recorded notices before
+///    TransactionScriptExecutor drains them at the end of the run -- observed erasing a real
+///    auto-answered dialog's record -- defeating PRD §01's "never handled invisibly" while the run
+///    still reported success.
+///
+/// The read-only members (IsActive, TryGetOverride) went internal along with the mutators rather
+/// than being kept public: nothing outside these assemblies wants them, and this codebase's rule is
+/// that a public type in MCPBridge.Core/MCPBridge.RevitAdapter is a script-REACHABLE type
+/// (RoslynScriptRunner.LoadableReferences() references every assembly loaded in the Revit AppDomain,
+/// this one included). MCPBridge.AddIn's DialogSuppressionHandler and MCPBridge.Core.Tests keep
+/// their access through the InternalsVisibleTo grants in MCPBridge.Core.csproj; a Roslyn script
+/// submission assembly is never named there and cannot choose its own name. Pinned by
+/// revit/test-harness/denylist_bypass_test.go (TestScriptCannotTamperWithDialogSuppression), with
+/// TestDialogsAreStillAutoSuppressed pinning that the feature itself still works across that seam.
 /// </summary>
-public static class ActiveDialogContext
+internal static class ActiveDialogContext
 {
     private static IDictionary<string, int>? _overrides;
     private static List<DiagnosticRecord> _recorded = new();

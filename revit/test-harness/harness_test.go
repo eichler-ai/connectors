@@ -130,6 +130,17 @@ type executeScriptOut struct {
 	ExecutionID string `json:"execution_id"`
 	Status      string `json:"status"`
 	Output      string `json:"output"`
+	// Notices carries the PRD §01 diagnostic records a run reports alongside
+	// its result — read here because issue #24's partial-commit reporting has
+	// no other observable: the run's status only says "failed", and which
+	// documents kept their changes lives in a notice, not in the status.
+	Notices []struct {
+		Severity string   `json:"severity"`
+		Code     string   `json:"code"`
+		Source   string   `json:"source"`
+		Message  string   `json:"message"`
+		Remedy   []string `json:"remedy"`
+	} `json:"notices"`
 }
 
 // Note there is deliberately no Error field here. A script that fails to
@@ -163,8 +174,14 @@ func runScript(t *testing.T, c *mcpclient.Client, instanceID, documentID, script
 // at all, so the codes skill.md tells an agent to match on existed only inside
 // the prose. A test that greps the message cannot see that.
 type rejectedScript struct {
-	Text  string
-	Error struct {
+	Text string
+	// Output is the failed run's stdout. Present because a script that throws
+	// still reports what it printed before throwing, and that is the only way
+	// to learn something (here, a created document's title) from a run whose
+	// return value is gone -- which in turn keeps the follow-up assertion
+	// scoped to one document instead of scanning every open one.
+	Output string `json:"output"`
+	Error  struct {
 		Code    string   `json:"code"`
 		Message string   `json:"message"`
 		Remedy  []string `json:"remedy"`
@@ -225,7 +242,14 @@ func callExecuteScriptWith(t *testing.T, c *mcpclient.Client, instanceID, docume
 	for k, v := range extra {
 		args[k] = v
 	}
-	raw, err := c.CallTool("execute_script", args, 20*time.Second)
+	// LONGER THAN THE SERVER'S OWN default timeout_ms (30s, mcpserver.defaultTimeoutMs),
+	// deliberately. At 20s the client gave up BEFORE the broker would have answered, so a
+	// script that legitimately ran 20-30s -- creating Revit documents is genuinely slow, and
+	// slower as a session accumulates them -- failed here while the add-in carried on running
+	// it, and every subsequent call in the suite came back "busy". That reads like a hung
+	// script and is really just a client deadline shorter than the server's. Keep this above
+	// defaultTimeoutMs so the connector's own pending/running contract is what decides.
+	raw, err := c.CallTool("execute_script", args, 45*time.Second)
 	if err != nil {
 		t.Fatalf("execute_script: %v", err)
 	}
@@ -756,4 +780,406 @@ return new {
 			}
 		}
 	})
+}
+
+// TestCreatedDocumentIsWritable is issue #24's whole point, live: a script can
+// create a document AND write to it AND have that write actually commit.
+//
+// WHAT CHANGED, and what deliberately did not. Before this, a script could
+// create a document via UIApplication.Application.NewProjectDocument and read
+// it, but any write threw ModificationOutsideTransactionException — the
+// executor's ambient Transaction covers only the ACTIVE document, and
+// ScriptApiDenylist check 1 unconditionally refuses a script opening its own.
+// The fix does NOT narrow that check (a runtime document-identity comparison
+// was assessed and rejected: Revit hands back different wrapper objects for
+// "the same" document depending on the API entry point). Instead the connector
+// opens and owns a Transaction/TransactionGroup for each document a script
+// creates, in the same step that creates it — the new
+// CreateProjectDocument/CreateFamilyDocument script globals.
+//
+// So there are now TWO creation paths and they differ in exactly one way:
+// the raw Application members still work and are still READ-ONLY; the new
+// globals give a writable document. TestApplicationCreatesDocuments'
+// NewDocumentIsOutsideTheAmbientTransaction subtest pins the read-only half and
+// must keep passing alongside this — the raw path was not broken or replaced.
+//
+// SESSION COST, as with TestApplicationCreatesDocuments: every run leaves its
+// documents open in the live session. Same accepted trade, same reason.
+func TestCreatedDocumentIsWritable(t *testing.T) {
+	c, instanceID, documentID := targetDocument(t)
+
+	// Two subtests below COUNT levels at a given elevation across every open
+	// document, and this case deliberately leaves its documents open (nothing
+	// closes them -- see the note above). A hardcoded elevation therefore makes
+	// them pass once and fail on the second run in the same Revit session, with
+	// a count of 2 -- observed live, and it reads exactly like a double-commit
+	// bug rather than a stale fixture. Unique-per-run elevations keep "exactly
+	// one" a real assertion instead of a run-order artifact.
+	base := 1000 + float64(time.Now().UnixNano()/1e6%500000)/100.0
+	elevA := strconv.FormatFloat(base+0.001, 'f', 4, 64)
+	elevB := strconv.FormatFloat(base+0.002, 'f', 4, 64)
+	elevAmbient := strconv.FormatFloat(base+0.003, 'f', 4, 64)
+	elevRolledBack := strconv.FormatFloat(base+0.004, 'f', 4, 64)
+
+	// The headline: create, write, and read the write back, all in one script.
+	// Level.Create is the same write TestCreateLevel makes against the ambient
+	// document, chosen so the only variable here is WHICH document it lands in.
+	t.Run("CreateProjectDocumentThenWriteToIt", func(t *testing.T) {
+		out := runScript(t, c, instanceID, documentID, `
+var doc = CreateProjectDocument();
+var before = new Autodesk.Revit.DB.FilteredElementCollector(doc)
+    .OfClass(typeof(Autodesk.Revit.DB.Level)).GetElementCount();
+var level = Autodesk.Revit.DB.Level.Create(doc, 4242.0);
+var after = new Autodesk.Revit.DB.FilteredElementCollector(doc)
+    .OfClass(typeof(Autodesk.Revit.DB.Level)).GetElementCount();
+return new {
+  docType = doc.GetType().FullName,
+  isTheAmbientDocument = object.ReferenceEquals(doc, Document),
+  created = after == before + 1,
+  levelId = level.Id.Value
+};
+`)
+		if out.Status != "success" {
+			t.Fatalf("expected status=success, got %q (output: %s)", out.Status, out.Output)
+		}
+		for _, want := range []string{
+			"docType = Autodesk.Revit.DB.Document",
+			// Guards against the whole test passing for the wrong reason: if
+			// CreateProjectDocument ever returned the ambient document, every
+			// other assertion here would still hold and nothing would be proven.
+			"isTheAmbientDocument = False",
+			"created = True",
+		} {
+			if !strings.Contains(out.Output, want) {
+				t.Errorf("wanted %q in output: %s", want, out.Output)
+			}
+		}
+	})
+
+	// THE ASSERTION THAT ACTUALLY PROVES THE COMMIT. Writing inside one script
+	// only shows the write was permitted; it says nothing about whether the
+	// connector committed the created document's transaction after the script
+	// returned. A SECOND execute_script call, finding the document again in
+	// Application.Documents and reading the level back, is what distinguishes
+	// "committed" from "written and then silently rolled back".
+	t.Run("WritesToACreatedDocumentSurviveTheScript", func(t *testing.T) {
+		// A distinctive elevation so the follow-up query cannot match a level
+		// from the template or from another subtest's document.
+		created := runScript(t, c, instanceID, documentID, `
+var doc = CreateProjectDocument();
+Autodesk.Revit.DB.Level.Create(doc, 4343.0);
+return doc.Title;
+`)
+		if created.Status != "success" {
+			t.Fatalf("expected status=success, got %q (output: %s)", created.Status, created.Output)
+		}
+		title := strings.TrimSpace(created.Output)
+		if title == "" {
+			t.Fatalf("created document reported no title; output: %s", created.Output)
+		}
+
+		found := runScript(t, c, instanceID, documentID, `
+int matches = 0;
+foreach (Autodesk.Revit.DB.Document d in UIApplication.Application.Documents) {
+  if (d.Title != `+strconv.Quote(title)+`) { continue; }
+  foreach (Autodesk.Revit.DB.Level lv in new Autodesk.Revit.DB.FilteredElementCollector(d)
+      .OfClass(typeof(Autodesk.Revit.DB.Level))) {
+    if (System.Math.Abs(lv.Elevation - 4343.0) < 0.001) { matches++; }
+  }
+}
+return "matches = " + matches + ";";
+`)
+		if found.Status != "success" {
+			t.Fatalf("expected status=success, got %q (output: %s)", found.Status, found.Output)
+		}
+		if !strings.Contains(found.Output, "matches = 1;") {
+			t.Fatalf("the level written to a created document did not survive the script that wrote it -- the connector's managed transaction for that document did not commit; output: %s", found.Output)
+		}
+	})
+
+	// A failing script must roll back EVERY document, not just the ambient one.
+	// Written and then thrown away in one script, then checked from a second:
+	// the created document still exists (nothing closes it) but must carry no
+	// level at this elevation.
+	t.Run("AThrowingScriptRollsBackCreatedDocumentsToo", func(t *testing.T) {
+		// A run that writes to a created document and then throws. Read via
+		// runRejectedScript, not runScript: a script that throws comes back as an MCP
+		// tool error carrying the PRD §01 record, which decodeToolResult fatals on by
+		// design. The title is printed to stdout BEFORE the throw, because the return
+		// value dies with the script and the follow-up check needs to look at exactly
+		// one document.
+		thrown := runRejectedScript(t, c, instanceID, documentID, `
+var doc = CreateProjectDocument();
+Autodesk.Revit.DB.Level.Create(doc, `+elevRolledBack+`);
+System.Console.WriteLine(doc.Title);
+throw new System.InvalidOperationException("deliberate");
+`)
+		if thrown.Error.Code != "script-execution-failed" {
+			t.Fatalf("expected code script-execution-failed, got %q (text: %s)", thrown.Error.Code, thrown.Text)
+		}
+		rolledBackTitle := strings.TrimSpace(thrown.Output)
+		if rolledBackTitle == "" {
+			t.Fatalf("the throwing run reported no stdout, so there is no document to check; record: %s", thrown.Text)
+		}
+
+		// That document still exists (nothing closes it) but must carry no level at
+		// this elevation: its managed transaction was rolled back with everything else.
+		check := runScript(t, c, instanceID, documentID, `
+int matches = 0;
+foreach (Autodesk.Revit.DB.Document d in UIApplication.Application.Documents) {
+  if (d.Title != `+strconv.Quote(rolledBackTitle)+`) { continue; }
+  foreach (Autodesk.Revit.DB.Level lv in new Autodesk.Revit.DB.FilteredElementCollector(d)
+      .OfClass(typeof(Autodesk.Revit.DB.Level))) {
+    if (System.Math.Abs(lv.Elevation - `+elevRolledBack+`) < 0.0001) { matches++; }
+  }
+}
+return "matches = " + matches + ";";
+`)
+		if check.Status != "success" {
+			t.Fatalf("expected status=success, got %q (output: %s)", check.Status, check.Output)
+		}
+		if !strings.Contains(check.Output, "matches = 0;") {
+			t.Fatalf("a throwing script left its write behind in a created document -- rollback does not cover every managed document; output: %s", check.Output)
+		}
+	})
+
+	// The family-document counterpart. FamilyManager.NewType is a real write and
+	// the API Phase D of the corpus plan actually goes through, so this is the
+	// same shape of proof as the project case rather than a weaker one.
+	t.Run("CreateFamilyDocumentThenWriteToIt", func(t *testing.T) {
+		out := runScript(t, c, instanceID, documentID, `
+var app = UIApplication.Application;
+string template = "";
+if (System.IO.Directory.Exists(app.FamilyTemplatePath)) {
+  foreach (var f in System.IO.Directory.EnumerateFiles(app.FamilyTemplatePath, "Generic Model.rft", System.IO.SearchOption.AllDirectories)) {
+    template = f;
+    break;
+  }
+}
+if (template.Length == 0) { return "no-template"; }
+var doc = CreateFamilyDocument(template);
+var before = doc.FamilyManager.Types.Size;
+doc.FamilyManager.NewType("MCPBridgeIssue24Type");
+return new {
+  isFamily = doc.IsFamilyDocument,
+  typeAdded = doc.FamilyManager.Types.Size == before + 1
+};
+`)
+		if out.Status != "success" {
+			t.Fatalf("expected status=success, got %q (output: %s)", out.Status, out.Output)
+		}
+		if strings.Contains(out.Output, "no-template") {
+			t.Skip("no \"Generic Model.rft\" under Application.FamilyTemplatePath on this machine")
+		}
+		for _, want := range []string{"isFamily = True", "typeAdded = True"} {
+			if !strings.Contains(out.Output, want) {
+				t.Errorf("wanted %q in output: %s", want, out.Output)
+			}
+		}
+	})
+
+	// ScriptApiDenylist check 1 is UNCHANGED and stays unconditional -- that is
+	// the property the whole approach was chosen to preserve, so it is asserted
+	// rather than assumed. A script may not open its own Transaction even
+	// against a document it created itself, because it no longer needs to.
+	t.Run("ConstructingATransactionIsStillRefusedAgainstACreatedDocument", func(t *testing.T) {
+		rejected := runRejectedScript(t, c, instanceID, documentID, `
+var doc = CreateProjectDocument();
+using (var tx = new Autodesk.Revit.DB.Transaction(doc, "mine")) { tx.Start(); tx.Commit(); }
+return "opened";
+`)
+		if rejected.Error.Code != "script-api-denied" {
+			t.Fatalf("expected code script-api-denied, got %q (text: %s)", rejected.Error.Code, rejected.Text)
+		}
+	})
+
+	// And the mirror image: calling the new helper is NOT a denylist violation.
+	// Covered at tier 1 too (TransactionScriptExecutorTests), but only live can
+	// show it against the real, fully-bound Revit metadata Revit itself loads.
+	t.Run("CallingTheCreationHelperIsNotADenylistViolation", func(t *testing.T) {
+		out := runScript(t, c, instanceID, documentID, `
+var doc = CreateProjectDocument();
+return "ok:" + (doc != null);
+`)
+		if out.Status != "success" {
+			t.Fatalf("expected status=success, got %q (output: %s)", out.Status, out.Output)
+		}
+		if !strings.Contains(out.Output, "ok:True") {
+			t.Fatalf("unexpected output: %s", out.Output)
+		}
+	})
+
+	// TWO created documents in one script, both written to, both committed.
+	// This is the N-document case proper -- the single-created-document tests
+	// above would all pass against an implementation that only ever tracked one.
+	t.Run("TwoCreatedDocumentsBothCommit", func(t *testing.T) {
+		created := runScript(t, c, instanceID, documentID, `
+var a = CreateProjectDocument();
+var b = CreateProjectDocument();
+Autodesk.Revit.DB.Level.Create(a, `+elevA+`);
+Autodesk.Revit.DB.Level.Create(b, `+elevB+`);
+return a.Title + "|" + b.Title;
+`)
+		if created.Status != "success" {
+			t.Fatalf("expected status=success, got %q (output: %s)", created.Status, created.Output)
+		}
+		titles := strings.Split(strings.TrimSpace(created.Output), "|")
+		if len(titles) != 2 {
+			t.Fatalf("expected two document titles, got %q", created.Output)
+		}
+
+		// Scoped to the two documents by title rather than scanning every open one.
+		// This case deliberately leaves documents open and the wider suite accumulates
+		// dozens of them, so an all-documents scan grows until it blows the harness's
+		// tool deadline (45s, see callExecuteScriptWith) -- which then leaves the
+		// instance busy and fails every later subtest for an unrelated reason.
+		// Observed live at the older, shorter deadline; keep queries scoped.
+		check := runScript(t, c, instanceID, documentID, `
+int a = 0, b = 0;
+foreach (Autodesk.Revit.DB.Document d in UIApplication.Application.Documents) {
+  bool isA = d.Title == `+strconv.Quote(titles[0])+`;
+  bool isB = d.Title == `+strconv.Quote(titles[1])+`;
+  if (!isA && !isB) { continue; }
+  foreach (Autodesk.Revit.DB.Level lv in new Autodesk.Revit.DB.FilteredElementCollector(d)
+      .OfClass(typeof(Autodesk.Revit.DB.Level))) {
+    if (isA && System.Math.Abs(lv.Elevation - `+elevA+`) < 0.0001) { a++; }
+    if (isB && System.Math.Abs(lv.Elevation - `+elevB+`) < 0.0001) { b++; }
+  }
+}
+return "a = " + a + "; b = " + b + ";";
+`)
+		if check.Status != "success" {
+			t.Fatalf("expected status=success, got %q (output: %s)", check.Status, check.Output)
+		}
+		if !strings.Contains(check.Output, "a = 1;") || !strings.Contains(check.Output, "b = 1;") {
+			t.Fatalf("both created documents were supposed to commit their own write; output: %s", check.Output)
+		}
+	})
+
+	// LIVE FINDING, pinned because it is a real consequence of this change and a
+	// surprising one: while the connector holds a managed transaction on a
+	// document, REVIT ITSELF refuses to close it —
+	// "Close is not allowed when there is any open sub-transaction, transaction
+	// or transaction group." So a document made with CreateProjectDocument
+	// cannot be closed from within the same script, even with
+	// confirm_lifecycle_actions. This is exactly the rule the ambient document
+	// has always been under; created documents have simply joined it.
+	//
+	// It also closes off the most obvious way a script could have made one
+	// document's commit fail after another's had already succeeded — the
+	// partial-commit case issue #24 flagged as undetermined. Revit refuses
+	// before that state is reachable.
+	//
+	// If you genuinely want a throwaway document you can close, use the raw
+	// Application.NewProjectDocument path — no transaction is opened for it, so
+	// Close still works there (and it is read-only, which is the trade).
+	t.Run("ACreatedDocumentCannotBeClosedWhileItsTransactionIsOpen", func(t *testing.T) {
+		out := decodeToolResult[executeScriptOut](t, callExecuteScriptWith(t, c, instanceID, documentID, `
+var doc = CreateProjectDocument();
+Autodesk.Revit.DB.Level.Create(doc, 5050.0);
+try { doc.Close(false); return "closed"; }
+catch (Autodesk.Revit.Exceptions.InvalidOperationException ex) { return "refused: " + ex.Message; }
+`, map[string]any{"confirm_lifecycle_actions": true}))
+		if out.Status != "success" {
+			t.Fatalf("expected status=success, got %q (output: %s)", out.Status, out.Output)
+		}
+		if !strings.Contains(out.Output, "refused:") {
+			t.Fatalf("closing a created document was not refused; if Revit now allows this, the partial-commit reasoning in ManagedDocumentTransactions needs revisiting; output: %s", out.Output)
+		}
+	})
+
+	// The per-document Failures API is really wired for created documents, not
+	// only for the ambient one: a warning raised inside a document the script
+	// created is auto-dismissed and reported in notices[] (PRD §07). This is the
+	// only route by which one document's commit can fail while another's
+	// succeeds — an ERROR-level posting forces that document's rollback — so it
+	// matters that the plumbing demonstrably reaches created documents at all.
+	t.Run("FailuresInACreatedDocumentAreReportedAsNotices", func(t *testing.T) {
+		out := runScript(t, c, instanceID, documentID, `
+var doc = CreateProjectDocument();
+var lvl = Autodesk.Revit.DB.Level.Create(doc, 0.0);
+doc.Create.NewRoom(lvl, new Autodesk.Revit.DB.UV(5, 5));
+return "room-created";
+`)
+		if out.Status != "success" {
+			t.Fatalf("expected status=success, got %q (output: %s)", out.Status, out.Output)
+		}
+		var found bool
+		for _, n := range out.Notices {
+			if n.Code == "transaction-failure-warning" {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("a Revit warning raised inside a CREATED document did not reach notices[] -- the per-document Failures API is not wired; notices: %+v", out.Notices)
+		}
+	})
+
+	// The ambient document is still committed normally when a script also
+	// creates documents -- the generalization must not have cost the original
+	// single-document behaviour. Written last in commit order by design (see
+	// ManagedDocumentTransactions), which is exactly why it needs its own check.
+	t.Run("TheAmbientDocumentStillCommitsAlongsideCreatedOnes", func(t *testing.T) {
+		out := runScript(t, c, instanceID, documentID, `
+var created = CreateProjectDocument();
+Autodesk.Revit.DB.Level.Create(created, `+elevA+`);
+Autodesk.Revit.DB.Level.Create(Document, `+elevAmbient+`);
+return "done";
+`)
+		if out.Status != "success" {
+			t.Fatalf("expected status=success, got %q (output: %s)", out.Status, out.Output)
+		}
+
+		check := runScript(t, c, instanceID, documentID, `
+int ambient = 0;
+foreach (Autodesk.Revit.DB.Level lv in new Autodesk.Revit.DB.FilteredElementCollector(Document)
+    .OfClass(typeof(Autodesk.Revit.DB.Level))) {
+  if (System.Math.Abs(lv.Elevation - `+elevAmbient+`) < 0.0001) { ambient++; }
+}
+return "ambient = " + ambient + ";";
+`)
+		if check.Status != "success" {
+			t.Fatalf("expected status=success, got %q (output: %s)", check.Status, check.Output)
+		}
+		if !strings.Contains(check.Output, "ambient = 1;") {
+			t.Fatalf("the ambient document's own write did not commit when the script also created a document; output: %s", check.Output)
+		}
+	})
+}
+
+// TestDialogsAreStillAutoSuppressed is the positive counterpart to
+// TestScriptCannotTamperWithDialogSuppression: making ActiveDialogContext
+// internal must not break the feature it exists for. Only the AddIn's
+// DialogSuppressionHandler and the executor call it now, both across
+// InternalsVisibleTo, and this is what proves that seam still carries.
+//
+// TaskDialog.Show is a genuinely modal Revit dialog raised on the same UI thread
+// the script runs on: with suppression working, the handler answers it (default
+// safe result) and the script returns; with it broken, this call would block
+// Revit's UI thread until a human clicked the dialog, and the harness would time
+// out instead of failing an assertion. So the fact that this case terminates at
+// all is half the assertion, and the auto-answered notice is the other half --
+// PRD §01's "never handled invisibly" means the run must also SAY it answered.
+//
+// Tier 2 by construction: DialogBoxShowing only ever fires inside a live Revit
+// process, and nothing about this path is observable from a unit test.
+func TestDialogsAreStillAutoSuppressed(t *testing.T) {
+	c, instanceID, documentID := targetDocument(t)
+
+	out := runScript(t, c, instanceID, documentID, `
+Autodesk.Revit.UI.TaskDialog.Show("MCPBridge harness", "auto-suppression probe");
+return "returned from a modal dialog";`)
+	if out.Status != "success" {
+		t.Fatalf("a script raising a modal dialog did not complete: status=%q output=%s", out.Status, out.Output)
+	}
+
+	var found bool
+	for _, n := range out.Notices {
+		if n.Code == "dialog-auto-answered" && strings.Contains(n.Message, "auto-suppression probe") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("the dialog was answered but not REPORTED -- the PRD §01 record of what Revit asked is missing from notices[]: %+v", out.Notices)
+	}
 }

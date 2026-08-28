@@ -2,8 +2,11 @@ using Autodesk.Revit.DB;
 
 namespace MCPBridge.RevitAdapter;
 
-/// <summary>Real implementation wrapping Autodesk.Revit.DB.TransactionGroup. Not unit-tested (see RevitTransactionAdapter).</summary>
-public sealed class RevitTransactionGroupAdapter : ITransactionGroupAdapter
+/// <summary>
+/// Real implementation wrapping Autodesk.Revit.DB.TransactionGroup. Not unit-tested, and internal, both
+/// for the reasons on <see cref="RevitTransactionAdapter"/>.
+/// </summary>
+internal sealed class RevitTransactionGroupAdapter : ITransactionGroupAdapter
 {
     private readonly TransactionGroup _group;
 

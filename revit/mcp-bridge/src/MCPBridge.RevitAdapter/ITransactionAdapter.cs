@@ -12,7 +12,7 @@ namespace MCPBridge.RevitAdapter;
 /// inside it (review finding: an observer invoked synchronously from inside the Failures API's own
 /// dispatch could throw and leave the commit in an undefined state).
 /// </summary>
-public interface ITransactionAdapter
+internal interface ITransactionAdapter
 {
     void Start();
     TransactionCommitResult Commit();

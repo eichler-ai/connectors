@@ -8,12 +8,41 @@ namespace MCPBridge.RevitAdapter;
 /// way to reach the real Autodesk.Revit.DB.Document a script now binds to as its `Document` global. It
 /// replaces the unsupported reflection-into-a-private-field workaround `skill.md` used to document.
 /// CreateTransaction/CreateTransactionGroup remain executor-only concerns -- they are OUR adapter methods,
-/// not real Revit API, and were never reachable from a script anyway; what actually keeps real Document
-/// exposure safe is ScriptApiDenylist (MCPBridge.Core), which rejects at compile time any script that
-/// opens its own Autodesk.Revit.DB.Transaction/TransactionGroup/SubTransaction against the same document
-/// the executor has already opened one on.
+/// not real Revit API. What keeps real Document exposure safe is ScriptApiDenylist (MCPBridge.Core), which
+/// rejects at compile time any script that opens its own Autodesk.Revit.DB.Transaction/TransactionGroup/
+/// SubTransaction against the same document the executor has already opened one on.
+///
+/// THIS COMMENT USED TO CLAIM THESE METHODS "were never reachable from a script anyway", AND THAT WAS
+/// FALSE -- recorded here because the claim is the kind that gets believed on re-reading. Live-verified
+/// against real Revit 2027: RoslynScriptRunner.LoadableReferences() references every assembly loaded in
+/// the Revit AppDomain, MCPBridge.RevitAdapter included, so while RevitDocumentAdapter was public a script
+/// could write `new MCPBridge.RevitAdapter.RevitDocumentAdapter(raw).CreateTransaction("mine")` on a
+/// document it had just created, start it, write an element and COMMIT -- a real, unmanaged transaction
+/// the denylist never saw, because the `new Transaction(...)` happens on the line below, in our code,
+/// while the denylist's AST walk only ever examines the script's OWN compilation. The same shape against
+/// the ambient document was stopped only by Revit's own one-transaction-per-document rule, not by
+/// anything the connector did deliberately.
+///
+/// The gap is closed structurally rather than by another denylist entry: every implementation of this
+/// interface, and every type that can hand one out, is now `internal` to its assembly, so a script cannot
+/// name them at all. See RevitDocumentAdapter and MCPBridge.Core.Execution.ManagedDocumentTransactions.
+///
+/// AND THIS INTERFACE IS INTERNAL TOO, WHICH THE FIRST ROUND OF THAT FIX GOT WRONG. It used to say the
+/// interface "stays public because it crosses the Core/RevitAdapter seam -- which is harmless, since a
+/// script can name a type it can never obtain an instance of." A second review round disproved that
+/// live: RevitScriptExecutionHandler was a public type whose public Execute(UIApplication) hands a real
+/// RevitUiApplicationAdapter -- typed as the then-public IUiApplicationAdapter -- to a callback the
+/// CALLER supplies, and a Roslyn script submission can declare its own type implementing that callback.
+/// So a script captured a live adapter, cast it to IDocumentCreationSource, created a document and
+/// opened a real unmanaged Transaction on it, reported status "success", and never named one internal
+/// type. Confirmed live against Revit 2027 before this fix, exactly as the round-1 bypass was.
+///
+/// The rule, restated so it is actually true: a public type in MCPBridge.Core/MCPBridge.RevitAdapter
+/// must neither BE an adapter/adapter-producing type NOR RETURN OR YIELD one -- directly, or through a
+/// caller-supplied callback or delegate. Being un-constructible is not enough; being unnameable is.
+/// InternalsVisibleTo (see MCPBridge.RevitAdapter.csproj) keeps the Core/AddIn/tests seam working.
 /// </summary>
-public interface IDocumentAdapter
+internal interface IDocumentAdapter
 {
     /// <summary>Human-readable title, for diagnostics only -- not a stable identity.</summary>
     string Title { get; }
