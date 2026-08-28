@@ -23,7 +23,19 @@ import (
 	"github.com/eichler-ai/connectors/revit/test-harness/mcpclient"
 )
 
-var brokerExe = flag.String("broker-exe", os.Getenv("MCP_SERVER_EXE"), "path to the built mcp-server binary under test")
+var (
+	brokerExe        = flag.String("broker-exe", os.Getenv("MCP_SERVER_EXE"), "path to the built mcp-server binary under test")
+	brokerMode       = flag.String("broker-mode", envOr("MCP_SERVER_MODE", "local"), "topology to launch the broker in -- local or remote (PRD §05). MUST match whatever topology the real Revit instance is actually configured for: a mismatch doesn't error, it makes this process its own independent broker with zero connected instances, and every case below silently SKIPs rather than failing (the exact trap this flag exists to make loud instead of quiet)")
+	brokerBind       = flag.String("broker-bind", envOr("MCP_SERVER_BIND", ""), "remote mode only: non-loopback bind address (PRD §05) -- required when -broker-mode=remote")
+	brokerAppDataDir = flag.String("broker-app-data-dir", envOr("MCP_SERVER_APPDATA", ""), "remote mode: required, the shared-drive broker.json directory matching the real broker's own -app-data-dir. local mode: optional override")
+)
+
+func envOr(key, fallback string) string {
+	if v, ok := os.LookupEnv(key); ok {
+		return v
+	}
+	return fallback
+}
 
 // startClient is the shared setup every case in this suite uses: launch the
 // broker (as a secondary instance if one's already running and connected to
@@ -35,7 +47,22 @@ func startClient(t *testing.T) (*mcpclient.Client, listInstancesOut) {
 		t.Skip("no -broker-exe / MCP_SERVER_EXE set; nothing to test against")
 	}
 
-	c, err := mcpclient.Start(*brokerExe, "-mode", "local")
+	args := []string{"-mode", *brokerMode}
+	switch *brokerMode {
+	case "remote":
+		if *brokerBind == "" || *brokerAppDataDir == "" {
+			t.Fatalf("-broker-mode=remote requires -broker-bind and -broker-app-data-dir (or MCP_SERVER_BIND/MCP_SERVER_APPDATA) -- without them this would either fail to start or silently target the wrong broker.json location")
+		}
+		args = append(args, "-bind", *brokerBind, "-app-data-dir", *brokerAppDataDir)
+	case "local":
+		if *brokerAppDataDir != "" {
+			args = append(args, "-app-data-dir", *brokerAppDataDir)
+		}
+	default:
+		t.Fatalf("-broker-mode %q must be \"local\" or \"remote\"", *brokerMode)
+	}
+
+	c, err := mcpclient.Start(*brokerExe, args...)
 	if err != nil {
 		t.Fatalf("start broker: %v", err)
 	}
@@ -62,9 +89,18 @@ type listInstancesOut struct {
 	} `json:"instances"`
 }
 
-// toolResult mirrors the MCP tools/call envelope: text content plus, when
-// the tool registers one, structuredContent carrying the typed payload.
+// toolResult mirrors the MCP tools/call envelope: text content (always
+// present, and the only place the actual PRD §01 diagnostic record shows up
+// on failure) plus, on success, structuredContent carrying the typed
+// payload. structuredContent is absent on error, so IsError must be checked
+// BEFORE attempting to decode it -- a harness whose whole purpose is
+// surfacing real failures must not itself reduce one to an opaque
+// "unexpected end of JSON input".
 type toolResult struct {
+	Content []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	} `json:"content"`
 	StructuredContent json.RawMessage `json:"structuredContent"`
 	IsError           bool            `json:"isError"`
 }
@@ -74,6 +110,13 @@ func decodeToolResult[T any](t *testing.T, raw json.RawMessage) T {
 	var tr toolResult
 	if err := json.Unmarshal(raw, &tr); err != nil {
 		t.Fatalf("decode tool envelope: %v\nraw: %s", err, raw)
+	}
+	if tr.IsError {
+		text := "(no content)"
+		if len(tr.Content) > 0 {
+			text = tr.Content[0].Text
+		}
+		t.Fatalf("tool call returned an error: %s", text)
 	}
 	var out T
 	if err := json.Unmarshal(tr.StructuredContent, &out); err != nil {
