@@ -99,44 +99,39 @@ Only `System` is imported by default, so use fully-qualified names (`Autodesk.Re
 `System.IO.File.ReadAllText`) or you'll get `CS0246`. Use `using` *directives* freely at the top of
 your script if you'd rather: `using Autodesk.Revit.DB;`.
 
-**Creating documents — use `CreateProjectDocument` / `CreateFamilyDocument`.** These are script
-globals, not Revit API, and they are what you want in almost every case: they create the document *and*
-open a transaction the connector manages for it, so you can write to it immediately. It commits when
-your script returns and rolls back if your script throws, exactly like the active document. No
-confirmation needed — nothing persists until you save, and saving is gated separately.
+**Creating documents — use `CreateProjectDocument` / `CreateFamilyDocument`.** These script globals
+create the document *and* open a transaction the connector manages for it, so you can write to it
+immediately; it commits when your script returns and rolls back if your script throws, exactly like the
+active document. No confirmation needed — nothing persists until you save, and saving is gated
+separately.
 
 ```csharp
-var doc = CreateProjectDocument();                    // blank, writable, from Revit's default template
-Autodesk.Revit.DB.Level.Create(doc, 10.0);            // just write to it — no transaction of your own
+var doc = CreateProjectDocument();               // blank, writable, from Revit's default template
+Autodesk.Revit.DB.Level.Create(doc, 10.0);       // just write to it — no transaction of your own
 ```
 
-`CreateProjectDocument()` defaults to the install's own default project template; pass a path to use a
-different one. `CreateFamilyDocument(path)` needs a path — there is no install-wide default family
-template.
+`CreateProjectDocument()` defaults to the install's default project template; pass a path for another.
+`CreateFamilyDocument(path)` needs a path — there is no default family template.
 
-**The raw `UIApplication.Application.NewProjectDocument`/`NewFamilyDocument` still work, and are
-READ-ONLY from a script.** That is the only difference between the two paths. Nothing opens a
-transaction for what the raw members return, and you may not open one yourself (see below), so writing
-to such a document throws `ModificationOutsideTransactionException`. Reach for them only when you
-genuinely just want to inspect a document.
+**The raw `UIApplication.Application.NewProjectDocument`/`NewFamilyDocument` still work and are
+READ-ONLY** — that is the only difference between the two paths. Nothing opens a transaction for what
+they return, and you may not open one yourself (see below), so writing throws
+`ModificationOutsideTransactionException`. Use them only to inspect.
 
 Ask Revit for template paths rather than guessing: `Application.DefaultProjectTemplate` is a full `.rte`
 path, and `Application.FamilyTemplatePath` is the **root of the family-template tree**, not a flat
-folder of `.rft` files — the templates sit in language/discipline subdirectories under it, so search it
-recursively (`SearchOption.AllDirectories`).
+folder of `.rft` files — templates sit in language/discipline subdirectories, so search it recursively
+(`SearchOption.AllDirectories`).
 
-One limit applies to a created document however you made it: **it has no `document_id`** — it never
-appears in `list_instances` and you cannot point a later call at it. It does stay open for the session,
-so a later script finds it by walking `UIApplication.Application.Documents` and matching `Title` or
-`PathName`.
+However you made it, a created document **has no `document_id`** — it never appears in `list_instances`
+and you cannot point a later call at it. It stays open for the session, so a later script finds it by
+walking `UIApplication.Application.Documents` and matching `Title` or `PathName`.
 
-**If several documents are in play, they commit together or not at all — with one caveat worth
-knowing.** Every document your script created plus the active one are committed after your script
-returns, created ones first and the active one last. If one commit fails, everything not yet committed
-is rolled back — but a commit that already succeeded cannot be undone, so an earlier created document
-can keep its changes. When that happens you get a `script-partial-commit` notice naming exactly which
-documents kept their changes and which did not; nothing is hidden. The ordering means the active
-document — the real model a person has open — is the one that always gets rolled back in that case.
+**With several documents in play**, all of them commit after your script returns — created ones first,
+the active one last. If one commit fails the rest are rolled back, but a commit that already succeeded
+cannot be undone, so an earlier created document can keep its changes; you then get a
+`script-partial-commit` notice naming which documents kept theirs and which did not. The ordering means
+the active document is always the one rolled back in that case.
 
 **There is no cleanup path, so create sparingly.** `Document.Close` and `.Dispose` are both
 confirmation-gated (see below), which means a script cannot quietly tidy up after itself: every
