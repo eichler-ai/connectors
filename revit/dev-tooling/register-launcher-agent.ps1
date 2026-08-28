@@ -5,8 +5,22 @@ $action = New-ScheduledTaskAction -Execute 'powershell.exe' `
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User 'nicholas'
 $principal = New-ScheduledTaskPrincipal -UserId 'nicholas' -LogonType Interactive -RunLevel Limited
 
-Register-ScheduledTask -TaskName 'MCPBridgeDevLauncherAgent' -Action $action -Trigger $trigger -Principal $principal -Force
+# Review finding (issue #26 PR, independent review): default TaskSettingsSet is wrong for a script
+# meant to run in `while ($true)` indefinitely. ExecutionTimeLimit defaults to PT72H -- after 3 days
+# of VM uptime, Task Scheduler kills the agent outright, and every signal drop after that is
+# silently ignored until the next logon, which is indistinguishable from "the signal didn't work"
+# (the exact diagnostic hole the agent's own logging exists to close). DisallowStartIfOnBatteries /
+# StopIfGoingOnBatteries default to $true -- already a documented gotcha for THIS task specifically
+# (Parallels passes the Mac's battery state through to the guest), so setting it here at registration
+# time closes the gap at its source instead of relying on a later manual Set-ScheduledTask fix-up.
+# RestartCount/RestartInterval give the loop a shot at recovering on its own if it ever does exit
+# unexpectedly, rather than staying down until someone notices and restarts it by hand.
+$settings = New-ScheduledTaskSettingsSet `
+    -ExecutionTimeLimit ([TimeSpan]::Zero) `
+    -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+    -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
+
+Register-ScheduledTask -TaskName 'MCPBridgeDevLauncherAgent' -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force
 
 $verify = (Get-ScheduledTask -TaskName 'MCPBridgeDevLauncherAgent').Actions[0]
 Write-Output "Registered. Execute=$($verify.Execute) Arguments=$($verify.Arguments)"
-

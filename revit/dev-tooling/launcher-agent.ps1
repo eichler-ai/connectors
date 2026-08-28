@@ -102,24 +102,42 @@ function Start-BrokerAsPrimary([string]$BrokerExe) {
     $maxAttempts = 3
     for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
         try {
-            Get-Process -Name ([System.IO.Path]::GetFileNameWithoutExtension($BrokerExe)) -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-            $before = if (Test-Path $brokerJsonPath) { (Get-Item $brokerJsonPath).LastWriteTimeUtc } else { $null }
+            Get-Process -Name ([System.IO.Path]::GetFileNameWithoutExtension($BrokerExe)) -ErrorAction SilentlyContinue | ForEach-Object {
+                Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+                # Review finding: starting the new process immediately after this, redirected to the
+                # SAME fixed log paths the just-killed one had open, can throw IOException if the
+                # kernel hasn't finished tearing down its file handles yet. Give it a moment.
+                Wait-Process -Id $_.Id -Timeout 5 -ErrorAction SilentlyContinue
+            }
             $p = Start-Process $BrokerExe -ArgumentList '-mode', 'local' -WindowStyle Hidden -PassThru `
                 -RedirectStandardOutput 'C:\dev\broker-launch-out.log' -RedirectStandardError 'C:\dev\broker-launch-err.log'
 
+            # Review finding: only a process that WINS AcquireLock ever writes broker.json -- a
+            # secondary writes nothing at all. The original version of this loop only trusted
+            # broker.json once its mtime moved past a "before" snapshot, which means it could never
+            # detect the exact case this guard exists for: a stray secondary that was ALREADY
+            # primary, with a broker.json that was never going to be rewritten by anyone, ours
+            # included (since ours just lost the race and became a secondary too). So: read whatever
+            # broker.json currently says on every poll, regardless of whether it just changed, and
+            # only act on it once the pid it names is confirmed to belong to a still-LIVE process --
+            # otherwise it's stale content from a primary that has since exited (including a PREVIOUS
+            # attempt's own victim in this same loop), and waiting a bit longer for OUR write is the
+            # right call, not reacting to a ghost pid.
             $info = $null
             $deadline = (Get-Date).AddSeconds(10)
             while ((Get-Date) -lt $deadline) {
                 Start-Sleep -Milliseconds 300
                 if (-not (Test-Path $brokerJsonPath)) { continue }
-                $mtime = (Get-Item $brokerJsonPath).LastWriteTimeUtc
-                if ($before -and $mtime -le $before) { continue } # still the PREVIOUS primary's file
-                try { $info = Get-Content $brokerJsonPath -Raw -ErrorAction Stop | ConvertFrom-Json } catch { $info = $null }
-                if ($info) { break }
+                $candidate = $null
+                try { $candidate = Get-Content $brokerJsonPath -Raw -ErrorAction Stop | ConvertFrom-Json } catch { continue }
+                if (-not $candidate) { continue }
+                if ($candidate.pid -eq $p.Id) { $info = $candidate; break }
+                if (Get-Process -Id $candidate.pid -ErrorAction SilentlyContinue) { $info = $candidate; break }
             }
 
             if (-not $info) {
-                Write-AgentLog "startbroker attempt $attempt`: started pid=$($p.Id) but broker.json never updated within 10s; retrying"
+                Write-AgentLog "startbroker attempt $attempt`: no live primary (ours or otherwise) confirmed via broker.json within 10s; retrying"
+                try { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue } catch { }
                 continue
             }
             if ($info.pid -eq $p.Id) {
@@ -129,8 +147,16 @@ function Start-BrokerAsPrimary([string]$BrokerExe) {
 
             # Someone else won the lock this process just lost -- almost always a stray
             # harness-spawned secondary that never got cleaned up (see the function comment).
-            Write-AgentLog "startbroker attempt $attempt`: LOCK RACE -- started pid=$($p.Id) but broker.json names pid=$($info.pid) as primary instead; killing both and retrying"
-            try { Stop-Process -Id $info.pid -Force -ErrorAction SilentlyContinue } catch { }
+            # Review finding: only kill the pid broker.json names if it's still alive AND looks like
+            # a broker -- a bare Stop-Process on an unverified pid risks hitting an unrelated process
+            # that happens to have reused it (e.g. a RevitWorker spawned by a concurrent *.launch).
+            $victim = Get-Process -Id $info.pid -ErrorAction SilentlyContinue
+            if ($victim -and $victim.ProcessName -like 'mcp-server*') {
+                Write-AgentLog "startbroker attempt $attempt`: LOCK RACE -- started pid=$($p.Id) but broker.json names pid=$($info.pid) ($($victim.ProcessName)) as primary instead; killing both and retrying"
+                Stop-Process -Id $victim.Id -Force -ErrorAction SilentlyContinue
+            } else {
+                Write-AgentLog "startbroker attempt $attempt`: broker.json names pid=$($info.pid) as primary but that process is gone or doesn't look like a broker (found: '$($victim.ProcessName)'); not killing it, just retrying our own start"
+            }
             try { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue } catch { }
         } catch {
             Write-AgentLog "startbroker attempt $attempt FAILED: $($_.Exception.ToString())"
@@ -141,99 +167,21 @@ function Start-BrokerAsPrimary([string]$BrokerExe) {
 }
 
 while ($true) {
-    Get-ChildItem $signalDir -Filter "*.launch" -ErrorAction SilentlyContinue | ForEach-Object {
-        # SETTLE GUARD -- do not remove without reading this.
-        #
-        # A signal dropped as "create the file, then write its content" (two steps, e.g. a
-        # `New-Item` followed by a `Set-Content`, or any non-atomic write from outside this
-        # session) can be observed by this loop in between those steps, i.e. EMPTY. The old code
-        # consumed such a file immediately, got zero lines, and fell through to the no-document
-        # branch below -- silently launching Revit with NO document argument. That failure is
-        # invisible from the caller's side: Revit really does start, the add-in really does load
-        # and connect, and `register` really does report `documents: []` -- which reads exactly
-        # like a document-tracking bug in the add-in or broker rather than a signal that lost its
-        # payload before it was ever read. This cost a full live-validation session to root-cause
-        # (the giveaway was Revit's own journal recording no document on its command line).
-        #
-        # Two defenses, deliberately both:
-        #   1. Callers SHOULD drop signals atomically -- write the content under a name this
-        #      filter does not match (e.g. `x.tmp`), then `Rename-Item` it to `x.launch`. Rename
-        #      within a directory is atomic, so the file can never be seen half-written.
-        #   2. This guard, for callers that don't: ignore a signal until it has stopped changing,
-        #      so a two-step drop is read only after its second step has landed.
-        #
-        # The wait is TWO-TIER, and the empty tier is the whole point. An empty *.launch is genuinely
-        # ambiguous -- it means both "launch with no document" (a legitimate, documented use) and
-        # "the payload hasn't been written yet". A flat 1s wait was measured failing exactly this
-        # way: a create-then-write drop with a 3s gap was consumed at the 1s mark with zero lines and
-        # launched Revit with no document -- the original bug, reproduced by its own fix. A file with
-        # content is trustworthy quickly; an EMPTY one has to sit still much longer before we believe
-        # emptiness was intentional rather than a payload still in flight.
-        $ageMs = ((Get-Date) - $_.LastWriteTime).TotalMilliseconds
-        $settleMs = if ($_.Length -eq 0) { 15000 } else { 1000 }
-        if ($ageMs -lt $settleMs) { return }
-
-        $lines = @(Get-Content $_.FullName -ErrorAction SilentlyContinue)
-        Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue
-        $exePath = $revitExe
-        $docPath = $null
-        $pristineSource = $null
-        if ($lines.Count -ge 3) {
-            # Issue #26, "pristine-fixture-copy-per-launch": line 2 is an untouched source, line 3
-            # is the working copy actually opened -- copied fresh every launch so a *.close taint
-            # (or any other accumulated state) from a PRIOR run against the same working path can
-            # never carry forward, regardless of how that prior run ended.
-            if (-not [string]::IsNullOrWhiteSpace($lines[0])) { $exePath = $lines[0] }
-            $pristineSource = $lines[1]
-            $docPath = $lines[2]
-        } elseif ($lines.Count -eq 2) {
-            if (-not [string]::IsNullOrWhiteSpace($lines[0])) { $exePath = $lines[0] }
-            $docPath = $lines[1]
-        } elseif ($lines.Count -eq 1) {
-            $docPath = $lines[0]
-        }
-        Write-AgentLog "launch signal '$($_.Name)': $($lines.Count) line(s); exe='$exePath'; doc='$docPath'; pristineSource='$pristineSource'"
-        if ($lines.Count -eq 0) {
-            # Distinguish a deliberate no-document launch (an intentionally empty signal) from the
-            # lost-payload case above, which otherwise look identical in this log.
-            Write-AgentLog "  NOTE: signal was still empty after a 15s settle wait; launching with NO document. If a document WAS intended, the drop was not atomic and its payload never landed (see the settle guard above)."
-        }
-
-        if ($pristineSource) {
-            try {
-                if (-not (Test-Path $pristineSource)) {
-                    Write-AgentLog "  WARNING: pristine source does not exist: '$pristineSource' -- opening '$docPath' as-is, whatever state it's already in"
-                } else {
-                    Copy-Item $pristineSource $docPath -Force
-                    Write-AgentLog "  copied pristine '$pristineSource' -> working copy '$docPath'"
-                }
-            } catch {
-                Write-AgentLog "  PRISTINE COPY FAILED: $($_.Exception.ToString()) -- opening '$docPath' as-is"
-            }
-        }
-
-        try {
-            if ([string]::IsNullOrWhiteSpace($docPath)) {
-                $p = Start-Process $exePath -PassThru
-            } else {
-                if (-not (Test-Path $docPath)) { Write-AgentLog "  WARNING: document path does not exist: '$docPath'" }
-                $p = Start-Process $exePath -ArgumentList "`"$docPath`"" -PassThru
-                # Issue #26, "forced reconnect": only meaningful when a document was actually
-                # opened -- a no-document launch has nothing for the add-in's snapshot race to get
-                # wrong. Overwrites any earlier pending reconnect rather than queuing one per
-                # launch; a second launch this close together supersedes the first's reconnect
-                # need anyway (its own document is the one that'll actually be open by then).
-                $script:pendingReconnectAt = (Get-Date).AddSeconds($reconnectDelaySec)
-                Write-AgentLog "  scheduled forced broker reconnect at $($script:pendingReconnectAt.ToString('o'))"
-            }
-            Write-AgentLog "  started pid=$($p.Id)"
-        } catch {
-            Write-AgentLog "  START-PROCESS FAILED: $($_.Exception.ToString())"
-        }
-    }
-
+    # *.close is handled FIRST, before *.launch, in every iteration -- deliberately, not
+    # alphabetically. Review finding: with launch handled first, a launch dropped just before a
+    # close (e.g. the caller changes their mind moments after starting one) could both land in the
+    # SAME iteration once the launch's settle guard has elapsed -- Revit starts, then is immediately
+    # killed by the close in the same tick, re-tainting the very working copy the launch may have
+    # just refreshed, while a reconnect the launch scheduled stays armed for a Revit that no longer
+    # exists. A close is always a "make the world quiet" instruction; running it first means the
+    # worst a same-tick launch+close can do is start Revit and immediately close it again (as
+    # intended), never launch-then-kill in the wrong order relative to what the caller asked for.
     Get-ChildItem $signalDir -Filter "*.close" -ErrorAction SilentlyContinue | ForEach-Object {
         Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue
+        # Review finding: a reconnect scheduled by an earlier launch must not survive a close --
+        # otherwise it fires later against a broker with no matching Revit instance to resync,
+        # disrupting whatever's running BY THEN for no benefit to anything that's gone.
+        $script:pendingReconnectAt = $null
         # Issue #26, "graceful close instead of force-kill": a forced Stop-Process stamps the open
         # .rvt "in use" INSIDE the file itself, which then blocks the NEXT launch against that same
         # path with a modal "File Opened By Another User" prompt -- confirmed live as the single
@@ -274,6 +222,113 @@ while ($true) {
             $stillRunning | Stop-Process -Force -ErrorAction SilentlyContinue
         } else {
             Write-AgentLog "close signal: Revit closed gracefully, no force-kill needed"
+        }
+    }
+
+    Get-ChildItem $signalDir -Filter "*.launch" -ErrorAction SilentlyContinue | ForEach-Object {
+        # SETTLE GUARD -- do not remove without reading this.
+        #
+        # A signal dropped as "create the file, then write its content" (two steps, e.g. a
+        # `New-Item` followed by a `Set-Content`, or any non-atomic write from outside this
+        # session) can be observed by this loop in between those steps, i.e. EMPTY. The old code
+        # consumed such a file immediately, got zero lines, and fell through to the no-document
+        # branch below -- silently launching Revit with NO document argument. That failure is
+        # invisible from the caller's side: Revit really does start, the add-in really does load
+        # and connect, and `register` really does report `documents: []` -- which reads exactly
+        # like a document-tracking bug in the add-in or broker rather than a signal that lost its
+        # payload before it was ever read. This cost a full live-validation session to root-cause
+        # (the giveaway was Revit's own journal recording no document on its command line).
+        #
+        # Two defenses, deliberately both:
+        #   1. Callers SHOULD drop signals atomically -- write the content under a name this
+        #      filter does not match (e.g. `x.tmp`), then `Rename-Item` it to `x.launch`. Rename
+        #      within a directory is atomic, so the file can never be seen half-written.
+        #   2. This guard, for callers that don't: ignore a signal until it has stopped changing,
+        #      so a two-step drop is read only after its second step has landed.
+        #
+        # The wait is TWO-TIER, and the empty tier is the whole point. An empty *.launch is genuinely
+        # ambiguous -- it means both "launch with no document" (a legitimate, documented use) and
+        # "the payload hasn't been written yet". A flat 1s wait was measured failing exactly this
+        # way: a create-then-write drop with a 3s gap was consumed at the 1s mark with zero lines and
+        # launched Revit with no document -- the original bug, reproduced by its own fix. A file with
+        # content is trustworthy quickly; an EMPTY one has to sit still much longer before we believe
+        # emptiness was intentional rather than a payload still in flight.
+        $fileLength = $_.Length
+        $ageMs = ((Get-Date) - $_.LastWriteTime).TotalMilliseconds
+        $settleMs = if ($fileLength -eq 0) { 15000 } else { 1000 }
+        if ($ageMs -lt $settleMs) { return }
+
+        $lines = @(Get-Content $_.FullName -ErrorAction SilentlyContinue)
+        Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue
+        $exePath = $revitExe
+        $docPath = $null
+        $pristineSource = $null
+        if ($lines.Count -ge 3) {
+            # Issue #26, "pristine-fixture-copy-per-launch": line 2 is an untouched source, line 3
+            # is the working copy actually opened -- copied fresh every launch so a *.close taint
+            # (or any other accumulated state) from a PRIOR run against the same working path can
+            # never carry forward, regardless of how that prior run ended.
+            if (-not [string]::IsNullOrWhiteSpace($lines[0])) { $exePath = $lines[0] }
+            $pristineSource = $lines[1]
+            $docPath = $lines[2]
+        } elseif ($lines.Count -eq 2) {
+            if (-not [string]::IsNullOrWhiteSpace($lines[0])) { $exePath = $lines[0] }
+            $docPath = $lines[1]
+        } elseif ($lines.Count -eq 1) {
+            $docPath = $lines[0]
+        }
+        Write-AgentLog "launch signal '$($_.Name)': $($lines.Count) line(s); exe='$exePath'; doc='$docPath'; pristineSource='$pristineSource'"
+        if ($lines.Count -eq 0) {
+            # Distinguish a deliberate no-document launch (an intentionally empty signal) from the
+            # lost-payload case above, which otherwise look identical in this log. Review finding:
+            # this used to hardcode "15s" regardless of which settle tier was actually taken (a
+            # non-empty file whose Get-Content nonetheless failed -- e.g. a transient shared-folder
+            # read error -- would print a wait duration that never happened, in the one log whose
+            # whole job is being trustworthy about what actually occurred), so log the real values.
+            Write-AgentLog "  NOTE: signal read as empty ($($settleMs)ms settle tier, file was $fileLength byte(s) at settle time); launching with NO document. If a document WAS intended, either the drop was not atomic and its payload never landed (see the settle guard above), or Get-Content failed to read a non-empty file."
+        }
+
+        if ($pristineSource) {
+            # Review finding: the original version fell through to Start-Process on ANY failure here
+            # (missing source, Revit still holding a lock on $docPath, a copy error) -- silently
+            # opening the STALE/tainted working copy and reproducing exactly the "File Opened By
+            # Another User" stall this whole feature exists to prevent, while still reporting the
+            # launch as a success. Treat every failure here as a reason to skip the launch entirely
+            # instead: a launch that doesn't happen is cheaper than one that opens a tainted file.
+            if (Get-Process -Name 'Revit' -ErrorAction SilentlyContinue) {
+                Write-AgentLog "  ABORT: Revit is still running -- a pristine copy over '$docPath' could collide with a lock it's still holding on that path; drop *.close first, then retry this launch"
+                return
+            }
+            if (-not (Test-Path $pristineSource)) {
+                Write-AgentLog "  ABORT: pristine source does not exist: '$pristineSource' -- not launching against a possibly-stale or missing working copy"
+                return
+            }
+            try {
+                Copy-Item $pristineSource $docPath -Force -ErrorAction Stop
+                Write-AgentLog "  copied pristine '$pristineSource' -> working copy '$docPath'"
+            } catch {
+                Write-AgentLog "  ABORT: PRISTINE COPY FAILED: $($_.Exception.ToString()) -- not launching against whatever's left at '$docPath'"
+                return
+            }
+        }
+
+        try {
+            if ([string]::IsNullOrWhiteSpace($docPath)) {
+                $p = Start-Process $exePath -PassThru
+            } else {
+                if (-not (Test-Path $docPath)) { Write-AgentLog "  WARNING: document path does not exist: '$docPath'" }
+                $p = Start-Process $exePath -ArgumentList "`"$docPath`"" -PassThru
+                # Issue #26, "forced reconnect": only meaningful when a document was actually
+                # opened -- a no-document launch has nothing for the add-in's snapshot race to get
+                # wrong. Overwrites any earlier pending reconnect rather than queuing one per
+                # launch; a second launch this close together supersedes the first's reconnect
+                # need anyway (its own document is the one that'll actually be open by then).
+                $script:pendingReconnectAt = (Get-Date).AddSeconds($reconnectDelaySec)
+                Write-AgentLog "  scheduled forced broker reconnect at $($script:pendingReconnectAt.ToString('o'))"
+            }
+            Write-AgentLog "  started pid=$($p.Id)"
+        } catch {
+            Write-AgentLog "  START-PROCESS FAILED: $($_.Exception.ToString())"
         }
     }
 
@@ -329,6 +384,19 @@ while ($true) {
         $exePath = $lines[0]
         $argString = if ($lines.Count -ge 2) { $lines[1] } else { $null }
         Write-AgentLog "runexe signal '$($_.Name)': exe='$exePath'; args='$argString'"
+
+        # Review finding: *.runexe blocks this whole loop (Start-Process -Wait below) -- the
+        # harness itself is routinely run this way, for minutes at a time. A reconnect scheduled by
+        # an earlier launch and left pending would sit frozen behind that block and only fire AFTER
+        # the run finishes, which is the worst possible timing: the stale-snapshot race it exists to
+        # fix is exactly what would make the run's own results unreliable, and firing right after
+        # just disrupts the broker at the one moment nothing needs it disrupted. Drain it now,
+        # before blocking, rather than letting it arrive late or not at all.
+        if ($script:pendingReconnectAt) {
+            Write-AgentLog "runexe signal '$($_.Name)': draining pending broker reconnect before this blocking run so it can't fire mid-run or arrive right after"
+            $script:pendingReconnectAt = $null
+            Start-BrokerAsPrimary $defaultBrokerExe | Out-Null
+        }
         try {
             $params = @{
                 FilePath = $exePath
