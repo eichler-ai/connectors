@@ -21,19 +21,26 @@ namespace MCPBridge.Core.Execution;
 ///    writes, element queries, geometry) rides the ambient transaction correctly with no new
 ///    transaction-ownership scheme -- confirmed live before Phase 3 shipped.
 ///
-///    KNOWN OVER-BREADTH, recorded rather than implied: the check does not look at WHICH document the
-///    Transaction targets, because it cannot -- it is compile-time, and the receiver is an arbitrary
-///    expression. So it also refuses the one case Revit itself would allow: a Transaction on a document
-///    the script just created via Application.NewProjectDocument, which the ambient transaction does not
-///    cover (one-open-transaction is a per-DOCUMENT rule). Confirmed live -- constructing one
-///    reflectively against a created document committed successfully. The consequence is that a script
-///    can create a document and read it, not write to it, which is what currently blocks PRD §13's
-///    corpus fixture system. Tracked as issue #24, whose chosen fix leaves THIS check exactly as it is:
-///    the executor auto-wraps every document a script creates in its own managed transaction/group
-///    (generalizing TransactionScriptExecutor from one document to N), so "a script may never construct
-///    its own Transaction" stays unconditional and no runtime document-identity comparison is needed --
-///    that alternative was assessed and rejected, since Revit hands back different wrappers for the same
-///    document depending on entry point. See PRD §14, "Application-level access needed no new plumbing".
+///    THE OVER-BREADTH THIS CHECK ONCE HAD IS RESOLVED, and the resolution left the check itself
+///    byte-for-byte unchanged -- worth recording, because it is the reason the fix was chosen. The check
+///    cannot look at WHICH document a Transaction targets: it is compile-time, and the receiver is an
+///    arbitrary expression. So it also refused the one case Revit itself allows -- a Transaction on a
+///    document the script just created, which the ambient transaction does not cover, since
+///    one-open-transaction is a per-DOCUMENT rule. A script could create a document and read it, not
+///    write to it, which blocked PRD §13's corpus fixture system.
+///
+///    Issue #24 closed that WITHOUT narrowing anything here. The connector now opens and owns a
+///    Transaction/TransactionGroup for each document a script creates, in the same step that creates it
+///    (ScriptGlobals.CreateProjectDocument/CreateFamilyDocument -> ManagedDocumentTransactions), so the
+///    script has no reason to construct one and the refusal stays unconditional. The rejected
+///    alternative was a runtime document-identity comparison: Revit hands back DIFFERENT wrapper objects
+///    for "the same" document depending on the API entry point, and DocumentIdentity.ResolveCached is
+///    weakest for exactly the unsaved documents this is about, so a naive same-instance test would have
+///    reopened the same bypass class two review rounds already closed here. The chosen shape gains no
+///    new bypass surface at all: the creation helper is an ordinary method call on ScriptGlobals, not an
+///    object creation, so this AST walk has nothing new to bind to -- asserted, not assumed, at both
+///    tiers (TransactionScriptExecutorTests.CreateProjectDocument_IsNotADenylistViolation and
+///    revit/test-harness's TestCreatedDocumentIsWritable). See PRD §14.
 ///
 ///    Note this is a DIFFERENT thing from what the deleted IScriptDocument/IScriptUiDocument/
 ///    IScriptUiApplication interfaces used to guard. Those blocked IDocumentAdapter.CreateTransaction/

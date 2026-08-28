@@ -92,31 +92,51 @@ return Document.Title;
 | `ExportsDirectory`, `ImportsDirectory` | absolute paths, see "Exchanging files" |
 | `Publish(path, name?)` | copy a file into `exports/` and report it back; `name` renames it |
 | `DialogResultOverrides` | per-dialog answer override, e.g. `DialogResultOverrides["TaskDialog_X"] = 1001` |
+| `CreateProjectDocument(template?)`, `CreateFamilyDocument(template)` | create a **writable** new document — see "Creating documents" |
 | the .NET BCL | `System.IO`, `System.Linq`, etc. — fully usable |
 
 Only `System` is imported by default, so use fully-qualified names (`Autodesk.Revit.DB.Wall`,
 `System.IO.File.ReadAllText`) or you'll get `CS0246`. Use `using` *directives* freely at the top of
 your script if you'd rather: `using Autodesk.Revit.DB;`.
 
-**Creating documents.** `UIApplication.Application` is the real top-level
-`Autodesk.Revit.ApplicationServices.Application`, so `NewProjectDocument(path)` and
-`NewFamilyDocument(path)` work and need no confirmation — nothing persists until you save, and saving is
-gated separately. Ask Revit for the template paths rather than guessing: `DefaultProjectTemplate` is a
-full `.rte` path, and `FamilyTemplatePath` is the **root of the family-template tree**, not a flat
+**Creating documents — use `CreateProjectDocument` / `CreateFamilyDocument`.** These are script
+globals, not Revit API, and they are what you want in almost every case: they create the document *and*
+open a transaction the connector manages for it, so you can write to it immediately. It commits when
+your script returns and rolls back if your script throws, exactly like the active document. No
+confirmation needed — nothing persists until you save, and saving is gated separately.
+
+```csharp
+var doc = CreateProjectDocument();                    // blank, writable, from Revit's default template
+Autodesk.Revit.DB.Level.Create(doc, 10.0);            // just write to it — no transaction of your own
+```
+
+`CreateProjectDocument()` defaults to the install's own default project template; pass a path to use a
+different one. `CreateFamilyDocument(path)` needs a path — there is no install-wide default family
+template.
+
+**The raw `UIApplication.Application.NewProjectDocument`/`NewFamilyDocument` still work, and are
+READ-ONLY from a script.** That is the only difference between the two paths. Nothing opens a
+transaction for what the raw members return, and you may not open one yourself (see below), so writing
+to such a document throws `ModificationOutsideTransactionException`. Reach for them only when you
+genuinely just want to inspect a document.
+
+Ask Revit for template paths rather than guessing: `Application.DefaultProjectTemplate` is a full `.rte`
+path, and `Application.FamilyTemplatePath` is the **root of the family-template tree**, not a flat
 folder of `.rft` files — the templates sit in language/discipline subdirectories under it, so search it
 recursively (`SearchOption.AllDirectories`).
 
-```csharp
-var app = UIApplication.Application;
-var doc = app.NewProjectDocument(app.DefaultProjectTemplate);   // real, queryable Document
-```
+One limit applies to a created document however you made it: **it has no `document_id`** — it never
+appears in `list_instances` and you cannot point a later call at it. It does stay open for the session,
+so a later script finds it by walking `UIApplication.Application.Documents` and matching `Title` or
+`PathName`.
 
-Two limits before you build on this. **A created document is not covered by your script's
-transaction** — that one is opened on the instance's *active* document, so writing to the new one throws
-`ModificationOutsideTransactionException`, and you cannot open your own for it either (see below). Create
-and read, yes; write, not yet. **And it has no `document_id`** — it never appears in `list_instances` and
-you cannot point a later call at it. It does stay open for the session, so a later script finds it by
-walking `UIApplication.Application.Documents` and matching `Title` or `PathName`.
+**If several documents are in play, they commit together or not at all — with one caveat worth
+knowing.** Every document your script created plus the active one are committed after your script
+returns, created ones first and the active one last. If one commit fails, everything not yet committed
+is rolled back — but a commit that already succeeded cannot be undone, so an earlier created document
+can keep its changes. When that happens you get a `script-partial-commit` notice naming exactly which
+documents kept their changes and which did not; nothing is hidden. The ordering means the active
+document — the real model a person has open — is the one that always gets rolled back in that case.
 
 **There is no cleanup path, so create sparingly.** `Document.Close` and `.Dispose` are both
 confirmation-gated (see below), which means a script cannot quietly tidy up after itself: every
@@ -133,11 +153,9 @@ have run in is rolled back cleanly.
 Your script is already inside one, and Revit allows only one open transaction per document, so your own
 can never work. There is no flag for this. Just make your changes directly; they commit on success and
 roll back on failure. The error record's `code` is `script-api-denied`. The refusal ignores *which*
-document you were opening the transaction for, so it also blocks the one case Revit would allow — a
-transaction on a document you just created. Known limit, not an oversight (tracked as issue #24); it is
-why a created document is read-only from a script today. The planned fix keeps this rule exactly as it
-is — the connector will open a managed transaction for each document your script creates, so you still
-never construct one yourself.
+document you were opening the transaction for — including a document you just created. That is not a
+gap you need to work around: use `CreateProjectDocument`/`CreateFamilyDocument` above and the connector
+opens and owns that document's transaction for you, so there is never a reason to construct one.
 
 **2. Allowed, but only if you confirm — the document-lifecycle and worksharing calls.**
 

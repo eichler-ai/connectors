@@ -130,6 +130,21 @@ type executeScriptOut struct {
 	ExecutionID string `json:"execution_id"`
 	Status      string `json:"status"`
 	Output      string `json:"output"`
+	// Notices carries the PRD §01 diagnostic records a run reports alongside
+	// its result — read here because issue #24's partial-commit reporting has
+	// no other observable: the run's status only says "failed", and which
+	// documents kept their changes lives in a notice, not in the status.
+	Notices []struct {
+		Severity string   `json:"severity"`
+		Code     string   `json:"code"`
+		Source   string   `json:"source"`
+		Message  string   `json:"message"`
+		Remedy   []string `json:"remedy"`
+	} `json:"notices"`
+	Error *struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	} `json:"error"`
 }
 
 // Note there is deliberately no Error field here. A script that fails to
@@ -754,6 +769,287 @@ return new {
 			if !strings.Contains(out.Output, want) {
 				t.Errorf("wanted %q in output: %s", want, out.Output)
 			}
+		}
+	})
+}
+
+// TestCreatedDocumentIsWritable is issue #24's whole point, live: a script can
+// create a document AND write to it AND have that write actually commit.
+//
+// WHAT CHANGED, and what deliberately did not. Before this, a script could
+// create a document via UIApplication.Application.NewProjectDocument and read
+// it, but any write threw ModificationOutsideTransactionException — the
+// executor's ambient Transaction covers only the ACTIVE document, and
+// ScriptApiDenylist check 1 unconditionally refuses a script opening its own.
+// The fix does NOT narrow that check (a runtime document-identity comparison
+// was assessed and rejected: Revit hands back different wrapper objects for
+// "the same" document depending on the API entry point). Instead the connector
+// opens and owns a Transaction/TransactionGroup for each document a script
+// creates, in the same step that creates it — the new
+// CreateProjectDocument/CreateFamilyDocument script globals.
+//
+// So there are now TWO creation paths and they differ in exactly one way:
+// the raw Application members still work and are still READ-ONLY; the new
+// globals give a writable document. TestApplicationCreatesDocuments'
+// NewDocumentIsOutsideTheAmbientTransaction subtest pins the read-only half and
+// must keep passing alongside this — the raw path was not broken or replaced.
+//
+// SESSION COST, as with TestApplicationCreatesDocuments: every run leaves its
+// documents open in the live session. Same accepted trade, same reason.
+func TestCreatedDocumentIsWritable(t *testing.T) {
+	c, instanceID, documentID := targetDocument(t)
+
+	// The headline: create, write, and read the write back, all in one script.
+	// Level.Create is the same write TestCreateLevel makes against the ambient
+	// document, chosen so the only variable here is WHICH document it lands in.
+	t.Run("CreateProjectDocumentThenWriteToIt", func(t *testing.T) {
+		out := runScript(t, c, instanceID, documentID, `
+var doc = CreateProjectDocument();
+var before = new Autodesk.Revit.DB.FilteredElementCollector(doc)
+    .OfClass(typeof(Autodesk.Revit.DB.Level)).GetElementCount();
+var level = Autodesk.Revit.DB.Level.Create(doc, 4242.0);
+var after = new Autodesk.Revit.DB.FilteredElementCollector(doc)
+    .OfClass(typeof(Autodesk.Revit.DB.Level)).GetElementCount();
+return new {
+  docType = doc.GetType().FullName,
+  isTheAmbientDocument = object.ReferenceEquals(doc, Document),
+  created = after == before + 1,
+  levelId = level.Id.Value
+};
+`)
+		if out.Status != "success" {
+			t.Fatalf("expected status=success, got %q (output: %s)", out.Status, out.Output)
+		}
+		for _, want := range []string{
+			"docType = Autodesk.Revit.DB.Document",
+			// Guards against the whole test passing for the wrong reason: if
+			// CreateProjectDocument ever returned the ambient document, every
+			// other assertion here would still hold and nothing would be proven.
+			"isTheAmbientDocument = False",
+			"created = True",
+		} {
+			if !strings.Contains(out.Output, want) {
+				t.Errorf("wanted %q in output: %s", want, out.Output)
+			}
+		}
+	})
+
+	// THE ASSERTION THAT ACTUALLY PROVES THE COMMIT. Writing inside one script
+	// only shows the write was permitted; it says nothing about whether the
+	// connector committed the created document's transaction after the script
+	// returned. A SECOND execute_script call, finding the document again in
+	// Application.Documents and reading the level back, is what distinguishes
+	// "committed" from "written and then silently rolled back".
+	t.Run("WritesToACreatedDocumentSurviveTheScript", func(t *testing.T) {
+		// A distinctive elevation so the follow-up query cannot match a level
+		// from the template or from another subtest's document.
+		created := runScript(t, c, instanceID, documentID, `
+var doc = CreateProjectDocument();
+Autodesk.Revit.DB.Level.Create(doc, 4343.0);
+return doc.Title;
+`)
+		if created.Status != "success" {
+			t.Fatalf("expected status=success, got %q (output: %s)", created.Status, created.Output)
+		}
+		title := strings.TrimSpace(created.Output)
+		if title == "" {
+			t.Fatalf("created document reported no title; output: %s", created.Output)
+		}
+
+		found := runScript(t, c, instanceID, documentID, `
+int matches = 0;
+foreach (Autodesk.Revit.DB.Document d in UIApplication.Application.Documents) {
+  if (d.Title != `+strconv.Quote(title)+`) { continue; }
+  foreach (Autodesk.Revit.DB.Level lv in new Autodesk.Revit.DB.FilteredElementCollector(d)
+      .OfClass(typeof(Autodesk.Revit.DB.Level))) {
+    if (System.Math.Abs(lv.Elevation - 4343.0) < 0.001) { matches++; }
+  }
+}
+return "matches = " + matches + ";";
+`)
+		if found.Status != "success" {
+			t.Fatalf("expected status=success, got %q (output: %s)", found.Status, found.Output)
+		}
+		if !strings.Contains(found.Output, "matches = 1;") {
+			t.Fatalf("the level written to a created document did not survive the script that wrote it -- the connector's managed transaction for that document did not commit; output: %s", found.Output)
+		}
+	})
+
+	// A failing script must roll back EVERY document, not just the ambient one.
+	// Written and then thrown away in one script, then checked from a second:
+	// the created document still exists (nothing closes it) but must carry no
+	// level at this elevation.
+	t.Run("AThrowingScriptRollsBackCreatedDocumentsToo", func(t *testing.T) {
+		created := runScript(t, c, instanceID, documentID, `
+var doc = CreateProjectDocument();
+Autodesk.Revit.DB.Level.Create(doc, 4444.0);
+return doc.Title;
+`)
+		if created.Status != "success" {
+			t.Fatalf("setup script failed: %q (output: %s)", created.Status, created.Output)
+		}
+
+		// Now a run that writes to a NEW created document and then throws.
+		thrown := runScript(t, c, instanceID, documentID, `
+var doc = CreateProjectDocument();
+Autodesk.Revit.DB.Level.Create(doc, 4545.0);
+System.Console.WriteLine("title=" + doc.Title);
+throw new System.InvalidOperationException("deliberate");
+`)
+		if thrown.Status == "success" {
+			t.Fatalf("script was supposed to throw; output: %s", thrown.Output)
+		}
+
+		// Nothing anywhere in the session should carry a level at 4545 -- the
+		// document that got one was rolled back. Scanning every open document
+		// rather than re-finding one by title, because the throwing script's
+		// return value is gone with it.
+		check := runScript(t, c, instanceID, documentID, `
+int matches = 0;
+foreach (Autodesk.Revit.DB.Document d in UIApplication.Application.Documents) {
+  foreach (Autodesk.Revit.DB.Level lv in new Autodesk.Revit.DB.FilteredElementCollector(d)
+      .OfClass(typeof(Autodesk.Revit.DB.Level))) {
+    if (System.Math.Abs(lv.Elevation - 4545.0) < 0.001) { matches++; }
+  }
+}
+return "matches = " + matches + ";";
+`)
+		if check.Status != "success" {
+			t.Fatalf("expected status=success, got %q (output: %s)", check.Status, check.Output)
+		}
+		if !strings.Contains(check.Output, "matches = 0;") {
+			t.Fatalf("a throwing script left its write behind in a created document -- rollback does not cover every managed document; output: %s", check.Output)
+		}
+	})
+
+	// The family-document counterpart. FamilyManager.NewType is a real write and
+	// the API Phase D of the corpus plan actually goes through, so this is the
+	// same shape of proof as the project case rather than a weaker one.
+	t.Run("CreateFamilyDocumentThenWriteToIt", func(t *testing.T) {
+		out := runScript(t, c, instanceID, documentID, `
+var app = UIApplication.Application;
+string template = "";
+if (System.IO.Directory.Exists(app.FamilyTemplatePath)) {
+  foreach (var f in System.IO.Directory.EnumerateFiles(app.FamilyTemplatePath, "Generic Model.rft", System.IO.SearchOption.AllDirectories)) {
+    template = f;
+    break;
+  }
+}
+if (template.Length == 0) { return "no-template"; }
+var doc = CreateFamilyDocument(template);
+var before = doc.FamilyManager.Types.Size;
+doc.FamilyManager.NewType("MCPBridgeIssue24Type");
+return new {
+  isFamily = doc.IsFamilyDocument,
+  typeAdded = doc.FamilyManager.Types.Size == before + 1
+};
+`)
+		if out.Status != "success" {
+			t.Fatalf("expected status=success, got %q (output: %s)", out.Status, out.Output)
+		}
+		if strings.Contains(out.Output, "no-template") {
+			t.Skip("no \"Generic Model.rft\" under Application.FamilyTemplatePath on this machine")
+		}
+		for _, want := range []string{"isFamily = True", "typeAdded = True"} {
+			if !strings.Contains(out.Output, want) {
+				t.Errorf("wanted %q in output: %s", want, out.Output)
+			}
+		}
+	})
+
+	// ScriptApiDenylist check 1 is UNCHANGED and stays unconditional -- that is
+	// the property the whole approach was chosen to preserve, so it is asserted
+	// rather than assumed. A script may not open its own Transaction even
+	// against a document it created itself, because it no longer needs to.
+	t.Run("ConstructingATransactionIsStillRefusedAgainstACreatedDocument", func(t *testing.T) {
+		rejected := runRejectedScript(t, c, instanceID, documentID, `
+var doc = CreateProjectDocument();
+using (var tx = new Autodesk.Revit.DB.Transaction(doc, "mine")) { tx.Start(); tx.Commit(); }
+return "opened";
+`)
+		if rejected.Error.Code != "script-api-denied" {
+			t.Fatalf("expected code script-api-denied, got %q (text: %s)", rejected.Error.Code, rejected.Text)
+		}
+	})
+
+	// And the mirror image: calling the new helper is NOT a denylist violation.
+	// Covered at tier 1 too (TransactionScriptExecutorTests), but only live can
+	// show it against the real, fully-bound Revit metadata Revit itself loads.
+	t.Run("CallingTheCreationHelperIsNotADenylistViolation", func(t *testing.T) {
+		out := runScript(t, c, instanceID, documentID, `
+var doc = CreateProjectDocument();
+return "ok:" + (doc != null);
+`)
+		if out.Status != "success" {
+			t.Fatalf("expected status=success, got %q (output: %s)", out.Status, out.Output)
+		}
+		if !strings.Contains(out.Output, "ok:True") {
+			t.Fatalf("unexpected output: %s", out.Output)
+		}
+	})
+
+	// TWO created documents in one script, both written to, both committed.
+	// This is the N-document case proper -- the single-created-document tests
+	// above would all pass against an implementation that only ever tracked one.
+	t.Run("TwoCreatedDocumentsBothCommit", func(t *testing.T) {
+		created := runScript(t, c, instanceID, documentID, `
+var a = CreateProjectDocument();
+var b = CreateProjectDocument();
+Autodesk.Revit.DB.Level.Create(a, 4646.0);
+Autodesk.Revit.DB.Level.Create(b, 4747.0);
+return a.Title + "|" + b.Title;
+`)
+		if created.Status != "success" {
+			t.Fatalf("expected status=success, got %q (output: %s)", created.Status, created.Output)
+		}
+
+		check := runScript(t, c, instanceID, documentID, `
+int a = 0, b = 0;
+foreach (Autodesk.Revit.DB.Document d in UIApplication.Application.Documents) {
+  foreach (Autodesk.Revit.DB.Level lv in new Autodesk.Revit.DB.FilteredElementCollector(d)
+      .OfClass(typeof(Autodesk.Revit.DB.Level))) {
+    if (System.Math.Abs(lv.Elevation - 4646.0) < 0.001) { a++; }
+    if (System.Math.Abs(lv.Elevation - 4747.0) < 0.001) { b++; }
+  }
+}
+return "a = " + a + "; b = " + b + ";";
+`)
+		if check.Status != "success" {
+			t.Fatalf("expected status=success, got %q (output: %s)", check.Status, check.Output)
+		}
+		if !strings.Contains(check.Output, "a = 1;") || !strings.Contains(check.Output, "b = 1;") {
+			t.Fatalf("both created documents were supposed to commit their own write; output: %s", check.Output)
+		}
+	})
+
+	// The ambient document is still committed normally when a script also
+	// creates documents -- the generalization must not have cost the original
+	// single-document behaviour. Written last in commit order by design (see
+	// ManagedDocumentTransactions), which is exactly why it needs its own check.
+	t.Run("TheAmbientDocumentStillCommitsAlongsideCreatedOnes", func(t *testing.T) {
+		out := runScript(t, c, instanceID, documentID, `
+var created = CreateProjectDocument();
+Autodesk.Revit.DB.Level.Create(created, 4848.0);
+Autodesk.Revit.DB.Level.Create(Document, 4949.0);
+return "done";
+`)
+		if out.Status != "success" {
+			t.Fatalf("expected status=success, got %q (output: %s)", out.Status, out.Output)
+		}
+
+		check := runScript(t, c, instanceID, documentID, `
+int ambient = 0;
+foreach (Autodesk.Revit.DB.Level lv in new Autodesk.Revit.DB.FilteredElementCollector(Document)
+    .OfClass(typeof(Autodesk.Revit.DB.Level))) {
+  if (System.Math.Abs(lv.Elevation - 4949.0) < 0.001) { ambient++; }
+}
+return "ambient = " + ambient + ";";
+`)
+		if check.Status != "success" {
+			t.Fatalf("expected status=success, got %q (output: %s)", check.Status, check.Output)
+		}
+		if !strings.Contains(check.Output, "ambient = 1;") {
+			t.Fatalf("the ambient document's own write did not commit when the script also created a document; output: %s", check.Output)
 		}
 	})
 }
