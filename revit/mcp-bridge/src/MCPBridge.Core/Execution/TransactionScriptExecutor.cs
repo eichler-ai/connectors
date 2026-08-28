@@ -162,27 +162,61 @@ public sealed class TransactionScriptExecutor
     /// (it is), and this notice states exactly which documents kept their changes and which did not,
     /// rather than letting "failed" imply nothing happened anywhere.
     ///
-    /// Only emitted when something actually committed. A failure on the FIRST document commits nothing,
-    /// so it needs no such notice and gets none.
+    /// Emitted when something actually committed, and ALSO when a document's own rollback threw: an
+    /// indeterminate document is the case an agent most needs told about, so it cannot be the case that
+    /// gets no notice. A failure on the FIRST document that then rolls everything back cleanly commits
+    /// nothing and leaves nothing unknown, so it needs no such notice and gets none.
     /// </summary>
-    private static DiagnosticRecord PartialCommitNotice(ManagedDocumentCommitResult commit) => DiagnosticRecord.Create(
-        DiagnosticSeverity.Error,
-        "script-partial-commit",
-        DiagnosticSource.Execution,
-        $"The script ran to completion but one document failed to commit after {commit.CommittedDocuments.Count} " +
-        "other document(s) had already committed; a committed Revit transaction cannot be un-committed, so " +
-        $"those changes remain. Committed: {string.Join(", ", commit.CommittedDocuments)}. " +
-        $"Rolled back: {string.Join(", ", commit.RolledBackDocuments)}.",
-        detail: new Dictionary<string, object?>
-        {
-            ["committed_documents"] = commit.CommittedDocuments,
-            ["rolled_back_documents"] = commit.RolledBackDocuments,
-        },
-        remedy: new[]
+    private static DiagnosticRecord PartialCommitNotice(ManagedDocumentCommitResult commit)
+    {
+        var message =
+            $"The script ran to completion but one document failed to commit after {commit.CommittedDocuments.Count} " +
+            "other document(s) had already committed; a committed Revit transaction cannot be un-committed, so " +
+            $"those changes remain. Committed: {Describe(commit.CommittedDocuments)}. " +
+            $"Rolled back: {Describe(commit.RolledBackDocuments)}.";
+
+        // Named separately and last, never folded into "Rolled back" (independent PR review finding).
+        // Claiming a document rolled back when its rollback itself threw is the one lie this notice must
+        // not tell, and omitting it entirely would be the silence PRD §01 forbids -- an unknown-state
+        // document is exactly what a human or agent has to go and look at.
+        var remedy = new List<string>
         {
             "Documents a script creates are unsaved and in-memory, so nothing was written to disk -- " +
             "the committed changes exist only in this Revit session.",
+            // NOT "or undo": the connector has no adopt-by-title WRITE path. Only documents created in
+            // the current run get a managed transaction, and a script may never open its own
+            // (ScriptApiDenylist check 1), so a follow-up script can read a committed document and
+            // nothing more. Telling an agent it can undo the changes would send it after a capability
+            // that does not exist.
             "Find a committed document by Title in UIApplication.Application.Documents from a follow-up " +
-            "script to inspect or undo what landed.",
-        });
+            "script to inspect what landed.",
+        };
+
+        if (commit.UnknownStateDocuments.Count > 0)
+        {
+            message +=
+                $" Rollback FAILED, state unknown: {Describe(commit.UnknownStateDocuments)} -- the rollback " +
+                "for these threw, so this connector cannot say whether their changes were undone.";
+            remedy.Add(
+                "Inspect the unknown-state document(s) directly in Revit before relying on them; their " +
+                "contents were neither confirmed committed nor confirmed rolled back.");
+        }
+
+        return DiagnosticRecord.Create(
+            DiagnosticSeverity.Error,
+            "script-partial-commit",
+            DiagnosticSource.Execution,
+            message,
+            detail: new Dictionary<string, object?>
+            {
+                ["committed_documents"] = commit.CommittedDocuments,
+                ["rolled_back_documents"] = commit.RolledBackDocuments,
+                ["unknown_state_documents"] = commit.UnknownStateDocuments,
+            },
+            remedy: remedy);
+    }
+
+    /// <summary>"(none)" rather than an empty string, so a reader can tell an empty list from a bug.</summary>
+    private static string Describe(IReadOnlyList<string> documents) =>
+        documents.Count == 0 ? "(none)" : string.Join(", ", documents);
 }

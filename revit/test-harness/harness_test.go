@@ -141,10 +141,6 @@ type executeScriptOut struct {
 		Message  string   `json:"message"`
 		Remedy   []string `json:"remedy"`
 	} `json:"notices"`
-	Error *struct {
-		Code    string `json:"code"`
-		Message string `json:"message"`
-	} `json:"error"`
 }
 
 // Note there is deliberately no Error field here. A script that fails to
@@ -1035,8 +1031,9 @@ return a.Title + "|" + b.Title;
 		// Scoped to the two documents by title rather than scanning every open one.
 		// This case deliberately leaves documents open and the wider suite accumulates
 		// dozens of them, so an all-documents scan grows until it blows the harness's
-		// 20s tool timeout -- which then leaves the instance busy and fails every
-		// later subtest for an unrelated reason. Observed live; keep queries scoped.
+		// tool deadline (45s, see callExecuteScriptWith) -- which then leaves the
+		// instance busy and fails every later subtest for an unrelated reason.
+		// Observed live at the older, shorter deadline; keep queries scoped.
 		check := runScript(t, c, instanceID, documentID, `
 int a = 0, b = 0;
 foreach (Autodesk.Revit.DB.Document d in UIApplication.Application.Documents) {

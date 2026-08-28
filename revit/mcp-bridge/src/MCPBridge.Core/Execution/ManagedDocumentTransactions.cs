@@ -34,8 +34,22 @@ namespace MCPBridge.Core.Execution;
 /// real model a human has open; a created one is unsaved and in-memory, touching no file, no central
 /// model and no session, so confining partial-commit fallout to those is strictly the better trade.
 /// See <see cref="ManagedDocumentCommitResult"/> for how what did land is reported (PRD §01).
+///
+/// INTERNAL, AND THAT IS A SECURITY BOUNDARY, NOT A STYLE CHOICE. RoslynScriptRunner.LoadableReferences()
+/// references every assembly loaded in the Revit AppDomain -- MCPBridge.Core included -- so any PUBLIC
+/// type here is a type an untrusted agent script can name and construct. Live-verified against real Revit
+/// 2027 while this class was public: a script constructed `new MCPBridge.RevitAdapter.RevitDocumentAdapter(raw)`
+/// on a document it had made itself, called CreateTransaction on it, wrote a Level and COMMITTED it --
+/// a real, unmanaged transaction ScriptApiDenylist never saw, because the `new Transaction(...)` happens
+/// inside adapter code rather than in the script's own syntax tree, which is all the AST walk examines.
+/// This class was the same shape and strictly more powerful (Open/CreateAndOpen*/CommitAll/RollBackAll on
+/// documents the executor owns). `internal` closes it structurally -- a script cannot name what it cannot
+/// see -- which is why it was preferred over adding our own types to the denylist's tables: those are
+/// meant to stay small and Revit-API-focused, and a list of forbidden names is only ever as complete as
+/// the last person to remember to extend it. Reflection can still reach this, exactly as ScriptApiDenylist
+/// documents for its own entries; that is the accepted GUARD-not-sandbox line, unchanged.
 /// </summary>
-public sealed class ManagedDocumentTransactions
+internal sealed class ManagedDocumentTransactions
 {
     private sealed class Entry
     {
@@ -145,6 +159,11 @@ public sealed class ManagedDocumentTransactions
     {
         for (var i = _entries.Count - 1; i >= 0; i--)
         {
+            // SafeRollBack's success flag is deliberately discarded here, unlike in CommitAll. This path
+            // runs when the whole run already failed, so there is no partial-commit report to be honest
+            // WITHIN: nothing committed anywhere, and the outcome the caller returns is already the
+            // script's own exception. CommitAll is the case where the distinction changes what an agent
+            // is told, and that is where it is tracked.
             SafeRollBack(_entries[i].Transaction.RollBack);
             SafeRollBack(_entries[i].Group.RollBack);
         }
@@ -157,34 +176,61 @@ public sealed class ManagedDocumentTransactions
     /// failure and rolling back everything that has not already committed. Never throws: a commit-time
     /// exception is returned in the result so the caller can report it alongside what did land.
     ///
-    /// Like <see cref="RollBackAll"/>, this leaves the set empty: every document has been closed one way
-    /// or another, so the executor's `finally` net has nothing left to do.
+    /// Like <see cref="RollBackAll"/>, this leaves the set empty when it returns: every document has been
+    /// closed one way or another, so the executor's `finally` net has nothing left to do. The one case it
+    /// does NOT empty the set is an exception escaping it anyway -- see the clearing comment below, which
+    /// is where that deliberate asymmetry lives.
     /// </summary>
     public ManagedDocumentCommitResult CommitAll()
     {
         var order = _entries.Where(e => !e.IsAmbient).Concat(_entries.Where(e => e.IsAmbient)).ToList();
 
-        // Every entry is closed by the time this returns, one way or another -- drop them so a later
-        // RollBackAll (the executor's `finally` safety net) is a no-op rather than a double close.
-        _entries.Clear();
+        var result = CommitInOrder(order);
 
+        // CLEARED HERE, AFTER the work, and DELIBERATELY NOT IN A `finally` (independent PR review
+        // finding). Reaching this line means every document above was closed one way or another, so the
+        // set must end up empty -- otherwise the executor's `finally` RollBackAll would roll back what
+        // this method just committed.
+        //
+        // But if CommitInOrder THROWS, control never gets here and _entries stays populated ON PURPOSE.
+        // The bug was clearing up front: an unexpected escape (an adapter's CommitFailures getter,
+        // Document.Title inside Describe()) then left the executor's net with nothing to roll back, and
+        // every not-yet-committed document leaked an open Transaction/TransactionGroup into the live
+        // Revit session. A `finally` would NOT have fixed that -- it runs on the exception path too, and
+        // would clear the entries just the same. Only skipping the clear on that path preserves them.
+        // The reads that can actually throw are individually guarded below as well; this covers the ones
+        // nobody thought of.
+        _entries.Clear();
+        return result;
+    }
+
+    /// <summary>
+    /// <see cref="CommitAll"/>'s body, split out so the entry list is cleared only when this returns
+    /// normally -- see the comment at that call site, which is the whole reason this is a separate
+    /// method. Expected NOT to throw (every adapter call is guarded); the split exists precisely for the
+    /// case where that expectation turns out to be wrong.
+    /// </summary>
+    private static ManagedDocumentCommitResult CommitInOrder(List<Entry> order)
+    {
         var failures = new List<FailureSummary>();
         var committed = new List<string>();
         var rolledBack = new List<string>();
+        var unknownState = new List<string>();
         Exception? failure = null;
 
         var index = 0;
         for (; index < order.Count; index++)
         {
             var entry = order[index];
-            if (TryCommit(entry, failures, out var error))
+            var attempt = AttemptCommit(entry, failures);
+            if (attempt.Succeeded)
             {
                 committed.Add(entry.Describe());
                 continue;
             }
 
-            rolledBack.Add(entry.Describe());
-            failure = error;
+            (attempt.RollbackVerified ? rolledBack : unknownState).Add(entry.Describe());
+            failure = attempt.Error;
             index++;
             break;
         }
@@ -198,20 +244,53 @@ public sealed class ManagedDocumentTransactions
         // these documents have committed nothing, so rolling them back is both possible and correct.
         for (; index < order.Count; index++)
         {
-            SafeRollBack(order[index].Transaction.RollBack);
-            SafeRollBack(order[index].Group.RollBack);
-            rolledBack.Add(order[index].Describe());
+            var entry = order[index];
+            var transactionUnwound = SafeRollBack(entry.Transaction.RollBack);
+            var groupUnwound = SafeRollBack(entry.Group.RollBack);
+            (transactionUnwound && groupUnwound ? rolledBack : unknownState).Add(entry.Describe());
         }
 
-        return ManagedDocumentCommitResult.Failed(failure, failures, committed, rolledBack);
+        return ManagedDocumentCommitResult.Failed(failure, failures, committed, rolledBack, unknownState);
+    }
+
+    /// <summary>
+    /// What committing one document actually did. <see cref="RollbackVerified"/> is meaningful only when
+    /// <see cref="Error"/> is non-null: it reports whether the best-effort unwind that followed the
+    /// failure was itself observed to succeed, or threw and left this document in a state the connector
+    /// cannot describe. Carried out of <see cref="AttemptCommit"/> as a value rather than a second `out`
+    /// parameter so it is impossible to report a rollback the code never confirmed happened.
+    /// </summary>
+    private readonly struct CommitAttempt
+    {
+        private CommitAttempt(Exception? error, bool rollbackVerified)
+        {
+            Error = error;
+            RollbackVerified = rollbackVerified;
+        }
+
+        public Exception? Error { get; }
+
+        public bool RollbackVerified { get; }
+
+        public bool Succeeded => Error is null;
+
+        public static CommitAttempt Committed() => new(null, rollbackVerified: true);
+
+        public static CommitAttempt Failed(Exception error, bool rollbackVerified) => new(error, rollbackVerified);
     }
 
     /// <summary>
     /// Commits one document's pair, mirroring exactly what the single-document version of this class
     /// did: Commit(), then Assimilate() on the group. Failure has three distinct shapes and they need
     /// different unwinding, which is why this is not a one-liner.
+    ///
+    /// NOTHING HERE MAY THROW -- <see cref="CommitAll"/>'s documented contract is that it never does, and
+    /// the executor relies on that to report a commit failure alongside what did land instead of losing
+    /// the run. Every adapter call is therefore either inside a try or routed through a Safe* helper,
+    /// including the <c>CommitFailures</c> reads, which are ordinary property getters on an adapter and so
+    /// can fail exactly like any other call into Revit.
     /// </summary>
-    private static bool TryCommit(Entry entry, List<FailureSummary> failures, out Exception? error)
+    private static CommitAttempt AttemptCommit(Entry entry, List<FailureSummary> failures)
     {
         TransactionCommitResult result;
         try
@@ -220,25 +299,22 @@ public sealed class ManagedDocumentTransactions
         }
         catch (Exception ex)
         {
-            failures.AddRange(entry.Transaction.CommitFailures);
-            SafeRollBack(entry.Transaction.RollBack);
-            SafeRollBack(entry.Group.RollBack);
-            error = ex;
-            return false;
+            SafeCollectFailures(entry, failures);
+            var transactionUnwound = SafeRollBack(entry.Transaction.RollBack);
+            var groupUnwound = SafeRollBack(entry.Group.RollBack);
+            return CommitAttempt.Failed(ex, transactionUnwound && groupUnwound);
         }
 
-        failures.AddRange(entry.Transaction.CommitFailures);
+        SafeCollectFailures(entry, failures);
 
         if (result == TransactionCommitResult.RolledBack)
         {
             // Revit already rolled back the Transaction itself (ProceedWithRollBack) -- only the
             // TransactionGroup still needs an explicit rollback; calling Transaction.RollBack() again
-            // here would be invalid.
-            SafeRollBack(entry.Group.RollBack);
-            error = new InvalidOperationException(
-                entry.Transaction.CommitFailures.LastOrDefault(f => f.IsError)?.Message
-                ?? "A transaction failure forced a rollback.");
-            return false;
+            // here would be invalid. The Transaction half is therefore already undone by Revit, so the
+            // group's own outcome is the whole answer for this document.
+            var groupUnwound = SafeRollBack(entry.Group.RollBack);
+            return CommitAttempt.Failed(new InvalidOperationException(SafeRollBackReason(entry)), groupUnwound);
         }
 
         try
@@ -250,25 +326,87 @@ public sealed class ManagedDocumentTransactions
             // The Transaction is already committed and Revit offers no way to un-commit it; rolling
             // the GROUP back is the only remaining lever, and it is best-effort like every other
             // rollback here. Reported as a failure either way, never silently swallowed.
-            SafeRollBack(entry.Group.RollBack);
-            error = ex;
-            return false;
+            return CommitAttempt.Failed(ex, SafeRollBack(entry.Group.RollBack));
         }
 
-        error = null;
-        return true;
+        return CommitAttempt.Committed();
     }
 
-    private static void SafeRollBack(Action rollBack)
+    /// <summary>
+    /// Appends this document's Failures-API summaries (PRD §07), never throwing. A getter that fails is
+    /// itself reported as an error-severity failure rather than dropped -- it reaches the caller's
+    /// notices[] through the same path every real Revit failure does, so PRD §01's
+    /// observability-over-silence still holds for the case where the observability channel is what broke.
+    /// </summary>
+    private static void SafeCollectFailures(Entry entry, List<FailureSummary> failures)
+    {
+        try
+        {
+            failures.AddRange(entry.Transaction.CommitFailures);
+        }
+        catch (Exception ex)
+        {
+            failures.Add(new FailureSummary(
+                isError: true,
+                message: $"The Failures API result for '{SafeDescribe(entry)}' could not be read, so any Revit " +
+                         $"warnings or errors raised while committing it are not listed here: {ex.Message}",
+                failureDefinitionId: "mcp-bridge.commit-failures-unreadable",
+                failingElementIds: Array.Empty<string>()));
+        }
+    }
+
+    /// <summary>
+    /// The message for a Revit-forced rollback (ProceedWithRollBack), or a description of why that
+    /// message could not be recovered. Never throws -- see <see cref="AttemptCommit"/>.
+    /// </summary>
+    private static string SafeRollBackReason(Entry entry)
+    {
+        try
+        {
+            return entry.Transaction.CommitFailures.LastOrDefault(f => f.IsError)?.Message
+                ?? "A transaction failure forced a rollback.";
+        }
+        catch (Exception ex)
+        {
+            return "A transaction failure forced a rollback, and the failure list naming it could not be " +
+                   $"read either: {ex.Message}";
+        }
+    }
+
+    /// <summary>Entry.Describe() without letting a failing Document.Title break error reporting.</summary>
+    private static string SafeDescribe(Entry entry)
+    {
+        try
+        {
+            return entry.Describe();
+        }
+        catch
+        {
+            return "(a document whose title could not be read)";
+        }
+    }
+
+    /// <summary>
+    /// Rolls back best-effort and REPORTS WHETHER IT WORKED (independent PR review finding). Callers used
+    /// to discard this, then add the document to the "rolled back" list unconditionally -- so a document
+    /// whose own rollback threw was still reported as cleanly rolled back, which is precisely the claim
+    /// the partial-commit report exists to get right, and the ambient document (a human's real open model)
+    /// is one of the documents it could be wrong about.
+    ///
+    /// Still swallowing, deliberately: a rollback exception must never mask the original failure being
+    /// reported, nor stop the next document's rollback. The bug was never that it caught -- it is that
+    /// nobody asked what it caught.
+    /// </summary>
+    private static bool SafeRollBack(Action rollBack)
     {
         try
         {
             rollBack();
+            return true;
         }
         catch
         {
-            // Best-effort: never let a rollback-time exception mask the original failure being
-            // reported, and never let one document's rollback stop another document's.
+            return false;
         }
     }
 }

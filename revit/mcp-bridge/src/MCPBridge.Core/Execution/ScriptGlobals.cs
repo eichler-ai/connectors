@@ -185,7 +185,15 @@ public sealed class ScriptGlobals
     /// </summary>
     public IDictionary<string, int> DialogResultOverrides { get; } = new Dictionary<string, int>();
 
-    public ScriptGlobals(
+    /// <summary>
+    /// INTERNAL, though the CLASS stays public. Roslyn needs the globals TYPE public so a script can bind
+    /// these members by name in its own scope; it never constructs one -- TransactionScriptExecutor passes
+    /// the instance in. The constructor takes a <see cref="ManagedDocumentTransactions"/>, which is
+    /// internal precisely so an agent script cannot get hold of the executor's transaction set (see that
+    /// class's doc comment for the live-verified bypass this closes), and a public constructor taking an
+    /// internal parameter type would not compile anyway.
+    /// </summary>
+    internal ScriptGlobals(
         IDocumentAdapter document,
         IUiApplicationAdapter uiApplication,
         IUiDocumentAdapter? uiDocument,

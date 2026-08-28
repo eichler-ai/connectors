@@ -6,6 +6,7 @@ using System.Threading.Tasks;
 using MCPBridge.Core.Execution;
 using MCPBridge.Core.Tests.Fakes;
 using MCPBridge.RevitAdapter;
+using Microsoft.CodeAnalysis.Scripting;
 using Xunit;
 
 namespace MCPBridge.Core.Tests.Execution;
@@ -635,6 +636,13 @@ public class TransactionScriptExecutorTests
             document, uiApp, null, "CreateProjectDocument();", CancellationToken.None);
 
         Assert.IsNotType<ScriptApiDenylistViolationException>(outcome.Exception);
+        // ALSO not a compile error, or this assertion would pass vacuously (independent PR review
+        // finding): a typo in the script text above would fail to bind, produce a
+        // CompilationErrorException, and satisfy the denylist assertion while proving nothing about the
+        // denylist. Ruling that out is what makes this test say "the call COMPILED and check 1 did not
+        // fire". The precise runtime exception is deliberately not asserted -- it comes from the JIT
+        // failing to load mixed-mode RevitAPI.dll, which is an environment detail, not this claim.
+        Assert.IsNotType<CompilationErrorException>(outcome.Exception);
     }
 
     [Fact]
@@ -648,6 +656,30 @@ public class TransactionScriptExecutorTests
             document, uiApp, null, "CreateFamilyDocument(@\"C:\\t.rft\");", CancellationToken.None);
 
         Assert.IsNotType<ScriptApiDenylistViolationException>(outcome.Exception);
+        Assert.IsNotType<CompilationErrorException>(outcome.Exception);
+    }
+
+    [Fact]
+    public async Task EveryDocumentIsRolledBack_WhenTheRunnerItselfThrows()
+    {
+        // The self-review fix that moved RollBackAll() into ExecuteAsync's `finally` had no
+        // executor-level test -- only the two unit properties that ENABLE it (RollBackAll's
+        // idempotence, and CommitAll leaving the set empty). This closes that, and the seam is real
+        // rather than manufactured: RoslynScriptRunner takes an alcFactory, and it is invoked BEFORE
+        // RunAsync's own try block, so a throwing factory makes RunAsync throw instead of returning a
+        // failed outcome -- exactly the shape the `finally` exists for. Without it the ambient
+        // document's Transaction and TransactionGroup are left open in the live Revit session.
+        var executor = new TransactionScriptExecutor(new RoslynScriptRunner(
+            alcFactory: () => throw new InvalidOperationException("simulated load-context failure"),
+            additionalMetadataReferencePaths: RevitApiReference.Paths));
+        var document = new FakeDocumentAdapter();
+        var uiApp = new FakeUiApplicationAdapter();
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            executor.ExecuteAsync(document, uiApp, null, "1 + 1", CancellationToken.None));
+
+        Assert.Equal(new[] { "Start", "RollBack" }, document.LastTransaction!.Calls);
+        Assert.Equal(new[] { "Start", "RollBack" }, document.LastTransactionGroup!.Calls);
     }
 
     [Fact]

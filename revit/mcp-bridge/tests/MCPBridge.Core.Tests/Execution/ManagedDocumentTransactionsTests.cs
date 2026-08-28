@@ -42,6 +42,23 @@ public class ManagedDocumentTransactionsTests
         public bool ThrowOnCommit { get; set; }
         public bool ThrowOnStartTransaction { get; set; }
         public bool ThrowOnAssimilate { get; set; }
+
+        /// <summary>
+        /// Makes this document's own ROLLBACK fail -- the case that used to be reported as a clean
+        /// rollback anyway (independent PR review finding). Split in two because the two halves unwind
+        /// separately and a document is only honestly "rolled back" when BOTH succeed.
+        /// </summary>
+        public bool ThrowOnTransactionRollBack { get; set; }
+
+        public bool ThrowOnGroupRollBack { get; set; }
+
+        /// <summary>
+        /// Makes the CommitFailures getter itself throw. It is an ordinary adapter property backed by a
+        /// call into Revit, so it can fail like any other -- and it used to be read outside every
+        /// try/catch in CommitAll, which broke that method's documented "never throws" contract.
+        /// </summary>
+        public bool ThrowOnReadingCommitFailures { get; set; }
+
         public IReadOnlyList<FailureSummary> FailuresToReport { get; set; } = Array.Empty<FailureSummary>();
 
         public ITransactionAdapter CreateTransaction(string name) => new JournalingTransaction(this);
@@ -56,7 +73,12 @@ public class ManagedDocumentTransactionsTests
 
             public JournalingTransaction(JournalingDocumentAdapter owner) => _owner = owner;
 
-            public IReadOnlyList<FailureSummary> CommitFailures { get; private set; } = Array.Empty<FailureSummary>();
+            private IReadOnlyList<FailureSummary> _commitFailures = Array.Empty<FailureSummary>();
+
+            public IReadOnlyList<FailureSummary> CommitFailures =>
+                _owner.ThrowOnReadingCommitFailures
+                    ? throw new InvalidOperationException($"{_owner.Title}: simulated CommitFailures read failure")
+                    : _commitFailures;
 
             public void Start()
             {
@@ -75,13 +97,20 @@ public class ManagedDocumentTransactionsTests
                     throw new InvalidOperationException($"{_owner.Title}: simulated commit failure");
                 }
 
-                CommitFailures = _owner.FailuresToReport;
-                return CommitFailures.Any(f => f.IsError)
+                _commitFailures = _owner.FailuresToReport;
+                return _commitFailures.Any(f => f.IsError)
                     ? TransactionCommitResult.RolledBack
                     : TransactionCommitResult.Committed;
             }
 
-            public void RollBack() => _owner.Record("tx.RollBack");
+            public void RollBack()
+            {
+                _owner.Record("tx.RollBack");
+                if (_owner.ThrowOnTransactionRollBack)
+                {
+                    throw new InvalidOperationException($"{_owner.Title}: simulated transaction-rollback failure");
+                }
+            }
         }
 
         private sealed class JournalingGroup : ITransactionGroupAdapter
@@ -101,7 +130,14 @@ public class ManagedDocumentTransactionsTests
                 }
             }
 
-            public void RollBack() => _owner.Record("group.RollBack");
+            public void RollBack()
+            {
+                _owner.Record("group.RollBack");
+                if (_owner.ThrowOnGroupRollBack)
+                {
+                    throw new InvalidOperationException($"{_owner.Title}: simulated group-rollback failure");
+                }
+            }
         }
     }
 
@@ -368,6 +404,330 @@ public class ManagedDocumentTransactionsTests
 
         Assert.Contains("IDocumentCreationSource", ex.Message);
         Assert.Contains("revit/test-harness", ex.Message);
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Independent PR review, finding 1: a rollback that itself failed was still reported as a clean
+    // rollback. Every case below is about the connector telling the truth about what it does NOT know.
+    // ---------------------------------------------------------------------------------------------
+
+    [Fact]
+    public void CommitAll_DoesNotClaimADocumentRolledBack_WhenItsOwnRollbackThrew()
+    {
+        // THE BUG THIS PINS: the unwind loop added every remaining document to the "rolled back" list
+        // unconditionally, with SafeRollBack swallowing the exception, so a document whose rollback
+        // actually failed was reported as cleanly undone. Here that document is the AMBIENT one -- a
+        // human's real open model, and precisely the document the commit ORDERING exists to protect.
+        var journal = new List<string>();
+        var set = NewSet();
+        set.Open(
+            new JournalingDocumentAdapter("ambient", journal) { ThrowOnTransactionRollBack = true },
+            isAmbient: true);
+        set.Open(new JournalingDocumentAdapter("created", journal) { ThrowOnCommit = true });
+
+        var result = set.CommitAll();
+
+        Assert.False(result.Success);
+        Assert.DoesNotContain("ambient (active document)", result.RolledBackDocuments);
+        Assert.Equal(new[] { "ambient (active document)" }, result.UnknownStateDocuments);
+        // The failing document's OWN rollback worked, so it is still reported honestly as rolled back.
+        Assert.Equal(new[] { "created" }, result.RolledBackDocuments);
+        // Best-effort is preserved: a throwing transaction rollback must not stop the group's.
+        Assert.Contains("ambient:group.RollBack", journal);
+    }
+
+    [Fact]
+    public void CommitAll_ReportsUnknownState_WhenOnlyTheGroupRollbackThrows()
+    {
+        // A document is honestly "rolled back" only when BOTH halves came back clean; the group half
+        // failing on its own is just as unknown as the transaction half failing.
+        var journal = new List<string>();
+        var set = NewSet();
+        set.Open(new JournalingDocumentAdapter("ambient", journal) { ThrowOnGroupRollBack = true }, isAmbient: true);
+        set.Open(new JournalingDocumentAdapter("created", journal) { ThrowOnCommit = true });
+
+        var result = set.CommitAll();
+
+        Assert.Equal(new[] { "ambient (active document)" }, result.UnknownStateDocuments);
+        Assert.Equal(new[] { "created" }, result.RolledBackDocuments);
+    }
+
+    [Fact]
+    public void CommitAll_ReportsUnknownState_WhenTheFailingDocumentsOwnRollbackThrows()
+    {
+        // The other half of the same bug: the document that failed to commit is unwound inside the
+        // commit attempt itself, which discarded its rollback outcome just as the unwind loop did.
+        var journal = new List<string>();
+        var set = NewSet();
+        set.Open(
+            new JournalingDocumentAdapter("ambient", journal)
+            {
+                ThrowOnCommit = true,
+                ThrowOnTransactionRollBack = true,
+            },
+            isAmbient: true);
+
+        var result = set.CommitAll();
+
+        Assert.False(result.Success);
+        Assert.Empty(result.RolledBackDocuments);
+        Assert.Equal(new[] { "ambient (active document)" }, result.UnknownStateDocuments);
+    }
+
+    [Fact]
+    public void CommitAll_IsPartial_WhenADocumentIsLeftInAnUnknownState_EvenThoughNothingCommitted()
+    {
+        // IsPartial is what makes TransactionScriptExecutor emit the script-partial-commit notice. An
+        // unknown-state document with zero commits used to fall through every list and produce NO
+        // notice at all -- the silence PRD §01 exists to forbid, in the case that most needs a voice.
+        var journal = new List<string>();
+        var set = NewSet();
+        set.Open(
+            new JournalingDocumentAdapter("ambient", journal)
+            {
+                ThrowOnCommit = true,
+                ThrowOnGroupRollBack = true,
+            },
+            isAmbient: true);
+
+        var result = set.CommitAll();
+
+        Assert.Empty(result.CommittedDocuments);
+        Assert.True(result.IsPartial);
+    }
+
+    [Fact]
+    public void CommitAll_ReportsACleanRollbackAsRolledBack_NotAsUnknown()
+    {
+        // The honesty fix must not swing the other way and start hedging about rollbacks that worked.
+        var journal = new List<string>();
+        var set = NewSet();
+        set.Open(new JournalingDocumentAdapter("ambient", journal), isAmbient: true);
+        set.Open(new JournalingDocumentAdapter("created", journal) { ThrowOnCommit = true });
+
+        var result = set.CommitAll();
+
+        Assert.Equal(new[] { "created", "ambient (active document)" }, result.RolledBackDocuments);
+        Assert.Empty(result.UnknownStateDocuments);
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Independent PR review, finding 4: CommitAll's "never throws" contract, and the safety net that
+    // silently stopped working when it was violated.
+    // ---------------------------------------------------------------------------------------------
+
+    [Fact]
+    public void CommitAll_DoesNotThrow_WhenTheCommitFailuresGetterItselfThrows()
+    {
+        // CommitFailures was read OUTSIDE every try/catch, on both the success path and the
+        // Revit-forced-rollback path. A throwing getter escaped CommitAll entirely, which the executor
+        // is not written to survive: it reports a commit failure by INSPECTING the returned result.
+        var journal = new List<string>();
+        var set = NewSet();
+        set.Open(
+            new JournalingDocumentAdapter("ambient", journal) { ThrowOnReadingCommitFailures = true },
+            isAmbient: true);
+
+        var result = set.CommitAll();
+
+        Assert.True(result.Success);
+        // Not silently dropped either (PRD §01): the unreadable failure list is itself reported as an
+        // error-severity failure, which reaches notices[] through the ordinary path.
+        var reported = Assert.Single(result.CommitFailures);
+        Assert.True(reported.IsError);
+        Assert.Contains("could not be read", reported.Message);
+    }
+
+    [Fact]
+    public void CommitAll_LeavesNothingOpen_WhenTheCommitFailuresGetterThrowsMidRun()
+    {
+        // THE ACTUAL DAMAGE the escaping exception caused: _entries was cleared UP FRONT, so the
+        // executor's `finally` RollBackAll() found an empty set and became a no-op, leaking every
+        // not-yet-committed document's Transaction and TransactionGroup into the live Revit session.
+        // Clearing in a `finally` instead means the set is empty only once CommitAll has genuinely
+        // closed everything -- and Count is the observable the executor's net keys off.
+        var journal = new List<string>();
+        var set = NewSet();
+        set.Open(new JournalingDocumentAdapter("ambient", journal), isAmbient: true);
+        set.Open(new JournalingDocumentAdapter("created", journal) { ThrowOnReadingCommitFailures = true });
+
+        var result = set.CommitAll();
+
+        Assert.NotNull(result);
+        Assert.Equal(0, set.Count);
+
+        // And the net stays idempotent: nothing is rolled back a second time.
+        journal.Clear();
+        set.RollBackAll();
+        Assert.Empty(journal);
+    }
+
+    [Fact]
+    public void CommitAll_KeepsItsEntries_WhenSomethingUnexpectedEscapesIt()
+    {
+        // THE POINT OF NOT CLEARING UP FRONT, and the assertion that a `finally` would have failed --
+        // a `finally` runs on the exception path too and would clear the entries just the same. Every
+        // adapter call CommitAll makes is guarded, so getting here needs a genuinely unforeseen throw;
+        // Document.Title (via Entry.Describe) is one such spot, and stands in for the ones nobody has
+        // thought of yet. What matters is not the specific throw but that after it, the executor's
+        // `finally` RollBackAll() still has documents to close instead of silently finding none.
+        var journal = new List<string>();
+        var set = NewSet();
+        set.Open(new JournalingDocumentAdapter("ambient", journal), isAmbient: true);
+        set.Open(new ThrowingTitleDocumentAdapter("created", journal));
+
+        Assert.Throws<InvalidOperationException>(() => set.CommitAll());
+
+        Assert.Equal(2, set.Count);
+
+        // And the net genuinely closes them, rather than merely still holding references.
+        journal.Clear();
+        set.RollBackAll();
+        Assert.Contains("ambient:tx.RollBack", journal);
+        Assert.Contains("ambient:group.RollBack", journal);
+        Assert.Equal(0, set.Count);
+    }
+
+    /// <summary>
+    /// Commits fine but throws from Title, so the throw escapes from Entry.Describe() -- outside every
+    /// guarded adapter call, which is exactly the "unforeseen" shape being modelled.
+    /// </summary>
+    private sealed class ThrowingTitleDocumentAdapter : IDocumentAdapter
+    {
+        private readonly List<string> _journal;
+        private readonly string _name;
+
+        public ThrowingTitleDocumentAdapter(string name, List<string> journal)
+        {
+            _name = name;
+            _journal = journal;
+        }
+
+        public string Title => throw new InvalidOperationException($"{_name}: simulated Title failure");
+        public string? PathName => null;
+        public bool IsWorkshared => false;
+        public string? CentralModelPath => null;
+        public string DocumentId => "tmp-" + _name;
+
+        public ITransactionAdapter CreateTransaction(string name) => new Transaction(this);
+
+        public ITransactionGroupAdapter CreateTransactionGroup(string name) => new Group(this);
+
+        private void Record(string call) => _journal.Add($"{_name}:{call}");
+
+        private sealed class Transaction : ITransactionAdapter
+        {
+            private readonly ThrowingTitleDocumentAdapter _owner;
+
+            public Transaction(ThrowingTitleDocumentAdapter owner) => _owner = owner;
+
+            public IReadOnlyList<FailureSummary> CommitFailures => Array.Empty<FailureSummary>();
+
+            public void Start() => _owner.Record("tx.Start");
+
+            public TransactionCommitResult Commit()
+            {
+                _owner.Record("tx.Commit");
+                return TransactionCommitResult.Committed;
+            }
+
+            public void RollBack() => _owner.Record("tx.RollBack");
+        }
+
+        private sealed class Group : ITransactionGroupAdapter
+        {
+            private readonly ThrowingTitleDocumentAdapter _owner;
+
+            public Group(ThrowingTitleDocumentAdapter owner) => _owner = owner;
+
+            public void Start() => _owner.Record("group.Start");
+
+            public void Assimilate() => _owner.Record("group.Assimilate");
+
+            public void RollBack() => _owner.Record("group.RollBack");
+        }
+    }
+
+    [Fact]
+    public void CommitAll_StillReportsARevitForcedRollback_WhenTheFailureMessageCannotBeRead()
+    {
+        // The forced-rollback branch reads CommitFailures a SECOND time, to name the error in the
+        // exception it constructs. That read must not throw either, and losing the message must not
+        // lose the failure.
+        var journal = new List<string>();
+        var set = NewSet();
+        var ambient = new ForcedRollbackDocumentAdapter("ambient", journal);
+        set.Open(ambient, isAmbient: true);
+
+        var result = set.CommitAll();
+
+        Assert.False(result.Success);
+        Assert.Contains("forced a rollback", result.Failure!.Message);
+    }
+
+    /// <summary>
+    /// Reports TransactionCommitResult.RolledBack from Commit() and THEN makes CommitFailures throw --
+    /// the exact interleaving the forced-rollback branch's own second read has to survive, which the
+    /// single ThrowOnReadingCommitFailures flag cannot express (it would throw on the first read too,
+    /// before the branch is ever reached).
+    /// </summary>
+    private sealed class ForcedRollbackDocumentAdapter : IDocumentAdapter
+    {
+        private readonly List<string> _journal;
+
+        public ForcedRollbackDocumentAdapter(string title, List<string> journal)
+        {
+            Title = title;
+            _journal = journal;
+        }
+
+        public string Title { get; }
+        public string? PathName => null;
+        public bool IsWorkshared => false;
+        public string? CentralModelPath => null;
+        public string DocumentId => "tmp-" + Title;
+
+        public ITransactionAdapter CreateTransaction(string name) => new Transaction(this);
+
+        public ITransactionGroupAdapter CreateTransactionGroup(string name) => new Group(this);
+
+        private void Record(string call) => _journal.Add($"{Title}:{call}");
+
+        private sealed class Transaction : ITransactionAdapter
+        {
+            private readonly ForcedRollbackDocumentAdapter _owner;
+            private bool _committed;
+
+            public Transaction(ForcedRollbackDocumentAdapter owner) => _owner = owner;
+
+            public IReadOnlyList<FailureSummary> CommitFailures => _committed
+                ? throw new InvalidOperationException("simulated CommitFailures read failure after commit")
+                : Array.Empty<FailureSummary>();
+
+            public void Start() => _owner.Record("tx.Start");
+
+            public TransactionCommitResult Commit()
+            {
+                _owner.Record("tx.Commit");
+                _committed = true;
+                return TransactionCommitResult.RolledBack;
+            }
+
+            public void RollBack() => _owner.Record("tx.RollBack");
+        }
+
+        private sealed class Group : ITransactionGroupAdapter
+        {
+            private readonly ForcedRollbackDocumentAdapter _owner;
+
+            public Group(ForcedRollbackDocumentAdapter owner) => _owner = owner;
+
+            public void Start() => _owner.Record("group.Start");
+
+            public void Assimilate() => _owner.Record("group.Assimilate");
+
+            public void RollBack() => _owner.Record("group.RollBack");
+        }
     }
 
     private sealed class NonCreatingUiApplicationAdapter : IUiApplicationAdapter

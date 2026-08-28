@@ -101,9 +101,8 @@ your script if you'd rather: `using Autodesk.Revit.DB;`.
 
 **Creating documents — use `CreateProjectDocument` / `CreateFamilyDocument`.** These script globals
 create the document *and* open a transaction the connector manages for it, so you can write to it
-immediately; it commits when your script returns and rolls back if your script throws, exactly like the
-active document. No confirmation needed — nothing persists until you save, and saving is gated
-separately.
+immediately; it commits when your script returns and rolls back if it throws, exactly like the active
+document. No confirmation needed — nothing persists until you save, which is gated separately.
 
 ```csharp
 var doc = CreateProjectDocument();               // blank, writable, from Revit's default template
@@ -114,29 +113,32 @@ Autodesk.Revit.DB.Level.Create(doc, 10.0);       // just write to it — no tran
 `CreateFamilyDocument(path)` needs a path — there is no default family template.
 
 **The raw `UIApplication.Application.NewProjectDocument`/`NewFamilyDocument` still work and are
-READ-ONLY** — that is the only difference between the two paths. Nothing opens a transaction for what
-they return, and you may not open one yourself (see below), so writing throws
+READ-ONLY** — the only difference between the two paths. Nothing opens a transaction for what they
+return, and you may not open one yourself (see below), so writing throws
 `ModificationOutsideTransactionException`. Use them only to inspect.
 
 Ask Revit for template paths rather than guessing: `Application.DefaultProjectTemplate` is a full `.rte`
 path, and `Application.FamilyTemplatePath` is the **root of the family-template tree**, not a flat
-folder of `.rft` files — templates sit in language/discipline subdirectories, so search it recursively
+folder of `.rft` files — templates sit in subdirectories, so search recursively
 (`SearchOption.AllDirectories`).
 
 However you made it, a created document **has no `document_id`** — it never appears in `list_instances`
 and you cannot point a later call at it. It stays open for the session, so a later script finds it by
-walking `UIApplication.Application.Documents` and matching `Title` or `PathName`.
+walking `UIApplication.Application.Documents` and matching `Title` or `PathName` — to **read** only: a
+created document is writable only inside the script that created it.
 
 **With several documents in play**, all of them commit after your script returns — created ones first,
 the active one last. If one commit fails the rest are rolled back, but a commit that already succeeded
-cannot be undone, so an earlier created document can keep its changes; you then get a
-`script-partial-commit` notice naming which documents kept theirs and which did not. The ordering means
-the active document is always the one rolled back in that case.
+cannot be undone, so an earlier one can keep its changes; you then get a
+`script-partial-commit` notice naming which documents kept theirs and which did not; the ordering means
+the active document is always the one rolled back.
 
 **There is no cleanup path, so create sparingly.** `Document.Close` and `.Dispose` are both
-confirmation-gated (see below), which means a script cannot quietly tidy up after itself: every
-document you create stays open in the live Revit session a person is sitting in front of, until they
-restart Revit. Don't create documents in a loop.
+confirmation-gated (see below), so a script cannot quietly tidy up after itself: every document you
+create stays open in the person's live Revit session until they restart Revit. Worse for a created one:
+**Revit itself** refuses `Close` while its managed transaction is open, even with
+`confirm_lifecycle_actions: true` — for a throwaway you can close, use the raw read-only path. Don't
+create documents in a loop.
 
 ### What you may not do without saying so
 
@@ -148,9 +150,9 @@ have run in is rolled back cleanly.
 Your script is already inside one, and Revit allows only one open transaction per document, so your own
 can never work. There is no flag for this. Just make your changes directly; they commit on success and
 roll back on failure. The error record's `code` is `script-api-denied`. The refusal ignores *which*
-document you were opening the transaction for — including a document you just created. That is not a
-gap you need to work around: use `CreateProjectDocument`/`CreateFamilyDocument` above and the connector
-opens and owns that document's transaction for you, so there is never a reason to construct one.
+document you meant it for, including one you just created. That is not a gap to work around: use
+`CreateProjectDocument`/`CreateFamilyDocument` above and the connector owns that document's transaction
+for you, so there is never a reason to construct one.
 
 **2. Allowed, but only if you confirm — the document-lifecycle and worksharing calls.**
 

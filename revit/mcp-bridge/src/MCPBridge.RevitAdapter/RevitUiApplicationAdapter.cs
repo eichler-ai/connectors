@@ -3,8 +3,15 @@ using Autodesk.Revit.UI;
 
 namespace MCPBridge.RevitAdapter;
 
-/// <summary>Real implementation wrapping Autodesk.Revit.UI.UIApplication. Not unit-tested (see RevitTransactionAdapter).</summary>
-public sealed class RevitUiApplicationAdapter : IUiApplicationAdapter, IRawUiApplicationSource, IDocumentCreationSource
+/// <summary>
+/// Real implementation wrapping Autodesk.Revit.UI.UIApplication. Not unit-tested (see RevitTransactionAdapter).
+///
+/// Internal for the same reason as <see cref="RevitDocumentAdapter"/>, and it is the more powerful of the
+/// two: its constructor takes the UIApplication a script already holds as a global, and its
+/// IDocumentCreationSource members below hand back an IDocumentAdapter whose CreateTransaction a script
+/// could then call. Public, it was a one-line route to an unmanaged transaction on a brand-new document.
+/// </summary>
+internal sealed class RevitUiApplicationAdapter : IUiApplicationAdapter, IRawUiApplicationSource, IDocumentCreationSource
 {
     private readonly UIApplication _uiApplication;
 

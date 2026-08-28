@@ -58,4 +58,18 @@
     <ProjectReference Include="..\MCPBridge.RevitAdapter\MCPBridge.RevitAdapter.csproj" />
   </ItemGroup>
 
+  <!--
+    ManagedDocumentTransactions and ScriptGlobals' constructor are internal because they are reachable
+    from agent script scope otherwise ; RoslynScriptRunner.LoadableReferences() references every assembly
+    loaded in the Revit AppDomain, this one included, so a public transaction-owning type here is a type
+    an untrusted script can name and construct. See ManagedDocumentTransactions' own doc comment for the
+    live evidence. This grant lets MCPBridge.Core.Tests keep testing them directly ; a Roslyn script
+    submission assembly is never named here and cannot choose its own name, so it gains nothing.
+  -->
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
+      <_Parameter1>MCPBridge.Core.Tests</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
+
 </Project>

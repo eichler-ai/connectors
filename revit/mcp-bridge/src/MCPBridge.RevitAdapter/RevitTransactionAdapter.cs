@@ -9,8 +9,13 @@ namespace MCPBridge.RevitAdapter;
 /// Revit API types are not constructible outside a live session (see the
 /// revit-connector-development skill's testing strategy). Exercised only by the
 /// live integration harness.
+///
+/// Internal alongside <see cref="RevitDocumentAdapter"/>. Constructing this already required a script to
+/// construct the Autodesk.Revit.DB.Transaction it wraps, which ScriptApiDenylist check 1 refuses outright,
+/// so this was never the open door -- but it is only ever built from that adapter, in this assembly, and
+/// leaving one half of the pair public would just invite the question again.
 /// </summary>
-public sealed class RevitTransactionAdapter : ITransactionAdapter
+internal sealed class RevitTransactionAdapter : ITransactionAdapter
 {
     private readonly Transaction _transaction;
 
