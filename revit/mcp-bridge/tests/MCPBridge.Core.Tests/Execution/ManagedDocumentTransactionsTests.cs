@@ -204,6 +204,42 @@ public class ManagedDocumentTransactionsTests
     }
 
     [Fact]
+    public void RollBackAll_IsIdempotent_SoTheExecutorCanCallItUnconditionallyFromFinally()
+    {
+        // Self-review finding: TransactionScriptExecutor now calls RollBackAll() from its `finally` as
+        // a safety net for the case where the runner THROWS rather than returning a failed outcome --
+        // no branch would otherwise close anything. That only works if a second call is a no-op, so
+        // this pins it rather than leaving it to be re-derived from the entry-clearing implementation.
+        var journal = new List<string>();
+        var set = NewSet();
+        set.Open(new JournalingDocumentAdapter("ambient", journal), isAmbient: true);
+        set.RollBackAll();
+        journal.Clear();
+
+        set.RollBackAll();
+
+        Assert.Empty(journal);
+        Assert.Equal(0, set.Count);
+    }
+
+    [Fact]
+    public void RollBackAll_AfterCommitAll_DoesNothing()
+    {
+        var journal = new List<string>();
+        var set = NewSet();
+        set.Open(new JournalingDocumentAdapter("ambient", journal), isAmbient: true);
+        set.Open(new JournalingDocumentAdapter("created", journal));
+        set.CommitAll();
+        journal.Clear();
+
+        set.RollBackAll();
+
+        // Rolling a committed document back from the `finally` net would undo the very work the run
+        // just reported as successful -- the one thing this net must never do.
+        Assert.Empty(journal);
+    }
+
+    [Fact]
     public void CommitAll_RollsBackTheFailingDocumentAndEveryUnattemptedOne_WhenTheFirstCommitThrows()
     {
         // Nothing committed, so nothing is partial -- this is the ordinary total-failure case and it

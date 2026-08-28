@@ -133,6 +133,13 @@ public sealed class ManagedDocumentTransactions
     /// Rolls back every managed document, most recently opened first, best-effort. Used for every
     /// failed run -- a thrown script, a compile/denylist rejection, or a cancellation -- so a failure
     /// leaves no partial changes behind in ANY document, not just the ambient one.
+    ///
+    /// IDEMPOTENT BY DESIGN -- entries are dropped once closed, here and in <see cref="CommitAll"/>, so
+    /// calling this a second time does nothing. That is what lets TransactionScriptExecutor call it
+    /// unconditionally from its `finally` as a safety net: if the runner itself throws rather than
+    /// returning a failed outcome, no branch has rolled anything back and every document's transaction
+    /// would otherwise be left open in the live session. Self-review finding -- the single-document
+    /// version had the same hole and it simply mattered less.
     /// </summary>
     public void RollBackAll()
     {
@@ -141,16 +148,25 @@ public sealed class ManagedDocumentTransactions
             SafeRollBack(_entries[i].Transaction.RollBack);
             SafeRollBack(_entries[i].Group.RollBack);
         }
+
+        _entries.Clear();
     }
 
     /// <summary>
     /// Commits every managed document in the order described on this class, stopping at the first
     /// failure and rolling back everything that has not already committed. Never throws: a commit-time
     /// exception is returned in the result so the caller can report it alongside what did land.
+    ///
+    /// Like <see cref="RollBackAll"/>, this leaves the set empty: every document has been closed one way
+    /// or another, so the executor's `finally` net has nothing left to do.
     /// </summary>
     public ManagedDocumentCommitResult CommitAll()
     {
         var order = _entries.Where(e => !e.IsAmbient).Concat(_entries.Where(e => e.IsAmbient)).ToList();
+
+        // Every entry is closed by the time this returns, one way or another -- drop them so a later
+        // RollBackAll (the executor's `finally` safety net) is a no-op rather than a double close.
+        _entries.Clear();
 
         var failures = new List<FailureSummary>();
         var committed = new List<string>();

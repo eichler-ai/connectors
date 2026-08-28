@@ -121,6 +121,12 @@ public sealed class TransactionScriptExecutor
         }
         finally
         {
+            // Safety net, not the normal path: every branch above has already committed or rolled back,
+            // and ManagedDocumentTransactions drops its entries when it does, so this is a no-op then.
+            // It matters when the runner throws instead of returning a failed outcome -- without it,
+            // every managed document's Transaction and TransactionGroup would be left open in the live
+            // Revit session with nothing holding a reference to them.
+            transactions.RollBackAll();
             ActiveDialogContext.ClearActive();
         }
     }
