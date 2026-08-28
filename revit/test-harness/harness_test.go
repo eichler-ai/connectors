@@ -155,19 +155,36 @@ func runScript(t *testing.T, c *mcpclient.Client, instanceID, documentID, script
 	return decodeToolResult[executeScriptOut](t, callExecuteScript(t, c, instanceID, documentID, script))
 }
 
+// rejectedScript is the PRD §01 diagnostic record a refused execution comes
+// back as. `code` and `remedy` are read as fields here, deliberately: they were
+// both wrong on the wire while every message-substring assertion in this file
+// passed -- every failure reported code:"script-execution-failed" and no remedy
+// at all, so the codes skill.md tells an agent to match on existed only inside
+// the prose. A test that greps the message cannot see that.
+type rejectedScript struct {
+	Text  string
+	Error struct {
+		Code    string   `json:"code"`
+		Message string   `json:"message"`
+		Remedy  []string `json:"remedy"`
+	} `json:"error"`
+}
+
 // runRejectedScript executes one script that is expected to be REJECTED, and
 // returns everything the connector said about why.
 //
 // A rejected script does not come back as a successful tool call carrying
 // status:"failed" -- it comes back as an MCP tool ERROR whose text content is
-// the PRD §01 diagnostic record (confirmed live: isError with
-// code:"script-execution-failed" and the ScriptApiDenylist message). That is
-// why this cannot go through decodeToolResult, which fails the test on
-// isError by design -- correctly, for every case that expects a result.
-func runRejectedScript(t *testing.T, c *mcpclient.Client, instanceID, documentID, script string) string {
+// the PRD §01 diagnostic record. That is why this cannot go through
+// decodeToolResult, which fails the test on isError by design -- correctly, for
+// every case that expects a result.
+func runRejectedScript(t *testing.T, c *mcpclient.Client, instanceID, documentID, script string) rejectedScript {
 	t.Helper()
-	raw := callExecuteScript(t, c, instanceID, documentID, script)
+	return rejectionOf(t, callExecuteScript(t, c, instanceID, documentID, script))
+}
 
+func rejectionOf(t *testing.T, raw json.RawMessage) rejectedScript {
+	t.Helper()
 	var tr toolResult
 	if err := json.Unmarshal(raw, &tr); err != nil {
 		t.Fatalf("decode tool envelope: %v\nraw: %s", err, raw)
@@ -178,7 +195,12 @@ func runRejectedScript(t *testing.T, c *mcpclient.Client, instanceID, documentID
 	if len(tr.Content) == 0 {
 		t.Fatalf("rejection carried no content at all, so nothing tells an agent what happened: %s", raw)
 	}
-	return tr.Content[0].Text
+
+	out := rejectedScript{Text: tr.Content[0].Text}
+	if err := json.Unmarshal([]byte(tr.Content[0].Text), &out); err != nil {
+		t.Fatalf("rejection text is not the PRD §01 record it is supposed to be: %v\ntext: %s", err, tr.Content[0].Text)
+	}
+	return out
 }
 
 func callExecuteScript(t *testing.T, c *mcpclient.Client, instanceID, documentID, script string) json.RawMessage {
@@ -297,17 +319,35 @@ func TestDenylistRejectsOwnTransaction(t *testing.T) {
 		{"SubTransaction", "Autodesk.Revit.DB.SubTransaction", `using (var st = new Autodesk.Revit.DB.SubTransaction(Document)) { st.Start(); st.Commit(); } return "ran";`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			text := runRejectedScript(t, c, instanceID, documentID, tc.script)
+			rej := runRejectedScript(t, c, instanceID, documentID, tc.script)
 			// The code an agent keys off, and the member it actually used --
 			// a rejection that named neither would be unactionable (PRD §01).
-			if !strings.Contains(text, "script-api-denied") {
-				t.Errorf("rejection does not name the denylist code; result: %s", text)
+			if rej.Error.Code != "script-api-denied" {
+				t.Errorf("record's code = %q, want script-api-denied; result: %s", rej.Error.Code, rej.Text)
 			}
-			if !strings.Contains(text, tc.member) {
-				t.Errorf("rejection does not name %q, so an agent cannot tell what it did wrong; result: %s", tc.member, text)
+			if !strings.Contains(rej.Text, tc.member) {
+				t.Errorf("rejection does not name %q, so an agent cannot tell what it did wrong; result: %s", tc.member, rej.Text)
+			}
+			if len(rej.Error.Remedy) == 0 {
+				t.Errorf("rejection carries no remedy, though there is a concrete next step; result: %s", rej.Text)
 			}
 		})
 	}
+
+	// A `dynamic` argument makes constructor overload resolution late-bound,
+	// which an independent PR review flagged as a way past a check keyed on the
+	// bound symbol. Live, it is not: this is refused like any other spelling of
+	// `new` (Roslyn still reports the constructor symbol, and Analyze now falls
+	// back to the constructed TYPE if it ever stops doing so). Pinned live as
+	// well as in tier 1 because check 1 is the one refusal that can never be
+	// opted into, and `dynamic` genuinely works in scripts here.
+	t.Run("LateBoundConstructorArgument", func(t *testing.T) {
+		rej := runRejectedScript(t, c, instanceID, documentID,
+			`dynamic d = Document; var tx = new Autodesk.Revit.DB.Transaction(d, "mine"); return "constructed";`)
+		if rej.Error.Code != "script-api-denied" {
+			t.Errorf("record's code = %q, want script-api-denied; result: %s", rej.Error.Code, rej.Text)
+		}
+	})
 
 	// Confirmation is for the lifecycle members only; it must not become a
 	// general "ignore the denylist" switch. Live-checked because that is the
@@ -365,15 +405,15 @@ func TestLifecycleGateRequiresConfirmation(t *testing.T) {
 	const script = `System.Func<bool> close = Document.Close; return close != null ? "bound" : "null";`
 
 	// Unconfirmed: refused, before anything runs.
-	text := runRejectedScript(t, c, instanceID, documentID, script)
-	if !strings.Contains(text, "script-lifecycle-confirmation-required") {
-		t.Errorf("refusal does not name the confirmation code, so an agent cannot tell this is retryable; result: %s", text)
+	rej := runRejectedScript(t, c, instanceID, documentID, script)
+	if rej.Error.Code != "script-lifecycle-confirmation-required" {
+		t.Errorf("record's code = %q, want script-lifecycle-confirmation-required -- an agent matching on the field, as skill.md tells it to, cannot see this is retryable; result: %s", rej.Error.Code, rej.Text)
 	}
-	if !strings.Contains(text, "confirm_lifecycle_actions") {
-		t.Errorf("refusal does not name the argument that lifts it, which is the only actionable part (PRD §01); result: %s", text)
+	if !strings.Contains(strings.Join(rej.Error.Remedy, " "), "confirm_lifecycle_actions: true") {
+		t.Errorf("remedy does not tell the agent to resend with confirm_lifecycle_actions, which is the whole point of a retryable refusal (PRD §01); result: %s", rej.Text)
 	}
-	if !strings.Contains(text, "Autodesk.Revit.DB.Document.Close") {
-		t.Errorf("refusal does not name the member the script used; result: %s", text)
+	if !strings.Contains(rej.Text, "Autodesk.Revit.DB.Document.Close") {
+		t.Errorf("refusal does not name the member the script used; result: %s", rej.Text)
 	}
 
 	// Confirmed: the identical text runs.
@@ -391,7 +431,54 @@ func TestLifecycleGateRequiresConfirmation(t *testing.T) {
 	// that folded the decision into the compile step would pass every
 	// assertion above and fail this one.
 	again := runRejectedScript(t, c, instanceID, documentID, script)
-	if !strings.Contains(again, "script-lifecycle-confirmation-required") {
-		t.Errorf("confirmation leaked to a later unconfirmed run of the same script; result: %s", again)
+	if again.Error.Code != "script-lifecycle-confirmation-required" {
+		t.Errorf("confirmation leaked to a later unconfirmed run of the same script; result: %s", again.Text)
+	}
+}
+
+// TestLifecycleGateCoversTheNewlyAddedMembers checks the five members added to
+// the gated tier after an independent PR review proposed them (PRD §14):
+// Document.SaveAsCloudModel/Dispose, PrintManager.SubmitPrint,
+// UIDocument.SaveAndClose, UIApplication.PostCommand. Each exists with these
+// signatures in the live Revit 2027 API (verified with describe_function before
+// being added), and each answers "no" to the list's membership question -- a
+// thrown exception undoes none of them.
+//
+// Every script here binds a METHOD GROUP and never invokes it, for the same
+// reason TestLifecycleGateRequiresConfirmation does: detection fires on the
+// reference exactly as on a call, and actually invoking any of these would
+// close, save, print, or cloud-publish a real model on a real machine, which
+// nothing in a regression suite could undo afterwards.
+func TestLifecycleGateCoversTheNewlyAddedMembers(t *testing.T) {
+	c, instanceID, documentID := targetDocument(t)
+
+	for _, tc := range []struct{ name, member, script string }{
+		{"SaveAsCloudModel", "Autodesk.Revit.DB.Document.SaveAsCloudModel",
+			`System.Action<System.Guid, System.Guid, string, string> f = Document.SaveAsCloudModel; return f != null ? "bound" : "null";`},
+		{"Dispose", "Autodesk.Revit.DB.Document.Dispose",
+			`System.Action f = Document.Dispose; return f != null ? "bound" : "null";`},
+		{"SubmitPrint", "Autodesk.Revit.DB.PrintManager.SubmitPrint",
+			`System.Func<bool> f = Document.PrintManager.SubmitPrint; return f != null ? "bound" : "null";`},
+		{"SaveAndClose", "Autodesk.Revit.UI.UIDocument.SaveAndClose",
+			`System.Func<bool> f = UIDocument.SaveAndClose; return f != null ? "bound" : "null";`},
+		{"PostCommand", "Autodesk.Revit.UI.UIApplication.PostCommand",
+			`System.Action<Autodesk.Revit.UI.RevitCommandId> f = UIApplication.PostCommand; return f != null ? "bound" : "null";`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rej := runRejectedScript(t, c, instanceID, documentID, tc.script)
+			if rej.Error.Code != "script-lifecycle-confirmation-required" {
+				t.Errorf("record's code = %q, want script-lifecycle-confirmation-required; result: %s", rej.Error.Code, rej.Text)
+			}
+			if !strings.Contains(rej.Text, tc.member) {
+				t.Errorf("refusal does not name %q; result: %s", tc.member, rej.Text)
+			}
+
+			// The same text, confirmed, gets through the gate and runs.
+			out := decodeToolResult[executeScriptOut](t, callExecuteScriptWith(t, c, instanceID, documentID, tc.script,
+				map[string]any{"confirm_lifecycle_actions": true}))
+			if out.Status != "success" || !strings.Contains(out.Output, "bound") {
+				t.Fatalf("confirmed script did not run: status=%q output=%s", out.Status, out.Output)
+			}
+		})
 	}
 }
