@@ -23,6 +23,14 @@ namespace MCPBridge.Core.Execution;
 /// queries, geometry) rides the executor's existing ambient transaction and needs no new
 /// transaction-ownership scheme -- confirmed live before this shipped (PRD §14).
 ///
+/// ISSUE #24 adds the one exception to "everything rides the ambient transaction": a document
+/// the script CREATES is a different document, and Revit's one-open-transaction rule is
+/// per-document, so the ambient pair does not cover it. Hence CreateProjectDocument/
+/// CreateFamilyDocument below -- they create the document AND have the executor open a
+/// managed transaction for it, in one step. That keeps the denylist rule above completely
+/// unconditional: the script still never constructs a transaction, because it never needs to.
+/// The raw Application.NewProjectDocument path is untouched and stays read-only.
+///
 /// WHY THIS ONE FILE REFERENCES RevitAPI/RevitAPIUI DIRECTLY, and why that is not a
 /// precedent: MCPBridge.Core is otherwise entirely decoupled from Revit, working only
 /// against the MCPBridge.RevitAdapter interfaces so its decision logic stays unit-testable

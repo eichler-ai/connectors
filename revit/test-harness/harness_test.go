@@ -799,6 +799,18 @@ return new {
 func TestCreatedDocumentIsWritable(t *testing.T) {
 	c, instanceID, documentID := targetDocument(t)
 
+	// Two subtests below COUNT levels at a given elevation across every open
+	// document, and this case deliberately leaves its documents open (nothing
+	// closes them -- see the note above). A hardcoded elevation therefore makes
+	// them pass once and fail on the second run in the same Revit session, with
+	// a count of 2 -- observed live, and it reads exactly like a double-commit
+	// bug rather than a stale fixture. Unique-per-run elevations keep "exactly
+	// one" a real assertion instead of a run-order artifact.
+	base := 1000 + float64(time.Now().UnixNano()/1e6%500000)/100.0
+	elevA := strconv.FormatFloat(base+0.001, 'f', 4, 64)
+	elevB := strconv.FormatFloat(base+0.002, 'f', 4, 64)
+	elevAmbient := strconv.FormatFloat(base+0.003, 'f', 4, 64)
+
 	// The headline: create, write, and read the write back, all in one script.
 	// Level.Create is the same write TestCreateLevel makes against the ambient
 	// document, chosen so the only variable here is WHICH document it lands in.
@@ -880,24 +892,17 @@ return "matches = " + matches + ";";
 	// the created document still exists (nothing closes it) but must carry no
 	// level at this elevation.
 	t.Run("AThrowingScriptRollsBackCreatedDocumentsToo", func(t *testing.T) {
-		created := runScript(t, c, instanceID, documentID, `
-var doc = CreateProjectDocument();
-Autodesk.Revit.DB.Level.Create(doc, 4444.0);
-return doc.Title;
-`)
-		if created.Status != "success" {
-			t.Fatalf("setup script failed: %q (output: %s)", created.Status, created.Output)
-		}
-
-		// Now a run that writes to a NEW created document and then throws.
-		thrown := runScript(t, c, instanceID, documentID, `
+		// A run that writes to a created document and then throws. Read via
+		// runRejectedScript, not runScript: a script that throws comes back as an MCP
+		// tool error carrying the PRD §01 record, which decodeToolResult fatals on by
+		// design.
+		thrown := runRejectedScript(t, c, instanceID, documentID, `
 var doc = CreateProjectDocument();
 Autodesk.Revit.DB.Level.Create(doc, 4545.0);
-System.Console.WriteLine("title=" + doc.Title);
 throw new System.InvalidOperationException("deliberate");
 `)
-		if thrown.Status == "success" {
-			t.Fatalf("script was supposed to throw; output: %s", thrown.Output)
+		if thrown.Error.Code != "script-execution-failed" {
+			t.Fatalf("expected code script-execution-failed, got %q (text: %s)", thrown.Error.Code, thrown.Text)
 		}
 
 		// Nothing anywhere in the session should carry a level at 4545 -- the
@@ -995,8 +1000,8 @@ return "ok:" + (doc != null);
 		created := runScript(t, c, instanceID, documentID, `
 var a = CreateProjectDocument();
 var b = CreateProjectDocument();
-Autodesk.Revit.DB.Level.Create(a, 4646.0);
-Autodesk.Revit.DB.Level.Create(b, 4747.0);
+Autodesk.Revit.DB.Level.Create(a, `+elevA+`);
+Autodesk.Revit.DB.Level.Create(b, `+elevB+`);
 return a.Title + "|" + b.Title;
 `)
 		if created.Status != "success" {
@@ -1008,8 +1013,8 @@ int a = 0, b = 0;
 foreach (Autodesk.Revit.DB.Document d in UIApplication.Application.Documents) {
   foreach (Autodesk.Revit.DB.Level lv in new Autodesk.Revit.DB.FilteredElementCollector(d)
       .OfClass(typeof(Autodesk.Revit.DB.Level))) {
-    if (System.Math.Abs(lv.Elevation - 4646.0) < 0.001) { a++; }
-    if (System.Math.Abs(lv.Elevation - 4747.0) < 0.001) { b++; }
+    if (System.Math.Abs(lv.Elevation - `+elevA+`) < 0.0001) { a++; }
+    if (System.Math.Abs(lv.Elevation - `+elevB+`) < 0.0001) { b++; }
   }
 }
 return "a = " + a + "; b = " + b + ";";
@@ -1022,6 +1027,65 @@ return "a = " + a + "; b = " + b + ";";
 		}
 	})
 
+	// LIVE FINDING, pinned because it is a real consequence of this change and a
+	// surprising one: while the connector holds a managed transaction on a
+	// document, REVIT ITSELF refuses to close it —
+	// "Close is not allowed when there is any open sub-transaction, transaction
+	// or transaction group." So a document made with CreateProjectDocument
+	// cannot be closed from within the same script, even with
+	// confirm_lifecycle_actions. This is exactly the rule the ambient document
+	// has always been under; created documents have simply joined it.
+	//
+	// It also closes off the most obvious way a script could have made one
+	// document's commit fail after another's had already succeeded — the
+	// partial-commit case issue #24 flagged as undetermined. Revit refuses
+	// before that state is reachable.
+	//
+	// If you genuinely want a throwaway document you can close, use the raw
+	// Application.NewProjectDocument path — no transaction is opened for it, so
+	// Close still works there (and it is read-only, which is the trade).
+	t.Run("ACreatedDocumentCannotBeClosedWhileItsTransactionIsOpen", func(t *testing.T) {
+		out := decodeToolResult[executeScriptOut](t, callExecuteScriptWith(t, c, instanceID, documentID, `
+var doc = CreateProjectDocument();
+Autodesk.Revit.DB.Level.Create(doc, 5050.0);
+try { doc.Close(false); return "closed"; }
+catch (Autodesk.Revit.Exceptions.InvalidOperationException ex) { return "refused: " + ex.Message; }
+`, map[string]any{"confirm_lifecycle_actions": true}))
+		if out.Status != "success" {
+			t.Fatalf("expected status=success, got %q (output: %s)", out.Status, out.Output)
+		}
+		if !strings.Contains(out.Output, "refused:") {
+			t.Fatalf("closing a created document was not refused; if Revit now allows this, the partial-commit reasoning in ManagedDocumentTransactions needs revisiting; output: %s", out.Output)
+		}
+	})
+
+	// The per-document Failures API is really wired for created documents, not
+	// only for the ambient one: a warning raised inside a document the script
+	// created is auto-dismissed and reported in notices[] (PRD §07). This is the
+	// only route by which one document's commit can fail while another's
+	// succeeds — an ERROR-level posting forces that document's rollback — so it
+	// matters that the plumbing demonstrably reaches created documents at all.
+	t.Run("FailuresInACreatedDocumentAreReportedAsNotices", func(t *testing.T) {
+		out := runScript(t, c, instanceID, documentID, `
+var doc = CreateProjectDocument();
+var lvl = Autodesk.Revit.DB.Level.Create(doc, 0.0);
+doc.Create.NewRoom(lvl, new Autodesk.Revit.DB.UV(5, 5));
+return "room-created";
+`)
+		if out.Status != "success" {
+			t.Fatalf("expected status=success, got %q (output: %s)", out.Status, out.Output)
+		}
+		var found bool
+		for _, n := range out.Notices {
+			if n.Code == "transaction-failure-warning" {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("a Revit warning raised inside a CREATED document did not reach notices[] -- the per-document Failures API is not wired; notices: %+v", out.Notices)
+		}
+	})
+
 	// The ambient document is still committed normally when a script also
 	// creates documents -- the generalization must not have cost the original
 	// single-document behaviour. Written last in commit order by design (see
@@ -1029,8 +1093,8 @@ return "a = " + a + "; b = " + b + ";";
 	t.Run("TheAmbientDocumentStillCommitsAlongsideCreatedOnes", func(t *testing.T) {
 		out := runScript(t, c, instanceID, documentID, `
 var created = CreateProjectDocument();
-Autodesk.Revit.DB.Level.Create(created, 4848.0);
-Autodesk.Revit.DB.Level.Create(Document, 4949.0);
+Autodesk.Revit.DB.Level.Create(created, `+elevA+`);
+Autodesk.Revit.DB.Level.Create(Document, `+elevAmbient+`);
 return "done";
 `)
 		if out.Status != "success" {
@@ -1041,7 +1105,7 @@ return "done";
 int ambient = 0;
 foreach (Autodesk.Revit.DB.Level lv in new Autodesk.Revit.DB.FilteredElementCollector(Document)
     .OfClass(typeof(Autodesk.Revit.DB.Level))) {
-  if (System.Math.Abs(lv.Elevation - 4949.0) < 0.001) { ambient++; }
+  if (System.Math.Abs(lv.Elevation - `+elevAmbient+`) < 0.0001) { ambient++; }
 }
 return "ambient = " + ambient + ";";
 `)
