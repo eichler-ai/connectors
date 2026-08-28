@@ -6,14 +6,24 @@ Revit's own API documentation on demand.
 
 Read this once at the start of a Revit task. It is orientation, not reference.
 
-> **Read this first — current capability.** `execute_script` compiles real C#, but the objects it
-> puts in scope are a **narrow seam**, not the Revit API. `Document` is not
-> `Autodesk.Revit.DB.Document`; it exposes `Title` and nothing else. Revit API types are **not
-> callable from a script today** — `new FilteredElementCollector(Document)` fails to compile with
-> `CS0122 ... inaccessible due to its protection level`. What works today is document identity,
-> file exchange, and the full .NET base class library. The discovery tools already reflect the real
-> API so you can explore it, but you cannot yet *call* what you find. Don't spend turns trying;
-> see "What's actually in scope" below.
+> **Read this first — current capability.** `execute_script` compiles real C#, but the `Document`
+> global is not `Autodesk.Revit.DB.Document` — it's a narrow, sanctioned seam exposing only
+> `Title`. Passing it anywhere a real Revit API type is expected fails to compile, e.g.
+> `new FilteredElementCollector(Document)` → `CS1503: cannot convert from
+> 'MCPBridge.RevitAdapter.IScriptDocument' to 'Autodesk.Revit.DB.Document'`.
+>
+> **The real Revit API is reachable, just not through that sanctioned seam.** Reflecting into the
+> document adapter's private field gets you the real `Autodesk.Revit.DB.Document`, and real API
+> calls against it work — including writes (`Level.Create`, live-verified: it rides the same
+> ambient transaction the executor already wraps every script in, so you don't open your own):
+> ```csharp
+> var field = Document.GetType().GetField("_document",
+>     System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+> var realDoc = (Autodesk.Revit.DB.Document)field.GetValue(Document);
+> ```
+> This is **not a documented contract** — it depends on an implementation detail (the field's
+> name) that could change without notice, and it's how you reach the API today, not the intended
+> long-term design. If it stops working, that's the seam changing, not you doing it wrong.
 
 ---
 
@@ -146,9 +156,9 @@ Don't know the path yet? Run `return ImportsDirectory;` first, then write your f
 
 ## Discovering the API
 
-Reflect over Revit's real installed assemblies rather than guessing names. Remember the caveat at the
-top: this tells you what *exists*, which you can't call from a script yet — it's for planning and for
-answering questions about the API.
+Reflect over Revit's real installed assemblies rather than guessing names. Remember the note at the
+top: what you find here is callable, just not through the sanctioned `Document` global directly —
+use it to plan a script and look up exact signatures before reaching for the reflection technique.
 
 - **`search_functions`** — start here when you know *what* you want, not the name.
   `{"query": "create wall"}` → ranked matches with summaries.
@@ -186,10 +196,13 @@ to which broker, and the loaded build.
 | Script stays `pending` | Revit's UI thread is blocked — usually a modal dialog, or the user is mid-edit | Don't retry; a second call just returns `busy`. Ask the user to check for an open dialog. |
 | `status: "unresponsive"` | Revit stopped answering heartbeats | Wait; if it persists, Revit needs attention from the user. |
 | `status: "unrecoverable"` | A prior script ignored cancellation | Nothing you send will run. Revit must be restarted; the instance gets a new `instance_id`. |
-| Script fails with `CS0103`/`CS0122`/`CS0246` | A compile error, not an infrastructure problem | Fix the script. Only `System` is imported; the Revit API is not reachable (see the note at the top). |
+| Script fails with `CS0103`/`CS1503`/`CS0246` | A compile error, not an infrastructure problem | Fix the script. `CS1503` on `Document` usually means you passed the sanctioned global where a real `Autodesk.Revit.DB.Document` is expected — see the reflection technique at the top. Only `System` is imported by default otherwise. |
 
 For a human debugging deeper, the add-in writes `connection.log` and `startup-errors.log` to
-`%LOCALAPPDATA%\MCPBridge\`; the broker's discovery file is `%LOCALAPPDATA%\Connectors\Revit\broker.json`.
+`%LOCALAPPDATA%\MCPBridge\`. The broker's discovery file is `%LOCALAPPDATA%\Connectors\Revit\broker.json`
+in local mode (Revit and the broker on the same machine); in remote mode (broker on a different
+machine, e.g. this project's own Mac+Parallels dev setup) it's written to the shared drive instead —
+ask a human where that's configured if you need it.
 
 ## Quick reference
 

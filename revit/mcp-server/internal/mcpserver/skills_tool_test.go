@@ -97,21 +97,35 @@ func TestSkillFileCoversTheBriefedTopics(t *testing.T) {
 	}
 }
 
-// The single most important correctness property of this document: it must not
-// promise Revit API access that execute_script does not currently have. The
-// script globals are a narrow seam (Document exposes Title and nothing else),
-// and `new FilteredElementCollector(Document)` fails to compile live with
-// CS0122. A draft of this file used exactly that as its headline example. An
-// agent believing it would burn turns writing scripts that cannot compile, so
-// the caveat is pinned rather than trusted to survive future edits.
-func TestSkillFileWarnsThatTheRevitApiIsNotCallableYet(t *testing.T) {
+// The single most important correctness property of this document: it must
+// accurately describe what execute_script can and cannot reach, in both
+// directions. The sanctioned Document global is a narrow seam (Title only),
+// and passing it where a real Revit API type is expected fails to compile
+// live with CS1503 (confirmed live against a real instance -- a draft of
+// this file claimed CS0122, which is wrong: that's a protection-level error,
+// not the type-mismatch this actually produces). But the API IS reachable
+// via reflection into the document adapter's private field, and real writes
+// through it succeed (also confirmed live). An agent that read an earlier
+// version of this file believing the API was flatly unreachable would burn
+// turns avoiding a technique that actually works -- as costly a failure mode
+// as the original "don't bother, it won't compile" caveat existed to prevent
+// in the first place. Both halves are pinned so neither regresses silently.
+func TestSkillFileAccuratelyDescribesRevitApiReachability(t *testing.T) {
 	for _, marker := range []string{
-		"FilteredElementCollector", // named as the concrete thing that fails
-		"CS0122",                   // the actual compiler error it produces
+		"FilteredElementCollector", // named as the concrete thing that fails through the sanctioned seam
+		"CS1503",                   // the actual compiler error that produces, not CS0122
+		"GetField",                 // the reflection technique that actually reaches the real API
 	} {
 		if !strings.Contains(skillFile, marker) {
-			t.Errorf("skill file no longer mentions %q: the current-capability caveat must survive, "+
-				"or agents will write scripts against a Revit API they cannot reach", marker)
+			t.Errorf("skill file no longer mentions %q: both halves of the capability story "+
+				"(what's blocked, what actually works) must survive future edits", marker)
+		}
+	}
+	for _, forbidden := range []string{"not callable from a script", "API is not reachable", "CS0122"} {
+		if strings.Contains(skillFile, forbidden) {
+			t.Errorf("skill file contains %q: this claim is false as of this test (Revit API IS reachable "+
+				"via reflection, and the real compile error is CS1503 not CS0122) -- fix the prose, not this test",
+				forbidden)
 		}
 	}
 }
