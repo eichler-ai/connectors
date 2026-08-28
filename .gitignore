@@ -13,6 +13,13 @@ mcp-server-mac
 # directory local mode writes to (never committed either).
 Connectors/
 
+# Machine-specific MCP config: this project's remote-mode dev topology (PRD §05) means .mcp.json
+# carries a real developer's absolute home-directory paths and Parallels VM IP, neither of which
+# means anything on a different machine. Not shipped as a template here either -- the mode/paths/
+# IP a given remote-mode dev environment needs are specific enough that a copy-and-edit example
+# would go stale faster than it'd help; see PRD §05 for what the flags mean.
+.mcp.json
+
 # .NET build output, per TFM now that the Bridge multi-targets (PRD §11).
 bin/
 obj/
