@@ -106,16 +106,19 @@ have run in is rolled back cleanly.
 **1. Flatly rejected — `new Transaction(...)`, `new TransactionGroup(...)`, `new SubTransaction(...)`.**
 Your script is already inside one, and Revit allows only one open transaction per document, so your own
 can never work. There is no flag for this. Just make your changes directly; they commit on success and
-roll back on failure. The error names `script-api-denied`.
+roll back on failure. The error record's `code` is `script-api-denied`.
 
 **2. Allowed, but only if you confirm — the document-lifecycle and worksharing calls.**
 
 | Gated | What it escapes to |
 |---|---|
-| `Document.Close` | the session a person has open in front of them |
+| `Document.Close`, `.Dispose` | the session a person has open in front of them |
 | `Document.Save`, `.SaveAs` | the filesystem |
 | `Document.SynchronizeWithCentral` | the shared central model your teammates see |
-| `Document.Print`, `.PrintToFile` | a physical device |
+| `Document.SaveAsCloudModel` | a cloud project other people can open |
+| `Document.Print`, `.PrintToFile`, `PrintManager.SubmitPrint` | a physical device |
+| `UIDocument.SaveAndClose` | the filesystem, then that person's session |
+| `UIApplication.PostCommand` | anything, after your script's transaction has already closed |
 | `WorksharingUtils.RelinquishOwnership` | another user's ability to edit |
 
 **Why these and nothing else:** everything else you change is covered by the transaction wrapped around
@@ -123,8 +126,9 @@ your script, so if the script throws, your changes are undone automatically. The
 outside this document's own content, and no exception takes them back. That one question ("would a thrown
 exception actually undo this?") is the whole rule.
 
-Call one without confirming and the run is refused before it starts, with code
-`script-lifecycle-confirmation-required` naming every gated member you used. To go ahead, resend the
+Call one without confirming and the run is refused before it starts. The error record's `code` is
+`script-lifecycle-confirmation-required` — match on that field, not on the message text — its `message`
+names every gated member you used, and its `remedy` spells out the resend. To go ahead, resend the
 **same** call with the flag:
 
 ```json
@@ -165,6 +169,9 @@ Every failure uses one shape. Read `message` for what happened, `remedy` for wha
 
 - **`message` names the real condition** — a compiler error, an API exception. It is not a wrapper;
   read it literally. Compiler errors mean fix the script, not retry it.
+- **`code` is what you match on**, not the message. Most script failures are the generic
+  `script-execution-failed`; a refusal carries its own — `script-api-denied` (change the script) or
+  `script-lifecycle-confirmation-required` (resend with the flag), see "What you may not do".
 - **`remedy` is actionable.** Follow it before retrying.
 - **`notices[]` on a *successful* result** means something was auto-resolved for you. Dialogs your
   script triggers are auto-answered with the safe option and reported here (override per dialog with
@@ -241,7 +248,8 @@ to which broker, and the loaded build.
 | `status: "unresponsive"` | Revit stopped answering heartbeats | Wait; if it persists, Revit needs attention from the user. |
 | `status: "unrecoverable"` | A prior script ignored cancellation | Nothing you send will run. Revit must be restarted; the instance gets a new `instance_id`. |
 | Script fails with `CS0103`/`CS1503`/`CS0246` | A compile error, not an infrastructure problem | Fix the script. `CS0246` almost always means an unqualified Revit type — only `System` is imported, so write `Autodesk.Revit.DB.Wall` or add `using Autodesk.Revit.DB;`. Use `describe_function` to check an overload rather than guessing at a `CS1503`. |
-| Script fails naming `script-api-denied` | You used something on the denylist — most often opening your own `Transaction` | See "What you may not do". Nothing ran and nothing changed. |
+| Error `code` is `script-api-denied` | You used something flatly rejected — most often opening your own `Transaction` | See "What you may not do". Nothing ran and nothing changed; no argument lifts this, the script has to change. |
+| Error `code` is `script-lifecycle-confirmation-required` | You used a gated document-lifecycle or worksharing member without confirming | Nothing ran and nothing changed. If the action is genuinely intended, resend the **identical** call with `confirm_lifecycle_actions: true`; otherwise drop that call. The `message` names every gated member you used. |
 
 For a human debugging deeper, the add-in always writes `connection.log` and `startup-errors.log` to
 `%LOCALAPPDATA%\Connectors\Revit\` on the machine running Revit, regardless of local/remote mode. The
