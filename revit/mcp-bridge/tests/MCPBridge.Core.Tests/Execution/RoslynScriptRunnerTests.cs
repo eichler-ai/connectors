@@ -18,6 +18,17 @@ public class RoslynScriptRunnerTests
     // PRD §14) would not bind, and every denylist case below would fail with an ordinary CS0246 while
     // appearing to "reject" the script -- asserting nothing about the denylist at all. They cannot be
     // supplied as loaded assemblies here; see RevitApiReference's doc comment for why.
+    static RoslynScriptRunnerTests()
+    {
+        // RoslynScriptRunner references whatever is ALREADY LOADED in this process
+        // (LoadableReferences), so a `dynamic` script only compiles here if Microsoft.CSharp has been
+        // loaded first -- otherwise it fails with CS0656 (missing Binder) and the late-bound denylist
+        // cases below would "reject" for a reason that has nothing to do with the denylist. Touching
+        // the type is what forces the assembly in. In production this is free: inside Revit the
+        // add-in's own dependencies already pull it in, confirmed live (`dynamic d = 1;` runs).
+        _ = typeof(Microsoft.CSharp.RuntimeBinder.Binder);
+    }
+
     private static RoslynScriptRunner NewRunner(Action? compileCounter = null) =>
         new(compileCounter: compileCounter, additionalMetadataReferencePaths: RevitApiReference.Paths);
 
@@ -330,6 +341,15 @@ public class RoslynScriptRunnerTests
     [InlineData("Document.SynchronizeWithCentral(null, null);", "SynchronizeWithCentral")]
     [InlineData("Document.Print((Autodesk.Revit.DB.ViewSet)null);", "Print")]
     [InlineData("Autodesk.Revit.DB.WorksharingUtils.RelinquishOwnership(Document, null, null);", "RelinquishOwnership")]
+    // Added after an independent PR review proposed them and each was run through the SAME membership
+    // question the six above were ("does a thrown exception in the script undo this?" -- no, for all of
+    // them), then confirmed to exist with these exact signatures in the live Revit 2027 API via
+    // describe_function rather than assumed.
+    [InlineData("Document.SaveAsCloudModel(System.Guid.Empty, System.Guid.Empty, null, null);", "SaveAsCloudModel")]
+    [InlineData("Document.Dispose();", "Dispose")]
+    [InlineData("Document.PrintManager.SubmitPrint();", "SubmitPrint")]
+    [InlineData("UIDocument.SaveAndClose();", "SaveAndClose")]
+    [InlineData("UIApplication.PostCommand((Autodesk.Revit.UI.RevitCommandId)null);", "PostCommand")]
     public async Task RunAsync_LifecycleMemberWithoutConfirmation_IsRejected(string script, string expectedNamedMember)
     {
         var runner = NewRunner();
@@ -357,6 +377,11 @@ public class RoslynScriptRunnerTests
     [InlineData("Document.SynchronizeWithCentral(null, null);")]
     [InlineData("Document.Print((Autodesk.Revit.DB.ViewSet)null);")]
     [InlineData("Autodesk.Revit.DB.WorksharingUtils.RelinquishOwnership(Document, null, null);")]
+    [InlineData("Document.SaveAsCloudModel(System.Guid.Empty, System.Guid.Empty, null, null);")]
+    [InlineData("Document.Dispose();")]
+    [InlineData("Document.PrintManager.SubmitPrint();")]
+    [InlineData("UIDocument.SaveAndClose();")]
+    [InlineData("UIApplication.PostCommand((Autodesk.Revit.UI.RevitCommandId)null);")]
     public async Task RunAsync_LifecycleMemberWithConfirmation_IsNotRejected(string script)
     {
         // What this tier can prove, precisely: the SAME text that was refused above passes the gate
@@ -472,6 +497,33 @@ public class RoslynScriptRunnerTests
 
         Assert.IsType<ScriptApiDenylistViolationException>(outcome.Exception);
         Assert.Contains(expectedNamedType, outcome.Exception!.Message);
+    }
+
+    [Theory]
+    // `dynamic` is the one spelling of `new` where the CONSTRUCTOR, not just the syntax, can go
+    // unresolved: an argument of type dynamic makes overload resolution late-bound in principle, and
+    // GetSymbolInfo(...).Symbol is null for a late-bound node. An independent PR review flagged this as
+    // a way to walk past check 1 -- the refusal PRD §14 and skill.md both promise can never be opted
+    // into -- in the same category as the target-typed `new` and method-group bypasses already fixed
+    // here. It was checked LIVE against a real Revit 2027 document before being "fixed": `dynamic` is
+    // genuinely usable from a script here (Microsoft.CSharp is present; `dynamic d = 1; d.ToString()`
+    // runs), and every shape below was ALREADY rejected, because Roslyn still hands back the bound
+    // constructor symbol for an object creation with dynamic arguments. So these cases pin behaviour
+    // that already held rather than closing an open hole -- and the type-based fallback they exercise
+    // (ScriptApiDenylist.Analyze) means the promise no longer rests on that Roslyn detail alone.
+    [InlineData("dynamic d = Document; var t = new Autodesk.Revit.DB.Transaction(d, \"x\"); return 1;", "Transaction")]
+    [InlineData("dynamic d = Document; dynamic n = \"x\"; var t = new Autodesk.Revit.DB.Transaction(d, n); return 1;", "Transaction")]
+    [InlineData("dynamic d = Document; Autodesk.Revit.DB.TransactionGroup g = new(d, \"x\"); return 1;", "TransactionGroup")]
+    [InlineData("dynamic d = Document; dynamic s = new Autodesk.Revit.DB.SubTransaction(d); return 1;", "SubTransaction")]
+    public async Task RunAsync_TransactionConstructedWithALateBoundArgument_IsStillRejected(string script, string expectedNamedType)
+    {
+        var runner = NewRunner();
+
+        var outcome = await runner.RunAsync(script, NewGlobals(), CancellationToken.None);
+
+        var ex = Assert.IsType<ScriptApiDenylistViolationException>(outcome.Exception);
+        Assert.Equal(ScriptApiDenylistViolationException.DeniedCode, ex.Code);
+        Assert.Contains(expectedNamedType, ex.Message);
     }
 
     [Fact]

@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using System.Linq;
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
 
 namespace MCPBridge.Core.Execution;
 
@@ -79,6 +80,16 @@ internal static class ScriptApiDenylist
     /// as System.IO.Stream.Close. Member names verified against the live Revit 2027 API via
     /// describe_function (note PRD §14 originally wrote "SynchronizeWithCentralDocument"; the actual
     /// member is Document.SynchronizeWithCentral).
+    ///
+    /// A DELIBERATE NON-ENTRY: a member reached through a `dynamic` receiver (`dynamic d = Document;
+    /// d.Close();`) is NOT detected here, and that is accepted rather than overlooked. The receiver's
+    /// type is erased at compile time, so nothing binds and there is no containing type to key on --
+    /// gating it would mean matching the bare NAME "Close" on any dynamic receiver, which is exactly the
+    /// check this table's shape exists to avoid (it would gate System.IO.Stream.Close and every other
+    /// unrelated Close in .NET). It also fails the carve-out test in the same way reflection does: writing
+    /// `dynamic` to reach a gated member is deliberate, not the accidental or plausible-looking mistake
+    /// this guard is for. Confirmed live, so it is a known accepted gap and not a guess. Constructing a
+    /// denied TYPE via `dynamic` is a different matter and stays refused -- see Analyze.
     /// </summary>
     private static readonly Dictionary<string, HashSet<string>> LifecycleMembersByType = new()
     {
@@ -87,9 +98,32 @@ internal static class ScriptApiDenylist
             "Close",
             "Save",
             "SaveAs",
+            // Writes the model into an Autodesk cloud project -- SaveAs's escape from this document's
+            // own content, aimed at a shared destination other people see.
+            "SaveAsCloudModel",
             "SynchronizeWithCentral",
             "Print",
             "PrintToFile",
+            // Document is IDisposable and disposing one closes it, so this is Close under another
+            // spelling; the same "no exception undoes it" answer applies.
+            "Dispose",
+        },
+        ["Autodesk.Revit.DB.PrintManager"] = new HashSet<string>
+        {
+            // Sends the job to a physical device (or a file), same category as Document.Print.
+            "SubmitPrint",
+        },
+        ["Autodesk.Revit.UI.UIDocument"] = new HashSet<string>
+        {
+            // Saves AND ends the human's open session in one call -- both halves already gated on Document.
+            "SaveAndClose",
+        },
+        ["Autodesk.Revit.UI.UIApplication"] = new HashSet<string>
+        {
+            // Queues a Revit UI command to run AFTER control leaves the API context -- i.e. after the
+            // ambient transaction has already been committed or rolled back. Whatever it does is
+            // structurally outside the rollback boundary, whichever command is posted.
+            "PostCommand",
         },
         ["Autodesk.Revit.DB.WorksharingUtils"] = new HashSet<string>
         {
@@ -141,17 +175,41 @@ internal static class ScriptApiDenylist
                 // through one code path, and catches a denied method whether it is called or merely
                 // referenced.
                 var symbol = semanticModel.GetSymbolInfo(node).Symbol;
-                if (symbol is not IMethodSymbol method)
+                if (symbol is IMethodSymbol method)
                 {
+                    if (method.MethodKind == MethodKind.Constructor)
+                    {
+                        CheckConstruction(FullName(method.ContainingType));
+                    }
+
+                    var lifecycleMember = LifecycleMemberOrNull(method);
+                    if (lifecycleMember is not null && seen.Add(lifecycleMember))
+                    {
+                        lifecycleMembers.Add(lifecycleMember);
+                    }
+
                     continue;
                 }
 
-                CheckConstruction(method);
-
-                var lifecycleMember = LifecycleMemberOrNull(method);
-                if (lifecycleMember is not null && seen.Add(lifecycleMember))
+                // BELT AND BRACES for `new`, because check 1 is the one refusal that can never be opted
+                // into: judge the CONSTRUCTED TYPE whenever the constructor symbol itself did not
+                // resolve. GetSymbolInfo(...).Symbol is null for any late-bound call -- and a `dynamic`
+                // argument makes constructor overload resolution late-bound in principle
+                // (CandidateReason.LateBound) -- whereas GetTypeInfo still names the type being
+                // constructed, since `new T(...)` is statically typed T however its overload is picked.
+                //
+                // LIVE FINDING, worth recording rather than implying: this is defense in depth, NOT a
+                // hole that was open. Every spelling we could construct was ALREADY rejected against a
+                // real Revit 2027 document -- `dynamic d = Document; new Transaction(d, "x")`, both
+                // arguments dynamic, the target-typed `Transaction t = new(d, "x")`, and assigning the
+                // result to a `dynamic` -- because Roslyn still reports the bound constructor symbol for
+                // an object creation with dynamic arguments. (`dynamic` itself is genuinely usable from a
+                // script here: `dynamic d = 1; d.ToString()` runs, so Microsoft.CSharp is present and the
+                // premise was testable, not vacuous.) The fallback exists so this does not silently
+                // depend on that Roslyn detail continuing to hold.
+                if (node is BaseObjectCreationExpressionSyntax)
                 {
-                    lifecycleMembers.Add(lifecycleMember);
+                    CheckConstruction(FullName(semanticModel.GetTypeInfo(node).Type));
                 }
             }
         }
@@ -159,14 +217,14 @@ internal static class ScriptApiDenylist
         return lifecycleMembers.Count == 0 ? ScriptApiAnalysis.Clean : new ScriptApiAnalysis(lifecycleMembers);
     }
 
-    private static void CheckConstruction(IMethodSymbol method)
+    /// <summary>
+    /// Throws if <paramref name="typeName"/> is a type no script may construct (check 1). Takes the
+    /// resolved type NAME rather than a symbol so both callers in <see cref="Analyze"/> -- the bound
+    /// constructor's containing type, and the constructed type of an object creation whose constructor
+    /// did not bind -- reach the identical refusal with the identical message.
+    /// </summary>
+    private static void CheckConstruction(string? typeName)
     {
-        if (method.MethodKind != MethodKind.Constructor)
-        {
-            return;
-        }
-
-        var typeName = FullName(method.ContainingType);
         if (typeName is null || !DeniedConstructedTypes.Contains(typeName))
         {
             return;
