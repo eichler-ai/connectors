@@ -8,7 +8,8 @@ namespace MCPBridge.Core.Execution;
 /// Compile-time guard over what an agent script may call, now that ScriptGlobals exposes the real
 /// Autodesk.Revit.DB.Document rather than a narrow interface (PRD §14, Phase 3).
 ///
-/// TWO CHECKS, and they are not equally important:
+/// TWO CHECKS, and they differ in KIND, not just in importance -- one is an unconditional rejection,
+/// the other is a confirmation gate:
 ///
 /// 1. TRANSACTION OWNERSHIP -- the load-bearing one. TransactionScriptExecutor opens an ambient
 ///    TransactionGroup + Transaction around every script run, before compilation even happens, and
@@ -24,9 +25,27 @@ namespace MCPBridge.Core.Execution;
 ///    CreateTransactionGroup -- our own adapter methods, not Revit API, and unreachable from a script
 ///    once Document became the real type anyway.
 ///
-/// 2. DOCUMENT-LIFECYCLE / WORKSHARING MEMBERS -- a fixed starting denylist: operations a script has no
-///    business performing on a document a human has open in a live session (closing or saving it out
-///    from under them, syncing or relinquishing shared ownership, driving the printer).
+/// 2. DOCUMENT-LIFECYCLE / WORKSHARING MEMBERS -- CONFIRMATION-GATED, not blocked. These are allowed,
+///    but only when the execute_script request that carries the script explicitly opted in with
+///    confirm_lifecycle_actions: true.
+///
+///    THE GOVERNING PRINCIPLE, which is what decides whether a member belongs on this list: a script's
+///    changes roll back automatically if it throws, because the ambient transaction covers document
+///    CONTENT. These members are gated precisely because they escape that rollback boundary -- each
+///    affects something outside this document's own content, which no exception can undo: a human's
+///    local session (Close), the filesystem (Save/SaveAs), a shared central model other teammates see
+///    (SynchronizeWithCentral), a physical device (Print/PrintToFile), or another user's ability to edit
+///    (WorksharingUtils.RelinquishOwnership). The test for adding an entry is one question -- "does a
+///    thrown exception actually undo this?" -- and for everything here the answer is no.
+///
+///    Confirmation, rather than a block, is the right mechanism for exactly this class: the operations
+///    are legitimate and sometimes genuinely wanted, they just must not happen as an incidental side
+///    effect of a script an agent wrote for some other purpose. Contrast check 1, which can never be
+///    opted into because it is not a policy judgement at all -- a second Transaction simply cannot work.
+///
+///    Detection is compile-time and cacheable (a property of the script text); the allow/reject decision
+///    is per-run, since the confirmation flag is per-request. See <see cref="ScriptApiAnalysis"/> for why
+///    the two are split that way, and RoslynScriptRunner.RunAsync for where the decision is made.
 ///
 /// SCOPE, deliberately (PRD §14's own explicit caveat): this list is a STARTING POINT expected to grow
 /// from real use. It is not, and is not trying to be, an exhaustive policy over the ~1,700-type Revit
@@ -55,13 +74,13 @@ internal static class ScriptApiDenylist
     };
 
     /// <summary>
-    /// Denied (containing type, member name) pairs -- see check 2. Keyed on the CONTAINING TYPE as well
-    /// as the name, deliberately: a bare name check would reject ordinary, harmless .NET such as
-    /// System.IO.Stream.Close. Member names verified against the live Revit 2027 API via
+    /// Confirmation-gated (containing type, member name) pairs -- see check 2. Keyed on the CONTAINING
+    /// TYPE as well as the name, deliberately: a bare name check would gate ordinary, harmless .NET such
+    /// as System.IO.Stream.Close. Member names verified against the live Revit 2027 API via
     /// describe_function (note PRD §14 originally wrote "SynchronizeWithCentralDocument"; the actual
     /// member is Document.SynchronizeWithCentral).
     /// </summary>
-    private static readonly Dictionary<string, HashSet<string>> DeniedMembersByType = new()
+    private static readonly Dictionary<string, HashSet<string>> LifecycleMembersByType = new()
     {
         ["Autodesk.Revit.DB.Document"] = new HashSet<string>
         {
@@ -79,17 +98,27 @@ internal static class ScriptApiDenylist
     };
 
     /// <summary>
-    /// Walks the already-bound compilation and throws <see cref="ScriptApiDenylistViolationException"/>
-    /// on the first violation found. Called from RoslynScriptRunner.GetOrCompile after script.Compile()
+    /// Walks the already-bound compilation. Throws <see cref="ScriptApiDenylistViolationException"/> on
+    /// the first transaction-construction violation (check 1 -- unconditional, no opt-in exists), and
+    /// otherwise RETURNS what lifecycle members the script uses (check 2) for the caller to judge against
+    /// this run's confirmation flag. Called from RoslynScriptRunner.GetOrCompile after script.Compile()
     /// reports no errors -- binding must have succeeded for the semantic model to resolve symbols at all,
     /// and running before that would just re-report ordinary compile errors as denylist violations.
     ///
     /// This is a SEMANTIC check, not a text search: it asks the semantic model what each expression
     /// actually binds to, so a using-alias, a fully-qualified name, and a `var`-typed intermediate are
-    /// all caught identically, while the same words inside a string literal or a comment are not.
+    /// all caught identically, while the same words inside a string literal or a comment are not. That
+    /// property matters as much for the gated members as for the constructed types -- moving lifecycle
+    /// members onto a different enforcement path changed WHEN they are judged, not HOW they are found.
     /// </summary>
-    public static void Enforce(Compilation compilation)
+    public static ScriptApiAnalysis Analyze(Compilation compilation)
     {
+        // Ordered + deduplicated: the rejection message names every member the script uses, in the order
+        // they appear, so an agent that has to remove or confirm them sees all of them at once rather
+        // than discovering them one failed run at a time.
+        var lifecycleMembers = new List<string>();
+        var seen = new HashSet<string>();
+
         foreach (var tree in compilation.SyntaxTrees)
         {
             var semanticModel = compilation.GetSemanticModel(tree);
@@ -118,9 +147,16 @@ internal static class ScriptApiDenylist
                 }
 
                 CheckConstruction(method);
-                CheckDeniedMember(method);
+
+                var lifecycleMember = LifecycleMemberOrNull(method);
+                if (lifecycleMember is not null && seen.Add(lifecycleMember))
+                {
+                    lifecycleMembers.Add(lifecycleMember);
+                }
             }
         }
+
+        return lifecycleMembers.Count == 0 ? ScriptApiAnalysis.Clean : new ScriptApiAnalysis(lifecycleMembers);
     }
 
     private static void CheckConstruction(IMethodSymbol method)
@@ -136,7 +172,7 @@ internal static class ScriptApiDenylist
             return;
         }
 
-        throw new ScriptApiDenylistViolationException(
+        throw ScriptApiDenylistViolationException.Denied(
             typeName,
             "Every script already runs inside a Transaction and TransactionGroup this connector opens " +
             "for you, and Revit allows only one open Transaction per document at a time, so opening " +
@@ -145,22 +181,22 @@ internal static class ScriptApiDenylist
             "and rolled back if it throws.");
     }
 
-    private static void CheckDeniedMember(IMethodSymbol method)
+    /// <summary>
+    /// The fully-qualified name of <paramref name="method"/> if it is one of the confirmation-gated
+    /// lifecycle members, otherwise null. Returning rather than throwing is the whole point of check 2's
+    /// shape: whether this is allowed cannot be decided here, because it depends on the request.
+    /// </summary>
+    private static string? LifecycleMemberOrNull(IMethodSymbol method)
     {
         var containingType = FullName(method.ContainingType);
         if (containingType is null
-            || !DeniedMembersByType.TryGetValue(containingType, out var deniedMembers)
-            || !deniedMembers.Contains(method.Name))
+            || !LifecycleMembersByType.TryGetValue(containingType, out var gatedMembers)
+            || !gatedMembers.Contains(method.Name))
         {
-            return;
+            return null;
         }
 
-        throw new ScriptApiDenylistViolationException(
-            $"{containingType}.{method.Name}",
-            "This changes the document's lifecycle or its worksharing state rather than its content, " +
-            "which is not something a script may do to a document a person has open in a live Revit " +
-            "session.",
-            "Ask the person driving Revit to do this themselves if it is genuinely needed.");
+        return $"{containingType}.{method.Name}";
     }
 
     /// <summary>

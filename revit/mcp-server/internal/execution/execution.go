@@ -242,6 +242,22 @@ func fromRPCError(executionID string, rpcErr *transport.RPCError) *diag.Record {
 		WithDetail(map[string]any{"execution_id": executionID})
 }
 
+// ScriptOptions carries the per-request policy flags execute_script accepts
+// beyond the script itself. A struct rather than more bool parameters
+// deliberately: both members are booleans with unrelated meanings, and
+// positional bools next to each other in a Go call are exactly the shape
+// that silently transposes.
+type ScriptOptions struct {
+	// OverwriteOutputFiles applies uniformly to every file Publish() touches
+	// during the run (PRD §09).
+	OverwriteOutputFiles bool
+
+	// ConfirmLifecycleActions permits the Revit API members that act outside
+	// the ambient transaction's rollback boundary (PRD §14). Without it the
+	// add-in refuses such a script before running it.
+	ConfirmLifecycleActions bool
+}
+
 // ExecuteScript forwards a script to instanceID's add-in connection. See
 // PRD §06: a script finishing within timeoutMs returns the completed
 // Result inline; otherwise the add-in's own {status:pending|running}
@@ -253,7 +269,7 @@ func fromRPCError(executionID string, rpcErr *transport.RPCError) *diag.Record {
 // calls return an explicit error rather than queuing or reporting busy,
 // per §06 — the instance stays unrecoverable until a Revit restart mints a
 // fresh instance_id (§05).
-func (m *Manager) ExecuteScript(ctx context.Context, instanceID, documentID, script string, timeoutMs, maxDurationMs int, overwriteOutputFiles bool) (*Result, *diag.Record) {
+func (m *Manager) ExecuteScript(ctx context.Context, instanceID, documentID, script string, timeoutMs, maxDurationMs int, opts ScriptOptions) (*Result, *diag.Record) {
 	m.mu.Lock()
 	if m.unrecoverable[instanceID] {
 		m.mu.Unlock()
@@ -283,7 +299,13 @@ func (m *Manager) ExecuteScript(ctx context.Context, instanceID, documentID, scr
 		"script":                 script,
 		"timeout_ms":             timeoutMs,
 		"max_duration_ms":        maxDurationMs,
-		"overwrite_output_files": overwriteOutputFiles,
+		"overwrite_output_files": opts.OverwriteOutputFiles,
+
+		// PRD §14: always sent, even when false. The add-in defaults it to
+		// false itself, but sending it explicitly keeps the wire params a
+		// complete statement of what this request asked for rather than
+		// something a reader has to reconstruct from absence.
+		"confirm_lifecycle_actions": opts.ConfirmLifecycleActions,
 	}
 	res, drec := m.callWire(ctx, conn, "execute_script", executionID, timeoutMs, params)
 	if drec != nil {

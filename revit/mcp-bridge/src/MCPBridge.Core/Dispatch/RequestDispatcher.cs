@@ -118,6 +118,7 @@ public sealed class RequestDispatcher
         long maxDurationMs;
         long timeoutMs;
         bool overwriteOutputFiles;
+        bool confirmLifecycleActions;
         try
         {
             executionId = request.GetRequiredString("execution_id");
@@ -128,6 +129,14 @@ public sealed class RequestDispatcher
             // PRD §09: applies uniformly across every file ScriptGlobals.Publish touches during this
             // run -- not a per-file override.
             overwriteOutputFiles = request.GetOptionalBool("overwrite_output_files", false);
+
+            // PRD §14: opt-in for the confirmation-gated lifecycle members (Document.Close/Save/SaveAs/
+            // SynchronizeWithCentral/Print, WorksharingUtils.RelinquishOwnership). Per-REQUEST, not
+            // per-script: the same script text may arrive once without it and again with it, so it is
+            // read here on every call and forwarded down to the run, never folded into the compilation
+            // cache. Defaults to false -- an agent that never heard of the flag cannot trip these members
+            // by accident, which is the entire point of gating them.
+            confirmLifecycleActions = request.GetOptionalBool("confirm_lifecycle_actions", false);
 
             // KNOWN LIMITATION (second live-wiring review finding, still true after PRD §09's file-exchange
             // work): document_id is part of the wire contract (the broker always sends it) but is not read
@@ -168,7 +177,7 @@ public sealed class RequestDispatcher
                 return ExecutionResultMessage.FromInstanceUnrecoverable(request.Id, outcome.Diagnostic!);
         }
 
-        var workTask = RunScriptWorkItemAsync(executionId, script, overwriteOutputFiles);
+        var workTask = RunScriptWorkItemAsync(executionId, script, overwriteOutputFiles, confirmLifecycleActions);
 
         // PRD §06: a script finishing inside timeout_ms returns the completed result inline; one that
         // doesn't returns the current {status, execution_id} instead of hanging the call. The timeout
@@ -257,9 +266,11 @@ public sealed class RequestDispatcher
         };
     }
 
-    private Task RunScriptWorkItemAsync(string executionId, string scriptText, bool overwriteOutputFiles)
+    private Task RunScriptWorkItemAsync(string executionId, string scriptText, bool overwriteOutputFiles, bool confirmLifecycleActions)
     {
-        var runTask = _bridge.RunAsync(executionId, uiApplication => RunScriptWorkItem(executionId, scriptText, overwriteOutputFiles, uiApplication));
+        var runTask = _bridge.RunAsync(
+            executionId,
+            uiApplication => RunScriptWorkItem(executionId, scriptText, overwriteOutputFiles, confirmLifecycleActions, uiApplication));
 
         // Hard requirement 2: ANY fault on this Task -- including ExternalEventRaiseDeniedException, which
         // RunScriptWorkItem below never gets a chance to observe or react to since it never even ran --
@@ -286,7 +297,12 @@ public sealed class RequestDispatcher
             TaskScheduler.Default);
     }
 
-    private ScriptExecutionOutcome RunScriptWorkItem(string executionId, string scriptText, bool overwriteOutputFiles, IUiApplicationAdapter uiApplication)
+    private ScriptExecutionOutcome RunScriptWorkItem(
+        string executionId,
+        string scriptText,
+        bool overwriteOutputFiles,
+        bool confirmLifecycleActions,
+        IUiApplicationAdapter uiApplication)
     {
         // Hard requirement 1: check cancellation before touching the model at all -- a still-Pending
         // execution can have been resolved directly to Cancelled by ExecutionManager.ApplyCancellation
@@ -339,7 +355,16 @@ public sealed class RequestDispatcher
         // script containing its own top-level `await` before compiling it -- see
         // ExternalEventBridge<TResult>'s own doc comment and RoslynScriptRunner.RejectTopLevelAwait.
         var outcome = _scriptExecutor
-            .ExecuteAsync(document, uiApplication, uiDocument, scriptText, cancellationToken, workspacePaths.Exports, workspacePaths.Imports, overwriteOutputFiles)
+            .ExecuteAsync(
+                document,
+                uiApplication,
+                uiDocument,
+                scriptText,
+                cancellationToken,
+                workspacePaths.Exports,
+                workspacePaths.Imports,
+                overwriteOutputFiles,
+                confirmLifecycleActions)
             .GetAwaiter().GetResult();
 
         if (outcome.WasCancelled)

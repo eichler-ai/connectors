@@ -38,6 +38,16 @@ type ExecuteScriptIn struct {
 	TimeoutMs            int    `json:"timeout_ms,omitempty" jsonschema:"milliseconds to wait for completion before returning a pending/running status; default 30000"`
 	MaxDurationMs        int    `json:"max_duration_ms,omitempty" jsonschema:"hard ceiling on total script runtime in milliseconds, independent of timeout_ms; default 600000"`
 	OverwriteOutputFiles bool   `json:"overwrite_output_files,omitempty" jsonschema:"if true, Publish() calls that would overwrite an existing exported file succeed and replace it; if false (default), such a collision fails that one file's publish rather than overwriting it silently"`
+
+	// ConfirmLifecycleActions is the opt-in for the handful of Revit API
+	// members that escape the rollback boundary every other script change
+	// enjoys (PRD §14). Without it, a script using one is refused before it
+	// runs with code script-lifecycle-confirmation-required, naming the
+	// members; resending the identical script with it set runs it. It is a
+	// per-REQUEST flag by design — the add-in caches compiled scripts by
+	// text, so the decision is deliberately made at run time, not folded
+	// into that cache.
+	ConfirmLifecycleActions bool `json:"confirm_lifecycle_actions,omitempty" jsonschema:"set true to allow this script to call Document.Close/Save/SaveAs/SynchronizeWithCentral/Print or WorksharingUtils.RelinquishOwnership; these act outside the transaction that otherwise rolls a failed script back (a person's open session, the filesystem, the shared central model, a printer, another user's checkout), so without this flag such a script is refused before it runs"`
 }
 
 // PollExecutionIn is the input schema for the poll_execution tool.
@@ -80,7 +90,10 @@ func Register(s *mcp.Server, mgr *execution.Manager) {
 		if maxDurationMs <= 0 {
 			maxDurationMs = defaultMaxDurationMs
 		}
-		res, drec := mgr.ExecuteScript(ctx, in.InstanceID, in.DocumentID, in.Script, timeoutMs, maxDurationMs, in.OverwriteOutputFiles)
+		res, drec := mgr.ExecuteScript(ctx, in.InstanceID, in.DocumentID, in.Script, timeoutMs, maxDurationMs, execution.ScriptOptions{
+			OverwriteOutputFiles:    in.OverwriteOutputFiles,
+			ConfirmLifecycleActions: in.ConfirmLifecycleActions,
+		})
 		return toolResult(res, drec)
 	})
 

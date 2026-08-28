@@ -305,9 +305,20 @@ public class RoslynScriptRunnerTests
         Assert.False(outcome.Success);
         Assert.False(outcome.WasCancelled);
         Assert.IsType<ScriptApiDenylistViolationException>(outcome.Exception);
-        Assert.Contains(ScriptApiDenylistViolationException.Code, outcome.Exception!.Message);
+        Assert.Contains(ScriptApiDenylistViolationException.DeniedCode, outcome.Exception!.Message);
         Assert.Contains(expectedNamedType, outcome.Exception.Message);
     }
+
+    // --- PRD §14: the confirmation-gated half ---
+    //
+    // The lifecycle/worksharing members are no longer flatly rejected: they are allowed when the
+    // request itself opted in with confirm_lifecycle_actions. The principle deciding which members
+    // belong here (and why this is a gate rather than a block) is written out in ScriptApiDenylist's
+    // own doc comment: a script's changes roll back automatically if it throws, because the ambient
+    // transaction covers document CONTENT; these members escape that boundary -- a person's session,
+    // the filesystem, the shared central model, a printer, another user's checkout -- and no exception
+    // undoes them. So the test is a per-run question, not a per-script one, and these cases assert
+    // BOTH answers for the same script text.
 
     [Theory]
     // Overloads are cast-disambiguated so each script binds to exactly one member; an ambiguous call
@@ -319,18 +330,127 @@ public class RoslynScriptRunnerTests
     [InlineData("Document.SynchronizeWithCentral(null, null);", "SynchronizeWithCentral")]
     [InlineData("Document.Print((Autodesk.Revit.DB.ViewSet)null);", "Print")]
     [InlineData("Autodesk.Revit.DB.WorksharingUtils.RelinquishOwnership(Document, null, null);", "RelinquishOwnership")]
-    public async Task RunAsync_ScriptCallsADeniedDocumentMember_IsRejectedByTheDenylist(string script, string expectedNamedMember)
+    public async Task RunAsync_LifecycleMemberWithoutConfirmation_IsRejected(string script, string expectedNamedMember)
     {
-        // PRD §14's starting denylist: document-lifecycle and worksharing operations that a script has
-        // no business performing on a document a human has open. Deliberately a short, concrete list
-        // expected to grow from real use -- see ScriptApiDenylist's own comment.
+        var runner = NewRunner();
+
+        // No confirmLifecycleActions argument at all -- the default, and the shape of every request
+        // from an agent that has never heard of the flag. That MUST be the refusing case.
+        var outcome = await runner.RunAsync(script, NewGlobals(), CancellationToken.None);
+
+        Assert.False(outcome.Success);
+        Assert.False(outcome.WasCancelled);
+        var ex = Assert.IsType<ScriptApiDenylistViolationException>(outcome.Exception);
+        // The distinct code is the actionable part: script-api-denied means "change the script",
+        // script-lifecycle-confirmation-required means "resend with the flag". An agent that cannot
+        // tell them apart either gives up on a permitted operation or retries a forbidden one forever.
+        Assert.Equal(ScriptApiDenylistViolationException.ConfirmationRequiredCode, ex.Code);
+        Assert.Contains(ScriptApiDenylistViolationException.ConfirmationRequiredCode, ex.Message);
+        Assert.Contains("confirm_lifecycle_actions", ex.Message);
+        Assert.Contains(expectedNamedMember, ex.Message);
+    }
+
+    [Theory]
+    [InlineData("Document.Close();")]
+    [InlineData("Document.Save();")]
+    [InlineData("Document.SaveAs((string)null);")]
+    [InlineData("Document.SynchronizeWithCentral(null, null);")]
+    [InlineData("Document.Print((Autodesk.Revit.DB.ViewSet)null);")]
+    [InlineData("Autodesk.Revit.DB.WorksharingUtils.RelinquishOwnership(Document, null, null);")]
+    public async Task RunAsync_LifecycleMemberWithConfirmation_IsNotRejected(string script)
+    {
+        // What this tier can prove, precisely: the SAME text that was refused above passes the gate
+        // and is handed on to execution. It cannot prove the call then succeeds -- the emitted
+        // submission names Revit types, and RevitAPI.dll is a mixed-mode assembly no test host can
+        // load (see RevitApiReference), so the run fails afterwards for that unrelated reason. The
+        // assertion is therefore "not refused BY THE GATE", which is exactly the property the gate
+        // owns. Actually calling a lifecycle member end to end is a tier-2 case, in
+        // revit/test-harness, where a real Revit is on the other end.
+        var compileCount = 0;
+        var runner = NewRunner(compileCounter: () => compileCount++);
+
+        var outcome = await runner.RunAsync(script, NewGlobals(), CancellationToken.None, confirmLifecycleActions: true);
+
+        Assert.Equal(1, compileCount);
+        Assert.IsNotType<ScriptApiDenylistViolationException>(outcome.Exception);
+    }
+
+    [Fact]
+    public async Task RunAsync_LifecycleScriptConfirmedThenResentUnconfirmed_IsRejectedTheSecondTime()
+    {
+        // THE cache-vs-per-request case, and the reason detection and decision are split at all. The
+        // compiled script (and the detection result riding with it) is cached by verbatim text, so a
+        // confirmed run leaves a cache entry behind. If the decision had been folded into compilation,
+        // this second, UNCONFIRMED run would hit that entry and be waved through -- a permanent
+        // confirmation bypass available to anyone who confirmed once. Compilation is genuinely reused
+        // (compileCount stays 1); the decision is not.
+        var compileCount = 0;
+        var runner = NewRunner(compileCounter: () => compileCount++);
+        const string script = "Document.Save();";
+
+        var confirmed = await runner.RunAsync(script, NewGlobals(), CancellationToken.None, confirmLifecycleActions: true);
+        var unconfirmed = await runner.RunAsync(script, NewGlobals(), CancellationToken.None);
+
+        Assert.Equal(1, compileCount);
+        Assert.IsNotType<ScriptApiDenylistViolationException>(confirmed.Exception);
+        var ex = Assert.IsType<ScriptApiDenylistViolationException>(unconfirmed.Exception);
+        Assert.Equal(ScriptApiDenylistViolationException.ConfirmationRequiredCode, ex.Code);
+    }
+
+    [Theory]
+    // The bypass shapes that defeated the denylist's first, syntax-matching version, re-pinned for the
+    // lifecycle members specifically now that they run down a different enforcement path (detected at
+    // compile time, judged at run time) than the transaction check that originally caught them. A
+    // method group is never an InvocationExpressionSyntax, and a script can reach one without ever
+    // writing a call -- if detection only saw calls, the gate would be trivially avoidable.
+    [InlineData("System.Func<bool> f = Document.Close; return f != null;", "Close")]
+    [InlineData("System.Action f = Document.Save; return f != null;", "Save")]
+    [InlineData("using D = Autodesk.Revit.DB.Document; System.Func<D, bool> f = d => d.Close(); return f != null;", "Close")]
+    public async Task RunAsync_LifecycleMemberReachedWithoutACall_StillRequiresConfirmation(string script, string expectedNamedMember)
+    {
         var runner = NewRunner();
 
         var outcome = await runner.RunAsync(script, NewGlobals(), CancellationToken.None);
 
+        var ex = Assert.IsType<ScriptApiDenylistViolationException>(outcome.Exception);
+        Assert.Equal(ScriptApiDenylistViolationException.ConfirmationRequiredCode, ex.Code);
+        Assert.Contains(expectedNamedMember, ex.Message);
+    }
+
+    [Fact]
+    public async Task RunAsync_ScriptUsingSeveralLifecycleMembers_NamesThemAll()
+    {
+        // One refusal, every member named. An agent that had to discover them one failed run at a time
+        // would either give up or confirm blind; naming them all is what lets it judge the whole set.
+        var runner = NewRunner();
+
+        var outcome = await runner.RunAsync(
+            "Document.Save(); Document.Close(); return 1;", NewGlobals(), CancellationToken.None);
+
+        var ex = Assert.IsType<ScriptApiDenylistViolationException>(outcome.Exception);
+        Assert.Contains("Autodesk.Revit.DB.Document.Save", ex.Message);
+        Assert.Contains("Autodesk.Revit.DB.Document.Close", ex.Message);
+    }
+
+    [Theory]
+    [InlineData("new Autodesk.Revit.DB.Transaction(Document, \"x\");", "Transaction")]
+    [InlineData("Autodesk.Revit.DB.TransactionGroup g = new(Document, \"x\"); return 1;", "TransactionGroup")]
+    [InlineData("using Tx = Autodesk.Revit.DB.SubTransaction; var s = new Tx(Document); return 1;", "SubTransaction")]
+    public async Task RunAsync_TransactionConstruction_IsRejectedEvenWithConfirmation(string script, string expectedNamedType)
+    {
+        // Check 1 is NOT gated and has no opt-in, by design: a second Transaction on the same document
+        // is not a risk judgement a caller may override, it simply cannot work (Revit permits one open
+        // Transaction per document). Passing the confirmation flag must change nothing here -- if it
+        // ever did, the flag would have become a general "ignore the denylist" switch, which is not
+        // what it is.
+        var runner = NewRunner();
+
+        var outcome = await runner.RunAsync(script, NewGlobals(), CancellationToken.None, confirmLifecycleActions: true);
+
         Assert.False(outcome.Success);
-        Assert.IsType<ScriptApiDenylistViolationException>(outcome.Exception);
-        Assert.Contains(expectedNamedMember, outcome.Exception!.Message);
+        var ex = Assert.IsType<ScriptApiDenylistViolationException>(outcome.Exception);
+        Assert.Equal(ScriptApiDenylistViolationException.DeniedCode, ex.Code);
+        Assert.Contains(expectedNamedType, ex.Message);
     }
 
     [Theory]
@@ -355,27 +475,13 @@ public class RoslynScriptRunnerTests
     }
 
     [Fact]
-    public async Task RunAsync_DeniedMemberReferencedAsAMethodGroup_IsStillRejected()
-    {
-        // `Document.Close` without parentheses is never an InvocationExpressionSyntax, so the first
-        // version of the denylist -- which only inspected invocations -- missed it entirely. Confirmed
-        // live: the script compiled and ran, handing itself a delegate straight to Document.Close.
-        // Binding to the symbol rather than the syntax shape is what closes this.
-        var runner = NewRunner();
-
-        var outcome = await runner.RunAsync(
-            "System.Func<bool> f = Document.Close; return f != null;", NewGlobals(), CancellationToken.None);
-
-        Assert.IsType<ScriptApiDenylistViolationException>(outcome.Exception);
-        Assert.Contains("Close", outcome.Exception!.Message);
-    }
-
-    [Fact]
     public async Task RunAsync_DeniedScript_NeverCached_NeverCompiled()
     {
-        // Same guarantee the await rejection has: a denied script must not be counted as a successful
-        // compilation nor enter the compilation cache, or a later identical run would hit the cache
-        // and skip the check entirely.
+        // Same guarantee the await rejection has: an UNCONDITIONALLY denied script must not be counted
+        // as a successful compilation nor enter the compilation cache, or a later identical run would
+        // hit the cache and skip the check entirely. Note this is the opposite of the confirmation-gated
+        // members, which DO get cached on purpose (their detection cannot change between runs, only the
+        // decision can) -- see RunAsync_LifecycleScriptConfirmedThenResentUnconfirmed_IsRejectedTheSecondTime.
         var compileCount = 0;
         var runner = NewRunner(compileCounter: () => compileCount++);
 
@@ -406,7 +512,7 @@ public class RoslynScriptRunnerTests
     public async Task RunAsync_OrdinaryRevitApiUse_IsNotRejected()
     {
         // The denylist must not blanket-ban the Revit API -- exposing it is the entire point of Phase 3.
-        // The compile counter is the assertion: it only increments after ScriptApiDenylist.Enforce has
+        // The compile counter is the assertion: it only increments after ScriptApiDenylist.Analyze has
         // returned without throwing, so `1` means this script bound real Revit symbols (a collector over
         // the real Document, the headline example the whole design exists for) and was allowed through.
         var compileCount = 0;

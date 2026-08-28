@@ -50,7 +50,7 @@ func TestExecuteScriptCompletesInline(t *testing.T) {
 	m := NewManager()
 	m.AttachInstance("inst-1", conn)
 
-	res, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "return 42;", 5000, 60000, false)
+	res, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "return 42;", 5000, 60000, ScriptOptions{})
 	if drec != nil {
 		t.Fatalf("unexpected diag error: %+v", drec)
 	}
@@ -74,7 +74,7 @@ func TestExecuteScriptReturnsPendingOnSlowScript(t *testing.T) {
 	m := NewManager()
 	m.AttachInstance("inst-1", conn)
 
-	res, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "sleep forever", 100, 60000, false)
+	res, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "sleep forever", 100, 60000, ScriptOptions{})
 	if drec != nil {
 		t.Fatalf("unexpected diag error: %+v", drec)
 	}
@@ -107,7 +107,7 @@ func TestExecuteScriptForwardsOverwriteOutputFilesAndFiles(t *testing.T) {
 	m := NewManager()
 	m.AttachInstance("inst-1", conn)
 
-	res, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "Publish(\"a.png\");", 5000, 60000, true)
+	res, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "Publish(\"a.png\");", 5000, 60000, ScriptOptions{OverwriteOutputFiles: true})
 	if drec != nil {
 		t.Fatalf("ExecuteScript: %+v", drec)
 	}
@@ -144,7 +144,7 @@ func TestExecuteScriptSecondCallReturnsBusy(t *testing.T) {
 	}
 	done := make(chan outcome, 1)
 	go func() {
-		res, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "long script", 60000, 600000, false)
+		res, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "long script", 60000, 600000, ScriptOptions{})
 		done <- outcome{res, drec}
 	}()
 
@@ -152,7 +152,7 @@ func TestExecuteScriptSecondCallReturnsBusy(t *testing.T) {
 	// for inst-1 before we issue the second one.
 	time.Sleep(100 * time.Millisecond)
 
-	res2, drec2 := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "second script", 5000, 60000, false)
+	res2, drec2 := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "second script", 5000, 60000, ScriptOptions{})
 	close(block)
 
 	if drec2 != nil {
@@ -170,7 +170,7 @@ func TestExecuteScriptSecondCallReturnsBusy(t *testing.T) {
 
 func TestExecuteScriptUnknownInstance(t *testing.T) {
 	m := NewManager()
-	_, drec := m.ExecuteScript(context.Background(), "ghost", "doc-1", "1+1", 1000, 60000, false)
+	_, drec := m.ExecuteScript(context.Background(), "ghost", "doc-1", "1+1", 1000, 60000, ScriptOptions{})
 	if drec == nil {
 		t.Fatal("expected diag error for unknown instance")
 	}
@@ -211,7 +211,7 @@ func TestPollExecutionResolvesToTerminal(t *testing.T) {
 	m := NewManager()
 	m.AttachInstance("inst-1", conn)
 
-	start, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "slow", 50, 60000, false)
+	start, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "slow", 50, 60000, ScriptOptions{})
 	if drec != nil {
 		t.Fatalf("ExecuteScript: %+v", drec)
 	}
@@ -239,7 +239,7 @@ func TestPollExecutionResolvesToTerminal(t *testing.T) {
 
 	// A follow-up execute_script on the same instance must succeed now that
 	// the prior execution is terminal (busy state cleared).
-	res, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "next", 50, 60000, false)
+	res, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "next", 50, 60000, ScriptOptions{})
 	if drec != nil {
 		t.Fatalf("ExecuteScript after terminal poll: %+v", drec)
 	}
@@ -257,7 +257,7 @@ func TestPollExecutionAfterTerminalReturnsCachedResultWithoutWireCall(t *testing
 	m := NewManager()
 	m.AttachInstance("inst-1", conn)
 
-	res, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "fast", 5000, 60000, false)
+	res, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "fast", 5000, 60000, ScriptOptions{})
 	if drec != nil {
 		t.Fatalf("ExecuteScript: %+v", drec)
 	}
@@ -292,7 +292,7 @@ func TestCancelExecutionForwardsAndSettles(t *testing.T) {
 	m := NewManager()
 	m.AttachInstance("inst-1", conn)
 
-	start, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "loop forever", 50, 600000, false)
+	start, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "loop forever", 50, 600000, ScriptOptions{})
 	if drec != nil {
 		t.Fatalf("ExecuteScript: %+v", drec)
 	}
@@ -306,7 +306,7 @@ func TestCancelExecutionForwardsAndSettles(t *testing.T) {
 	}
 
 	// Instance should no longer be busy.
-	res2, drec2 := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "fresh", 50, 60000, false)
+	res2, drec2 := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "fresh", 50, 60000, ScriptOptions{})
 	if drec2 != nil {
 		t.Fatalf("ExecuteScript after cancel: %+v", drec2)
 	}
@@ -335,7 +335,7 @@ func TestWireErrorPropagatesDiagnosticData(t *testing.T) {
 	m := NewManager()
 	m.AttachInstance("inst-1", conn)
 
-	_, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "boom", 1000, 60000, false)
+	_, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "boom", 1000, 60000, ScriptOptions{})
 	if drec == nil {
 		t.Fatal("expected diag error")
 	}
@@ -353,7 +353,7 @@ func TestInstanceDisconnectedDuringPoll(t *testing.T) {
 	m := NewManager()
 	m.AttachInstance("inst-1", conn)
 
-	start, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "slow", 50, 60000, false)
+	start, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "slow", 50, 60000, ScriptOptions{})
 	if drec != nil {
 		t.Fatalf("ExecuteScript: %+v", drec)
 	}
@@ -381,7 +381,7 @@ func TestReconnectClearsStaleBusyState(t *testing.T) {
 	m := NewManager()
 	m.AttachInstance("inst-1", conn)
 
-	_, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "slow", 50, 60000, false)
+	_, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "slow", 50, 60000, ScriptOptions{})
 	if drec != nil {
 		t.Fatalf("ExecuteScript: %+v", drec)
 	}
@@ -398,7 +398,7 @@ func TestReconnectClearsStaleBusyState(t *testing.T) {
 	})
 	m.AttachInstance("inst-1", conn2)
 
-	res, drec2 := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "retry", 1000, 60000, false)
+	res, drec2 := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "retry", 1000, 60000, ScriptOptions{})
 	if drec2 != nil {
 		t.Fatalf("ExecuteScript after reconnect: %+v, want success (not wedged busy)", drec2)
 	}
@@ -426,7 +426,7 @@ func TestForwardExistingWireErrorDoesNotSettleTerminal(t *testing.T) {
 	m := NewManager()
 	m.AttachInstance("inst-1", conn)
 
-	start, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "slow", 50, 60000, false)
+	start, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "slow", 50, 60000, ScriptOptions{})
 	if drec != nil {
 		t.Fatalf("ExecuteScript: %+v", drec)
 	}
@@ -473,7 +473,7 @@ func TestUnrecoverableLatchesInstance(t *testing.T) {
 	m := NewManager()
 	m.AttachInstance("inst-1", conn)
 
-	start, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "slow", 50, 60000, false)
+	start, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "slow", 50, 60000, ScriptOptions{})
 	if drec != nil {
 		t.Fatalf("ExecuteScript: %+v", drec)
 	}
@@ -481,7 +481,7 @@ func TestUnrecoverableLatchesInstance(t *testing.T) {
 	// Simulate the add-in's cancellation grace period lapsing.
 	m.settle("inst-1", start.ExecutionID, &Result{Status: StatusUnrecoverable, ExecutionID: start.ExecutionID})
 
-	_, drec2 := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "another", 1000, 60000, false)
+	_, drec2 := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "another", 1000, 60000, ScriptOptions{})
 	if drec2 == nil || drec2.Code != "instance_unrecoverable" {
 		t.Fatalf("got %+v, want instance_unrecoverable", drec2)
 	}
@@ -490,7 +490,7 @@ func TestUnrecoverableLatchesInstance(t *testing.T) {
 	// must survive this, since it's still the same wedged Revit process.
 	m.DetachInstance("inst-1")
 	m.AttachInstance("inst-1", conn)
-	_, drec3 := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "after reconnect", 1000, 60000, false)
+	_, drec3 := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "after reconnect", 1000, 60000, ScriptOptions{})
 	if drec3 == nil || drec3.Code != "instance_unrecoverable" {
 		t.Fatalf("got %+v, want instance_unrecoverable to survive a same-id reconnect", drec3)
 	}
@@ -510,7 +510,7 @@ func TestUnrecoverableDoesNotAffectADifferentInstanceID(t *testing.T) {
 	m := NewManager()
 	m.AttachInstance("inst-1", conn)
 
-	start, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "slow", 50, 60000, false)
+	start, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "slow", 50, 60000, ScriptOptions{})
 	if drec != nil {
 		t.Fatalf("ExecuteScript: %+v", drec)
 	}
@@ -524,7 +524,7 @@ func TestUnrecoverableDoesNotAffectADifferentInstanceID(t *testing.T) {
 	})
 	m.AttachInstance("inst-1-restarted", conn2)
 
-	res, drec2 := m.ExecuteScript(context.Background(), "inst-1-restarted", "doc-1", "post-restart", 1000, 60000, false)
+	res, drec2 := m.ExecuteScript(context.Background(), "inst-1-restarted", "doc-1", "post-restart", 1000, 60000, ScriptOptions{})
 	if drec2 != nil {
 		t.Fatalf("ExecuteScript against a fresh instance_id: %+v, want it to succeed", drec2)
 	}
@@ -546,7 +546,7 @@ func TestSettleDoesNotRegressAlreadyTerminalStatus(t *testing.T) {
 	m := NewManager()
 	m.AttachInstance("inst-1", conn)
 
-	start, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "slow", 50, 60000, false)
+	start, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "slow", 50, 60000, ScriptOptions{})
 	if drec != nil {
 		t.Fatalf("ExecuteScript: %+v", drec)
 	}
@@ -580,7 +580,7 @@ func TestMaxDurationAutoCancelsUnpolledExecution(t *testing.T) {
 	m := NewManager()
 	m.AttachInstance("inst-1", conn)
 
-	_, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "slow", 50, 100 /* maxDurationMs */, false)
+	_, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "slow", 50, 100 /* maxDurationMs */, ScriptOptions{})
 	if drec != nil {
 		t.Fatalf("ExecuteScript: %+v", drec)
 	}
@@ -672,7 +672,7 @@ func TestCancelExecutionEscalatesToUnrecoverableAfterGracePeriod(t *testing.T) {
 	// exactly one scheduled callback (CancelExecution's own grace
 	// escalation) so fireAll below doesn't end up synchronously running an
 	// unrelated auto-cancel that blocks for its own full wire budget.
-	start, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "wedge forever", 50, 0, false)
+	start, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "wedge forever", 50, 0, ScriptOptions{})
 	if drec != nil {
 		t.Fatalf("ExecuteScript: %+v", drec)
 	}
@@ -711,7 +711,7 @@ func TestCancelExecutionEscalatesToUnrecoverableAfterGracePeriod(t *testing.T) {
 	<-cancelDone
 
 	// The instance must now be unrecoverable, not stuck busy forever.
-	_, drec2 := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "another", 1000, 60000, false)
+	_, drec2 := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "another", 1000, 60000, ScriptOptions{})
 	if drec2 == nil || drec2.Code != "instance_unrecoverable" {
 		t.Fatalf("ExecuteScript after grace-period escalation: %+v, want instance_unrecoverable", drec2)
 	}
@@ -742,7 +742,7 @@ func TestCancelExecutionGraceEscalationIsNoOpIfAlreadyTerminal(t *testing.T) {
 	m, fa := newManagerWithFakeClock()
 	m.AttachInstance("inst-1", conn)
 
-	start, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "cooperative", 50, 60000, false)
+	start, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "cooperative", 50, 60000, ScriptOptions{})
 	if drec != nil {
 		t.Fatalf("ExecuteScript: %+v", drec)
 	}
@@ -785,7 +785,7 @@ func TestStatusForInstance_PendingWhileQueued(t *testing.T) {
 	m := NewManager()
 	m.AttachInstance("inst-1", conn)
 
-	_, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "sleep forever", 100, 60000, false)
+	_, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "sleep forever", 100, 60000, ScriptOptions{})
 	if drec != nil {
 		t.Fatalf("ExecuteScript: %+v", drec)
 	}
@@ -804,7 +804,7 @@ func TestStatusForInstance_BusyWhileRunning(t *testing.T) {
 	m := NewManager()
 	m.AttachInstance("inst-1", conn)
 
-	_, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "slow", 100, 60000, false)
+	_, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "slow", 100, 60000, ScriptOptions{})
 	if drec != nil {
 		t.Fatalf("ExecuteScript: %+v", drec)
 	}
@@ -823,7 +823,7 @@ func TestStatusForInstance_UnrecoverableBeatsEverythingElse(t *testing.T) {
 	m := NewManager()
 	m.AttachInstance("inst-1", conn)
 
-	start, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "slow", 50, 60000, false)
+	start, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "slow", 50, 60000, ScriptOptions{})
 	if drec != nil {
 		t.Fatalf("ExecuteScript: %+v", drec)
 	}
@@ -834,5 +834,40 @@ func TestStatusForInstance_UnrecoverableBeatsEverythingElse(t *testing.T) {
 
 	if got := m.StatusForInstance("inst-1"); got != StatusUnrecoverable {
 		t.Errorf("StatusForInstance = %q, want unrecoverable", got)
+	}
+}
+
+// TestExecuteScriptForwardsConfirmLifecycleActions pins PRD §14's confirmation
+// flag onto the wire. The add-in is where the decision is actually made (it is
+// the only side that can see what the script's compiled form touches), so the
+// broker's whole job here is to transmit the request's answer faithfully —
+// which makes "did it reach the params, with the right name and the right
+// value" the entire contract. Both values are asserted, not just true: a flag
+// that silently defaults to true when the caller said false would be the worst
+// possible failure of a confirmation gate, and `omitempty` on the tool input
+// makes false the value most likely to get lost.
+func TestExecuteScriptForwardsConfirmLifecycleActions(t *testing.T) {
+	for _, confirm := range []bool{false, true} {
+		var gotParams map[string]any
+		_, conn := newFakeInstance(t, func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
+			json.Unmarshal(params, &gotParams)
+			return map[string]any{"status": "success", "execution_id": gotParams["execution_id"]}, nil
+		})
+		m := NewManager()
+		m.AttachInstance("inst-1", conn)
+
+		_, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "Document.Save();", 5000, 60000,
+			ScriptOptions{ConfirmLifecycleActions: confirm})
+		if drec != nil {
+			t.Fatalf("ExecuteScript(confirm=%v): %+v", confirm, drec)
+		}
+
+		got, ok := gotParams["confirm_lifecycle_actions"].(bool)
+		if !ok {
+			t.Fatalf("params has no bool \"confirm_lifecycle_actions\"; got %+v", gotParams)
+		}
+		if got != confirm {
+			t.Errorf("params[\"confirm_lifecycle_actions\"] = %v, want %v", got, confirm)
+		}
 	}
 }

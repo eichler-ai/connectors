@@ -77,6 +77,48 @@ public class TransactionScriptExecutorTests
     }
 
     [Fact]
+    public async Task UnconfirmedLifecycleScript_RollsBackTransactionAndGroup_NeverCommits()
+    {
+        // PRD §14's confirmation gate refuses at RUN time rather than compile time (the flag is
+        // per-request, the compilation is cached), so it is a genuinely different code path from the
+        // unconditional rejection above -- and this is the assertion that it kept the property that
+        // matters: refused before anything executes, both scopes rolled back, nothing committed. The
+        // whole reason confirmation is the right mechanism for these members is that a rollback CANNOT
+        // undo them once they run; a gate that let them run first would be pointless.
+        var executor = NewExecutor();
+        var document = new FakeDocumentAdapter();
+        var uiApp = new FakeUiApplicationAdapter();
+
+        var outcome = await executor.ExecuteAsync(
+            document, uiApp, null, "Document.Save();", CancellationToken.None);
+
+        Assert.False(outcome.Success);
+        Assert.False(outcome.WasCancelled);
+        var ex = Assert.IsType<ScriptApiDenylistViolationException>(outcome.Exception);
+        Assert.Equal(ScriptApiDenylistViolationException.ConfirmationRequiredCode, ex.Code);
+        Assert.Equal(new[] { "Start", "RollBack" }, document.LastTransaction!.Calls);
+        Assert.Equal(new[] { "Start", "RollBack" }, document.LastTransactionGroup!.Calls);
+    }
+
+    [Fact]
+    public async Task ConfirmedLifecycleScript_IsForwardedToTheRunner()
+    {
+        // The executor's own job in the gate is just to forward the flag; this pins that it actually
+        // does. With confirmation the script gets past the gate and on to execution (where, in this
+        // tier, it then fails on loading RevitAPI.dll -- see RoslynScriptRunnerTests) so the assertion
+        // is that the refusal is no longer the confirmation one. A dropped parameter here would make
+        // confirm_lifecycle_actions permanently inert with no other test noticing.
+        var executor = NewExecutor();
+        var document = new FakeDocumentAdapter();
+        var uiApp = new FakeUiApplicationAdapter();
+
+        var outcome = await executor.ExecuteAsync(
+            document, uiApp, null, "Document.Save();", CancellationToken.None, confirmLifecycleActions: true);
+
+        Assert.IsNotType<ScriptApiDenylistViolationException>(outcome.Exception);
+    }
+
+    [Fact]
     public async Task CommitFailure_RollsBackTransactionAndGroup_ReportsFailure()
     {
         var executor = NewExecutor();

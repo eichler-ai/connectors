@@ -104,12 +104,24 @@ public sealed class RoslynScriptRunner
             .Where(a => !a.IsDynamic && !string.IsNullOrEmpty(a.Location))
             .ToArray();
 
-    public async Task<ScriptExecutionOutcome> RunAsync(string scriptText, ScriptGlobals globals, CancellationToken cancellationToken)
+    /// <param name="confirmLifecycleActions">
+    /// The request's own <c>confirm_lifecycle_actions</c> flag (PRD §14). PER-REQUEST by nature -- the same
+    /// script text can arrive once without it and again with it -- which is exactly why it is a parameter of
+    /// RUN rather than of compile: compilation is cached by script text, so folding this decision into
+    /// GetOrCompile would let one run's answer be reused for a request that asked something different.
+    /// Detection of whether the script needs it IS cached (it depends only on the text); only the decision
+    /// is made here.
+    /// </param>
+    public async Task<ScriptExecutionOutcome> RunAsync(
+        string scriptText,
+        ScriptGlobals globals,
+        CancellationToken cancellationToken,
+        bool confirmLifecycleActions = false)
     {
-        Script<object> script;
+        CompiledScript compiled;
         try
         {
-            script = GetOrCompile(scriptText);
+            compiled = GetOrCompile(scriptText);
         }
         catch (CompilationErrorException ex)
         {
@@ -127,6 +139,20 @@ public sealed class RoslynScriptRunner
             return ScriptExecutionOutcome.Failed(ex, stdOut: "");
         }
 
+        // PRD §14, the per-request half of the denylist. Deliberately placed here -- after compilation
+        // (cached or not), before the ALC is created and before anything is emitted or executed -- so a
+        // refused run has the same "nothing happened" property as the unconditional compile-time
+        // rejections above: TransactionScriptExecutor rolls its ambient transaction back and the document
+        // is untouched. Note this is reached identically on a cache HIT and a cache MISS, which is the
+        // whole point: an unconfirmed rerun of a script that was confirmed a moment ago is still refused.
+        if (compiled.Analysis.RequiresLifecycleConfirmation && !confirmLifecycleActions)
+        {
+            return ScriptExecutionOutcome.Failed(
+                ScriptApiDenylistViolationException.LifecycleConfirmationRequired(compiled.Analysis.LifecycleMembers),
+                stdOut: "");
+        }
+
+        var script = compiled.Script;
         var alc = _alcFactory();
         var originalOut = Console.Out;
         var writer = new StringWriter();
@@ -222,7 +248,7 @@ public sealed class RoslynScriptRunner
         return await resultTask.ConfigureAwait(false);
     }
 
-    private Script<object> GetOrCompile(string scriptText)
+    private CompiledScript GetOrCompile(string scriptText)
     {
         // The await check only needs to run on a genuine cache miss: the cache key is the verbatim script
         // text, and only a script that already passed RejectTopLevelAwait below is ever inserted into it
@@ -251,14 +277,20 @@ public sealed class RoslynScriptRunner
         // PRD §14: the denylist needs bound symbols, so it runs only once Compile() has reported no
         // errors -- before that, every expression would resolve to an error symbol and the check could
         // only re-report ordinary compile errors as denylist violations. Placed before _compileCounter/
-        // _cache.Set for the same reason RejectTopLevelAwait sits before them: a rejected script must
-        // never be counted as a successful compilation nor enter the cache, or an identical later run
-        // would hit the cache and skip the check entirely.
-        ScriptApiDenylist.Enforce(script.GetCompilation());
+        // _cache.Set for the same reason RejectTopLevelAwait sits before them: a script rejected
+        // UNCONDITIONALLY (transaction construction -- Analyze throws for that) must never be counted as
+        // a successful compilation nor enter the cache, or an identical later run would hit the cache and
+        // skip the check entirely.
+        //
+        // What Analyze RETURNS (the confirmation-gated lifecycle members it found) is the opposite case:
+        // it is cached on purpose, because it is a property of this script text and cannot change between
+        // runs. Only the decision made from it is per-run -- see RunAsync.
+        var analysis = ScriptApiDenylist.Analyze(script.GetCompilation());
 
         _compileCounter?.Invoke();
-        _cache.Set(scriptText, script);
-        return script;
+        var compiled = new CompiledScript(script, analysis);
+        _cache.Set(scriptText, compiled);
+        return compiled;
     }
 
     /// <summary>

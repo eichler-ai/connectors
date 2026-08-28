@@ -309,3 +309,43 @@ func TestToolsAreRegisteredWithExpectedNames(t *testing.T) {
 		}
 	}
 }
+
+// TestExecuteScriptToolForwardsConfirmLifecycleActions is the tool-surface half
+// of PRD §14's confirmation gate: the argument must exist on execute_script's
+// input schema under the name the skill file tells agents to use, and must
+// reach the add-in's params. Driven through the real tool handler (not
+// execution.Manager directly) because the schema binding is exactly what could
+// silently drop it — an argument the SDK does not know about is ignored, not
+// rejected, so a typo'd json tag would fail nothing else in this suite.
+func TestExecuteScriptToolForwardsConfirmLifecycleActions(t *testing.T) {
+	mgr := execution.NewManager()
+	var gotConfirm bool
+	attachFakeInstance(t, mgr, "inst-1", func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
+		var p map[string]any
+		json.Unmarshal(params, &p)
+		gotConfirm, _ = p["confirm_lifecycle_actions"].(bool)
+		return map[string]any{"status": "success", "execution_id": p["execution_id"]}, nil
+	})
+	cs := connectClient(t, mgr)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	res, err := cs.CallTool(ctx, &mcp.CallToolParams{
+		Name: "execute_script",
+		Arguments: map[string]any{
+			"instance_id":               "inst-1",
+			"document_id":               "doc-1",
+			"script":                    "Document.Save();",
+			"confirm_lifecycle_actions": true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected tool error: %+v", res.Content)
+	}
+	if !gotConfirm {
+		t.Error("confirm_lifecycle_actions did not reach the wire params as true")
+	}
+}
