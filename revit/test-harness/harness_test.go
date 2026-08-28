@@ -129,48 +129,76 @@ type executeScriptOut struct {
 	ExecutionID string `json:"execution_id"`
 	Status      string `json:"status"`
 	Output      string `json:"output"`
+	// The PRD §01 diagnostic record for a failed script -- where a compile
+	// error, an await rejection, or a ScriptApiDenylist violation actually
+	// surfaces. Absent on success.
+	Error *struct {
+		Severity string `json:"severity"`
+		Code     string `json:"code"`
+		Source   string `json:"source"`
+		Message  string `json:"message"`
+		Remedy   string `json:"remedy"`
+	} `json:"error"`
 }
 
-// TestCreateLevel is this harness's first, most basic case: a real
-// model-modifying write (Level.Create) succeeds through execute_script.
-//
-// The script reflects into RevitDocumentAdapter's private _document field
-// to reach the real Autodesk.Revit.DB.Document rather than calling a
-// sanctioned API -- because there isn't one yet. ScriptGlobals.Document is
-// still IScriptDocument (Title only) as of this test; real Document access
-// is the Phase 3 design this case exists to validate ahead of. Once that
-// design ships, replace the reflection with the real accessor and this
-// comment -- deliberately not hidden behind a helper, so it's impossible to
-// miss when Phase 3 lands (see skill.md's "verify against the running
-// connector, not the PRD" lesson).
-func TestCreateLevel(t *testing.T) {
+// failureText is everything a failed execution said, for assertions that
+// don't want to care whether a given detail landed in the diagnostic
+// record's message or in the script's own captured output.
+func (o executeScriptOut) failureText() string {
+	text := o.Output
+	if o.Error != nil {
+		text += " | " + o.Error.Code + " | " + o.Error.Message + " | " + o.Error.Remedy
+	}
+	return text
+}
+
+// targetDocument returns a connected instance and one open document, or
+// skips -- the shared preamble for every case below.
+func targetDocument(t *testing.T) (*mcpclient.Client, string, string) {
+	t.Helper()
 	c, instances := startClient(t)
 	inst := instances.Instances[0]
 	if len(inst.Documents) == 0 {
 		t.Skip("connected instance has no open document")
 	}
-	doc := inst.Documents[0]
+	return c, inst.InstanceID, inst.Documents[0].DocumentID
+}
 
-	script := `
-var field = Document.GetType().GetField("_document", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-if (field == null) { return new { ok = false, stage = "reflect-field" }; }
-var realDoc = (Autodesk.Revit.DB.Document)field.GetValue(Document);
-var before = new Autodesk.Revit.DB.FilteredElementCollector(realDoc).OfClass(typeof(Autodesk.Revit.DB.Level)).GetElementCount();
-var level = Autodesk.Revit.DB.Level.Create(realDoc, 999.0);
-var after = new Autodesk.Revit.DB.FilteredElementCollector(realDoc).OfClass(typeof(Autodesk.Revit.DB.Level)).GetElementCount();
-return new { ok = after == before + 1, levelId = level.Id.Value, before, after };
-`
-
+// runScript executes one script and returns its decoded result, failing on
+// transport errors but NOT on a failed script status -- several cases below
+// assert specifically that a script is rejected.
+func runScript(t *testing.T, c *mcpclient.Client, instanceID, documentID, script string) executeScriptOut {
+	t.Helper()
 	raw, err := c.CallTool("execute_script", map[string]any{
-		"instance_id": inst.InstanceID,
-		"document_id": doc.DocumentID,
+		"instance_id": instanceID,
+		"document_id": documentID,
 		"script":      script,
 	}, 20*time.Second)
 	if err != nil {
 		t.Fatalf("execute_script: %v", err)
 	}
+	return decodeToolResult[executeScriptOut](t, raw)
+}
 
-	out := decodeToolResult[executeScriptOut](t, raw)
+// TestCreateLevel is this harness's first, most basic case: a real
+// model-modifying write (Level.Create) succeeds through execute_script.
+//
+// As of PRD §14 (Phase 3) this uses the SANCTIONED `Document` global, which
+// is the real Autodesk.Revit.DB.Document. It previously reflected into
+// RevitDocumentAdapter's private _document field because no sanctioned
+// accessor existed; that workaround is gone along with the narrow
+// IScriptDocument seam it worked around.
+func TestCreateLevel(t *testing.T) {
+	c, instanceID, documentID := targetDocument(t)
+
+	script := `
+var before = new Autodesk.Revit.DB.FilteredElementCollector(Document).OfClass(typeof(Autodesk.Revit.DB.Level)).GetElementCount();
+var level = Autodesk.Revit.DB.Level.Create(Document, 999.0);
+var after = new Autodesk.Revit.DB.FilteredElementCollector(Document).OfClass(typeof(Autodesk.Revit.DB.Level)).GetElementCount();
+return new { ok = after == before + 1, levelId = level.Id.Value, before, after };
+`
+
+	out := runScript(t, c, instanceID, documentID, script)
 	if out.Status != "success" {
 		t.Fatalf("expected status=success, got %q (output: %s)", out.Status, out.Output)
 	}
@@ -183,5 +211,80 @@ return new { ok = after == before + 1, levelId = level.Id.Value, before, after }
 	// happens to have today.
 	if !strings.Contains(out.Output, "ok = True") {
 		t.Fatalf("level was not created as expected; output: %s", out.Output)
+	}
+}
+
+// TestScriptGlobalsExposeRealRevitObjects covers what MCPBridge.Core.Tests
+// no longer can. Those assertions (a script reading Document.Title and
+// getting the document's real title back) used to run against
+// FakeDocumentAdapter in tier 1; once `Document` became the real
+// Autodesk.Revit.DB.Document that stopped being fakeable at all -- Document
+// is sealed and non-constructible outside a live Revit session, and
+// RevitAPI.dll is a mixed-mode assembly a test host cannot even load. So
+// this is the tier that can still make them (PRD §14).
+func TestScriptGlobalsExposeRealRevitObjects(t *testing.T) {
+	c, instanceID, documentID := targetDocument(t)
+
+	// Each global is asserted to be the REAL Revit type, by name, not merely
+	// non-null: a narrow adapter would also answer .Title, so the type check
+	// is what actually distinguishes the Phase 3 seam from the old one.
+	script := `
+return new {
+  docType = Document.GetType().FullName,
+  uiAppType = UIApplication.GetType().FullName,
+  uiDocType = UIDocument == null ? "null" : UIDocument.GetType().FullName,
+  title = Document.Title,
+  sameDoc = object.ReferenceEquals(Document, UIDocument.Document)
+};
+`
+
+	out := runScript(t, c, instanceID, documentID, script)
+	if out.Status != "success" {
+		t.Fatalf("expected status=success, got %q (output: %s)", out.Status, out.Output)
+	}
+	for _, want := range []string{
+		"docType = Autodesk.Revit.DB.Document",
+		"uiAppType = Autodesk.Revit.UI.UIApplication",
+		"uiDocType = Autodesk.Revit.UI.UIDocument",
+	} {
+		if !strings.Contains(out.Output, want) {
+			t.Errorf("globals do not expose the real Revit types: wanted %q in output: %s", want, out.Output)
+		}
+	}
+}
+
+// TestDenylistRejectsOwnTransaction is the live half of the ScriptApiDenylist
+// coverage. Tier 1 proves the check fires and that the executor rolls back;
+// only here can we prove the whole path -- that a rejected script comes back
+// to the agent as a clear, named diagnostic rather than a crash, a hang, or
+// (worst) a silent no-op that leaves the ambient transaction in an odd state
+// and the next script failing for an unrelated-looking reason.
+func TestDenylistRejectsOwnTransaction(t *testing.T) {
+	c, instanceID, documentID := targetDocument(t)
+
+	for _, tc := range []struct{ name, script string }{
+		{"Transaction", `using (var tx = new Autodesk.Revit.DB.Transaction(Document, "mine")) { tx.Start(); tx.Commit(); } return "ran";`},
+		{"TransactionGroup", `using (var tg = new Autodesk.Revit.DB.TransactionGroup(Document, "mine")) { tg.Start(); tg.Assimilate(); } return "ran";`},
+		{"SubTransaction", `using (var st = new Autodesk.Revit.DB.SubTransaction(Document)) { st.Start(); st.Commit(); } return "ran";`},
+		{"Document.Close", `Document.Close(); return "ran";`},
+		{"Document.SaveAs", `Document.SaveAs("C:\\Temp\\should-never-happen.rvt"); return "ran";`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := runScript(t, c, instanceID, documentID, tc.script)
+			if out.Status == "success" {
+				t.Fatalf("denylisted script was allowed to run; output: %s", out.Output)
+			}
+			if !strings.Contains(out.failureText(), "script-api-denied") {
+				t.Errorf("rejection does not name the denylist code; result: %s", out.failureText())
+			}
+		})
+	}
+
+	// The instance must still be usable afterwards -- a rejection happens
+	// before compilation completes, so the ambient transaction is rolled
+	// back cleanly and the next script runs normally.
+	out := runScript(t, c, instanceID, documentID, `return Document.Title;`)
+	if out.Status != "success" {
+		t.Fatalf("instance unusable after denylist rejections: status=%q output=%s", out.Status, out.Output)
 	}
 }

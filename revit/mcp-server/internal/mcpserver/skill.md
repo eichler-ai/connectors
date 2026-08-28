@@ -6,24 +6,23 @@ Revit's own API documentation on demand.
 
 Read this once at the start of a Revit task. It is orientation, not reference.
 
-> **Read this first — current capability.** `execute_script` compiles real C#, but the `Document`
-> global is not `Autodesk.Revit.DB.Document` — it's a narrow, sanctioned seam exposing only
-> `Title`. Passing it anywhere a real Revit API type is expected fails to compile, e.g.
-> `new FilteredElementCollector(Document)` → `CS1503: cannot convert from
-> 'MCPBridge.RevitAdapter.IScriptDocument' to 'Autodesk.Revit.DB.Document'`.
->
-> **The real Revit API is reachable, just not through that sanctioned seam.** Reflecting into the
-> document adapter's private field gets you the real `Autodesk.Revit.DB.Document`, and real API
-> calls against it work — including writes (`Level.Create`, live-verified: it rides the same
-> ambient transaction the executor already wraps every script in, so you don't open your own):
+> **Read this first — current capability.** `execute_script` compiles real C#, and the `Document`
+> global **is** `Autodesk.Revit.DB.Document` — the real thing, not a wrapper. Pass it straight
+> into any Revit API that wants a document:
 > ```csharp
-> var field = Document.GetType().GetField("_document",
->     System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-> var realDoc = (Autodesk.Revit.DB.Document)field.GetValue(Document);
+> var walls = new FilteredElementCollector(Document)
+>     .OfClass(typeof(Wall)).GetElementCount();
+> var level = Level.Create(Document, 42.0);   // writes work too
+> return new { walls, levelId = level.Id.Value };
 > ```
-> This is **not a documented contract** — it depends on an implementation detail (the field's
-> name) that could change without notice, and it's how you reach the API today, not the intended
-> long-term design. If it stops working, that's the seam changing, not you doing it wrong.
+> `UIApplication` and `UIDocument` are likewise the real `Autodesk.Revit.UI` types (`UIDocument`
+> may be null). Only `System` is imported, so either fully-qualify (`Autodesk.Revit.DB.Wall`) or
+> nothing will resolve — see "Running a script" below.
+>
+> **You never open a transaction.** Every script already runs inside a `Transaction` and
+> `TransactionGroup` this connector opens for you: your changes commit automatically if the script
+> succeeds and roll back if it throws. Revit allows only one open transaction per document, so
+> constructing your own is **rejected before your script runs** — see "What you may not do" below.
 
 ---
 
@@ -84,17 +83,34 @@ return Document.Title;
 
 | In scope | Type / use |
 |---|---|
-| `Document` | `Title` only |
-| `UIDocument` | `.Document` → same as above; may be null |
-| `UIApplication` | `.ActiveUiDocument` → may be null |
+| `Document` | `Autodesk.Revit.DB.Document` — the real one, full API |
+| `UIDocument` | `Autodesk.Revit.UI.UIDocument`; may be null |
+| `UIApplication` | `Autodesk.Revit.UI.UIApplication` |
 | `CancellationToken` | check it in loops (see below) |
 | `ExportsDirectory`, `ImportsDirectory` | absolute paths, see "Exchanging files" |
 | `Publish(path, name?)` | copy a file into `exports/` and report it back; `name` renames it |
 | `DialogResultOverrides` | per-dialog answer override, e.g. `DialogResultOverrides["TaskDialog_X"] = 1001` |
 | the .NET BCL | `System.IO`, `System.Linq`, etc. — fully usable |
 
-Only `System` is imported by default, so use fully-qualified names (`System.IO.File.ReadAllText`)
-or you'll get `CS0246`. Each run is wrapped in a transaction automatically; you cannot open your own.
+Only `System` is imported by default, so use fully-qualified names (`Autodesk.Revit.DB.Wall`,
+`System.IO.File.ReadAllText`) or you'll get `CS0246`. Use `using` *directives* freely at the top of
+your script if you'd rather: `using Autodesk.Revit.DB;`.
+
+### What you may not do
+
+A small denylist is enforced **at compile time**, before your script runs — so a rejected script
+changes nothing, and the transaction it would have run in is rolled back cleanly. Rejections come
+back as a failed execution whose error names `script-api-denied` and the exact member.
+
+| Rejected | Why | Do this instead |
+|---|---|---|
+| `new Transaction(...)`, `new TransactionGroup(...)`, `new SubTransaction(...)` | Your script is already inside one, and Revit allows only one open transaction per document | Just make your changes; they commit on success, roll back on failure |
+| `Document.Close`, `.Save`, `.SaveAs`, `.SynchronizeWithCentral`, `.Print` | Changes the document's lifecycle or worksharing state, not its content — on a file a person has open | Ask the person driving Revit |
+| `WorksharingUtils.RelinquishOwnership` | Same reason | Ask the person driving Revit |
+
+Everything else in the Revit API is fair game. This list is deliberately short and may grow; it is
+about preventing accidental damage, not sandboxing — if you hit it, you wanted a different approach,
+not a way around it.
 
 **Long scripts.** If the call exceeds `timeout_ms` you get `{"status":"running","execution_id":...}`.
 Call `poll_execution` with that id until a terminal status. `cancel_execution` requests a stop — but
@@ -156,9 +172,9 @@ Don't know the path yet? Run `return ImportsDirectory;` first, then write your f
 
 ## Discovering the API
 
-Reflect over Revit's real installed assemblies rather than guessing names. Remember the note at the
-top: what you find here is callable, just not through the sanctioned `Document` global directly —
-use it to plan a script and look up exact signatures before reaching for the reflection technique.
+Reflect over Revit's real installed assemblies rather than guessing names. What you find here is
+directly callable from a script against the `Document` global — use it to look up exact signatures
+and overloads before writing one, which is far cheaper than a round trip through a `CS1503`.
 
 - **`search_functions`** — start here when you know *what* you want, not the name.
   `{"query": "create wall"}` → ranked matches with summaries.
@@ -196,7 +212,8 @@ to which broker, and the loaded build.
 | Script stays `pending` | Revit's UI thread is blocked — usually a modal dialog, or the user is mid-edit | Don't retry; a second call just returns `busy`. Ask the user to check for an open dialog. |
 | `status: "unresponsive"` | Revit stopped answering heartbeats | Wait; if it persists, Revit needs attention from the user. |
 | `status: "unrecoverable"` | A prior script ignored cancellation | Nothing you send will run. Revit must be restarted; the instance gets a new `instance_id`. |
-| Script fails with `CS0103`/`CS1503`/`CS0246` | A compile error, not an infrastructure problem | Fix the script. `CS1503` on `Document` usually means you passed the sanctioned global where a real `Autodesk.Revit.DB.Document` is expected — see the reflection technique at the top. Only `System` is imported by default otherwise. |
+| Script fails with `CS0103`/`CS1503`/`CS0246` | A compile error, not an infrastructure problem | Fix the script. `CS0246` almost always means an unqualified Revit type — only `System` is imported, so write `Autodesk.Revit.DB.Wall` or add `using Autodesk.Revit.DB;`. Use `describe_function` to check an overload rather than guessing at a `CS1503`. |
+| Script fails naming `script-api-denied` | You used something on the denylist — most often opening your own `Transaction` | See "What you may not do". Nothing ran and nothing changed. |
 
 For a human debugging deeper, the add-in always writes `connection.log` and `startup-errors.log` to
 `%LOCALAPPDATA%\Connectors\Revit\` on the machine running Revit, regardless of local/remote mode. The
