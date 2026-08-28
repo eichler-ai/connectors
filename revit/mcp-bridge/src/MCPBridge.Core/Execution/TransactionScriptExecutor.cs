@@ -13,6 +13,15 @@ namespace MCPBridge.Core.Execution;
 /// success, roll back both on any failure (thrown exception, compile error, or cooperative
 /// cancellation) so a failed script never leaves partial document changes behind.
 ///
+/// ISSUE #24: that is now true of EVERY document the run touches, not just the active one. The pair
+/// above is opened for the ambient document before the script runs; a document the script creates via
+/// ScriptGlobals.CreateProjectDocument/CreateFamilyDocument gets its own pair, opened lazily at the
+/// moment of creation. All of them live in one <see cref="ManagedDocumentTransactions"/>, which owns
+/// commit ordering and partial-failure semantics -- see that class for why the ambient document is
+/// committed LAST, and PartialCommitNotice below for what happens when a later commit fails after an
+/// earlier one already succeeded. The script never commits or rolls back anything itself, with N
+/// documents exactly as with one; its own return-or-throw governs all of them uniformly.
+///
 /// PRD §07 (phase 02): the transaction's Failures API results (warnings auto-dismissed, any error
 /// forces a rollback) are read from ITransactionAdapter.CommitFailures once, after Commit() returns.
 /// Dialogs seen via DialogBoxShowing during the run (ActiveDialogContext) and those failures are both
@@ -55,15 +64,16 @@ public sealed class TransactionScriptExecutor
         bool overwriteOutputFiles = false,
         bool confirmLifecycleActions = false)
     {
-        var group = document.CreateTransactionGroup(TransactionName);
-        var transaction = document.CreateTransaction(TransactionName);
-
-        group.Start();
-        transaction.Start();
+        // Issue #24: N documents, not one. The ambient (active) document is opened here, before the
+        // script runs, exactly as before; any document the script goes on to create through
+        // ScriptGlobals.CreateProjectDocument/CreateFamilyDocument is opened lazily into this same set
+        // as it is created. Commit/rollback/notices then all loop over every document.
+        var transactions = new ManagedDocumentTransactions(TransactionName, uiApplication);
+        transactions.Open(document, isAmbient: true);
 
         var globals = new ScriptGlobals(
             document, uiApplication, uiDocument, cancellationToken,
-            exportsDirectoryPath, importsDirectoryPath, overwriteOutputFiles);
+            exportsDirectoryPath, importsDirectoryPath, overwriteOutputFiles, transactions);
         ActiveDialogContext.SetActive(globals.DialogResultOverrides);
 
         try
@@ -74,7 +84,7 @@ public sealed class TransactionScriptExecutor
 
             if (!outcome.Success)
             {
-                RollBackBoth(transaction, group);
+                transactions.RollBackAll();
                 // Commit() never ran -- no failures-API notices to fold in, but a dialog may still have
                 // fired mid-script before it failed or was cancelled (PRD §07: this is precisely the
                 // headline case -- a script stuck behind a dialog gets auto-cancelled by max_duration_ms).
@@ -92,35 +102,22 @@ public sealed class TransactionScriptExecutor
                     : ScriptExecutionOutcome.Failed(outcome.Exception!, outcome.StdOut, dialogNotices, publishedFiles);
             }
 
-            TransactionCommitResult commitResult;
-            try
-            {
-                commitResult = transaction.Commit();
-            }
-            catch (Exception ex)
-            {
-                RollBackBoth(transaction, group);
-                var failedNotices = CombinedNotices(transaction.CommitFailures);
-                return ScriptExecutionOutcome.Failed(ex, outcome.StdOut, failedNotices, globals.PublishedFiles);
-            }
+            // The script's own code has already finished at this point -- with one document or with N,
+            // every commit happens here, in the executor, never in the script.
+            var commit = transactions.CommitAll();
+            var notices = CombinedNotices(commit.CommitFailures);
 
-            var commitFailures = transaction.CommitFailures;
-
-            if (commitResult == TransactionCommitResult.RolledBack)
+            if (!commit.Success)
             {
-                // Revit already rolled back the Transaction itself (ProceedWithRollBack) -- only the
-                // TransactionGroup still needs an explicit rollback; calling transaction.RollBack()
-                // again here would be invalid.
-                group.RollBack();
-                var errorMessage = commitFailures.LastOrDefault(f => f.IsError)?.Message
-                    ?? "A transaction failure forced a rollback.";
-                var rolledBackNotices = CombinedNotices(commitFailures);
-                return ScriptExecutionOutcome.Failed(new InvalidOperationException(errorMessage), outcome.StdOut, rolledBackNotices, globals.PublishedFiles);
+                if (commit.IsPartial)
+                {
+                    notices.Add(PartialCommitNotice(commit));
+                }
+
+                return ScriptExecutionOutcome.Failed(commit.Failure!, outcome.StdOut, notices, globals.PublishedFiles);
             }
 
-            group.Assimilate();
-            var completedNotices = CombinedNotices(commitFailures);
-            return ScriptExecutionOutcome.Completed(outcome.ReturnValue, outcome.StdOut, completedNotices, globals.PublishedFiles);
+            return ScriptExecutionOutcome.Completed(outcome.ReturnValue, outcome.StdOut, notices, globals.PublishedFiles);
         }
         finally
         {
@@ -152,25 +149,34 @@ public sealed class TransactionScriptExecutor
         },
         remedy: null);
 
-    private static void RollBackBoth(ITransactionAdapter transaction, ITransactionGroupAdapter group)
-    {
-        // Review finding: an unguarded transaction.RollBack() here could itself throw (e.g. the
-        // Transaction was already closed by Revit's own Failures API resolution before Commit() threw),
-        // which previously propagated uncaught and replaced the real failure being reported with a
-        // rollback-time exception instead. Each rollback is now independently best-effort.
-        SafeRollBack(transaction.RollBack);
-        SafeRollBack(group.RollBack);
-    }
-
-    private static void SafeRollBack(Action rollBack)
-    {
-        try
+    /// <summary>
+    /// Issue #24: with N documents a commit failure can be genuinely PARTIAL -- an earlier document's
+    /// transaction already committed, and Revit offers no way to un-commit one. PRD §01's
+    /// observability-over-silence principle makes saying so non-optional: the run is reported as failed
+    /// (it is), and this notice states exactly which documents kept their changes and which did not,
+    /// rather than letting "failed" imply nothing happened anywhere.
+    ///
+    /// Only emitted when something actually committed. A failure on the FIRST document commits nothing,
+    /// so it needs no such notice and gets none.
+    /// </summary>
+    private static DiagnosticRecord PartialCommitNotice(ManagedDocumentCommitResult commit) => DiagnosticRecord.Create(
+        DiagnosticSeverity.Error,
+        "script-partial-commit",
+        DiagnosticSource.Execution,
+        $"The script ran to completion but one document failed to commit after {commit.CommittedDocuments.Count} " +
+        "other document(s) had already committed; a committed Revit transaction cannot be un-committed, so " +
+        $"those changes remain. Committed: {string.Join(", ", commit.CommittedDocuments)}. " +
+        $"Rolled back: {string.Join(", ", commit.RolledBackDocuments)}.",
+        detail: new Dictionary<string, object?>
         {
-            rollBack();
-        }
-        catch
+            ["committed_documents"] = commit.CommittedDocuments,
+            ["rolled_back_documents"] = commit.RolledBackDocuments,
+        },
+        remedy: new[]
         {
-            // Best-effort: never let a rollback-time exception mask the original failure being reported.
-        }
-    }
+            "Documents a script creates are unsaved and in-memory, so nothing was written to disk -- " +
+            "the committed changes exist only in this Revit session.",
+            "Find a committed document by Title in UIApplication.Application.Documents from a follow-up " +
+            "script to inspect or undo what landed.",
+        });
 }
