@@ -69,9 +69,20 @@ unexpectedly skipping, this is the first thing to check.
   obvious exactly what's being exercised.
 - `harness_test.go` — the cases themselves, currently: `TestCreateLevel`,
   `TestScriptGlobalsExposeRealRevitObjects`, `TestDenylistRejectsOwnTransaction`,
-  `TestLifecycleGateRequiresConfirmation`.
+  `TestLifecycleGateRequiresConfirmation`, `TestLifecycleGateCoversTheNewlyAddedMembers`,
+  `TestApplicationCreatesDocuments`.
 
-The last two exist here rather than in `MCPBridge.Core.Tests` because they cannot exist there.
+`TestApplicationCreatesDocuments` is the first case whose subtests are *heterogeneous* — each
+asserting a different thing about one capability — rather than table-driven over a single shape
+the way the two bundles above it are. That is the shape PRD §13's corpus plan calls for. It covers the
+top-level `Autodesk.Revit.ApplicationServices.Application` (reached as `UIApplication.Application`)
+and its `NewProjectDocument`/`NewFamilyDocument`, and it also pins the two boundaries a corpus
+fixture system runs into: a created document is outside the executor's ambient transaction, and
+it is addressed by a later script through `Application.Documents`, never through a `document_id`.
+Each run leaves its documents open in the live Revit session on purpose — see the case's own
+comment, and PRD §14.
+
+The denylist and lifecycle cases exist here rather than in `MCPBridge.Core.Tests` because they cannot exist there.
 Since PRD §14 shipped, `ScriptGlobals.Document` is the real `Autodesk.Revit.DB.Document` — sealed,
 non-constructible outside a live Revit session, and living in a mixed-mode assembly a plain test
 host cannot even load. Any assertion about what a script actually *gets* from the globals, or how a

@@ -21,6 +21,20 @@ namespace MCPBridge.Core.Execution;
 ///    writes, element queries, geometry) rides the ambient transaction correctly with no new
 ///    transaction-ownership scheme -- confirmed live before Phase 3 shipped.
 ///
+///    KNOWN OVER-BREADTH, recorded rather than implied: the check does not look at WHICH document the
+///    Transaction targets, because it cannot -- it is compile-time, and the receiver is an arbitrary
+///    expression. So it also refuses the one case Revit itself would allow: a Transaction on a document
+///    the script just created via Application.NewProjectDocument, which the ambient transaction does not
+///    cover (one-open-transaction is a per-DOCUMENT rule). Confirmed live -- constructing one
+///    reflectively against a created document committed successfully. The consequence is that a script
+///    can create a document and read it, not write to it, which is what currently blocks PRD §13's
+///    corpus fixture system. Tracked as issue #24, whose chosen fix leaves THIS check exactly as it is:
+///    the executor auto-wraps every document a script creates in its own managed transaction/group
+///    (generalizing TransactionScriptExecutor from one document to N), so "a script may never construct
+///    its own Transaction" stays unconditional and no runtime document-identity comparison is needed --
+///    that alternative was assessed and rejected, since Revit hands back different wrappers for the same
+///    document depending on entry point. See PRD §14, "Application-level access needed no new plumbing".
+///
 ///    Note this is a DIFFERENT thing from what the deleted IScriptDocument/IScriptUiDocument/
 ///    IScriptUiApplication interfaces used to guard. Those blocked IDocumentAdapter.CreateTransaction/
 ///    CreateTransactionGroup -- our own adapter methods, not Revit API, and unreachable from a script
