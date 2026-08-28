@@ -426,9 +426,21 @@ internal sealed class BridgeHost
                 continue;
             }
 
+            // Observability (PRD §01), and the direct fix for a real, repeated misdiagnosis: until this
+            // line existed, a SUCCESSFUL discovery logged nothing at all, and RunOneConnection logged
+            // nothing on entry or on success either -- so a perfectly healthy, authenticated, registered,
+            // idle connection produced exactly the same log tail as an indefinite hang: "loop iteration:
+            // about to TryDiscover" and then silence forever. That silence was twice root-caused as a
+            // stall in the discovery read itself (once genuinely, once not), and the second time cost a
+            // full investigation into a connection that was in fact already live and serving
+            // list_instances. Both endpoints of every attempt are now logged, so "no further lines" can
+            // only ever mean "still inside the step this line names".
+            LogConnectionDiagnostic($"broker discovered at {discoveryResult.Address.Host}:{discoveryResult.Address.Port}; connecting");
+
             try
             {
                 RunOneConnection(discoveryResult.BrokerJson, discoveryResult.Address, dispatcher, documentSnapshotHandler, documentSnapshotEvent, reconnectController, stopToken);
+                LogConnectionDiagnostic($"connection to {discoveryResult.Address.Host}:{discoveryResult.Address.Port} ended (broker closed it, or Stop() was called); will reconnect");
             }
             catch (Exception ex)
             {
@@ -637,6 +649,12 @@ internal sealed class BridgeHost
         _brokerAddress = $"{address.Host}:{address.Port}";
         Interlocked.Exchange(ref _connectedSinceUtcTicks, DateTimeOffset.UtcNow.Ticks);
         _isConnected = true;
+
+        // The single most important line in this log: "connected" is otherwise invisible, and its absence
+        // was being read as evidence of a hang (see RunConnectionLoop's own comment on this). Logged after
+        // the three status fields above so a log line saying "connected" can never be observed alongside a
+        // status snapshot that doesn't yet agree.
+        LogConnectionDiagnostic($"connected: auth+register succeeded at {address.Host}:{address.Port} (instance {_instanceId}, {documents.Count} document(s)); entering read loop");
 
         // Heartbeat (PRD §05): a periodic `ping` notification so the broker can tell a live-but-wedged
         // Revit process apart from a merely-quiet one. Scoped as a `using var` local, not a field like
