@@ -34,6 +34,8 @@ Every connector's local state lives under a per-connector namespaced root, never
 
 (macOS/Linux equivalents follow the platform's own app-data convention, same `Connectors/<App>/` suffix.) This exists specifically so future connectors don't collide with each other's state.
 
+**Known exception, not yet reconciled**: the Revit add-in's own diagnostic logs (`connection.log`, `startup-errors.log`) currently live at `%LOCALAPPDATA%\MCPBridge\`, not `%LOCALAPPDATA%\Connectors\Revit\` — the broker's own state (`broker.json`, the discovery cache) does follow the convention correctly. Flagged by a documentation-sync audit rather than fixed outright, since correcting it is a real behavior change (moving where a human or script would look for those log files), not a doc wording fix.
+
 ## Testing philosophy
 
 - **MCP Server: unit-test everything, always.** It's pure logic (protocol, routing, state) with no host-app dependency, so there's no excuse not to.
