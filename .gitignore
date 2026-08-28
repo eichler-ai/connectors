@@ -5,7 +5,13 @@
 # where a `git add -A` would happily commit it. Real release artifacts come from the (still unbuilt)
 # release pipeline described in PRD §12, never from a developer's working tree.
 mcp-server-win.exe
+mcp-server-mac
 *.exe
+
+# Remote-mode dev runtime state (PRD §05) -- broker.json carries a live auth token, and this
+# whole directory is per-machine runtime state anyway, same category as the platform app-data
+# directory local mode writes to (never committed either).
+Connectors/
 
 # .NET build output, per TFM now that the Bridge multi-targets (PRD §11).
 bin/
