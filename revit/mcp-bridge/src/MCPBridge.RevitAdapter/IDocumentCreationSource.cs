@@ -23,7 +23,7 @@ namespace MCPBridge.RevitAdapter;
 /// The returned adapter is expected to ALSO implement IRawDocumentSource (RevitDocumentAdapter does),
 /// since ScriptGlobals has to hand the real Document back to the script.
 /// </summary>
-public interface IDocumentCreationSource
+internal interface IDocumentCreationSource
 {
     /// <summary>
     /// Creates a new project document from <paramref name="templatePath"/>, or from the Revit

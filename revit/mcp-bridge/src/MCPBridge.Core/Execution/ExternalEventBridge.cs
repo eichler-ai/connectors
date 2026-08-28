@@ -27,7 +27,7 @@ namespace MCPBridge.Core.Execution;
 /// Only one work item is in flight at a time, matching ExecutionManager's own single-active-execution
 /// invariant (PRD §06: Revit's UI thread runs one script at a time).
 /// </summary>
-public sealed class ExternalEventBridge<TResult> : IScriptExecutionCallback
+internal sealed class ExternalEventBridge<TResult> : IScriptExecutionCallback
 {
     private readonly IExternalEventRaiser _raiser;
     private readonly object _lock = new();

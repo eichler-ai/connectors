@@ -12,7 +12,7 @@ namespace MCPBridge.Core.Tests.Fakes;
 /// assembly; IDocumentCreationSource returns an IDocumentAdapter, so the create-and-track logic stays
 /// tier-1 testable while only the final unwrap to a real Document remains tier-2.
 /// </summary>
-public sealed class FakeUiApplicationAdapter : IUiApplicationAdapter, IDocumentCreationSource
+internal sealed class FakeUiApplicationAdapter : IUiApplicationAdapter, IDocumentCreationSource
 {
     public IUiDocumentAdapter? ActiveUiDocument { get; init; }
 
@@ -40,7 +40,7 @@ public sealed class FakeUiApplicationAdapter : IUiApplicationAdapter, IDocumentC
 }
 
 /// <summary>See FakeDocumentAdapter: deliberately does not implement IRawUiDocumentSource (PRD §14).</summary>
-public sealed class FakeUiDocumentAdapter : IUiDocumentAdapter
+internal sealed class FakeUiDocumentAdapter : IUiDocumentAdapter
 {
     public IDocumentAdapter Document { get; init; } = new FakeDocumentAdapter();
 }

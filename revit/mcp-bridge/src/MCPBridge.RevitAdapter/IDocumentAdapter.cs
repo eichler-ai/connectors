@@ -26,10 +26,23 @@ namespace MCPBridge.RevitAdapter;
 /// The gap is closed structurally rather than by another denylist entry: every implementation of this
 /// interface, and every type that can hand one out, is now `internal` to its assembly, so a script cannot
 /// name them at all. See RevitDocumentAdapter and MCPBridge.Core.Execution.ManagedDocumentTransactions.
-/// The interface itself stays public because it crosses the Core/RevitAdapter seam -- which is harmless,
-/// since a script can name a type it can never obtain an instance of.
+///
+/// AND THIS INTERFACE IS INTERNAL TOO, WHICH THE FIRST ROUND OF THAT FIX GOT WRONG. It used to say the
+/// interface "stays public because it crosses the Core/RevitAdapter seam -- which is harmless, since a
+/// script can name a type it can never obtain an instance of." A second review round disproved that
+/// live: RevitScriptExecutionHandler was a public type whose public Execute(UIApplication) hands a real
+/// RevitUiApplicationAdapter -- typed as the then-public IUiApplicationAdapter -- to a callback the
+/// CALLER supplies, and a Roslyn script submission can declare its own type implementing that callback.
+/// So a script captured a live adapter, cast it to IDocumentCreationSource, created a document and
+/// opened a real unmanaged Transaction on it, reported status "success", and never named one internal
+/// type. Confirmed live against Revit 2027 before this fix, exactly as the round-1 bypass was.
+///
+/// The rule, restated so it is actually true: a public type in MCPBridge.Core/MCPBridge.RevitAdapter
+/// must neither BE an adapter/adapter-producing type NOR RETURN OR YIELD one -- directly, or through a
+/// caller-supplied callback or delegate. Being un-constructible is not enough; being unnameable is.
+/// InternalsVisibleTo (see MCPBridge.RevitAdapter.csproj) keeps the Core/AddIn/tests seam working.
 /// </summary>
-public interface IDocumentAdapter
+internal interface IDocumentAdapter
 {
     /// <summary>Human-readable title, for diagnostics only -- not a stable identity.</summary>
     string Title { get; }

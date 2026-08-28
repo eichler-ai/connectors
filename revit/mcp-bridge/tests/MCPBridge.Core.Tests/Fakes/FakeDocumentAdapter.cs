@@ -13,7 +13,7 @@ namespace MCPBridge.Core.Tests.Fakes;
 /// a direct RevitAPI assembly reference -- see IRawDocumentSource's doc comment for why that matters
 /// (with one, xUnit silently skips this entire assembly and `dotnet test` still exits 0).
 /// </summary>
-public sealed class FakeDocumentAdapter : IDocumentAdapter
+internal sealed class FakeDocumentAdapter : IDocumentAdapter
 {
     public string Title { get; init; } = "FakeDocument";
     public string? PathName { get; init; }

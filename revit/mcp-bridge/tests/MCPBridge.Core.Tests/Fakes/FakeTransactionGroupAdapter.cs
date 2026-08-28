@@ -3,7 +3,7 @@ using MCPBridge.RevitAdapter;
 
 namespace MCPBridge.Core.Tests.Fakes;
 
-public sealed class FakeTransactionGroupAdapter : ITransactionGroupAdapter
+internal sealed class FakeTransactionGroupAdapter : ITransactionGroupAdapter
 {
     public string Name { get; }
     public List<string> Calls { get; } = new();

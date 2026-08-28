@@ -100,6 +100,86 @@ return "opened an unmanaged transaction";`,
 	}
 }
 
+// TestConnectorCapabilitiesAreNotReachableThroughACallback pins the fix for the
+// SECOND instance of the same bypass class, found by a second independent review
+// one round AFTER the first was "fixed" -- which is the whole reason this test
+// exists as its own function rather than another row in the table above.
+//
+// WHY THE ROUND-1 CASES DID NOT CATCH IT: every one of them writes
+// `new <ConcreteType>()`, so making the concrete adapters `internal` made them
+// all pass. But RevitScriptExecutionHandler was still a PUBLIC type with a
+// public constructor and a public Execute(UIApplication) whose body hands a real
+// RevitUiApplicationAdapter -- typed as the then-public IUiApplicationAdapter --
+// straight to ARBITRARY CALLER-SUPPLIED code:
+//
+//	class Grab : MCPBridge.RevitAdapter.IScriptExecutionCallback {
+//	    public MCPBridge.RevitAdapter.IUiApplicationAdapter A;
+//	    public void OnExecute(MCPBridge.RevitAdapter.IUiApplicationAdapter a) => A = a;
+//	}
+//	var g = new Grab();
+//	new MCPBridge.RevitAdapter.RevitScriptExecutionHandler(g).Execute(UIApplication);
+//	var doc = ((MCPBridge.RevitAdapter.IDocumentCreationSource)g.A).CreateProjectDocument(null);
+//	doc.CreateTransaction("bypass").Start();   // real, unmanaged, untracked
+//
+// A Roslyn script submission can declare types, so the script supplies the
+// callback itself and never has to NAME an internal type -- every type in that
+// snippet was public. So the round-1 fix did not block it, and the round-1 tests
+// would have kept passing for as long as the hole stayed open.
+//
+// THE RULE THIS PINS, restated correctly: a public type in MCPBridge.Core /
+// MCPBridge.RevitAdapter must neither BE an adapter/adapter-producing type NOR
+// RETURN OR YIELD one -- directly, or through a caller-supplied callback or
+// delegate. "Interfaces are safe to leave public because a script can never
+// obtain one" was the round-1 wording and it is false; the adapter interfaces
+// are internal now too, which is what makes the capability itself unnameable.
+func TestConnectorCapabilitiesAreNotReachableThroughACallback(t *testing.T) {
+	c, instanceID, documentID := targetDocument(t)
+
+	script := `
+class Grab : MCPBridge.RevitAdapter.IScriptExecutionCallback {
+    public MCPBridge.RevitAdapter.IUiApplicationAdapter Captured;
+    public void OnExecute(MCPBridge.RevitAdapter.IUiApplicationAdapter a) { Captured = a; }
+}
+var g = new Grab();
+new MCPBridge.RevitAdapter.RevitScriptExecutionHandler(g).Execute(UIApplication);
+var src = (MCPBridge.RevitAdapter.IDocumentCreationSource)g.Captured;
+var doc = src.CreateProjectDocument(null);
+var tx = doc.CreateTransaction("bypass");
+tx.Start();
+return "captured an adapter through a callback";`
+
+	rej := runRejectedScript(t, c, instanceID, documentID, script)
+
+	// Must fail at COMPILE time as an accessibility/unknown-type problem. A
+	// runtime failure here (a null, a Revit refusal) would mean every type in
+	// the snippet is still nameable and the capture still constructible --
+	// exactly the state this test exists to detect, and exactly how the hole
+	// survived round 1.
+	if !mentionsInaccessible(rej.Text) {
+		t.Errorf("the callback-capture script did not fail as an INACCESSIBLE/unknown type -- the capability may still be reachable; result: %s",
+			rej.Text)
+	}
+
+	// And it must fail on the CAPTURE machinery itself, not incidentally on
+	// something else in the snippet.
+	mentionsCaptureType := false
+	for _, name := range []string{"IScriptExecutionCallback", "IUiApplicationAdapter", "RevitScriptExecutionHandler", "IDocumentCreationSource"} {
+		if strings.Contains(rej.Text, name) {
+			mentionsCaptureType = true
+			break
+		}
+	}
+	if !mentionsCaptureType {
+		t.Errorf("rejection names none of the callback-capture types, so it may be failing for an unrelated reason; result: %s", rej.Text)
+	}
+
+	// The connector is still usable afterwards: an ordinary compile rejection.
+	out := runScript(t, c, instanceID, documentID, `return Document.Title;`)
+	if out.Status != "success" {
+		t.Errorf("instance unusable after the rejection: status=%q output=%s", out.Status, out.Output)
+	}
+}
+
 // mentionsInaccessible reports whether a compile rejection failed because the
 // named type could not be seen. Roslyn words this differently depending on
 // whether the type is inaccessible (CS0122) or the namespace no longer resolves

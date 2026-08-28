@@ -6,7 +6,7 @@ namespace MCPBridge.RevitAdapter;
 /// `UIDocument` global (PRD §14) comes from <see cref="IRawUiDocumentSource"/>, which the real adapter
 /// also implements.
 /// </summary>
-public interface IUiDocumentAdapter
+internal interface IUiDocumentAdapter
 {
     IDocumentAdapter Document { get; }
 }

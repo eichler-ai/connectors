@@ -38,7 +38,7 @@ public static class DocumentIdentity
 {
     private const int HashHexLength = 16;
 
-    public static string Resolve(IDocumentAdapter document, IUncPathResolver uncResolver)
+    internal static string Resolve(IDocumentAdapter document, IUncPathResolver uncResolver)
     {
         if (document.IsWorkshared)
         {
