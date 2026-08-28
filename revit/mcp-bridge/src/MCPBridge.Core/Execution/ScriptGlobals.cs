@@ -69,10 +69,19 @@ public sealed class ScriptGlobals
             ? null
             : Raw<IRawUiDocumentSource>(_uiDocumentAdapter, nameof(UIDocument)).RawUiDocument;
 
+    public CancellationToken CancellationToken { get; }
+
     /// <summary>
     /// Resolves an adapter's raw-Revit-object capability, or fails with a message that says exactly
     /// what is missing and where a test needing it belongs. Never returns null: a null global would
     /// surface inside an agent's script as an unexplained NullReferenceException (PRD §01).
+    ///
+    /// Note this guard is unreachable from MCPBridge.Core.Tests, and that is a property of the JIT
+    /// rather than an oversight: it resolves every type a method body references -- including the
+    /// Revit-typed return of the property calling this -- before executing any of that body, so a
+    /// unit-test script touching Document fails on loading RevitAPI.dll (mixed-mode, unloadable
+    /// outside Revit) rather than here. It is defensive cover for a future adapter that implements
+    /// IDocumentAdapter but forgets IRawDocumentSource.
     /// </summary>
     private static TSource Raw<TSource>(object adapter, string globalName) where TSource : class =>
         adapter as TSource
@@ -83,7 +92,6 @@ public sealed class ScriptGlobals
             "outside a running Revit session, so a fake genuinely cannot supply one. A test that needs " +
             "to EXECUTE a script against real Revit objects belongs in the tier-2 live harness " +
             "(revit/test-harness), not MCPBridge.Core.Tests.");
-    public CancellationToken CancellationToken { get; }
 
     /// <summary>
     /// This document's imports/ directory (PRD §09) -- where a human places a file for a script to
