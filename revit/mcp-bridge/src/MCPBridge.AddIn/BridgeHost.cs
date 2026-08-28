@@ -514,18 +514,20 @@ internal sealed class BridgeHost
     }
 
     /// <summary>
-    /// Best-effort append to %LocalAppData%\MCPBridge\connection.log -- the reconnect loop's own
+    /// Best-effort append to %LocalAppData%\Connectors\Revit\connection.log -- the reconnect loop's own
     /// equivalent of MCPBridgeApplication.TryLogDiagnostic (PRD §01 observability: a caught-and-swallowed
     /// failure still deserves a trace somewhere, not total silence). Deliberately a separate file from
     /// startup-errors.log: this loop retries indefinitely and can log far more often than a one-shot
     /// OnStartup failure ever would, so keeping them apart means a busy connection log never buries a
-    /// startup failure underneath it.
+    /// startup failure underneath it. Always the LOCAL per-machine directory regardless of local/remote
+    /// topology (see TryLogDiagnostic's own comment for why), reusing BrokerDiscoveryOptions.Local()'s
+    /// path computation rather than hand-rolling it a second time.
     /// </summary>
     private static void LogConnectionDiagnostic(string message)
     {
         try
         {
-            var directory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "MCPBridge");
+            var directory = BrokerDiscoveryOptions.Local().ConnectorRoot;
             Directory.CreateDirectory(directory);
             File.AppendAllText(Path.Combine(directory, "connection.log"), $"{DateTimeOffset.UtcNow:O} {message}\n");
         }

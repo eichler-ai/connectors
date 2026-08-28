@@ -198,11 +198,12 @@ to which broker, and the loaded build.
 | `status: "unrecoverable"` | A prior script ignored cancellation | Nothing you send will run. Revit must be restarted; the instance gets a new `instance_id`. |
 | Script fails with `CS0103`/`CS1503`/`CS0246` | A compile error, not an infrastructure problem | Fix the script. `CS1503` on `Document` usually means you passed the sanctioned global where a real `Autodesk.Revit.DB.Document` is expected — see the reflection technique at the top. Only `System` is imported by default otherwise. |
 
-For a human debugging deeper, the add-in writes `connection.log` and `startup-errors.log` to
-`%LOCALAPPDATA%\MCPBridge\`. The broker's discovery file is `%LOCALAPPDATA%\Connectors\Revit\broker.json`
-in local mode (Revit and the broker on the same machine); in remote mode (broker on a different
-machine, e.g. this project's own Mac+Parallels dev setup) it's written to the shared drive instead —
-ask a human where that's configured if you need it.
+For a human debugging deeper, the add-in always writes `connection.log` and `startup-errors.log` to
+`%LOCALAPPDATA%\Connectors\Revit\` on the machine running Revit, regardless of local/remote mode. The
+broker's own discovery file, `broker.json`, lives there too in local mode (Revit and the broker on the
+same machine); in remote mode (broker on a different machine, e.g. this project's own Mac+Parallels
+dev setup) `broker.json` moves to the shared drive instead — ask a human where that's configured if you
+need it.
 
 ## Quick reference
 
