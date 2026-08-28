@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 
 namespace MCPBridge.Core.Execution;
@@ -23,7 +24,13 @@ namespace MCPBridge.Core.Execution;
 /// </summary>
 internal sealed class ScriptApiAnalysis
 {
-    public static readonly ScriptApiAnalysis Clean = new(new List<string>());
+    /// <summary>
+    /// The shared "nothing gated in this script" instance -- returned for the overwhelmingly common
+    /// script and therefore alive for the process's lifetime. Backed by <see cref="Array.Empty{T}"/>
+    /// rather than an empty List so the IReadOnlyList it exposes cannot be cast back to something
+    /// mutable: an accidental Add through such a cast would poison every future script's analysis.
+    /// </summary>
+    public static readonly ScriptApiAnalysis Clean = new(Array.Empty<string>());
 
     public ScriptApiAnalysis(IReadOnlyList<string> lifecycleMembers)
     {

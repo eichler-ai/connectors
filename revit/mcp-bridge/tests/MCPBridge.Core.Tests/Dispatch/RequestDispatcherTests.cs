@@ -83,6 +83,72 @@ public class RequestDispatcherTests
         Assert.Contains("\"code\":\"script-execution-failed\"", json);
     }
 
+    // PRD §01/§14, from an independent PR review: the two denylist refusals define their own codes and
+    // skill.md tells agents to match on them -- but every script failure was reported with a hardcoded
+    // code of "script-execution-failed", so those codes only ever appeared as a SUBSTRING of `message`
+    // and never in the field that carries them. These two cases assert the record's actual `code`, which
+    // is the thing that was wrong; asserting the message alone is what let it pass unnoticed.
+
+    [Fact]
+    public async Task ExecuteScript_DeniedByTheDenylist_ReportsItsOwnCodeAndRemedy()
+    {
+        var executionManager = NewExecutionManager();
+        var bridge = new ExternalEventBridge<ScriptExecutionOutcome>(new FakeExternalEventRaiser());
+        var dispatcher = new RequestDispatcher(executionManager, bridge, NewScriptExecutor());
+
+        var dispatchTask = dispatcher.DispatchAsync(
+            ExecuteScriptRequest(1, "exec-1", "new Autodesk.Revit.DB.Transaction(Document, \"x\");"));
+        bridge.OnExecute(NewUiApp());
+
+        var json = await dispatchTask;
+
+        Assert.Contains("\"status\":\"error\"", json);
+        Assert.Contains($"\"code\":\"{ScriptApiDenylistViolationException.DeniedCode}\"", json);
+        Assert.DoesNotContain("\"code\":\"script-execution-failed\"", json);
+        // Unconditional refusal, so the remedy is "change the script", never "retry with a flag".
+        Assert.Contains("no argument to execute_script permits it", json);
+        Assert.DoesNotContain("confirm_lifecycle_actions", json);
+    }
+
+    [Fact]
+    public async Task ExecuteScript_LifecycleMemberWithoutConfirmation_ReportsItsOwnCodeAndTheResendRemedy()
+    {
+        var executionManager = NewExecutionManager();
+        var bridge = new ExternalEventBridge<ScriptExecutionOutcome>(new FakeExternalEventRaiser());
+        var dispatcher = new RequestDispatcher(executionManager, bridge, NewScriptExecutor());
+
+        // ExecuteScriptRequest sends no confirm_lifecycle_actions -- the refusing case by design.
+        var dispatchTask = dispatcher.DispatchAsync(ExecuteScriptRequest(1, "exec-1", "Document.Close();"));
+        bridge.OnExecute(NewUiApp());
+
+        var json = await dispatchTask;
+
+        Assert.Contains("\"status\":\"error\"", json);
+        Assert.Contains($"\"code\":\"{ScriptApiDenylistViolationException.ConfirmationRequiredCode}\"", json);
+        Assert.DoesNotContain("\"code\":\"script-execution-failed\"", json);
+        // The single most obvious next step in the connector, and it used to be reported with none.
+        Assert.Contains("confirm_lifecycle_actions: true", json);
+        Assert.Contains("Autodesk.Revit.DB.Document.Close", json);
+    }
+
+    [Fact]
+    public async Task ExecuteScript_ContainingAwait_ReportsItsOwnCode()
+    {
+        // Same call site, same gap, same fix: this exception also carries its own code and was also
+        // being flattened to script-execution-failed.
+        var executionManager = NewExecutionManager();
+        var bridge = new ExternalEventBridge<ScriptExecutionOutcome>(new FakeExternalEventRaiser());
+        var dispatcher = new RequestDispatcher(executionManager, bridge, NewScriptExecutor());
+
+        var dispatchTask = dispatcher.DispatchAsync(
+            ExecuteScriptRequest(1, "exec-1", "await System.Threading.Tasks.Task.Delay(1); return 1;"));
+        bridge.OnExecute(NewUiApp());
+
+        var json = await dispatchTask;
+
+        Assert.Contains($"\"code\":\"{ScriptAwaitNotAllowedException.Code}\"", json);
+    }
+
     [Fact]
     public async Task ExecuteScript_NoActiveDocument_ReturnsErrorWithoutTouchingScriptExecutor()
     {

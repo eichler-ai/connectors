@@ -361,10 +361,14 @@ public sealed class RequestDispatcher
                 uiDocument,
                 scriptText,
                 cancellationToken,
-                workspacePaths.Exports,
-                workspacePaths.Imports,
-                overwriteOutputFiles,
-                confirmLifecycleActions)
+                // Named from here on: four optional arguments in a row, two of them adjacent bools, is
+                // a swap this compiles straight through (overwriteOutputFiles and confirmLifecycleActions
+                // are both bool, and reversing them would silently confirm lifecycle actions nobody asked
+                // to confirm).
+                exportsDirectoryPath: workspacePaths.Exports,
+                importsDirectoryPath: workspacePaths.Imports,
+                overwriteOutputFiles: overwriteOutputFiles,
+                confirmLifecycleActions: confirmLifecycleActions)
             .GetAwaiter().GetResult();
 
         if (outcome.WasCancelled)
@@ -377,18 +381,59 @@ public sealed class RequestDispatcher
         }
         else
         {
+            var (code, remedy) = FailureCodeAndRemedy(outcome.Exception);
             var diagnostic = DiagnosticRecord.Create(
                 DiagnosticSeverity.Error,
-                "script-execution-failed",
+                code,
                 DiagnosticSource.Execution,
                 outcome.Exception?.Message ?? $"execution {executionId} failed with no exception detail.",
                 detail: new Dictionary<string, object?> { ["execution_id"] = executionId },
-                remedy: null);
+                remedy: remedy);
             _executionManager.CompleteError(executionId, _now(), diagnostic, outcome.StdOut, outcome.Notices, outcome.Files);
         }
 
         return outcome;
     }
+
+    /// <summary>
+    /// The PRD §01 <c>code</c> and <c>remedy</c> for one failed execution.
+    ///
+    /// Independent PR review finding: every script failure used to be reported as
+    /// <c>script-execution-failed</c> with a null remedy, so the codes an agent is told to match on --
+    /// <c>script-api-denied</c> and <c>script-lifecycle-confirmation-required</c> (skill.md, PRD §14) --
+    /// only ever appeared as a SUBSTRING of <c>message</c> and never in the field that names them. A
+    /// refusal an agent can lift by resending with one extra argument is worthless if the agent has to
+    /// pattern-match prose to notice it, and worse, the confirmation refusal had the most obvious remedy
+    /// of any error in the connector and carried none.
+    ///
+    /// Only exceptions that CARRY a code get one; anything else keeps the generic
+    /// <c>script-execution-failed</c>, which is the honest answer for an arbitrary exception thrown by
+    /// script code. ScriptAwaitNotAllowedException is here for exactly the same reason as the denylist
+    /// pair -- it reaches this call site by the same route, defines its own code, and had the same gap.
+    /// </summary>
+    private static (string Code, string[]? Remedy) FailureCodeAndRemedy(Exception? exception) => exception switch
+    {
+        ScriptApiDenylistViolationException denial when denial.Code == ScriptApiDenylistViolationException.ConfirmationRequiredCode =>
+            (denial.Code, new[]
+            {
+                "Resend the identical execute_script call with confirm_lifecycle_actions: true if this " +
+                "action is genuinely intended.",
+                $"Otherwise remove the use of {denial.DeniedMember} from the script.",
+            }),
+        ScriptApiDenylistViolationException denial =>
+            (denial.Code, new[]
+            {
+                $"Remove {denial.DeniedMember} from the script; no argument to execute_script permits it.",
+                "Make document changes directly instead -- the connector already runs every script inside " +
+                "its own Transaction, which is committed on success and rolled back if the script throws.",
+            }),
+        ScriptAwaitNotAllowedException =>
+            (ScriptAwaitNotAllowedException.Code, new[]
+            {
+                "Rewrite the script without async/await; call the synchronous form of whatever it awaited.",
+            }),
+        _ => ("script-execution-failed", null),
+    };
 
     /// <summary>
     /// Second live-wiring review finding: poll_execution previously ignored timeout_ms entirely and
