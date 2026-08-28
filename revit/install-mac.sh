@@ -43,15 +43,39 @@ Usage: $(basename "$0") [--uninstall] [--bind <ip>] [--port <n>]
 EOF
 }
 
+require_value() {
+    # set -u turns a missing "$2" into a raw "unbound variable" crash rather than a clean
+    # message -- guard every flag that takes one.
+    if [ $# -lt 2 ]; then
+        echo "$1 requires a value" >&2
+        usage >&2
+        exit 1
+    fi
+}
+
 while [ $# -gt 0 ]; do
     case "$1" in
         --uninstall) UNINSTALL=1; shift ;;
-        --bind) BIND_OVERRIDE="$2"; shift 2 ;;
-        --port) PORT="$2"; shift 2 ;;
+        --bind) require_value "$@"; BIND_OVERRIDE="$2"; shift 2 ;;
+        --port) require_value "$@"; PORT="$2"; shift 2 ;;
         -h|--help) usage; exit 0 ;;
         *) echo "Unknown argument: $1" >&2; usage >&2; exit 1 ;;
     esac
 done
+
+# Validated once, up front, rather than letting a typo surface later as an opaque MCP connection
+# failure inside Claude Code -- main.go validates both too, but only at broker spawn time, by
+# which point this script has already reported success.
+if [ -n "$BIND_OVERRIDE" ]; then
+    if ! [[ "$BIND_OVERRIDE" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo "--bind $BIND_OVERRIDE is not a valid IPv4 literal" >&2
+        exit 1
+    fi
+fi
+if ! [[ "$PORT" =~ ^[0-9]+$ ]] || [ "$PORT" -gt 65535 ]; then
+    echo "--port $PORT is not a valid port number (0-65535)" >&2
+    exit 1
+fi
 
 if ! command -v claude >/dev/null 2>&1; then
     echo "Claude Code CLI not found on PATH -- install it first: https://claude.com/claude-code" >&2
@@ -80,7 +104,10 @@ if [ -n "$BIND_OVERRIDE" ]; then
     BIND_IP="$BIND_OVERRIDE"
     echo "Using --bind override: $BIND_IP"
 else
-    BIND_IP="$(ifconfig bridge100 2>/dev/null | awk '/inet /{print $2; exit}')"
+    # `|| true`: under set -e/-o pipefail, ifconfig exiting non-zero (interface doesn't exist)
+    # would otherwise kill the script right here, before the friendly message below -- the one
+    # case that message exists for -- ever gets a chance to print.
+    BIND_IP="$(ifconfig bridge100 2>/dev/null | awk '/inet /{print $2; exit}' || true)"
     if [ -z "$BIND_IP" ]; then
         echo "Could not auto-detect a Parallels shared-network IP (looked for interface 'bridge100')." >&2
         echo "Find yours with: ifconfig | grep -B4 'inet 10.211' -- then re-run with --bind <ip>." >&2
@@ -103,6 +130,18 @@ mkdir -p "$APP_DATA_DIR"
 # this project's own PR history for exactly this mistake caught and reverted.
 claude mcp remove revit --scope local >/dev/null 2>&1 || true
 claude mcp add revit --scope local -- "$BROKER_BIN" -mode remote -bind "$BIND_IP" -port "$PORT" -app-data-dir "$APP_DATA_DIR"
+
+# `claude mcp add` on an already-registered name is a silent, exit-0 no-op rather than an
+# overwrite -- so if the `remove` above failed for a real reason (swallowed by `|| true`, since
+# "wasn't previously registered" also exits non-zero and must stay non-fatal), this would
+# otherwise report success while a stale registration (old IP, old binary path) is what's
+# actually left in ~/.claude.json. Confirm what's actually registered rather than trust the exit
+# code of a command that can't distinguish those two cases.
+if ! claude mcp get revit 2>/dev/null | grep -qF -- "$BIND_IP"; then
+    echo "Registration did not take effect as expected -- 'claude mcp get revit' doesn't show $BIND_IP." >&2
+    echo "A previous registration may be stuck; try: claude mcp remove revit --scope local, then re-run this script." >&2
+    exit 1
+fi
 
 echo "Registered 'revit' with Claude Code (scope: local)."
 echo "Remote-mode config: -bind $BIND_IP -port $PORT -app-data-dir $APP_DATA_DIR"
