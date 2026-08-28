@@ -395,6 +395,8 @@ func runPrimary(ctx context.Context, bindAddr string, port int, dataDir string, 
 	discoveryRouter := discovery.NewRouter(reg)
 	mcpserver.RegisterDiscovery(mcpServer, discoveryRouter)
 	mcpserver.RegisterInstances(mcpServer, reg, execMgr)
+	// No dependencies and no Revit needed: get_skills answers even with nothing connected.
+	mcpserver.RegisterSkills(mcpServer)
 
 	b := &broker.Broker{
 		Token:     token,
