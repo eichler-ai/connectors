@@ -530,7 +530,11 @@ return new {
   appType = app.GetType().FullName,
   version = app.VersionNumber,
   projectTemplate = app.DefaultProjectTemplate,
-  projectTemplateUsable = app.DefaultProjectTemplate.Length > 0 && System.IO.File.Exists(app.DefaultProjectTemplate)
+  // Null-coalesced: DefaultProjectTemplate is null on an install that never
+  // configured one, and a bare .Length would then throw a
+  // NullReferenceException the agent only sees as an opaque
+  // "expected status=success" instead of the clear skip below.
+  projectTemplateUsable = (app.DefaultProjectTemplate ?? "").Length > 0 && System.IO.File.Exists(app.DefaultProjectTemplate ?? "")
 };
 `)
 		if out.Status != "success" {
@@ -543,11 +547,14 @@ return new {
 		}
 		// DefaultProjectTemplate is what the three subtests below build on, and it
 		// is per-install: it can be blank, or name a template this machine never
-		// shipped. Asserted here so that shows up once, as a clear environment
-		// failure, rather than three times as an opaque "expected status=success"
-		// from whichever script tried to use it.
+		// shipped. Checked here so that shows up once, clearly, rather than three
+		// times as an opaque "expected status=success" from whichever script tried
+		// to use it. SKIPped rather than failed, for the same reason
+		// NewFamilyDocument skips on a missing family template: a Revit install
+		// without a usable default project template is an environment precondition
+		// this harness does not own, not a regression in the capability under test.
 		if !strings.Contains(out.Output, "projectTemplateUsable = True") {
-			t.Fatalf("Application.DefaultProjectTemplate does not name a file that exists on this machine; output: %s", out.Output)
+			t.Skipf("Application.DefaultProjectTemplate does not name a file that exists on this machine; output: %s", out.Output)
 		}
 	})
 
@@ -591,8 +598,11 @@ return new {
 	// second Transaction on a different document (one-open-transaction is a
 	// per-document rule) -- it is ScriptApiDenylist check 1 that refuses to
 	// construct one, unconditionally and without regard to which document it
-	// targets. Closing that gap is a separate, deliberate piece of work; until it
-	// happens, a script can CREATE a blank document and READ it, not write to it.
+	// targets. Closing that gap is a separate, deliberate piece of work, tracked
+	// as issue #24 -- and its chosen fix does NOT narrow check 1: the executor
+	// will auto-wrap every document a script creates in its own managed
+	// transaction, so the refusal stays unconditional. Until that lands, a script
+	// can CREATE a blank document and READ it, not write to it.
 	t.Run("NewDocumentIsOutsideTheAmbientTransaction", func(t *testing.T) {
 		out := runScript(t, c, instanceID, documentID, `
 var app = UIApplication.Application;
@@ -646,17 +656,24 @@ return app.NewProjectDocument(app.DefaultProjectTemplate).Title;
 		// the created one having survived at all. Counted rather than
 		// short-circuited so the failure message can say whether it found none or
 		// found several.
+		//
+		// The count is TERMINATED with a semicolon, and the assertion matches the
+		// terminated string: an unterminated "matches = 1" is a prefix of
+		// "matches = 10", "matches = 11" and so on, so a substring check on it
+		// could not tell one from several -- the exact distinction this subtest
+		// exists to make, and a live one, since this case deliberately leaves its
+		// documents open and repeated runs in one session accumulate them.
 		found := runScript(t, c, instanceID, documentID, `
 int matches = 0;
 foreach (Autodesk.Revit.DB.Document d in UIApplication.Application.Documents) {
   if (d.Title == `+strconv.Quote(title)+` && d.PathName.Length == 0) { matches++; }
 }
-return "matches = " + matches;
+return "matches = " + matches + ";";
 `)
 		if found.Status != "success" {
 			t.Fatalf("expected status=success, got %q (output: %s)", found.Status, found.Output)
 		}
-		if !strings.Contains(found.Output, "matches = 1") {
+		if !strings.Contains(found.Output, "matches = 1;") {
 			t.Fatalf("expected exactly one unsaved open document titled %q -- it was created by an earlier execute_script call, so if it is gone, nothing can address a fixture document across calls; output: %s", title, found.Output)
 		}
 	})

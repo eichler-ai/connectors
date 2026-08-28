@@ -28,9 +28,12 @@ namespace MCPBridge.Core.Execution;
 ///    cover (one-open-transaction is a per-DOCUMENT rule). Confirmed live -- constructing one
 ///    reflectively against a created document committed successfully. The consequence is that a script
 ///    can create a document and read it, not write to it, which is what currently blocks PRD §13's
-///    corpus fixture system. Narrowing this means moving the decision to runtime, against the ambient
-///    document; that is its own piece of work. See PRD §14, "Application-level access needed no new
-///    plumbing".
+///    corpus fixture system. Tracked as issue #24, whose chosen fix leaves THIS check exactly as it is:
+///    the executor auto-wraps every document a script creates in its own managed transaction/group
+///    (generalizing TransactionScriptExecutor from one document to N), so "a script may never construct
+///    its own Transaction" stays unconditional and no runtime document-identity comparison is needed --
+///    that alternative was assessed and rejected, since Revit hands back different wrappers for the same
+///    document depending on entry point. See PRD §14, "Application-level access needed no new plumbing".
 ///
 ///    Note this is a DIFFERENT thing from what the deleted IScriptDocument/IScriptUiDocument/
 ///    IScriptUiApplication interfaces used to guard. Those blocked IDocumentAdapter.CreateTransaction/
