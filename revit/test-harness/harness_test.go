@@ -246,7 +246,14 @@ func callExecuteScriptWith(t *testing.T, c *mcpclient.Client, instanceID, docume
 	for k, v := range extra {
 		args[k] = v
 	}
-	raw, err := c.CallTool("execute_script", args, 20*time.Second)
+	// LONGER THAN THE SERVER'S OWN default timeout_ms (30s, mcpserver.defaultTimeoutMs),
+	// deliberately. At 20s the client gave up BEFORE the broker would have answered, so a
+	// script that legitimately ran 20-30s -- creating Revit documents is genuinely slow, and
+	// slower as a session accumulates them -- failed here while the add-in carried on running
+	// it, and every subsequent call in the suite came back "busy". That reads like a hung
+	// script and is really just a client deadline shorter than the server's. Keep this above
+	// defaultTimeoutMs so the connector's own pending/running contract is what decides.
+	raw, err := c.CallTool("execute_script", args, 45*time.Second)
 	if err != nil {
 		t.Fatalf("execute_script: %v", err)
 	}
