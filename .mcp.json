@@ -1,12 +1,12 @@
 {
   "mcpServers": {
     "revit": {
-      "command": "${CLAUDE_PROJECT_DIR}/revit/mcp-server/mcp-server-mac",
+      "command": "revit/mcp-server/mcp-server-mac",
       "args": [
         "-mode", "remote",
-        "-bind", "${MCPBRIDGE_MAC_IP:-10.211.55.2}",
+        "-bind", "10.211.55.2",
         "-port", "56900",
-        "-app-data-dir", "${CLAUDE_PROJECT_DIR}/Connectors/Revit"
+        "-app-data-dir", "Connectors/Revit"
       ]
     }
   }
