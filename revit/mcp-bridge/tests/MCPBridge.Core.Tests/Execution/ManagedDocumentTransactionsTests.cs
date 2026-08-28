@@ -563,34 +563,47 @@ public class ManagedDocumentTransactionsTests
     }
 
     [Fact]
-    public void CommitAll_KeepsItsEntries_WhenSomethingUnexpectedEscapesIt()
+    public void CommitAll_ReportsADocumentWhoseTitleCannotBeRead_InsteadOfLettingTheThrowEscape()
     {
-        // THE POINT OF NOT CLEARING UP FRONT, and the assertion that a `finally` would have failed --
-        // a `finally` runs on the exception path too and would clear the entries just the same. Every
-        // adapter call CommitAll makes is guarded, so getting here needs a genuinely unforeseen throw;
-        // Document.Title (via Entry.Describe) is one such spot, and stands in for the ones nobody has
-        // thought of yet. What matters is not the specific throw but that after it, the executor's
-        // `finally` RollBackAll() still has documents to close instead of silently finding none.
+        // SECOND-ROUND REVIEW FINDING -- AND THIS TEST USED TO PIN THE BUG. Entry.Describe() reads
+        // Document.Title, a live Revit call that can throw, and CommitInOrder called it directly on
+        // three lines instead of through the SafeDescribe helper two methods away. A Title failure
+        // AFTER a successful commit therefore escaped CommitAll (whose contract says it never throws),
+        // then escaped TransactionScriptExecutor.ExecuteAsync -- whose try has a finally but no catch --
+        // as a raw unhandled exception, destroying the `script-partial-commit` notice that names which
+        // documents committed, i.e. exactly the information that notice exists to carry. The previous
+        // version of this test asserted the escape (Assert.Throws) and so pinned the buggy behaviour.
+        //
+        // Fixed behaviour asserted here: CommitAll does not throw, the commits still land and are still
+        // REPORTED, and the document that could not name itself appears under SafeDescribe's placeholder
+        // rather than vanishing from the report.
+        //
+        // The deliberate "clear the entry list only on the normal return path, never in a finally"
+        // structure that this test used to exercise stays in CommitAll as defence in depth for an
+        // unforeseen throw -- there is simply no adapter surface left that can produce one, which is the
+        // point of the fix rather than a gap in it.
         var journal = new List<string>();
         var set = NewSet();
         set.Open(new JournalingDocumentAdapter("ambient", journal), isAmbient: true);
         set.Open(new ThrowingTitleDocumentAdapter("created", journal));
 
-        Assert.Throws<InvalidOperationException>(() => set.CommitAll());
+        var result = set.CommitAll();
 
-        Assert.Equal(2, set.Count);
+        Assert.True(result.Success);
+        Assert.Equal(2, result.CommittedDocuments.Count);
+        Assert.Contains(result.CommittedDocuments, d => d.Contains("could not be read"));
+        Assert.Contains(result.CommittedDocuments, d => d.Contains("ambient"));
 
-        // And the net genuinely closes them, rather than merely still holding references.
+        // Everything really was closed, so the executor's `finally` net correctly finds nothing to undo.
+        Assert.Equal(0, set.Count);
         journal.Clear();
         set.RollBackAll();
-        Assert.Contains("ambient:tx.RollBack", journal);
-        Assert.Contains("ambient:group.RollBack", journal);
-        Assert.Equal(0, set.Count);
+        Assert.Empty(journal);
     }
 
     /// <summary>
-    /// Commits fine but throws from Title, so the throw escapes from Entry.Describe() -- outside every
-    /// guarded adapter call, which is exactly the "unforeseen" shape being modelled.
+    /// Commits fine but throws from Title, so the throw comes out of Entry.Describe() -- the spot that
+    /// used to sit outside every guarded adapter call and now routes through SafeDescribe.
     /// </summary>
     private sealed class ThrowingTitleDocumentAdapter : IDocumentAdapter
     {

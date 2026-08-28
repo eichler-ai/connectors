@@ -209,6 +209,15 @@ internal sealed class ManagedDocumentTransactions
     /// normally -- see the comment at that call site, which is the whole reason this is a separate
     /// method. Expected NOT to throw (every adapter call is guarded); the split exists precisely for the
     /// case where that expectation turns out to be wrong.
+    ///
+    /// SECOND-ROUND REVIEW FINDING: that "every adapter call is guarded" claim used to be FALSE here.
+    /// The three list-building calls below went through <c>entry.Describe()</c> directly rather than
+    /// <see cref="SafeDescribe"/> two methods away, and Describe() reads Document.Title -- a live Revit
+    /// call that can throw. When it threw AFTER a successful commit it escaped
+    /// TransactionScriptExecutor.ExecuteAsync (whose try has a finally but no catch) as a raw unhandled
+    /// exception, destroying the very `script-partial-commit` notice that exists to report which
+    /// documents committed. All three now route through SafeDescribe, which is what makes the
+    /// "never throws" contract on <see cref="CommitAll"/> actually true rather than merely intended.
     /// </summary>
     private static ManagedDocumentCommitResult CommitInOrder(List<Entry> order)
     {
@@ -225,11 +234,11 @@ internal sealed class ManagedDocumentTransactions
             var attempt = AttemptCommit(entry, failures);
             if (attempt.Succeeded)
             {
-                committed.Add(entry.Describe());
+                committed.Add(SafeDescribe(entry));
                 continue;
             }
 
-            (attempt.RollbackVerified ? rolledBack : unknownState).Add(entry.Describe());
+            (attempt.RollbackVerified ? rolledBack : unknownState).Add(SafeDescribe(entry));
             failure = attempt.Error;
             index++;
             break;
@@ -247,7 +256,7 @@ internal sealed class ManagedDocumentTransactions
             var entry = order[index];
             var transactionUnwound = SafeRollBack(entry.Transaction.RollBack);
             var groupUnwound = SafeRollBack(entry.Group.RollBack);
-            (transactionUnwound && groupUnwound ? rolledBack : unknownState).Add(entry.Describe());
+            (transactionUnwound && groupUnwound ? rolledBack : unknownState).Add(SafeDescribe(entry));
         }
 
         return ManagedDocumentCommitResult.Failed(failure, failures, committed, rolledBack, unknownState);

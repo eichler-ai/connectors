@@ -140,6 +140,34 @@ public class TransactionScriptExecutorTests
     }
 
     [Fact]
+    public async Task PartialCommitNotice_DoesNotClaimSurvivingChanges_WhenNothingCommitted()
+    {
+        // SECOND-ROUND REVIEW FINDING. This notice is also emitted when the FIRST (here: only) document
+        // fails to commit AND its own rollback throws -- an unknown-state document is the case an agent
+        // most needs told about, so it cannot be the case that gets no notice. But CommittedDocuments is
+        // empty there, and the message still read "...failed to commit after 0 other document(s) had
+        // already committed ... so those changes remain" -- claiming surviving changes that do not
+        // exist, in the one notice whose whole purpose is being honest about partial state.
+        var executor = NewExecutor();
+        var document = new FakeDocumentAdapter();
+        var uiApp = new FakeUiApplicationAdapter();
+        var transaction = (FakeTransactionAdapter)document.CreateTransaction("pre-created");
+        transaction.ThrowOnCommit = true;
+        transaction.ThrowOnRollBack = true;
+        var riggedDocument = new RiggedDocumentAdapter(document, transaction);
+
+        var outcome = await executor.ExecuteAsync(riggedDocument, uiApp, null, "1 + 1", CancellationToken.None);
+
+        Assert.False(outcome.Success);
+        var notice = Assert.Single(outcome.Notices, n => n.Code == "script-partial-commit");
+        Assert.DoesNotContain("those changes remain", notice.Message);
+        Assert.DoesNotContain("0 other document(s)", notice.Message);
+        Assert.Contains("no changes were kept", notice.Message);
+        // The unknown-state half of the report is unaffected -- it is why the notice fires at all here.
+        Assert.Contains("state unknown", notice.Message);
+    }
+
+    [Fact]
     public async Task CancelledScript_RollsBackCleanly()
     {
         var executor = NewExecutor();

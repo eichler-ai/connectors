@@ -42,7 +42,7 @@ namespace MCPBridge.Core.Execution;
 /// SynchronizeWithCentral/Print/RelinquishOwnership) are gated because they act outside it and nothing
 /// here can undo them. The flag is just forwarded to RoslynScriptRunner, which decides per run.
 /// </summary>
-public sealed class TransactionScriptExecutor
+internal sealed class TransactionScriptExecutor
 {
     private const string TransactionName = "MCP Bridge Script";
 
@@ -169,29 +169,42 @@ public sealed class TransactionScriptExecutor
     /// </summary>
     private static DiagnosticRecord PartialCommitNotice(ManagedDocumentCommitResult commit)
     {
-        var message =
-            $"The script ran to completion but one document failed to commit after {commit.CommittedDocuments.Count} " +
-            "other document(s) had already committed; a committed Revit transaction cannot be un-committed, so " +
-            $"those changes remain. Committed: {Describe(commit.CommittedDocuments)}. " +
-            $"Rolled back: {Describe(commit.RolledBackDocuments)}.";
+        // The "so those changes remain" clause is conditional on something ACTUALLY having committed
+        // (second-round review finding). This notice is also emitted when the FIRST document fails and
+        // its own rollback throws -- CommittedDocuments is empty there, and the unconditional wording
+        // read "...after 0 other document(s) had already committed ... so those changes remain", which
+        // claims surviving changes that do not exist, in the one notice whose entire job is being honest
+        // about partial state.
+        var message = commit.CommittedDocuments.Count > 0
+            ? $"The script ran to completion but one document failed to commit after {commit.CommittedDocuments.Count} " +
+              "other document(s) had already committed; a committed Revit transaction cannot be un-committed, so " +
+              $"those changes remain. Committed: {Describe(commit.CommittedDocuments)}. " +
+              $"Rolled back: {Describe(commit.RolledBackDocuments)}."
+            : "The script ran to completion but a document failed to commit before any document had committed, " +
+              $"so no changes were kept. Rolled back: {Describe(commit.RolledBackDocuments)}.";
 
-        // Named separately and last, never folded into "Rolled back" (independent PR review finding).
-        // Claiming a document rolled back when its rollback itself threw is the one lie this notice must
-        // not tell, and omitting it entirely would be the silence PRD §01 forbids -- an unknown-state
-        // document is exactly what a human or agent has to go and look at.
-        var remedy = new List<string>
+        // Both of these are about inspecting what COMMITTED, so they are only offered when something
+        // did -- see the message's own conditional above for why the zero-committed case exists at all.
+        var remedy = new List<string>();
+        if (commit.CommittedDocuments.Count > 0)
         {
-            "Documents a script creates are unsaved and in-memory, so nothing was written to disk -- " +
-            "the committed changes exist only in this Revit session.",
+            remedy.Add(
+                "Documents a script creates are unsaved and in-memory, so nothing was written to disk -- " +
+                "the committed changes exist only in this Revit session.");
             // NOT "or undo": the connector has no adopt-by-title WRITE path. Only documents created in
             // the current run get a managed transaction, and a script may never open its own
             // (ScriptApiDenylist check 1), so a follow-up script can read a committed document and
             // nothing more. Telling an agent it can undo the changes would send it after a capability
             // that does not exist.
-            "Find a committed document by Title in UIApplication.Application.Documents from a follow-up " +
-            "script to inspect what landed.",
-        };
+            remedy.Add(
+                "Find a committed document by Title in UIApplication.Application.Documents from a follow-up " +
+                "script to inspect what landed.");
+        }
 
+        // Named separately and last, never folded into "Rolled back" (independent PR review finding).
+        // Claiming a document rolled back when its rollback itself threw is the one lie this notice must
+        // not tell, and omitting it entirely would be the silence PRD §01 forbids -- an unknown-state
+        // document is exactly what a human or agent has to go and look at.
         if (commit.UnknownStateDocuments.Count > 0)
         {
             message +=

@@ -5,7 +5,7 @@ using MCPBridge.RevitAdapter;
 
 namespace MCPBridge.Core.Tests.Fakes;
 
-public sealed class FakeTransactionAdapter : ITransactionAdapter
+internal sealed class FakeTransactionAdapter : ITransactionAdapter
 {
     public string Name { get; }
     public List<string> Calls { get; } = new();
@@ -16,6 +16,12 @@ public sealed class FakeTransactionAdapter : ITransactionAdapter
     }
 
     public bool ThrowOnCommit { get; set; }
+
+    /// <summary>
+    /// Makes the best-effort unwind after a failed commit itself fail -- the "state unknown" case that
+    /// makes TransactionScriptExecutor emit its partial-commit notice even when nothing committed.
+    /// </summary>
+    public bool ThrowOnRollBack { get; set; }
     public IReadOnlyList<FailureSummary> FailuresToReport { get; set; } = Array.Empty<FailureSummary>();
 
     public IReadOnlyList<FailureSummary> CommitFailures { get; private set; } = Array.Empty<FailureSummary>();
@@ -34,5 +40,12 @@ public sealed class FakeTransactionAdapter : ITransactionAdapter
         return FailuresToReport.Any(f => f.IsError) ? TransactionCommitResult.RolledBack : TransactionCommitResult.Committed;
     }
 
-    public void RollBack() => Calls.Add("RollBack");
+    public void RollBack()
+    {
+        Calls.Add("RollBack");
+        if (ThrowOnRollBack)
+        {
+            throw new InvalidOperationException("simulated rollback failure");
+        }
+    }
 }
