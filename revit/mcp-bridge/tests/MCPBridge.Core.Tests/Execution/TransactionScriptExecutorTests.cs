@@ -12,7 +12,11 @@ namespace MCPBridge.Core.Tests.Execution;
 
 public class TransactionScriptExecutorTests
 {
-    private static TransactionScriptExecutor NewExecutor() => new(new RoslynScriptRunner());
+    // RevitAPI/RevitAPIUI are supplied as METADATA references, not loaded assemblies -- ScriptGlobals'
+    // members are real Revit types as of PRD §14, so without them nothing here would bind. See
+    // RevitApiReference's doc comment for why they cannot simply be loaded.
+    private static TransactionScriptExecutor NewExecutor() =>
+        new(new RoslynScriptRunner(additionalMetadataReferencePaths: RevitApiReference.Paths));
 
     private static string CreateTempDir()
     {
@@ -46,6 +50,28 @@ public class TransactionScriptExecutorTests
             document, uiApp, null, "throw new System.InvalidOperationException(\"boom\");", CancellationToken.None);
 
         Assert.False(outcome.Success);
+        Assert.Equal(new[] { "Start", "RollBack" }, document.LastTransaction!.Calls);
+        Assert.Equal(new[] { "Start", "RollBack" }, document.LastTransactionGroup!.Calls);
+    }
+
+    [Fact]
+    public async Task DenylistViolation_RollsBackTransactionAndGroup_NeverCommits()
+    {
+        // PRD §14: the ambient TransactionGroup/Transaction are opened BEFORE compilation runs, so a
+        // compile-time denylist rejection has to unwind them -- through the exact same path a
+        // CompilationErrorException or ScriptAwaitNotAllowedException already takes. Asserting that
+        // here means the denylist needed no new failure-handling code, which is the claim the design
+        // rests on.
+        var executor = NewExecutor();
+        var document = new FakeDocumentAdapter();
+        var uiApp = new FakeUiApplicationAdapter();
+
+        var outcome = await executor.ExecuteAsync(
+            document, uiApp, null, "new Autodesk.Revit.DB.Transaction(Document, \"x\");", CancellationToken.None);
+
+        Assert.False(outcome.Success);
+        Assert.False(outcome.WasCancelled);
+        Assert.IsType<ScriptApiDenylistViolationException>(outcome.Exception);
         Assert.Equal(new[] { "Start", "RollBack" }, document.LastTransaction!.Calls);
         Assert.Equal(new[] { "Start", "RollBack" }, document.LastTransactionGroup!.Calls);
     }

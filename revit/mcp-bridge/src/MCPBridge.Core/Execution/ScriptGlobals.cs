@@ -8,41 +8,81 @@ namespace MCPBridge.Core.Execution;
 
 /// <summary>
 /// The globals object exposed to script scope (PRD §06 step 3 / "Cancellation" -
-/// cooperative path). Deliberately built on the RevitAdapter interfaces, not raw
-/// Revit API types, so scripts run against fakes in unit tests exercise the exact
-/// same globals shape a live script would see.
+/// cooperative path).
 ///
-/// Forward-compatibility risk, flagged deliberately (adversarial code review,
-/// Phase 1): IScriptDocument/IUiApplicationAdapter/IUiDocumentAdapter today
-/// expose only what Phase 1's own trivial-expression scripts need (Title) --
-/// nowhere near real Revit API access (element queries, geometry, etc.).
-/// Because this exact globals shape is what real scripts will bind against by
-/// name once discovery/execute_script grows real API surface (Phase 3+),
-/// growing these interfaces later either balloons them into re-implementing
-/// large parts of the Revit API (defeating the "thin seam" premise) or forces
-/// a breaking change to a globals type scripts already depend on. Revisit
-/// this class's shape explicitly before Phase 3 lands real API access --
-/// don't let it grow ad hoc, member by member.
+/// PHASE 3 (PRD §14, "Real Revit API access from scripts"): Document/UIApplication/
+/// UIDocument are the REAL Autodesk.Revit.DB.Document / Autodesk.Revit.UI.UIApplication /
+/// UIDocument, not the narrow IScriptDocument/IScriptUiApplication/IScriptUiDocument
+/// interfaces they used to be (now deleted). Those interfaces existed to stop a script
+/// calling IDocumentAdapter.CreateTransaction/CreateTransactionGroup -- but those are OUR
+/// OWN adapter methods, not real Revit API, and the real risk they were standing in for is
+/// a script constructing its own Autodesk.Revit.DB.Transaction against the same Document
+/// TransactionScriptExecutor has already opened one on. That invariant is now enforced
+/// where it actually belongs: <see cref="ScriptApiDenylist"/>, a compile-time semantic
+/// check, not the type system. Everything else about the real API (reads, writes, element
+/// queries, geometry) rides the executor's existing ambient transaction and needs no new
+/// transaction-ownership scheme -- confirmed live before this shipped (PRD §14).
+///
+/// WHY THIS ONE FILE REFERENCES RevitAPI/RevitAPIUI DIRECTLY, and why that is not a
+/// precedent: MCPBridge.Core is otherwise entirely decoupled from Revit, working only
+/// against the MCPBridge.RevitAdapter interfaces so its decision logic stays unit-testable
+/// with fakes (see the revit-connector-development skill's testing strategy). ScriptGlobals
+/// is the single genuine exception, because it IS the public script-facing contract: an
+/// agent-authored script binds these identifiers by name and calls real Revit API on them,
+/// so this type has to name the real types. MCPBridge.Core.csproj's RevitAPI/RevitAPIUI
+/// references exist for this file alone -- do not reach for them from anywhere else in Core;
+/// add an adapter interface instead, the way every other Revit-touching concern here does.
 /// </summary>
 public sealed class ScriptGlobals
 {
+    private readonly IDocumentAdapter _documentAdapter;
+    private readonly IUiApplicationAdapter _uiApplicationAdapter;
+    private readonly IUiDocumentAdapter? _uiDocumentAdapter;
+
     // Property casing here is a public, external contract (PRD §06): an agent-authored script
     // binds to these identifiers by name in its scope, so it must match the PRD's published
     // names -- Document, UIApplication, UIDocument -- exactly.
     //
-    // Document/UIApplication/UIDocument are deliberately typed as IScriptDocument/IScriptUiApplication/
-    // IScriptUiDocument, not IDocumentAdapter/IUiApplicationAdapter/IUiDocumentAdapter: CreateTransaction/
-    // CreateTransactionGroup exist on IDocumentAdapter for TransactionScriptExecutor's own ambient
-    // Transaction/TransactionGroup (which already wraps every script run), not for the script to call --
-    // Revit only allows one open Transaction per Document, so a script calling CreateTransaction on the
-    // same Document the executor already opened one on always fails, whether reached via `Document`,
-    // `UIDocument.Document`, or `UIApplication.ActiveUiDocument.Document` -- a second independent PR
-    // review found this third path still reachable after the first two were closed, so ALL THREE globals
-    // are narrowed, not just the two that had already been caught. Confirmed live, not hypothetical --
-    // see IScriptDocument's doc comment.
-    public IScriptDocument Document { get; }
-    public IScriptUiApplication UIApplication { get; }
-    public IScriptUiDocument? UIDocument { get; }
+    // These are deliberately delegating PROPERTIES, resolved on access, not values captured in
+    // the constructor. Two reasons, both load-bearing:
+    //  (a) The constructor stays free of any Revit type, so ScriptGlobals can still be
+    //      constructed against RevitAdapter fakes in MCPBridge.Core.Tests -- which is what keeps
+    //      the whole non-Revit half of this class (Publish/file exchange, PRD §09, and the
+    //      compile-time ScriptApiDenylist checks) unit-testable with no live Revit at all.
+    //  (b) An adapter that cannot supply a real Revit object (a test fake) produces a clear,
+    //      signposted error naming revit/test-harness at the point a script actually touches the
+    //      global (PRD §01 observability-over-silence), rather than failing opaquely at construction
+    //      before a test's own body has even run.
+    //
+    // The raw objects come from the IRaw*Source capability interfaces rather than from IDocumentAdapter
+    // &c. directly -- see IRawDocumentSource's doc comment for why that separation is load-bearing and
+    // not merely stylistic (it is what keeps MCPBridge.Core.Tests' own assembly free of a RevitAPI
+    // reference, without which xUnit silently skips the entire test assembly).
+    public Autodesk.Revit.DB.Document Document =>
+        Raw<IRawDocumentSource>(_documentAdapter, nameof(Document)).RawDocument;
+
+    public Autodesk.Revit.UI.UIApplication UIApplication =>
+        Raw<IRawUiApplicationSource>(_uiApplicationAdapter, nameof(UIApplication)).RawUiApplication;
+
+    public Autodesk.Revit.UI.UIDocument? UIDocument =>
+        _uiDocumentAdapter is null
+            ? null
+            : Raw<IRawUiDocumentSource>(_uiDocumentAdapter, nameof(UIDocument)).RawUiDocument;
+
+    /// <summary>
+    /// Resolves an adapter's raw-Revit-object capability, or fails with a message that says exactly
+    /// what is missing and where a test needing it belongs. Never returns null: a null global would
+    /// surface inside an agent's script as an unexplained NullReferenceException (PRD §01).
+    /// </summary>
+    private static TSource Raw<TSource>(object adapter, string globalName) where TSource : class =>
+        adapter as TSource
+        ?? throw new NotSupportedException(
+            $"the `{globalName}` script global needs a real Revit object, but {adapter.GetType().Name} " +
+            $"does not implement {typeof(TSource).Name}. Only the live adapters do -- " +
+            "Autodesk.Revit.DB.Document, UIApplication and UIDocument are sealed and non-constructible " +
+            "outside a running Revit session, so a fake genuinely cannot supply one. A test that needs " +
+            "to EXECUTE a script against real Revit objects belongs in the tier-2 live harness " +
+            "(revit/test-harness), not MCPBridge.Core.Tests.");
     public CancellationToken CancellationToken { get; }
 
     /// <summary>
@@ -92,9 +132,9 @@ public sealed class ScriptGlobals
         string? importsDirectoryPath = null,
         bool overwriteOutputFiles = false)
     {
-        Document = document;
-        UIApplication = uiApplication;
-        UIDocument = uiDocument;
+        _documentAdapter = document;
+        _uiApplicationAdapter = uiApplication;
+        _uiDocumentAdapter = uiDocument;
         CancellationToken = cancellationToken;
         ExportsDirectory = exportsDirectoryPath;
         ImportsDirectory = importsDirectoryPath;

@@ -3,7 +3,7 @@ using Autodesk.Revit.DB;
 namespace MCPBridge.RevitAdapter;
 
 /// <summary>Real implementation wrapping Autodesk.Revit.DB.Document. Not unit-tested (see RevitTransactionAdapter).</summary>
-public sealed class RevitDocumentAdapter : IDocumentAdapter
+public sealed class RevitDocumentAdapter : IDocumentAdapter, IRawDocumentSource
 {
     private readonly Document _document;
     private readonly IUncPathResolver _uncPathResolver;
@@ -15,6 +15,13 @@ public sealed class RevitDocumentAdapter : IDocumentAdapter
     }
 
     public string Title => _document.Title;
+
+    /// <summary>
+    /// The real Document this adapter wraps (PRD §14) -- the sanctioned seam ScriptGlobals.Document is
+    /// built on. Returns the same reference the adapter was constructed with; no copy, no wrapper.
+    /// This is what makes skill.md's old `GetField("_document", ...)` reflection workaround obsolete.
+    /// </summary>
+    public Document RawDocument => _document;
 
     /// <summary>
     /// Resolved through DocumentIdentity's shared, process-lifetime cache (keyed on the live

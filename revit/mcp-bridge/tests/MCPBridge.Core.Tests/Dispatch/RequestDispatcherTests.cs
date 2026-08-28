@@ -28,7 +28,7 @@ public class RequestDispatcherTests
     private static ExecutionManager NewExecutionManager() =>
         new(new ExecutionRingBuffer(capacity: 50, retention: TimeSpan.FromMinutes(10)), gracePeriod: TimeSpan.FromSeconds(5));
 
-    private static TransactionScriptExecutor NewScriptExecutor() => new(new RoslynScriptRunner());
+    private static TransactionScriptExecutor NewScriptExecutor() => new(new RoslynScriptRunner(additionalMetadataReferencePaths: RevitApiReference.Paths));
 
     private static JsonRpcRequest ExecuteScriptRequest(int id, string executionId, string script, long timeoutMs = 30_000, long maxDurationMs = 600_000) =>
         Parse(new

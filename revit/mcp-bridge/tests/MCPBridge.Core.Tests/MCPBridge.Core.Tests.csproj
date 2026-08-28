@@ -40,6 +40,49 @@
     <RootNamespace>MCPBridge.Core.Tests</RootNamespace>
   </PropertyGroup>
 
+  <!-- Revit-version mapping, mirroring MCPBridge.RevitAdapter.csproj / MCPBridge.Core.csproj (PRD §11). -->
+  <PropertyGroup Condition="'$(TargetFramework)'=='net10.0-windows'">
+    <RevitVersion>2027</RevitVersion>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(TargetFramework)'=='net8.0-windows'">
+    <RevitVersion>2025</RevitVersion>
+  </PropertyGroup>
+  <PropertyGroup>
+    <RevitInstallDir>C:\Program Files\Autodesk\Revit $(RevitVersion)</RevitInstallDir>
+  </PropertyGroup>
+
+  <!--
+    There is deliberately NO <Reference Include="RevitAPI"> here, and that is load-bearing rather than
+    an omission (PRD §14). RevitAPI.dll is a mixed-mode C++/CLI assembly that only Revit's own native
+    host can load ; confirmed live on this dev VM, Assembly.LoadFrom on it anywhere else throws "An
+    attempt was made to load a program with an incorrect format." Give THIS assembly a direct reference
+    to it and xunit.runner.visualstudio cannot resolve that reference, SKIPS THE ENTIRE TEST ASSEMBLY,
+    and `dotnet test` still exits 0: 300+ tests silently stop running while the build looks green.
+    Measured both ways ; copy-local made no difference, the file was present and still unloadable.
+
+    An INDIRECT reference is fine (this project references MCPBridge.RevitAdapter and MCPBridge.Core,
+    both of which reference RevitAPI); it is specifically this assembly's own reference table that must
+    stay clean. That is why the fakes implement plain IDocumentAdapter and NOT IRawDocumentSource ; see
+    IRawDocumentSource's doc comment.
+
+    Tests that need Revit types bindable from SCRIPT scope get them as Roslyn METADATA references
+    instead, by file path ; Roslyn reads a mixed-mode assembly's managed metadata quite happily, it
+    just cannot load it. Hence the paths below and RevitApiReference.cs.
+  -->
+
+  <!-- The per-TFM Revit assembly paths, so tests can hand Roslyn a metadata reference without
+       hardcoding a Revit version. net10.0-windows resolves to 2027, net8.0-windows to 2025. -->
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>RevitApiPath</_Parameter1>
+      <_Parameter2>$(RevitInstallDir)\RevitAPI.dll</_Parameter2>
+    </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>RevitApiUiPath</_Parameter1>
+      <_Parameter2>$(RevitInstallDir)\RevitAPIUI.dll</_Parameter2>
+    </AssemblyAttribute>
+  </ItemGroup>
+
   <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
     <PackageReference Include="xunit" Version="2.9.2" />

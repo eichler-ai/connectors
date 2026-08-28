@@ -2,11 +2,11 @@ namespace MCPBridge.RevitAdapter;
 
 /// <summary>
 /// Thin seam over Autodesk.Revit.UI.UIDocument (PRD §06), used by RequestDispatcher to obtain the full
-/// IDocumentAdapter it passes to TransactionScriptExecutor. NOT what a script itself sees -- that's
-/// IScriptUiDocument (this interface's Document would let a script reach CreateTransaction through
-/// `UIDocument.Document`, same problem IScriptDocument fixes for the top-level `Document` global).
+/// IDocumentAdapter it passes to TransactionScriptExecutor. The real UIDocument a script binds to as its
+/// `UIDocument` global (PRD §14) comes from <see cref="IRawUiDocumentSource"/>, which the real adapter
+/// also implements.
 /// </summary>
-public interface IUiDocumentAdapter : IScriptUiDocument
+public interface IUiDocumentAdapter
 {
-    new IDocumentAdapter Document { get; }
+    IDocumentAdapter Document { get; }
 }

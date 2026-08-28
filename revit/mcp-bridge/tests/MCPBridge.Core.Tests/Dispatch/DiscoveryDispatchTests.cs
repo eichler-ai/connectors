@@ -30,7 +30,7 @@ public class DiscoveryDispatchTests
     private static ExecutionManager NewExecutionManager() =>
         new(new ExecutionRingBuffer(capacity: 50, retention: TimeSpan.FromMinutes(10)), gracePeriod: TimeSpan.FromSeconds(5));
 
-    private static TransactionScriptExecutor NewScriptExecutor() => new(new RoslynScriptRunner());
+    private static TransactionScriptExecutor NewScriptExecutor() => new(new RoslynScriptRunner(additionalMetadataReferencePaths: RevitApiReference.Paths));
 
     private static ExternalEventBridge<ScriptExecutionOutcome> NewBridge() =>
         new(new MCPBridge.Core.Tests.Fakes.FakeExternalEventRaiser());

@@ -13,6 +13,14 @@ namespace MCPBridge.Core.Tests.Execution;
 
 public class RoslynScriptRunnerTests
 {
+    // Every runner in this class is built with RevitAPI/RevitAPIUI as METADATA references. Without
+    // them, ScriptGlobals' own members (Document/UIApplication/UIDocument are real Revit types as of
+    // PRD §14) would not bind, and every denylist case below would fail with an ordinary CS0246 while
+    // appearing to "reject" the script -- asserting nothing about the denylist at all. They cannot be
+    // supplied as loaded assemblies here; see RevitApiReference's doc comment for why.
+    private static RoslynScriptRunner NewRunner(Action? compileCounter = null) =>
+        new(compileCounter: compileCounter, additionalMetadataReferencePaths: RevitApiReference.Paths);
+
     private static ScriptGlobals NewGlobals(CancellationToken token = default) => new(
         document: new FakeDocumentAdapter(),
         uiApplication: new FakeUiApplicationAdapter(),
@@ -22,7 +30,7 @@ public class RoslynScriptRunnerTests
     [Fact]
     public async Task RunAsync_SimpleExpression_ReturnsValue()
     {
-        var runner = new RoslynScriptRunner();
+        var runner = NewRunner();
 
         var outcome = await runner.RunAsync("1 + 1", NewGlobals(), CancellationToken.None);
 
@@ -31,36 +39,46 @@ public class RoslynScriptRunnerTests
     }
 
     [Fact]
-    public async Task RunAsync_CanAccessGlobals_DocumentTitle()
+    public async Task RunAsync_GlobalsBindToTheRealRevitTypes_ByPrdCasing()
     {
-        var runner = new RoslynScriptRunner();
-        var globals = NewGlobals();
+        // Phase 3 (PRD §14): Document/UIApplication/UIDocument are now the REAL Revit types. What this
+        // tier can still assert is the BINDING -- that the PRD §06 identifiers exist in script scope
+        // with that exact casing and are assignable to those exact types. Each lambda below proves one
+        // of those, purely at compile time.
+        //
+        // Asserted via the compile counter rather than a return value, deliberately: the counter only
+        // increments once GetOrCompile has bound the script successfully, so `1` IS the proof that all
+        // three bindings type-checked. The script cannot be EXECUTED in this tier at all -- the emitted
+        // submission names Revit types, and RevitAPI.dll is a mixed-mode assembly that will not load
+        // outside Revit (see RevitApiReference). Execution-and-result assertions for the globals moved
+        // to the tier-2 live harness (revit/test-harness) when this shipped.
+        var compileCount = 0;
+        var runner = NewRunner(compileCounter: () => compileCount++);
 
-        var outcome = await runner.RunAsync("Document.Title", globals, CancellationToken.None);
+        var outcome = await runner.RunAsync(
+            "System.Func<Autodesk.Revit.DB.Document> d = () => Document; " +
+            "System.Func<Autodesk.Revit.UI.UIApplication> a = () => UIApplication; " +
+            "System.Func<Autodesk.Revit.UI.UIDocument> u = () => UIDocument; " +
+            "return d != null && a != null && u != null;",
+            NewGlobals(), CancellationToken.None);
 
-        Assert.True(outcome.Success);
-        Assert.Equal("FakeDocument", outcome.ReturnValue);
+        Assert.Equal(1, compileCount);
+        Assert.IsNotType<ScriptApiDenylistViolationException>(outcome.Exception);
     }
 
-    [Fact]
-    public async Task RunAsync_CanAccessGlobals_UIApplicationAndUIDocument_ByPrdCasing()
-    {
-        // Fix 7: ScriptGlobals' member names are a public, external contract an agent-authored
-        // script binds to by identifier -- must match PRD §06's published casing (UIApplication/
-        // UIDocument, not UiApplication/UiDocument).
-        var runner = new RoslynScriptRunner();
-        var globals = NewGlobals();
-
-        var outcome = await runner.RunAsync("UIDocument.Document.Title", globals, CancellationToken.None);
-
-        Assert.True(outcome.Success);
-        Assert.Equal("FakeDocument", outcome.ReturnValue);
-    }
+    // NOTE, deliberately not a test: ScriptGlobals' "this adapter cannot supply a real Revit object"
+    // guard (its Raw<T> helper) CANNOT be exercised from this tier, and trying was informative enough to
+    // write down. A script reading `Document.Title` never reaches that guard here: the JIT must resolve
+    // every type a method body references -- including ScriptGlobals.Document's own return type -- before
+    // executing a single statement of it, so the emitted submission fails on loading RevitAPI.dll (a
+    // mixed-mode assembly; see RevitApiReference) rather than on the getter's null check. The guard is
+    // defensive code for a future adapter that forgets IRawDocumentSource, and it is honest to say it is
+    // unreachable from tier 1 rather than to pin it with a test that passes for an unrelated reason.
 
     [Fact]
     public async Task RunAsync_CapturesStdOut()
     {
-        var runner = new RoslynScriptRunner();
+        var runner = NewRunner();
 
         var outcome = await runner.RunAsync("System.Console.WriteLine(\"hello from script\"); 1", NewGlobals(), CancellationToken.None);
 
@@ -71,7 +89,7 @@ public class RoslynScriptRunnerTests
     [Fact]
     public async Task RunAsync_ThrowingScript_CapturesException_DoesNotThrowToCaller()
     {
-        var runner = new RoslynScriptRunner();
+        var runner = NewRunner();
 
         var outcome = await runner.RunAsync("throw new System.InvalidOperationException(\"boom\");", NewGlobals(), CancellationToken.None);
 
@@ -84,7 +102,7 @@ public class RoslynScriptRunnerTests
     [Fact]
     public async Task RunAsync_CompileError_CapturesAsFailure_DoesNotThrow()
     {
-        var runner = new RoslynScriptRunner();
+        var runner = NewRunner();
 
         var outcome = await runner.RunAsync("this is not valid C#!!!", NewGlobals(), CancellationToken.None);
 
@@ -95,7 +113,7 @@ public class RoslynScriptRunnerTests
     [Fact]
     public async Task RunAsync_CancelledToken_ObservedByScript_ReturnsCancelledOutcome()
     {
-        var runner = new RoslynScriptRunner();
+        var runner = NewRunner();
         using var cts = new CancellationTokenSource();
         cts.Cancel();
         var globals = NewGlobals(cts.Token);
@@ -111,7 +129,7 @@ public class RoslynScriptRunnerTests
     public async Task RunAsync_RepeatedIdenticalScript_UsesCachedCompilation()
     {
         var compileCount = 0;
-        var runner = new RoslynScriptRunner(compileCounter: () => compileCount++);
+        var runner = NewRunner(compileCounter: () => compileCount++);
 
         await runner.RunAsync("1 + 1", NewGlobals(), CancellationToken.None);
         await runner.RunAsync("1 + 1", NewGlobals(), CancellationToken.None);
@@ -140,7 +158,8 @@ public class RoslynScriptRunnerTests
             alc.Unloading += _ => unloadWasSignaled = true;
             captured = alc;
             return alc;
-        });
+        },
+            additionalMetadataReferencePaths: RevitApiReference.Paths);
 
         var outcome = await runner.RunAsync("1 + 1", NewGlobals(), CancellationToken.None);
 
@@ -203,7 +222,8 @@ public class RoslynScriptRunnerTests
             var alc = new AssemblyLoadContext("mcpbridge-script-weakref-test-" + Guid.NewGuid(), isCollectible: true);
             captured = alc;
             return alc;
-        });
+        },
+            additionalMetadataReferencePaths: RevitApiReference.Paths);
 
         var outcome = await runner.RunAsync("1 + 1", NewGlobals(), CancellationToken.None);
 
@@ -230,7 +250,7 @@ public class RoslynScriptRunnerTests
         // synchronously (.GetAwaiter().GetResult()), which is only deadlock-safe when the script has no
         // internal `await` of its own. A script with a top-level `await` must be rejected outright --
         // never silently hung, never silently dropped (PRD §01 observability-over-silence).
-        var runner = new RoslynScriptRunner();
+        var runner = NewRunner();
 
         var outcome = await runner.RunAsync(
             "await System.Threading.Tasks.Task.Delay(1); 1", NewGlobals(), CancellationToken.None);
@@ -245,7 +265,7 @@ public class RoslynScriptRunnerTests
     public async Task RunAsync_ScriptContainsAwait_NeverCached_NeverCompiled()
     {
         var compileCount = 0;
-        var runner = new RoslynScriptRunner(compileCounter: () => compileCount++);
+        var runner = NewRunner(compileCounter: () => compileCount++);
 
         await runner.RunAsync("await System.Threading.Tasks.Task.Delay(1); 1", NewGlobals(), CancellationToken.None);
         await runner.RunAsync("await System.Threading.Tasks.Task.Delay(1); 1", NewGlobals(), CancellationToken.None);
@@ -253,58 +273,129 @@ public class RoslynScriptRunnerTests
         Assert.Equal(0, compileCount);
     }
 
-    [Fact]
-    public async Task RunAsync_ScriptCallsDocumentCreateTransaction_FailsToCompile()
-    {
-        // Independent PR review of the IScriptDocument split (Document no longer exposes
-        // CreateTransaction/CreateTransactionGroup -- TransactionScriptExecutor already wraps every
-        // script run in an ambient Transaction/TransactionGroup, and Revit only allows one open
-        // Transaction per Document, so a script calling CreateTransaction on the same Document always
-        // failed at runtime before this split existed). This is the regression guard that split was
-        // missing entirely.
-        var runner = new RoslynScriptRunner();
+    // --- PRD §14: ScriptApiDenylist ---
+    //
+    // These replace the three RunAsync_ScriptCalls*CreateTransaction_FailsToCompile cases that stood
+    // here before Phase 3. Those guarded the same invariant by type-narrowing (IScriptDocument &c.,
+    // now deleted), which only ever blocked OUR OWN adapter's CreateTransaction/CreateTransactionGroup
+    // -- not real Revit API, and not the thing that actually matters. Now that `Document` is the real
+    // Autodesk.Revit.DB.Document, the real risk is a script constructing its own
+    // Autodesk.Revit.DB.Transaction against the document TransactionScriptExecutor has already opened
+    // one on, and that is what the denylist blocks.
+    //
+    // All of these are COMPILE-time only: they need the Document/Transaction TYPES (via the metadata
+    // reference and the static ctor's load touch above), never a live Document instance -- which is
+    // exactly why this whole safety-relevant slice stays in tier 1 with no live Revit.
 
-        var outcome = await runner.RunAsync(
-            "Document.CreateTransaction(\"x\")", NewGlobals(), CancellationToken.None);
+    [Theory]
+    [InlineData("new Autodesk.Revit.DB.Transaction(Document, \"x\");", "Transaction")]
+    [InlineData("new Autodesk.Revit.DB.TransactionGroup(Document, \"x\");", "TransactionGroup")]
+    [InlineData("new Autodesk.Revit.DB.SubTransaction(Document);", "SubTransaction")]
+    public async Task RunAsync_ScriptOpensItsOwnTransaction_IsRejectedByTheDenylist(string script, string expectedNamedType)
+    {
+        // THE load-bearing check. TransactionScriptExecutor opens the ambient TransactionGroup/
+        // Transaction before compilation even runs; Revit permits only one open Transaction per
+        // Document, so a script opening its own always fails -- and is what would make exposing the
+        // real Document unsafe. Rejected at compile time, so the executor's existing rollback path
+        // handles it exactly like any other compile error (no new failure handling).
+        var runner = NewRunner();
+
+        var outcome = await runner.RunAsync(script, NewGlobals(), CancellationToken.None);
 
         Assert.False(outcome.Success);
-        Assert.NotNull(outcome.Exception);
-        Assert.Contains("CreateTransaction", outcome.Exception!.Message);
+        Assert.False(outcome.WasCancelled);
+        Assert.IsType<ScriptApiDenylistViolationException>(outcome.Exception);
+        Assert.Contains(ScriptApiDenylistViolationException.Code, outcome.Exception!.Message);
+        Assert.Contains(expectedNamedType, outcome.Exception.Message);
+    }
+
+    [Theory]
+    // Overloads are cast-disambiguated so each script binds to exactly one member; an ambiguous call
+    // (CS0121) would fail compilation before the denylist ever ran, and the test would pass for the
+    // wrong reason. Signatures confirmed against the live 2027 API via describe_function.
+    [InlineData("Document.Close();", "Close")]
+    [InlineData("Document.Save();", "Save")]
+    [InlineData("Document.SaveAs((string)null);", "SaveAs")]
+    [InlineData("Document.SynchronizeWithCentral(null, null);", "SynchronizeWithCentral")]
+    [InlineData("Document.Print((Autodesk.Revit.DB.ViewSet)null);", "Print")]
+    [InlineData("Autodesk.Revit.DB.WorksharingUtils.RelinquishOwnership(Document, null, null);", "RelinquishOwnership")]
+    public async Task RunAsync_ScriptCallsADeniedDocumentMember_IsRejectedByTheDenylist(string script, string expectedNamedMember)
+    {
+        // PRD §14's starting denylist: document-lifecycle and worksharing operations that a script has
+        // no business performing on a document a human has open. Deliberately a short, concrete list
+        // expected to grow from real use -- see ScriptApiDenylist's own comment.
+        var runner = NewRunner();
+
+        var outcome = await runner.RunAsync(script, NewGlobals(), CancellationToken.None);
+
+        Assert.False(outcome.Success);
+        Assert.IsType<ScriptApiDenylistViolationException>(outcome.Exception);
+        Assert.Contains(expectedNamedMember, outcome.Exception!.Message);
     }
 
     [Fact]
-    public async Task RunAsync_ScriptCallsUiDocumentDotDocumentCreateTransaction_FailsToCompile()
+    public async Task RunAsync_DeniedScript_NeverCached_NeverCompiled()
     {
-        // Same bug, reached through UIDocument.Document instead of the top-level Document -- the
-        // narrower IScriptDocument fix must apply to IUiDocumentAdapter's Document too (via
-        // IScriptUiDocument), not just ScriptGlobals' own top-level Document property. Found by
-        // independent PR review: the first version of this fix missed this exact path.
-        var runner = new RoslynScriptRunner();
+        // Same guarantee the await rejection has: a denied script must not be counted as a successful
+        // compilation nor enter the compilation cache, or a later identical run would hit the cache
+        // and skip the check entirely.
+        var compileCount = 0;
+        var runner = NewRunner(compileCounter: () => compileCount++);
 
-        var outcome = await runner.RunAsync(
-            "UIDocument.Document.CreateTransaction(\"x\")", NewGlobals(), CancellationToken.None);
+        await runner.RunAsync("new Autodesk.Revit.DB.Transaction(Document, \"x\");", NewGlobals(), CancellationToken.None);
+        var second = await runner.RunAsync("new Autodesk.Revit.DB.Transaction(Document, \"x\");", NewGlobals(), CancellationToken.None);
 
-        Assert.False(outcome.Success);
-        Assert.NotNull(outcome.Exception);
-        Assert.Contains("CreateTransaction", outcome.Exception!.Message);
+        Assert.Equal(0, compileCount);
+        Assert.IsType<ScriptApiDenylistViolationException>(second.Exception);
+    }
+
+    [Theory]
+    [InlineData("\"new Autodesk.Revit.DB.Transaction(Document, x)\".Length > 0")]
+    [InlineData("\"Document.Close()\".Length > 0")]
+    [InlineData("\"Autodesk.Revit.DB.WorksharingUtils.RelinquishOwnership\".Length > 0")]
+    public async Task RunAsync_DenylistedTextInsideAStringLiteral_IsNotRejected(string script)
+    {
+        // Sanity check that the rejection is a real SEMANTIC check over bound symbols, not a text
+        // search -- the exact counterpart of RunAsync_AwaitInsideAStringLiteral_IsNotRejected.
+        var runner = NewRunner();
+
+        var outcome = await runner.RunAsync(script, NewGlobals(), CancellationToken.None);
+
+        Assert.True(outcome.Success);
+        Assert.Equal(true, outcome.ReturnValue);
     }
 
     [Fact]
-    public async Task RunAsync_ScriptCallsUiApplicationActiveUiDocumentDotDocumentCreateTransaction_FailsToCompile()
+    public async Task RunAsync_OrdinaryRevitApiUse_IsNotRejected()
     {
-        // Same bug again, reached through a THIRD path: UIApplication.ActiveUiDocument.Document. A second
-        // independent PR review found the first fix closed Document and UIDocument.Document but missed
-        // this one -- ScriptGlobals.UIApplication was still typed IUiApplicationAdapter, whose
-        // ActiveUiDocument is IUiDocumentAdapter? (full interface, CreateTransaction and all), not the
-        // narrower IScriptUiApplication/IScriptUiDocument.
-        var runner = new RoslynScriptRunner();
+        // The denylist must not blanket-ban the Revit API -- exposing it is the entire point of Phase 3.
+        // The compile counter is the assertion: it only increments after ScriptApiDenylist.Enforce has
+        // returned without throwing, so `1` means this script bound real Revit symbols (a collector over
+        // the real Document, the headline example the whole design exists for) and was allowed through.
+        var compileCount = 0;
+        var runner = NewRunner(compileCounter: () => compileCount++);
 
         var outcome = await runner.RunAsync(
-            "UIApplication.ActiveUiDocument.Document.CreateTransaction(\"x\")", NewGlobals(), CancellationToken.None);
+            "System.Func<Autodesk.Revit.DB.FilteredElementCollector> f = " +
+            "() => new Autodesk.Revit.DB.FilteredElementCollector(Document); return f != null;",
+            NewGlobals(), CancellationToken.None);
 
-        Assert.False(outcome.Success);
-        Assert.NotNull(outcome.Exception);
-        Assert.Contains("CreateTransaction", outcome.Exception!.Message);
+        Assert.Equal(1, compileCount);
+        Assert.IsNotType<ScriptApiDenylistViolationException>(outcome.Exception);
+    }
+
+    [Fact]
+    public async Task RunAsync_DenylistedMemberNameOnAnUnrelatedType_IsNotRejected()
+    {
+        // The check is (containing type, member), not a bare member name: `Close` on some other type
+        // is ordinary .NET and must keep working. A name-only check would break plain System.IO use.
+        var runner = NewRunner();
+
+        var outcome = await runner.RunAsync(
+            "var ms = new System.IO.MemoryStream(); ms.Close(); return \"ok\";", NewGlobals(), CancellationToken.None);
+
+        Assert.True(outcome.Success);
+        Assert.Equal("ok", outcome.ReturnValue);
     }
 
     [Fact]
@@ -312,7 +403,7 @@ public class RoslynScriptRunnerTests
     {
         // Sanity check that the rejection is a real syntax-tree walk (AwaitExpressionSyntax), not a naive
         // text search for the substring "await".
-        var runner = new RoslynScriptRunner();
+        var runner = NewRunner();
 
         var outcome = await runner.RunAsync("\"await\".Length", NewGlobals(), CancellationToken.None);
 

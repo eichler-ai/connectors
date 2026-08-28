@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.IO;
 using System.Linq;
@@ -66,7 +67,23 @@ public sealed class RoslynScriptRunner
     private readonly Action? _compileCounter;
     private readonly ScriptOptions _options;
 
-    public RoslynScriptRunner(int cacheCapacity = 32, Func<AssemblyLoadContext>? alcFactory = null, Action? compileCounter = null)
+    /// <param name="additionalMetadataReferencePaths">
+    /// Extra assemblies to make bindable from script scope, referenced by FILE PATH (metadata only)
+    /// rather than as loaded assemblies. Unused in production and null by default: inside a live Revit
+    /// process RevitAPI/RevitAPIUI are already loaded, so <see cref="LoadableReferences"/> picks them up
+    /// on its own. It exists for MCPBridge.Core.Tests, which cannot get them that way -- RevitAPI.dll is
+    /// a mixed-mode C++/CLI assembly that only Revit's own native host can load (Assembly.LoadFrom on it
+    /// elsewhere throws "An attempt was made to load a program with an incorrect format", confirmed
+    /// live). Roslyn, however, only ever reads its managed METADATA, which works fine from the file. That
+    /// is what keeps the compile-time ScriptApiDenylist checks fully unit-testable with no live Revit
+    /// (PRD §14) -- the scripts in those tests are rejected before anything is ever emitted or executed,
+    /// so nothing needs the assembly to actually load.
+    /// </param>
+    public RoslynScriptRunner(
+        int cacheCapacity = 32,
+        Func<AssemblyLoadContext>? alcFactory = null,
+        Action? compileCounter = null,
+        IEnumerable<string>? additionalMetadataReferencePaths = null)
     {
         _cache = new ScriptCompilationCache(cacheCapacity);
         _alcFactory = alcFactory ?? (() => new AssemblyLoadContext($"mcpbridge-script-{Guid.NewGuid()}", isCollectible: true));
@@ -74,6 +91,12 @@ public sealed class RoslynScriptRunner
         _options = ScriptOptions.Default
             .WithReferences(LoadableReferences())
             .WithImports("System");
+
+        if (additionalMetadataReferencePaths is not null)
+        {
+            _options = _options.AddReferences(
+                additionalMetadataReferencePaths.Select(path => MetadataReference.CreateFromFile(path)));
+        }
     }
 
     private static Assembly[] LoadableReferences() =>
@@ -94,6 +117,13 @@ public sealed class RoslynScriptRunner
         }
         catch (ScriptAwaitNotAllowedException ex)
         {
+            return ScriptExecutionOutcome.Failed(ex, stdOut: "");
+        }
+        catch (ScriptApiDenylistViolationException ex)
+        {
+            // Surfaced through the identical path as the two above (PRD §14): the caller
+            // (TransactionScriptExecutor) rolls back its ambient Transaction/TransactionGroup exactly as
+            // it does for any other pre-execution failure, so the denylist needed no new failure handling.
             return ScriptExecutionOutcome.Failed(ex, stdOut: "");
         }
 
@@ -217,6 +247,14 @@ public sealed class RoslynScriptRunner
                 string.Join(Environment.NewLine, errors.Select(e => e.ToString())),
                 ImmutableArray.CreateRange(errors));
         }
+
+        // PRD §14: the denylist needs bound symbols, so it runs only once Compile() has reported no
+        // errors -- before that, every expression would resolve to an error symbol and the check could
+        // only re-report ordinary compile errors as denylist violations. Placed before _compileCounter/
+        // _cache.Set for the same reason RejectTopLevelAwait sits before them: a rejected script must
+        // never be counted as a successful compilation nor enter the cache, or an identical later run
+        // would hit the cache and skip the check entirely.
+        ScriptApiDenylist.Enforce(script.GetCompilation());
 
         _compileCounter?.Invoke();
         _cache.Set(scriptText, script);

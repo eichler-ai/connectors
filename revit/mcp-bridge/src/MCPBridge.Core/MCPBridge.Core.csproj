@@ -13,6 +13,39 @@
     <AssemblyName>MCPBridge.Core</AssemblyName>
   </PropertyGroup>
 
+  <!-- Revit-version mapping, mirroring MCPBridge.RevitAdapter.csproj (PRD §11). -->
+  <PropertyGroup Condition="'$(TargetFramework)'=='net10.0-windows'">
+    <RevitVersion>2027</RevitVersion>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(TargetFramework)'=='net8.0-windows'">
+    <RevitVersion>2025</RevitVersion>
+  </PropertyGroup>
+  <PropertyGroup>
+    <RevitInstallDir>C:\Program Files\Autodesk\Revit $(RevitVersion)</RevitInstallDir>
+  </PropertyGroup>
+
+  <!--
+    A deliberate, narrow exception to Core's Revit-decoupling, scoped to ONE file: ScriptGlobals.cs.
+    Phase 3 (PRD §14) makes the script-facing globals the REAL Autodesk.Revit.DB.Document /
+    Autodesk.Revit.UI.UIApplication / UIDocument, and ScriptGlobals is inherently the public
+    script-facing contract ; it has to name those types now that scripts bind to them. Everything
+    else in Core stays exactly as decoupled as before, behind the MCPBridge.RevitAdapter interfaces.
+    This is NOT a precedent for the rest of Core; see ScriptGlobals.cs's own doc comment.
+
+    Private=false matches RevitAdapter: inside a live Revit process RevitAPI/RevitAPIUI are already
+    loaded, so copying them next to the add-in would only risk shadowing Revit's own copies.
+  -->
+  <ItemGroup>
+    <Reference Include="RevitAPI">
+      <HintPath>$(RevitInstallDir)\RevitAPI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="RevitAPIUI">
+      <HintPath>$(RevitInstallDir)\RevitAPIUI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
   <ItemGroup>
     <PackageReference Include="Microsoft.CodeAnalysis.CSharp.Scripting" Version="4.11.0" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.0" />
