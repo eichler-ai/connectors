@@ -178,8 +178,14 @@ func runScript(t *testing.T, c *mcpclient.Client, instanceID, documentID, script
 // at all, so the codes skill.md tells an agent to match on existed only inside
 // the prose. A test that greps the message cannot see that.
 type rejectedScript struct {
-	Text  string
-	Error struct {
+	Text string
+	// Output is the failed run's stdout. Present because a script that throws
+	// still reports what it printed before throwing, and that is the only way
+	// to learn something (here, a created document's title) from a run whose
+	// return value is gone -- which in turn keeps the follow-up assertion
+	// scoped to one document instead of scanning every open one.
+	Output string `json:"output"`
+	Error  struct {
 		Code    string   `json:"code"`
 		Message string   `json:"message"`
 		Remedy  []string `json:"remedy"`
@@ -810,6 +816,7 @@ func TestCreatedDocumentIsWritable(t *testing.T) {
 	elevA := strconv.FormatFloat(base+0.001, 'f', 4, 64)
 	elevB := strconv.FormatFloat(base+0.002, 'f', 4, 64)
 	elevAmbient := strconv.FormatFloat(base+0.003, 'f', 4, 64)
+	elevRolledBack := strconv.FormatFloat(base+0.004, 'f', 4, 64)
 
 	// The headline: create, write, and read the write back, all in one script.
 	// Level.Create is the same write TestCreateLevel makes against the ambient
@@ -895,26 +902,32 @@ return "matches = " + matches + ";";
 		// A run that writes to a created document and then throws. Read via
 		// runRejectedScript, not runScript: a script that throws comes back as an MCP
 		// tool error carrying the PRD §01 record, which decodeToolResult fatals on by
-		// design.
+		// design. The title is printed to stdout BEFORE the throw, because the return
+		// value dies with the script and the follow-up check needs to look at exactly
+		// one document.
 		thrown := runRejectedScript(t, c, instanceID, documentID, `
 var doc = CreateProjectDocument();
-Autodesk.Revit.DB.Level.Create(doc, 4545.0);
+Autodesk.Revit.DB.Level.Create(doc, `+elevRolledBack+`);
+System.Console.WriteLine(doc.Title);
 throw new System.InvalidOperationException("deliberate");
 `)
 		if thrown.Error.Code != "script-execution-failed" {
 			t.Fatalf("expected code script-execution-failed, got %q (text: %s)", thrown.Error.Code, thrown.Text)
 		}
+		rolledBackTitle := strings.TrimSpace(thrown.Output)
+		if rolledBackTitle == "" {
+			t.Fatalf("the throwing run reported no stdout, so there is no document to check; record: %s", thrown.Text)
+		}
 
-		// Nothing anywhere in the session should carry a level at 4545 -- the
-		// document that got one was rolled back. Scanning every open document
-		// rather than re-finding one by title, because the throwing script's
-		// return value is gone with it.
+		// That document still exists (nothing closes it) but must carry no level at
+		// this elevation: its managed transaction was rolled back with everything else.
 		check := runScript(t, c, instanceID, documentID, `
 int matches = 0;
 foreach (Autodesk.Revit.DB.Document d in UIApplication.Application.Documents) {
+  if (d.Title != `+strconv.Quote(rolledBackTitle)+`) { continue; }
   foreach (Autodesk.Revit.DB.Level lv in new Autodesk.Revit.DB.FilteredElementCollector(d)
       .OfClass(typeof(Autodesk.Revit.DB.Level))) {
-    if (System.Math.Abs(lv.Elevation - 4545.0) < 0.001) { matches++; }
+    if (System.Math.Abs(lv.Elevation - `+elevRolledBack+`) < 0.0001) { matches++; }
   }
 }
 return "matches = " + matches + ";";
@@ -1007,14 +1020,26 @@ return a.Title + "|" + b.Title;
 		if created.Status != "success" {
 			t.Fatalf("expected status=success, got %q (output: %s)", created.Status, created.Output)
 		}
+		titles := strings.Split(strings.TrimSpace(created.Output), "|")
+		if len(titles) != 2 {
+			t.Fatalf("expected two document titles, got %q", created.Output)
+		}
 
+		// Scoped to the two documents by title rather than scanning every open one.
+		// This case deliberately leaves documents open and the wider suite accumulates
+		// dozens of them, so an all-documents scan grows until it blows the harness's
+		// 20s tool timeout -- which then leaves the instance busy and fails every
+		// later subtest for an unrelated reason. Observed live; keep queries scoped.
 		check := runScript(t, c, instanceID, documentID, `
 int a = 0, b = 0;
 foreach (Autodesk.Revit.DB.Document d in UIApplication.Application.Documents) {
+  bool isA = d.Title == `+strconv.Quote(titles[0])+`;
+  bool isB = d.Title == `+strconv.Quote(titles[1])+`;
+  if (!isA && !isB) { continue; }
   foreach (Autodesk.Revit.DB.Level lv in new Autodesk.Revit.DB.FilteredElementCollector(d)
       .OfClass(typeof(Autodesk.Revit.DB.Level))) {
-    if (System.Math.Abs(lv.Elevation - `+elevA+`) < 0.0001) { a++; }
-    if (System.Math.Abs(lv.Elevation - `+elevB+`) < 0.0001) { b++; }
+    if (isA && System.Math.Abs(lv.Elevation - `+elevA+`) < 0.0001) { a++; }
+    if (isB && System.Math.Abs(lv.Elevation - `+elevB+`) < 0.0001) { b++; }
   }
 }
 return "a = " + a + "; b = " + b + ";";
