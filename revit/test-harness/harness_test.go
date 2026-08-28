@@ -482,3 +482,210 @@ func TestLifecycleGateCoversTheNewlyAddedMembers(t *testing.T) {
 		})
 	}
 }
+
+// TestApplicationCreatesDocuments covers the top-level
+// Autodesk.Revit.ApplicationServices.Application object -- reached from a script
+// as UIApplication.Application -- and specifically the two document-creating
+// members the PRD §13 corpus's fixture system needs: NewProjectDocument and
+// NewFamilyDocument.
+//
+// WHY THIS EXISTS AS A TEST RATHER THAN AS A FEATURE. Exposing Application was
+// planned as a fast-follow to PRD §14, on the assumption that ScriptGlobals would
+// need a fourth delegating property and a fourth IRaw*Source capability interface.
+// It needs none: PRD §14 made UIApplication the REAL Autodesk.Revit.UI.UIApplication,
+// and .Application is an ordinary property on that real type, so the whole
+// ApplicationServices.Application surface has been reachable since §14 shipped. No
+// code was written for this; the fast-follow reduced to proving the capability is
+// real and writing it down (PRD §14, "Application-level access needed no new
+// plumbing"). That makes a live assertion the only thing standing between the claim
+// and silent regression -- exactly the tier-2 case this harness is for.
+//
+// NEITHER MEMBER IS CONFIRMATION-GATED, and every subtest below runs WITHOUT
+// confirm_lifecycle_actions, which is what pins that. Run against
+// ScriptApiDenylist's own membership question -- "does a thrown exception in the
+// script actually undo this?" -- a freshly created, unsaved, in-memory document has
+// nothing to undo: it touches no file, no central model, no device, and no document
+// a human has open. What WOULD escape the rollback boundary is persisting it, and
+// Document.Save/SaveAs/SaveAsCloudModel are already gated in their own right. So
+// creation stays unrestricted and the gate sits exactly where the effect becomes
+// irreversible, not one step earlier.
+//
+// SESSION COST, deliberately accepted: every run leaves its documents open in the
+// live Revit session (nothing here closes them -- Document.Close is gated, and
+// Dispose with it). That matches the corpus plan's own position: fresh throwaway
+// documents accumulate in memory and are reclaimed by restarting Revit between full
+// runs, not by inventing a cleanup mechanism.
+func TestApplicationCreatesDocuments(t *testing.T) {
+	c, instanceID, documentID := targetDocument(t)
+
+	// The real type, by name, plus the two members -- the same shape
+	// TestScriptGlobalsExposeRealRevitObjects uses for the §14 globals, for the
+	// same reason: a wrapper would also answer a call, so the type check is what
+	// distinguishes reaching the real Application from reaching something like it.
+	t.Run("ApplicationIsTheRealRevitType", func(t *testing.T) {
+		out := runScript(t, c, instanceID, documentID, `
+var app = UIApplication.Application;
+return new {
+  appType = app.GetType().FullName,
+  version = app.VersionNumber,
+  projectTemplate = app.DefaultProjectTemplate
+};
+`)
+		if out.Status != "success" {
+			t.Fatalf("expected status=success, got %q (output: %s)", out.Status, out.Output)
+		}
+		if !strings.Contains(out.Output, "appType = Autodesk.Revit.ApplicationServices.Application") {
+			t.Fatalf("UIApplication.Application is not the real Application type; output: %s", out.Output)
+		}
+	})
+
+	// The fixture-system helper the corpus plan needs: a blank document from
+	// Revit's own shipped default template, so no fixture asset has to be
+	// committed to this repo. Asserts the document is real and queryable
+	// (levels come from the template), not merely non-null.
+	t.Run("NewProjectDocument", func(t *testing.T) {
+		out := runScript(t, c, instanceID, documentID, `
+var app = UIApplication.Application;
+var doc = app.NewProjectDocument(app.DefaultProjectTemplate);
+var levels = new Autodesk.Revit.DB.FilteredElementCollector(doc)
+    .OfClass(typeof(Autodesk.Revit.DB.Level)).GetElementCount();
+return new {
+  docType = doc.GetType().FullName,
+  isFamily = doc.IsFamilyDocument,
+  unsaved = doc.PathName.Length == 0,
+  hasLevels = levels > 0,
+  isBlank = object.ReferenceEquals(doc, Document) == false
+};
+`)
+		if out.Status != "success" {
+			t.Fatalf("expected status=success, got %q (output: %s)", out.Status, out.Output)
+		}
+		for _, want := range []string{
+			"docType = Autodesk.Revit.DB.Document",
+			"isFamily = False",
+			"unsaved = True",
+			"hasLevels = True",
+			"isBlank = True",
+		} {
+			if !strings.Contains(out.Output, want) {
+				t.Errorf("wanted %q in output: %s", want, out.Output)
+			}
+		}
+	})
+
+	// THE BOUNDARY THAT ACTUALLY CONSTRAINS THE FIXTURE SYSTEM, pinned here so it
+	// cannot be rediscovered the hard way. TransactionScriptExecutor's ambient
+	// Transaction is opened on the ACTIVE document; a document this script just
+	// created is not that document and is not covered by it, so writing to it
+	// throws ModificationOutsideTransactionException. Revit itself is fine with a
+	// second Transaction on a different document (one-open-transaction is a
+	// per-document rule) -- it is ScriptApiDenylist check 1 that refuses to
+	// construct one, unconditionally and without regard to which document it
+	// targets. Closing that gap is a separate, deliberate piece of work; until it
+	// happens, a script can CREATE a blank document and READ it, not write to it.
+	t.Run("NewDocumentIsOutsideTheAmbientTransaction", func(t *testing.T) {
+		out := runScript(t, c, instanceID, documentID, `
+var app = UIApplication.Application;
+var doc = app.NewProjectDocument(app.DefaultProjectTemplate);
+try {
+  Autodesk.Revit.DB.Level.Create(doc, 123.0);
+  return "modified";
+} catch (Autodesk.Revit.Exceptions.ModificationOutsideTransactionException) {
+  return "outside-transaction";
+}
+`)
+		if out.Status != "success" {
+			t.Fatalf("expected status=success, got %q (output: %s)", out.Status, out.Output)
+		}
+		if !strings.Contains(out.Output, "outside-transaction") {
+			t.Fatalf("a freshly created document was writable without its own transaction -- if that is now genuinely true, this test and the corpus plan's fixture design both need revisiting; output: %s", out.Output)
+		}
+	})
+
+	// HOW A FIXTURE DOCUMENT IS ADDRESSED ACROSS CALLS, which is the question the
+	// corpus plan left open. The answer is NOT a document_id: a document created
+	// this way never appears in list_instances (register's document list is a
+	// one-shot snapshot taken at connect, PRD §05) and execute_script does not
+	// route by document_id anyway -- every script runs against ActiveUIDocument
+	// (RequestDispatcher's own KNOWN LIMITATION comment). A script also cannot
+	// change that: UIApplication.OpenAndActivateDocument throws "The active
+	// document is currently modifiable" from inside the ambient transaction.
+	// What DOES work is in-script addressing: the document stays in
+	// Application.Documents for the rest of the session, so a later script finds it
+	// there by title. That is the mechanism, and this pins it.
+	t.Run("CreatedDocumentStaysInApplicationDocuments", func(t *testing.T) {
+		created := runScript(t, c, instanceID, documentID, `
+var app = UIApplication.Application;
+return app.NewProjectDocument(app.DefaultProjectTemplate).Title;
+`)
+		if created.Status != "success" {
+			t.Fatalf("expected status=success, got %q (output: %s)", created.Status, created.Output)
+		}
+		title := strings.TrimSpace(created.Output)
+		if title == "" {
+			t.Fatalf("created document reported no title, so nothing can address it later")
+		}
+
+		found := runScript(t, c, instanceID, documentID, `
+foreach (Autodesk.Revit.DB.Document d in UIApplication.Application.Documents) {
+  if (d.Title == "`+title+`") { return "found"; }
+}
+return "missing";
+`)
+		if found.Status != "success" {
+			t.Fatalf("expected status=success, got %q (output: %s)", found.Status, found.Output)
+		}
+		if !strings.Contains(found.Output, "found") {
+			t.Fatalf("document %q created by an earlier execute_script call was gone by the next one, so nothing can address it; output: %s", title, found.Output)
+		}
+	})
+
+	// Phase D of the corpus plan (family editing) happens in a FAMILY document,
+	// a different document context from every other phase. Asserted through
+	// FamilyManager rather than just IsFamilyDocument, since that is the API the
+	// parametric cases actually go through -- IsFamilyDocument alone would pass
+	// against a document too degenerate to use.
+	//
+	// The template is discovered from Application.FamilyTemplatePath rather than
+	// hardcoded: the path is per-machine and per-Revit-version, and a literal here
+	// would turn "this VM installed a different language pack" into a failure of
+	// the capability under test. If no Generic Model template is installed the
+	// subtest skips, per this harness's standing rule about environment
+	// preconditions it does not own.
+	t.Run("NewFamilyDocument", func(t *testing.T) {
+		out := runScript(t, c, instanceID, documentID, `
+var app = UIApplication.Application;
+string template = "";
+if (System.IO.Directory.Exists(app.FamilyTemplatePath)) {
+  foreach (var f in System.IO.Directory.EnumerateFiles(app.FamilyTemplatePath, "Generic Model.rft", System.IO.SearchOption.AllDirectories)) {
+    template = f;
+    break;
+  }
+}
+if (template.Length == 0) { return "no-template"; }
+var doc = app.NewFamilyDocument(template);
+return new {
+  docType = doc.GetType().FullName,
+  isFamily = doc.IsFamilyDocument,
+  hasFamilyManager = doc.FamilyManager != null,
+  hasParameters = doc.FamilyManager.Parameters.Size > 0
+};
+`)
+		if out.Status != "success" {
+			t.Fatalf("expected status=success, got %q (output: %s)", out.Status, out.Output)
+		}
+		if strings.Contains(out.Output, "no-template") {
+			t.Skip("no \"Generic Model.rft\" under Application.FamilyTemplatePath on this machine")
+		}
+		for _, want := range []string{
+			"docType = Autodesk.Revit.DB.Document",
+			"isFamily = True",
+			"hasFamilyManager = True",
+			"hasParameters = True",
+		} {
+			if !strings.Contains(out.Output, want) {
+				t.Errorf("wanted %q in output: %s", want, out.Output)
+			}
+		}
+	})
+}
