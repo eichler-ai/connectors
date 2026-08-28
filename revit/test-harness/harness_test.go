@@ -183,11 +183,26 @@ func runRejectedScript(t *testing.T, c *mcpclient.Client, instanceID, documentID
 
 func callExecuteScript(t *testing.T, c *mcpclient.Client, instanceID, documentID, script string) json.RawMessage {
 	t.Helper()
-	raw, err := c.CallTool("execute_script", map[string]any{
+	return callExecuteScriptWith(t, c, instanceID, documentID, script, nil)
+}
+
+// callExecuteScriptWith is callExecuteScript plus any extra tool arguments —
+// today only confirm_lifecycle_actions (PRD §14). Kept as a separate helper so
+// every existing case keeps sending the exact argument set it sent before:
+// the confirmation gate's whole contract is that a request WITHOUT the flag is
+// refused, and a helper that started passing it by default would quietly
+// dismantle that.
+func callExecuteScriptWith(t *testing.T, c *mcpclient.Client, instanceID, documentID, script string, extra map[string]any) json.RawMessage {
+	t.Helper()
+	args := map[string]any{
 		"instance_id": instanceID,
 		"document_id": documentID,
 		"script":      script,
-	}, 20*time.Second)
+	}
+	for k, v := range extra {
+		args[k] = v
+	}
+	raw, err := c.CallTool("execute_script", args, 20*time.Second)
 	if err != nil {
 		t.Fatalf("execute_script: %v", err)
 	}
@@ -280,8 +295,6 @@ func TestDenylistRejectsOwnTransaction(t *testing.T) {
 		{"Transaction", "Autodesk.Revit.DB.Transaction", `using (var tx = new Autodesk.Revit.DB.Transaction(Document, "mine")) { tx.Start(); tx.Commit(); } return "ran";`},
 		{"TransactionGroup", "Autodesk.Revit.DB.TransactionGroup", `using (var tg = new Autodesk.Revit.DB.TransactionGroup(Document, "mine")) { tg.Start(); tg.Assimilate(); } return "ran";`},
 		{"SubTransaction", "Autodesk.Revit.DB.SubTransaction", `using (var st = new Autodesk.Revit.DB.SubTransaction(Document)) { st.Start(); st.Commit(); } return "ran";`},
-		{"Document.Close", "Autodesk.Revit.DB.Document.Close", `Document.Close(); return "ran";`},
-		{"Document.SaveAs", "Autodesk.Revit.DB.Document.SaveAs", `Document.SaveAs("C:\\Temp\\should-never-happen.rvt"); return "ran";`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			text := runRejectedScript(t, c, instanceID, documentID, tc.script)
@@ -296,11 +309,89 @@ func TestDenylistRejectsOwnTransaction(t *testing.T) {
 		})
 	}
 
+	// Confirmation is for the lifecycle members only; it must not become a
+	// general "ignore the denylist" switch. Live-checked because that is the
+	// one place a broker-side wiring mistake (forwarding the flag into some
+	// broader allow) would actually show up.
+	t.Run("ConfirmationDoesNotUnlockTransactions", func(t *testing.T) {
+		raw := callExecuteScriptWith(t, c, instanceID, documentID,
+			`using (var tx = new Autodesk.Revit.DB.Transaction(Document, "mine")) { tx.Start(); tx.Commit(); } return "ran";`,
+			map[string]any{"confirm_lifecycle_actions": true})
+		var tr toolResult
+		if err := json.Unmarshal(raw, &tr); err != nil {
+			t.Fatalf("decode tool envelope: %v\nraw: %s", err, raw)
+		}
+		if !tr.IsError {
+			t.Fatalf("confirm_lifecycle_actions let a script open its own Transaction: %s", raw)
+		}
+		if len(tr.Content) == 0 || !strings.Contains(tr.Content[0].Text, "script-api-denied") {
+			t.Errorf("expected the unconditional script-api-denied rejection; result: %s", raw)
+		}
+	})
+
 	// The instance must still be usable afterwards -- a rejection happens
 	// before compilation completes, so the ambient transaction is rolled
 	// back cleanly and the next script runs normally.
 	out := runScript(t, c, instanceID, documentID, `return Document.Title;`)
 	if out.Status != "success" {
 		t.Fatalf("instance unusable after denylist rejections: status=%q output=%s", out.Status, out.Output)
+	}
+}
+
+// TestLifecycleGateRequiresConfirmation is the live half of PRD §14's
+// confirmation gate: the same script text must be REFUSED without
+// confirm_lifecycle_actions and RUN with it, end to end through the real
+// broker and a real Revit.
+//
+// It has to be here rather than in MCPBridge.Core.Tests for the same reason
+// the denylist case above does -- tier 1 can prove the gate's decision but
+// cannot execute a script that names Revit types at all (RevitAPI.dll is
+// mixed-mode and won't load in a test host), so "and then it actually ran" is
+// only assertable against a live Revit.
+//
+// WHY A METHOD GROUP RATHER THAN A CALL. The confirmed script binds
+// Document.Close to a delegate and never invokes it. That is deliberate, and
+// it is not a weaker test of the gate: the gate's job is to decide whether the
+// compiled script may proceed to execution, and detection fires on the method
+// group exactly as it does on a call (that bypass shape is pinned in tier 1
+// too). Actually invoking one of these members live would close, save, print,
+// or relinquish a real document on a real machine -- effects that, by the very
+// definition that put them behind this gate, nothing here could undo
+// afterwards. A regression suite must not need a human to repair the model it
+// ran against.
+func TestLifecycleGateRequiresConfirmation(t *testing.T) {
+	c, instanceID, documentID := targetDocument(t)
+
+	const script = `System.Func<bool> close = Document.Close; return close != null ? "bound" : "null";`
+
+	// Unconfirmed: refused, before anything runs.
+	text := runRejectedScript(t, c, instanceID, documentID, script)
+	if !strings.Contains(text, "script-lifecycle-confirmation-required") {
+		t.Errorf("refusal does not name the confirmation code, so an agent cannot tell this is retryable; result: %s", text)
+	}
+	if !strings.Contains(text, "confirm_lifecycle_actions") {
+		t.Errorf("refusal does not name the argument that lifts it, which is the only actionable part (PRD §01); result: %s", text)
+	}
+	if !strings.Contains(text, "Autodesk.Revit.DB.Document.Close") {
+		t.Errorf("refusal does not name the member the script used; result: %s", text)
+	}
+
+	// Confirmed: the identical text runs.
+	out := decodeToolResult[executeScriptOut](t, callExecuteScriptWith(t, c, instanceID, documentID, script,
+		map[string]any{"confirm_lifecycle_actions": true}))
+	if out.Status != "success" {
+		t.Fatalf("confirmed lifecycle script did not run: status=%q output=%s", out.Status, out.Output)
+	}
+	if !strings.Contains(out.Output, "bound") {
+		t.Errorf("confirmed script ran but did not return its own result; output=%s", out.Output)
+	}
+
+	// And the confirmation is per-request, not sticky: the same text, resent
+	// without the flag, is refused again. A cached-compilation implementation
+	// that folded the decision into the compile step would pass every
+	// assertion above and fail this one.
+	again := runRejectedScript(t, c, instanceID, documentID, script)
+	if !strings.Contains(again, "script-lifecycle-confirmation-required") {
+		t.Errorf("confirmation leaked to a later unconfirmed run of the same script; result: %s", again)
 	}
 }

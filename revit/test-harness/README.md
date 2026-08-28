@@ -68,7 +68,8 @@ unexpectedly skipping, this is the first thing to check.
   `tools/call`). Deliberately hand-rolled and minimal rather than pulling in an SDK, so it's
   obvious exactly what's being exercised.
 - `harness_test.go` — the cases themselves, currently: `TestCreateLevel`,
-  `TestScriptGlobalsExposeRealRevitObjects`, `TestDenylistRejectsOwnTransaction`.
+  `TestScriptGlobalsExposeRealRevitObjects`, `TestDenylistRejectsOwnTransaction`,
+  `TestLifecycleGateRequiresConfirmation`.
 
 The last two exist here rather than in `MCPBridge.Core.Tests` because they cannot exist there.
 Since PRD §14 shipped, `ScriptGlobals.Document` is the real `Autodesk.Revit.DB.Document` — sealed,

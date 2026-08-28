@@ -70,7 +70,8 @@ surfaces. Scripts are always explicitly targeted, so they're unaffected. Discove
 ## Running a script
 
 `execute_script` takes `instance_id`, `document_id`, `script`, and optional `timeout_ms`,
-`max_duration_ms` and `overwrite_output_files`. `return` a value and it comes back as `output`:
+`max_duration_ms`, `overwrite_output_files` and `confirm_lifecycle_actions`. `return` a value and it
+comes back as `output`:
 
 ```csharp
 return Document.Title;
@@ -96,21 +97,48 @@ Only `System` is imported by default, so use fully-qualified names (`Autodesk.Re
 `System.IO.File.ReadAllText`) or you'll get `CS0246`. Use `using` *directives* freely at the top of
 your script if you'd rather: `using Autodesk.Revit.DB;`.
 
-### What you may not do
+### What you may not do without saying so
 
-A small denylist is enforced **at compile time**, before your script runs — so a rejected script
-changes nothing, and the transaction it would have run in is rolled back cleanly. Rejections come
-back as a failed execution whose error names `script-api-denied` and the exact member.
+Two different things here, and the difference matters. Both are caught **before your script runs**, by a
+semantic check over the compiled code — so a refused script changes nothing and the transaction it would
+have run in is rolled back cleanly.
 
-| Rejected | Why | Do this instead |
-|---|---|---|
-| `new Transaction(...)`, `new TransactionGroup(...)`, `new SubTransaction(...)` | Your script is already inside one, and Revit allows only one open transaction per document | Just make your changes; they commit on success, roll back on failure |
-| `Document.Close`, `.Save`, `.SaveAs`, `.SynchronizeWithCentral`, `.Print` | Changes the document's lifecycle or worksharing state, not its content — on a file a person has open | Ask the person driving Revit |
-| `WorksharingUtils.RelinquishOwnership` | Same reason | Ask the person driving Revit |
+**1. Flatly rejected — `new Transaction(...)`, `new TransactionGroup(...)`, `new SubTransaction(...)`.**
+Your script is already inside one, and Revit allows only one open transaction per document, so your own
+can never work. There is no flag for this. Just make your changes directly; they commit on success and
+roll back on failure. The error names `script-api-denied`.
 
-Everything else in the Revit API is fair game. This list is deliberately short and may grow; it is
-about preventing accidental damage, not sandboxing — if you hit it, you wanted a different approach,
-not a way around it.
+**2. Allowed, but only if you confirm — the document-lifecycle and worksharing calls.**
+
+| Gated | What it escapes to |
+|---|---|
+| `Document.Close` | the session a person has open in front of them |
+| `Document.Save`, `.SaveAs` | the filesystem |
+| `Document.SynchronizeWithCentral` | the shared central model your teammates see |
+| `Document.Print`, `.PrintToFile` | a physical device |
+| `WorksharingUtils.RelinquishOwnership` | another user's ability to edit |
+
+**Why these and nothing else:** everything else you change is covered by the transaction wrapped around
+your script, so if the script throws, your changes are undone automatically. These are not — they act
+outside this document's own content, and no exception takes them back. That one question ("would a thrown
+exception actually undo this?") is the whole rule.
+
+Call one without confirming and the run is refused before it starts, with code
+`script-lifecycle-confirmation-required` naming every gated member you used. To go ahead, resend the
+**same** call with the flag:
+
+```json
+{"instance_id":"...","document_id":"...","script":"Document.Save(); return \"saved\";",
+ "confirm_lifecycle_actions": true}
+```
+
+It applies to that one call only — confirming once does not confirm the next one, even for identical
+script text. So treat the refusal as a real question, not a step to skip: if saving/closing/syncing is
+what was actually asked for, confirm and proceed; if it crept into a script written for some other
+purpose, remove it instead.
+
+Everything else in the Revit API is fair game. These two lists are deliberately short and may grow; they
+are about preventing damage nothing can undo, not sandboxing.
 
 **Long scripts.** If the call exceeds `timeout_ms` you get `{"status":"running","execution_id":...}`.
 Call `poll_execution` with that id until a terminal status. `cancel_execution` requests a stop — but

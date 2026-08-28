@@ -43,6 +43,18 @@ Not run on every commit by default (it's slow — VM/Revit lifecycle). Run it:
 - before every corpus regression pass (PRD §13: "re-run the full corpus on every add-in change")
 - before cutting a release
 
+## Script API surface — the denylist principle
+
+`ScriptApiDenylist` (`revit/mcp-bridge/src/MCPBridge.Core/Execution/ScriptApiDenylist.cs`) is not a general sandbox — every script already runs inside an ambient `Transaction`/`TransactionGroup` (opened by `TransactionScriptExecutor` before compilation/execution), so a thrown exception rolls back document content for free. The denylist exists only for the API surface where that rollback guarantee doesn't hold. When deciding whether something belongs on it, and which tier, ask one question: **does a thrown exception in the script actually undo this?**
+
+- **Hard-blocked, no override possible** — the answer is no because the problem is structural, not a matter of intent: constructing `Transaction`/`TransactionGroup`/`SubTransaction` would violate the connector's own one-open-transaction-per-document invariant. No confirmation parameter can rescue this; it isn't a risk judgment, it's a conflict with the execution model itself.
+- **Confirmation-gated** — the answer is no because the effect escapes the ambient transaction's boundary entirely: it changes something outside this document's own content — a human's local session (`Close`), the filesystem (`Save`/`SaveAs`), a shared central model other teammates see (`SynchronizeWithCentralDocument`), a physical device (`Print`), or another user's ability to edit (`RelinquishOwnership`). These are legitimate operations with deliberate human-directed intent, so an explicit confirmation parameter on the `execute_script` call is the right mechanism — not a flat block, and not silent prose-only guidance either.
+- **Unrestricted** — the answer is yes. Ordinary `Document`/`Element` mutations are covered by the ambient transaction, so no gate is needed.
+
+Run any proposed addition or removal through that test — not "does this feel risky."
+
+**Enforcement detail that matters as much as the list itself**: checks bind to the Roslyn semantic model (actual resolved symbols), never source-text/syntax shape. A syntax-shape first pass had two live bypasses that reached a real Revit document — a target-typed `new Transaction(...)` and a `Document.Close` method-group reference — both closed by binding to symbols instead. Any new denylist rule must do the same, and should be checked against the equivalent bypass shapes (target-typed construction, method groups, aliases) before being considered closed.
+
 ## Tools & scripts
 
 - **`prlctl`** — Parallels VM/guest control from the dev Mac. `prlctl start|stop|restart <vm>` for VM lifecycle; `prlctl exec <vm> ...` to launch/kill Revit.exe inside the guest once Parallels Tools are installed. Do not use `prlsrvctl` for this — that configures the Parallels service itself, not individual VMs (PRD §13).

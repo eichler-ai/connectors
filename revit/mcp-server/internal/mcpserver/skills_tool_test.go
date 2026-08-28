@@ -124,11 +124,31 @@ func TestSkillFileAccuratelyDescribesRevitApiReachability(t *testing.T) {
 				"(what works, what's denied) must survive future edits", marker)
 		}
 	}
-	// The denylist half must name what is actually blocked, not just that a
+	// The denylist half must name what is actually restricted, not just that a
 	// denylist exists -- an agent hitting it needs to recognise the case.
+	// Still topics, not wording: both members were named here before the
+	// restriction on them split into two kinds (PRD §14) and both are still
+	// named now, which is the point -- what changed is that
+	// SynchronizeWithCentral is confirmation-gated rather than flatly refused,
+	// not whether the guide tells an agent about it.
 	for _, marker := range []string{"Transaction", "SynchronizeWithCentral"} {
 		if !strings.Contains(skillFile, marker) {
-			t.Errorf("skill file no longer names %q among what a script may not do", marker)
+			t.Errorf("skill file no longer names %q among what a script may not do freely", marker)
+		}
+	}
+	// The two restrictions are not interchangeable and an agent that cannot
+	// tell them apart fails in one of two bad ways: giving up on a permitted
+	// operation, or retrying a structurally impossible one forever. So the
+	// guide must carry the gated half's own error code AND the parameter that
+	// lifts it -- a rewrite that collapsed the two back into one flat "denied"
+	// table would drop these while every other assertion here still passed.
+	for _, marker := range []string{
+		"script-lifecycle-confirmation-required",
+		"confirm_lifecycle_actions",
+	} {
+		if !strings.Contains(skillFile, marker) {
+			t.Errorf("skill file no longer mentions %q: an agent that hits the lifecycle gate needs both "+
+				"the code it will see and the argument that lifts it", marker)
 		}
 	}
 	for _, forbidden := range []string{
