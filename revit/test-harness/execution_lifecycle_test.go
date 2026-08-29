@@ -155,7 +155,7 @@ throw new System.TimeoutException("failsafe: cancellation never arrived within 6
 	})
 
 	// startRun starts the long-runner and returns the decoded answer WITHOUT
-	// fataling on an error-shaped one: an error answer (e.g. wire_call_failed,
+	// fataling on an error-shaped one: an error answer (e.g. wire-call-failed,
 	// whose broker record stays non-terminal by design) names the minted-and-
 	// possibly-stranded id only in error.detail.execution_id, and that id must
 	// be captured for resolution before anything gets to fail the test.

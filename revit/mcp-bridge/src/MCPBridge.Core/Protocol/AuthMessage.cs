@@ -50,7 +50,7 @@ public sealed class AuthMessage
         // that actually names the problem. ValueKind.Null is the same failure class one step later:
         // it serializes fine here (emits "id":null), but the Go broker's IsRequest() treats a JSON-RPC
         // message with a null id as NOT a request (broker.go's authParams path requires msg.ID != nil),
-        // so it gets rejected with "auth_required" and the connection closed -- an equally opaque
+        // so it gets rejected with "auth-required" and the connection closed -- an equally opaque
         // failure far from this constructor, for a value this guard can catch just as easily.
         if (id.ValueKind is JsonValueKind.Undefined or JsonValueKind.Null)
         {

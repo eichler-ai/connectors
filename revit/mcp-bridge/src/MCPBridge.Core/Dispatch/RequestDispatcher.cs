@@ -803,7 +803,7 @@ public sealed class RequestDispatcher
 
     private static DiagnosticRecord UnknownExecutionDiagnostic(string executionId) => DiagnosticRecord.Create(
         DiagnosticSeverity.Error,
-        "unknown_execution_id",
+        "unknown-execution-id",
         DiagnosticSource.Execution,
         $"execution_id '{executionId}' is not known to this add-in instance (never started, or evicted from the ring buffer).",
         detail: new Dictionary<string, object?> { ["execution_id"] = executionId },

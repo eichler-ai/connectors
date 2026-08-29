@@ -282,7 +282,7 @@ func TestPingNotificationReachesRegistry(t *testing.T) {
 // heartbeat prune sweep), this test's own assertion is the mirror image of
 // what it originally checked: the registry entry must NOT still be present
 // after the close, and execute_script against it must report
-// instance_not_found -- both are evidence AttachInstance/Register
+// instance-not-found -- both are evidence AttachInstance/Register
 // completed and then were cleanly torn down, not evidence of a leak.
 func TestRegisterThenImmediateCloseDetachesCleanly(t *testing.T) {
 	b, ln := newTestBroker(t)
@@ -328,12 +328,12 @@ func TestRegisterThenImmediateCloseDetachesCleanly(t *testing.T) {
 	var drec *diag.Record
 	for time.Now().Before(deadline) {
 		_, drec = b.Execution.ExecuteScript(context.Background(), "inst-fastclose", "doc-1", "1+1", 500, 60000, execution.ScriptOptions{})
-		if drec != nil && drec.Code == "instance_not_found" {
+		if drec != nil && drec.Code == "instance-not-found" {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("expected instance_not_found after the connection closed (attach must have been detached), got %+v", drec)
+	t.Fatalf("expected instance-not-found after the connection closed (attach must have been detached), got %+v", drec)
 }
 
 func TestAgentClientRoleProxiesMCPSession(t *testing.T) {

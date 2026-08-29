@@ -410,7 +410,7 @@ public class RequestDispatcherTests
         var json = await dispatcher.DispatchAsync(CancelRequest(1, "exec-unknown"));
 
         Assert.Contains("\"error\":{", json);
-        Assert.Contains("unknown_execution_id", json);
+        Assert.Contains("unknown-execution-id", json);
     }
 
     [Fact]
@@ -444,7 +444,7 @@ public class RequestDispatcherTests
         var json = await dispatcher.DispatchAsync(PollRequest(1, "exec-unknown"));
 
         Assert.Contains("\"error\":{", json);
-        Assert.Contains("unknown_execution_id", json);
+        Assert.Contains("unknown-execution-id", json);
     }
 
     [Fact]

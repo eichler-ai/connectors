@@ -103,7 +103,7 @@ const (
 	// lifetime (v1 integrated review). Non-terminal records are never
 	// evicted: they are live state, and their instance's busy latch
 	// depends on them. A poll_execution against an evicted id gets
-	// unknown_execution_id — the same answer PRD §05 already specifies
+	// unknown-execution-id — the same answer PRD §05 already specifies
 	// for an id the add-in's own bounded buffer no longer knows.
 	maxSettledExecutions = 200
 	settledRetention     = 10 * time.Minute
@@ -256,42 +256,42 @@ func (m *Manager) StatusForInstance(instanceID string) Status {
 const source = "mcp-server.internal.execution"
 
 func errInstanceUnrecoverable(instanceID string) *diag.Record {
-	return diag.New(diag.SeverityError, "instance_unrecoverable", source,
+	return diag.New(diag.SeverityError, "instance-unrecoverable", source,
 		fmt.Sprintf("instance %q is unrecoverable: a prior execution didn't respond to cancellation within its grace period (PRD §06)", instanceID)).
 		WithDetail(map[string]any{"instance_id": instanceID}).
 		WithRemedy("restart Revit for this instance; the add-in will register a fresh instance_id on reconnect")
 }
 
 func errInstanceNotFound(instanceID string) *diag.Record {
-	return diag.New(diag.SeverityError, "instance_not_found", source,
+	return diag.New(diag.SeverityError, "instance-not-found", source,
 		fmt.Sprintf("instance %q is not registered with the broker (no live connection)", instanceID)).
 		WithDetail(map[string]any{"instance_id": instanceID}).
 		WithRemedy("confirm the instance_id from a recent register/reconnect, then retry")
 }
 
 func errInstanceDisconnected(instanceID, executionID string) *diag.Record {
-	return diag.New(diag.SeverityError, "instance_disconnected", source,
+	return diag.New(diag.SeverityError, "instance-disconnected", source,
 		fmt.Sprintf("instance %q disconnected while execution %q was in flight", instanceID, executionID)).
 		WithDetail(map[string]any{"instance_id": instanceID, "execution_id": executionID}).
 		WithRemedy("wait for the add-in's reconnect loop to re-establish the connection, then retry poll_execution")
 }
 
 func errUnknownExecution(executionID string) *diag.Record {
-	return diag.New(diag.SeverityError, "unknown_execution_id", source,
+	return diag.New(diag.SeverityError, "unknown-execution-id", source,
 		fmt.Sprintf("execution_id %q is not known to this broker (never started, or the broker/add-in restarted since)", executionID)).
 		WithDetail(map[string]any{"execution_id": executionID}).
 		WithRemedy("start a new execution with execute_script")
 }
 
 func errWireCallFailed(executionID, method string, err error) *diag.Record {
-	return diag.New(diag.SeverityError, "wire_call_failed", source,
+	return diag.New(diag.SeverityError, "wire-call-failed", source,
 		fmt.Sprintf("%s for execution_id %q did not complete: %s", method, executionID, err.Error())).
 		WithDetail(map[string]any{"execution_id": executionID, "method": method}).
 		WithRemedy("retry poll_execution; if this persists the instance may need a Revit restart")
 }
 
 func errWireDecodeFailed(executionID, method string, err error) *diag.Record {
-	return diag.New(diag.SeverityError, "wire_response_malformed", source,
+	return diag.New(diag.SeverityError, "wire-response-malformed", source,
 		fmt.Sprintf("%s response for execution_id %q could not be decoded: %s", method, executionID, err.Error())).
 		WithDetail(map[string]any{"execution_id": executionID, "method": method})
 }
@@ -300,7 +300,7 @@ func fromRPCError(executionID string, rpcErr *transport.RPCError) *diag.Record {
 	if rpcErr.Data != nil {
 		return rpcErr.Data
 	}
-	return diag.New(diag.SeverityError, "add_in_error", source,
+	return diag.New(diag.SeverityError, "add-in-error", source,
 		fmt.Sprintf("execution_id %q failed: %s", executionID, rpcErr.Message)).
 		WithDetail(map[string]any{"execution_id": executionID})
 }
@@ -442,7 +442,7 @@ func (m *Manager) forwardExisting(ctx context.Context, executionID, wireMethod s
 	res, drec := m.callWire(ctx, conn, wireMethod, executionID, timeoutMs, params)
 	if drec != nil {
 		// One diagnostic IS a terminal answer, not a wire failure: the
-		// add-in itself reporting unknown_execution_id (issue #42, from PR
+		// add-in itself reporting unknown-execution-id (issue #42, from PR
 		// #41's review). That happens when the execute_script wire call was
 		// lost on a half-open connection — the add-in never received the
 		// script — and the add-in that answered is authoritative that it is
@@ -454,7 +454,7 @@ func (m *Manager) forwardExisting(ctx context.Context, executionID, wireMethod s
 		// (CONVENTIONS.md: the acting connection's identity travels with
 		// the action) — a displaced connection's late answer must not
 		// settle a run the live connection may genuinely be executing.
-		if drec.Code == "unknown_execution_id" {
+		if drec.Code == "unknown-execution-id" {
 			m.settleLostExecution(instanceID, executionID, conn)
 		}
 
@@ -471,7 +471,7 @@ func (m *Manager) forwardExisting(ctx context.Context, executionID, wireMethod s
 }
 
 // settleLostExecution marks executionID terminally failed after its OWNING
-// instance's CURRENT connection answered unknown_execution_id — see the call
+// instance's CURRENT connection answered unknown-execution-id — see the call
 // site in forwardExisting for the phantom-execution scenario (issue #42).
 // The conn-identity re-check happens here, under the lock, at the moment of
 // mutation: the connection that was current when the poll was forwarded may
@@ -504,7 +504,7 @@ func (m *Manager) settleLostExecution(instanceID, executionID string, conn *tran
 }
 
 func errExecutionLost(instanceID, executionID string) *diag.Record {
-	return diag.New(diag.SeverityError, "execution_lost", source,
+	return diag.New(diag.SeverityError, "execution-lost", source,
 		fmt.Sprintf("execution %q was reported unknown by instance %q's own live connection — either the script never reached the add-in (a connection drop raced the request; the common case) or its result aged out of the add-in's replay buffer before any poll retrieved it. The broker has settled it as failed and freed the instance", executionID, instanceID)).
 		WithDetail(map[string]any{"instance_id": instanceID, "execution_id": executionID}).
 		WithRemedy("re-issue execute_script (verify current document state first if the original script may have run to completion unobserved)")
@@ -625,7 +625,7 @@ func (m *Manager) escalateUnrecoverable(instanceID, executionID string, expected
 	// or a different connection at fire time (dropped and redialed, or
 	// displaced by a re-register) is different evidence entirely: the
 	// original connection's teardown/displacement already has its own
-	// recovery paths — the #46 execution_lost settle on the first
+	// recovery paths — the #46 execution-lost settle on the first
 	// post-redial poll, or a fresh cancel against the NEW connection, which
 	// captures THAT connection and escalates it if it too doesn't comply.
 	// The record stays non-terminal on decline, deliberately: asserting an

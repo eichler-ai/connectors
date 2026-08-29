@@ -103,13 +103,13 @@ func (r *Router) DetachInstance(instanceID string, conn *transport.Conn) {
 }
 
 func errNoInstanceConnected() *diag.Record {
-	return diag.New(diag.SeverityError, "no_instance_connected", source,
+	return diag.New(diag.SeverityError, "no-instance-connected", source,
 		"discovery needs at least one live Revit instance connected, and none is").
 		WithRemedy("launch Revit with the MCP Bridge add-in loaded, or call list_instances to check connection state")
 }
 
 func errInstanceNotFound(instanceID string) *diag.Record {
-	return diag.New(diag.SeverityError, "instance_not_found", source,
+	return diag.New(diag.SeverityError, "instance-not-found", source,
 		fmt.Sprintf("instance %q is not registered with the broker (no live connection)", instanceID)).
 		WithDetail(map[string]any{"instance_id": instanceID}).
 		WithRemedy("confirm the instance_id from a recent register/reconnect, then retry")
@@ -123,21 +123,21 @@ func errInstanceNotFound(instanceID string) *diag.Record {
 // candidates lists every connected instance's id and Revit version so the
 // caller can pick one without a separate list_instances round trip.
 func errAmbiguousInstanceVersion(candidates []map[string]string) *diag.Record {
-	return diag.New(diag.SeverityError, "ambiguous_instance_version", source,
+	return diag.New(diag.SeverityError, "ambiguous-instance-version", source,
 		"instance_id was omitted, but connected instances span more than one Revit version -- discovery results would be silently version-specific").
 		WithDetail(map[string]any{"candidates": candidates}).
 		WithRemedy("pass instance_id to pick a specific instance (see the candidates list, or call list_instances)")
 }
 
 func errWireCallFailed(method string, err error) *diag.Record {
-	return diag.New(diag.SeverityError, "wire_call_failed", source,
+	return diag.New(diag.SeverityError, "wire-call-failed", source,
 		fmt.Sprintf("%s did not complete: %s", method, err.Error())).
 		WithDetail(map[string]any{"method": method}).
 		WithRemedy("retry the call; if this persists the instance may need a Revit restart")
 }
 
 func errWireDecodeFailed(method string, err error) *diag.Record {
-	return diag.New(diag.SeverityError, "wire_response_malformed", source,
+	return diag.New(diag.SeverityError, "wire-response-malformed", source,
 		fmt.Sprintf("%s response could not be decoded: %s", method, err.Error())).
 		WithDetail(map[string]any{"method": method})
 }
@@ -146,7 +146,7 @@ func fromRPCError(rpcErr *transport.RPCError) *diag.Record {
 	if rpcErr.Data != nil {
 		return rpcErr.Data
 	}
-	return diag.New(diag.SeverityError, "add_in_error", source,
+	return diag.New(diag.SeverityError, "add-in-error", source,
 		fmt.Sprintf("discovery call failed: %s", rpcErr.Message))
 }
 

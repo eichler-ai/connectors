@@ -73,7 +73,7 @@ func TestSkillFileCoversTheBriefedTopics(t *testing.T) {
 		"architecture overview":  "MCP Bridge",
 		"multi-version":          "revit_version",
 		"error interpretation":   "remedy",
-		"ambiguous version path": "ambiguous_instance_version",
+		"ambiguous version path": "ambiguous-instance-version",
 		"file exchange out":      "exports",
 		"file exchange in":       "imports",
 		// Connection mechanics and debugging: an agent that can't tell "not

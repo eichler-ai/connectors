@@ -7,7 +7,7 @@ import (
 )
 
 func TestNewRecordShape(t *testing.T) {
-	r := New(SeverityError, "instance_not_found", "mcp-server.internal.execution",
+	r := New(SeverityError, "instance-not-found", "mcp-server.internal.execution",
 		"instance \"abc-123\" is not registered with the broker").
 		WithDetail(map[string]any{"instance_id": "abc-123"}).
 		WithRemedy("call list_instances to confirm the instance is connected, then retry")
@@ -15,7 +15,7 @@ func TestNewRecordShape(t *testing.T) {
 	if r.Severity != SeverityError {
 		t.Errorf("Severity = %q, want %q", r.Severity, SeverityError)
 	}
-	if r.Code != "instance_not_found" {
+	if r.Code != "instance-not-found" {
 		t.Errorf("Code = %q", r.Code)
 	}
 	if r.Source != "mcp-server.internal.execution" {

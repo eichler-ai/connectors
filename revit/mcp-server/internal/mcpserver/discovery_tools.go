@@ -207,7 +207,7 @@ func RegisterDiscovery(s *mcp.Server, r *discovery.Router) {
 }
 
 func errWireResponseMalformed(method string, err error) *diag.Record {
-	return diag.New(diag.SeverityError, "wire_response_malformed", discoverySource,
+	return diag.New(diag.SeverityError, "wire-response-malformed", discoverySource,
 		method+" response from the add-in could not be decoded: "+err.Error())
 }
 
