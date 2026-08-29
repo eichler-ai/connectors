@@ -171,12 +171,19 @@ try {
     var defFile = app.OpenSharedParameterFile();
     var group = defFile.Groups.get_Item("MCPHarness");
     var definition = group.Definitions.get_Item("MCPHarnessTestParam") as Autodesk.Revit.DB.ExternalDefinition;
+    // Independent PR review finding: the old ternary form of definitionName below this point was
+    // dead -- ParameterBindings.Insert(definition, ...) already dereferences
+    // definition internally, so a null would have thrown there first, before this line could ever be
+    // reached with definition still null. An explicit, fail-fast check here (right after the cast that
+    // could actually produce null) is honest about what's really being guarded against, instead of
+    // relying on an undocumented assumption about what Insert happens to do with a null argument.
+    if (definition == null) { throw new System.Exception("shared parameter definition not found after OpenSharedParameterFile"); }
 
     var categorySet = app.Create.NewCategorySet();
     categorySet.Insert(doc.Settings.Categories.get_Item(Autodesk.Revit.DB.BuiltInCategory.OST_Walls));
     var binding = app.Create.NewInstanceBinding(categorySet);
     bound = doc.ParameterBindings.Insert(definition, binding, Autodesk.Revit.DB.GroupTypeId.Data);
-    definitionName = definition == null ? "null" : definition.Name;
+    definitionName = definition.Name;
 } finally {
     app.SharedParametersFilename = originalSharedParamsFilename;
     System.IO.File.Delete(sharedParamPath);
@@ -299,10 +306,18 @@ foreach (var id in group3.GetMemberIds()) {
   if (doc.GetElement(id) is Autodesk.Revit.DB.Wall w) { group3WallX = (w.Location as Autodesk.Revit.DB.LocationCurve).Curve.GetEndPoint(0).X; }
 }
 
+// Independent PR review finding: exact double equality on Revit-regenerated geometry is a live
+// flake risk (a regenerate-order change could shift either value by float noise with no diagnostic),
+// even though it has been reliable in live testing so far. A small tolerance, plus both raw values in
+// the output, keeps this passing for the same real cases while giving something to look at if it
+// ever does drift.
+var deltaX = group2WallX.HasValue && group3WallX.HasValue ? System.Math.Abs(group2WallX.Value - group3WallX.Value) : (double?)null;
 return new {
   group2HasMember = group2WallX.HasValue,
   group3HasMember = group3WallX.HasValue,
-  propagated = group2WallX.HasValue && group3WallX.HasValue && group2WallX.Value == group3WallX.Value
+  group2WallX,
+  group3WallX,
+  propagated = deltaX.HasValue && deltaX.Value < 0.0001
 };
 `)
 		if out.Status != "success" {

@@ -127,20 +127,28 @@ internal sealed class ManagedDocumentTransactions
     /// script creates them (via the internal <see cref="DocumentOrigin"/> overload below, which
     /// distinguishes them from a document OpenForWriting adopted -- see that enum's own doc comment).
     ///
-    /// Guards against opening the SAME document twice, primarily by <see cref="IDocumentAdapter.DocumentId"/>.
-    /// TWO LAYERS, DELIBERATELY, not one: an earlier version of this comment claimed DocumentId alone was
-    /// "never reference equality" -- independent PR review found that claim false for exactly the
-    /// documents OpenForWriting targets. DocumentId is cached in DocumentIdentity's process-lifetime table
-    /// (MCPBridge.RevitAdapter/DocumentIdentity.cs), but for an UNSAVED document -- the primary case here,
-    /// since a document a prior call created is unsaved by construction -- resolution mints a fresh
-    /// `tmp-&lt;guid&gt;` on every cache MISS, so two independently-obtained adapters for the SAME unsaved
-    /// document can legitimately get different ids if Revit hands back different wrapper objects for
-    /// either lookup (the same "different wrappers per API entry point" gotcha this file already
-    /// documents elsewhere). A second check backstops that blind spot: compare the incoming adapter
-    /// against every already-tracked entry via <see cref="IDocumentAdapter.ReferencesSameUnderlyingDocumentAs"/>
-    /// -- true only for two real adapters wrapping the same live Document by REFERENCE; every test fake
-    /// answers false, so this never affects tier-1 behavior. Neither layer alone is complete; together
-    /// they catch the case each other misses.
+    /// Guards against opening the SAME document twice, by <see cref="IDocumentAdapter.DocumentId"/>.
+    ///
+    /// KNOWN, ACCEPTED GAP, DOCUMENTED RATHER THAN SILENTLY LEFT: DocumentId is cached in
+    /// DocumentIdentity's process-lifetime table (MCPBridge.RevitAdapter/DocumentIdentity.cs), keyed on
+    /// the live Document reference. For an UNSAVED document -- the primary case here, since a document a
+    /// prior call created is unsaved by construction -- resolution mints a fresh `tmp-&lt;guid&gt;` on
+    /// every cache MISS, so two independently-obtained adapters for the SAME unsaved document can
+    /// legitimately get different ids if Revit hands back different wrapper objects for either lookup
+    /// (the same "different wrappers per API entry point" gotcha this file already documents elsewhere).
+    /// A second, independent PR review round proposed a reference-equality backstop for exactly this case
+    /// and then found it PROVABLY DEAD: any backstop keyed on the Document reference (directly, or via
+    /// ReferenceEquals) hits the identical cache-miss problem DocumentId already has, since both are keyed
+    /// on the same reference -- there is no comparison two DIFFERENT Document wrapper objects for the same
+    /// live document can pass that DocumentId does not already catch on its own. Closing this gap for real
+    /// needs a comparison on something that stays stable ACROSS wrapper instances (e.g. a value read off
+    /// the document itself, not the wrapper), which needs live-Revit verification before it's added here --
+    /// not done as part of this fix. Until then: OpenForWriting on a document reached through a DIFFERENT
+    /// API entry point than however it's already tracked (e.g. re-found via `Application.Documents` when
+    /// it was originally opened as the ambient document) can silently open a SECOND transaction on it
+    /// rather than being refused -- Revit's own one-open-transaction-per-document rule is what actually
+    /// surfaces that case, as a raw exception rather than this guard's signposted one.
+    ///
     /// KNOWN, ACCEPTED gap in the other direction: a workshared document's DocumentId is derived from its
     /// CentralModelPath, so a local copy and its own central model opened in the same session legitimately
     /// share one DocumentId -- OpenForWriting on the second would be refused as a false-positive "already
@@ -157,10 +165,20 @@ internal sealed class ManagedDocumentTransactions
     public void Open(IDocumentAdapter document, bool isAmbient = false) =>
         Open(document, isAmbient ? DocumentOrigin.Ambient : DocumentOrigin.CreatedThisRun);
 
+    /// <summary>
+    /// Test-only entry point for the <see cref="DocumentOrigin.AdoptedExisting"/> tier (independent PR
+    /// review finding: that tier previously had ZERO tier-1 coverage at all -- not the ordering, not
+    /// <see cref="Entry.Describe"/>'s "(adopted via OpenForWriting)" branch, not the
+    /// <c>AnyCommittedDocumentMayBeReal</c> true branch -- because the only way to reach it was through
+    /// <see cref="OpenExisting"/>, which needs a real <c>Autodesk.Revit.DB.Document</c>. This lets a fake
+    /// exercise it directly, the same way <see cref="RequireExistingDocumentSource"/> was split out for
+    /// the same reason.
+    /// </summary>
+    internal void OpenAdoptedForTesting(IDocumentAdapter document) => Open(document, DocumentOrigin.AdoptedExisting);
+
     private void Open(IDocumentAdapter document, DocumentOrigin origin)
     {
-        var existing = _entries.FirstOrDefault(e => e.Document.DocumentId == document.DocumentId)
-            ?? FindByRawReference(document);
+        var existing = _entries.FirstOrDefault(e => e.Document.DocumentId == document.DocumentId);
         if (existing is not null)
         {
             throw new InvalidOperationException(
@@ -189,18 +207,6 @@ internal sealed class ManagedDocumentTransactions
 
         _entries.Add(new Entry(document, group, transaction, origin));
     }
-
-    /// <summary>
-    /// The DocumentId guard's reference-equality backstop -- see <see cref="Open(IDocumentAdapter, bool)"/>'s
-    /// own doc comment for why this exists alongside, not instead of, the DocumentId comparison. Routed
-    /// through <see cref="IDocumentAdapter.ReferencesSameUnderlyingDocumentAs"/> specifically so this
-    /// method never references a Revit type -- see that member's own doc comment for the tier-1 JIT
-    /// failure an earlier IRawDocumentSource-based version of this method caused. Every test fake answers
-    /// false (no fake wraps a distinct backing document to compare), so this never affects ordinary
-    /// tier-1 behavior, only the real tier-2 double-open case it targets.
-    /// </summary>
-    private Entry? FindByRawReference(IDocumentAdapter document) =>
-        _entries.FirstOrDefault(entry => entry.Document.ReferencesSameUnderlyingDocumentAs(document));
 
     /// <summary>
     /// Creates a new project document and opens its managed transaction in one step -- the whole point

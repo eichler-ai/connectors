@@ -88,10 +88,14 @@ public sealed class ManagedDocumentCommitResult
     /// </summary>
     public bool AnyCommittedDocumentMayBeReal { get; }
 
+    // anyCommittedDocumentMayBeReal is REQUIRED, not defaulted (independent PR review finding): an
+    // optional parameter defaulting to false exists only to keep old call sites compiling, and its
+    // actual effect would be a future call site silently under-reporting in the one notice whose entire
+    // job is honesty about partial state -- the exact class of bug the flag itself was added to fix.
     public static ManagedDocumentCommitResult Succeeded(
         IReadOnlyList<FailureSummary> commitFailures,
         IReadOnlyList<string> committedDocuments,
-        bool anyCommittedDocumentMayBeReal = false) =>
+        bool anyCommittedDocumentMayBeReal) =>
         new(null, commitFailures, committedDocuments, Array.Empty<string>(), Array.Empty<string>(), anyCommittedDocumentMayBeReal);
 
     public static ManagedDocumentCommitResult Failed(
@@ -100,6 +104,6 @@ public sealed class ManagedDocumentCommitResult
         IReadOnlyList<string> committedDocuments,
         IReadOnlyList<string> rolledBackDocuments,
         IReadOnlyList<string> unknownStateDocuments,
-        bool anyCommittedDocumentMayBeReal = false) =>
+        bool anyCommittedDocumentMayBeReal) =>
         new(failure, commitFailures, committedDocuments, rolledBackDocuments, unknownStateDocuments, anyCommittedDocumentMayBeReal);
 }

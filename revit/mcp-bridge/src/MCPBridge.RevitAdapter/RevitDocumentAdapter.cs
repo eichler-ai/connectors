@@ -42,10 +42,6 @@ internal sealed class RevitDocumentAdapter : IDocumentAdapter, IRawDocumentSourc
     /// </summary>
     public string DocumentId => DocumentIdentity.ResolveCached(_document, _uncPathResolver);
 
-    /// <summary>See IDocumentAdapter's own doc comment for why this exists alongside DocumentId.</summary>
-    public bool ReferencesSameUnderlyingDocumentAs(IDocumentAdapter other) =>
-        other is RevitDocumentAdapter otherReal && ReferenceEquals(otherReal._document, _document);
-
     public ITransactionAdapter CreateTransaction(string name) =>
         new RevitTransactionAdapter(new Transaction(_document, name));
 
