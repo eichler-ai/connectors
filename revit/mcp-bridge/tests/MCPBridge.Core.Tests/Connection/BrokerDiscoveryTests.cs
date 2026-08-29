@@ -150,13 +150,31 @@ public class BrokerDiscoveryTests : IDisposable
 
         if (OperatingSystem.IsWindows())
         {
-            using var hold = new FileStream(discovery.BrokerJsonPath, FileMode.Open, FileAccess.Read, FileShare.None);
+            // ACL deny-read, not a FileShare.None lock (PR #43 review follow-up): the sharing
+            // violation throws IOException, which the PRE-fix catch also handled -- so that shape
+            // couldn't detect the Exception-breadth widening regressing on the platform where the
+            // suite actually runs. A denied read throws UnauthorizedAccessException, the exact
+            // class the widening exists for.
+            var fileInfo = new FileInfo(discovery.BrokerJsonPath);
+            var user = System.Security.Principal.WindowsIdentity.GetCurrent().User!;
+            var denyRead = new System.Security.AccessControl.FileSystemAccessRule(
+                user, System.Security.AccessControl.FileSystemRights.Read, System.Security.AccessControl.AccessControlType.Deny);
+            var security = fileInfo.GetAccessControl();
+            security.AddAccessRule(denyRead);
+            fileInfo.SetAccessControl(security);
+            try
+            {
+                var result = discovery.TryDiscover();
 
-            var result = discovery.TryDiscover();
-
-            Assert.False(result.Found);
-            Assert.NotNull(result.Diagnostic);
-            Assert.Equal("broker-json-unreadable", result.Diagnostic!.Code);
+                Assert.False(result.Found);
+                Assert.NotNull(result.Diagnostic);
+                Assert.Equal("broker-json-unreadable", result.Diagnostic!.Code);
+            }
+            finally
+            {
+                security.RemoveAccessRule(denyRead);
+                fileInfo.SetAccessControl(security);
+            }
         }
         else
         {

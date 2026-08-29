@@ -28,7 +28,7 @@ public class RequestDispatcherTests
     private static ExecutionManager NewExecutionManager() =>
         new(new ExecutionRingBuffer(capacity: 50, retention: TimeSpan.FromMinutes(10)), gracePeriod: TimeSpan.FromSeconds(5));
 
-    private static TransactionScriptExecutor NewScriptExecutor() => new(new RoslynScriptRunner(additionalMetadataReferencePaths: RevitApiReference.Paths));
+    private static TransactionScriptExecutor NewScriptExecutor() => new(new RoslynScriptRunner(additionalMetadataReferences: RevitApiReference.References));
 
     // document_id defaults to the fake active document's own identity (FakeDocumentAdapter's default
     // DocumentId) -- document_id ROUTES now, so a request naming an id no open document has would be
