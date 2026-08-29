@@ -169,7 +169,7 @@ func (b *Broker) handleConn(ctx context.Context, conn net.Conn) {
 
 	var msg transport.Message
 	if jsonErr := json.Unmarshal(line, &msg); jsonErr != nil || !msg.IsRequest() || msg.Method != "auth" {
-		writeAuthRejection(fr, msg.ID, "auth_required",
+		writeAuthRejection(fr, msg.ID, "auth-required",
 			"the first message on a new connection must be a JSON-RPC request with method \"auth\" and a valid token")
 		conn.Close()
 		return
@@ -177,18 +177,18 @@ func (b *Broker) handleConn(ctx context.Context, conn net.Conn) {
 
 	var params authParams
 	if err := json.Unmarshal(msg.Params, &params); err != nil {
-		writeAuthRejection(fr, msg.ID, "auth_malformed", fmt.Sprintf("auth params could not be decoded: %s", err.Error()))
+		writeAuthRejection(fr, msg.ID, "auth-malformed", fmt.Sprintf("auth params could not be decoded: %s", err.Error()))
 		conn.Close()
 		return
 	}
 
 	if !singleton.ValidateToken(b.Token, params.Token) {
-		writeAuthRejection(fr, msg.ID, "auth_invalid_token", "the presented token does not match the broker's current token")
+		writeAuthRejection(fr, msg.ID, "auth-invalid-token", "the presented token does not match the broker's current token")
 		conn.Close()
 		return
 	}
 	if params.Role != RoleAddIn && params.Role != RoleAgentClient {
-		writeAuthRejection(fr, msg.ID, "auth_invalid_role", fmt.Sprintf("unknown role %q; expected %q or %q", params.Role, RoleAddIn, RoleAgentClient))
+		writeAuthRejection(fr, msg.ID, "auth-invalid-role", fmt.Sprintf("unknown role %q; expected %q or %q", params.Role, RoleAddIn, RoleAgentClient))
 		conn.Close()
 		return
 	}

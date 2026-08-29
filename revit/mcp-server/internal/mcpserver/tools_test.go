@@ -217,8 +217,8 @@ func TestExecuteScriptToolUnknownInstanceIsToolError(t *testing.T) {
 	if out.Error == nil {
 		t.Fatal("expected Error diagnostic record in output")
 	}
-	if out.Error.Code != "instance_not_found" {
-		t.Errorf("Error.Code = %q, want instance_not_found", out.Error.Code)
+	if out.Error.Code != "instance-not-found" {
+		t.Errorf("Error.Code = %q, want instance-not-found", out.Error.Code)
 	}
 	if out.Error.Severity != "error" {
 		t.Errorf("Error.Severity = %q, want error", out.Error.Severity)

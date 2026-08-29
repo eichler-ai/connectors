@@ -7,7 +7,7 @@ import (
 )
 
 func TestNewRecordShape(t *testing.T) {
-	r := New(SeverityError, "instance_not_found", "mcp-server.internal.execution",
+	r := New(SeverityError, "instance-not-found", "mcp-server.internal.execution",
 		"instance \"abc-123\" is not registered with the broker").
 		WithDetail(map[string]any{"instance_id": "abc-123"}).
 		WithRemedy("call list_instances to confirm the instance is connected, then retry")
@@ -15,7 +15,7 @@ func TestNewRecordShape(t *testing.T) {
 	if r.Severity != SeverityError {
 		t.Errorf("Severity = %q, want %q", r.Severity, SeverityError)
 	}
-	if r.Code != "instance_not_found" {
+	if r.Code != "instance-not-found" {
 		t.Errorf("Code = %q", r.Code)
 	}
 	if r.Source != "mcp-server.internal.execution" {
@@ -33,7 +33,7 @@ func TestNewRecordShape(t *testing.T) {
 }
 
 func TestRecordJSONShape(t *testing.T) {
-	r := New(SeverityWarning, "failure_auto_dismissed", "mcp-server.internal.execution", "warning dismissed")
+	r := New(SeverityWarning, "failure-auto-dismissed", "mcp-server.internal.execution", "warning dismissed")
 	b, err := json.Marshal(r)
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
@@ -75,7 +75,7 @@ func TestSeverityConstants(t *testing.T) {
 
 func TestWrapPreservesUnderlyingMessage(t *testing.T) {
 	underlying := "System.InvalidOperationException: document is not active"
-	r := New(SeverityError, "execution_failed", "mcp-server.internal.execution", "execute_script failed for execution_id \"exec-1\": "+underlying)
+	r := New(SeverityError, "execution-failed", "mcp-server.internal.execution", "execute_script failed for execution_id \"exec-1\": "+underlying)
 	if !strings.Contains(r.Message, underlying) {
 		t.Errorf("wrapped message must retain the original exception text, got %q", r.Message)
 	}

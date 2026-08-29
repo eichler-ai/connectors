@@ -151,7 +151,7 @@ public sealed class Win32WindowInventory : IWindowInventory
     // commonly because an ordinary long-running script is looping on it, no dialog anywhere. The
     // unbounded read therefore deadlocked the §07 diagnostic against the very condition it exists to
     // diagnose: the dispatcher's pending/running answer never got written, the broker's wire budget
-    // expired (wire_call_failed), and the instance stranded busy. PRD §07's "this diagnostic itself
+    // expired (wire-call-failed), and the instance stranded busy. PRD §07's "this diagnostic itself
     // is always reachable" claim only becomes true with a bounded read: SendMessageTimeout with
     // SMTO_ABORTIFHUNG (returns immediately once the thread is deemed hung) and a small per-window
     // budget -- a timed-out read is REPORTED as such by the caller (timedOut out-param), never

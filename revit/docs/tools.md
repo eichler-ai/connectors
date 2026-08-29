@@ -56,7 +56,7 @@ running some other script (one at a time per instance, it's Revit's UI thread); 
 ### Discovery tools
 
 All three take an optional `instance_id`. Omitting it works while every connected instance
-shares one Revit version; otherwise the call errors with `ambiguous_instance_version` and a
+shares one Revit version; otherwise the call errors with `ambiguous-instance-version` and a
 candidate list rather than silently answering from an arbitrary version. Every response
 carries the `revit_version` that answered.
 
@@ -113,8 +113,8 @@ not message text:
 | `script-api-denied` | flat rejection (own-transaction construction); change the script, no flag lifts it |
 | `script-lifecycle-confirmation-required` | gated member used without the flag; resend identical call with `confirm_lifecycle_actions: true` if intended |
 | `script-await-not-allowed` | top-level `await` isn't supported in scripts |
-| `unknown_execution_id` | the execution predates a Revit/add-in restart; re-run |
-| `ambiguous_instance_version` | discovery call with instances of multiple Revit versions connected; pass an `instance_id` from `detail.candidates` |
+| `unknown-execution-id` | the execution predates a Revit/add-in restart; re-run |
+| `ambiguous-instance-version` | discovery call with instances of multiple Revit versions connected; pass an `instance_id` from `detail.candidates` |
 
 `notices[]` on a **successful** result reports what was auto-resolved (PRD's
 observability-over-silence principle): auto-answered dialogs, auto-dismissed transaction

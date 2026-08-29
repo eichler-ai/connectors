@@ -135,7 +135,7 @@ func (c *Conn) handleRequest(msg *Message) {
 			rpcErr = &RPCError{
 				Code:    ErrCodeMethodNotFound,
 				Message: text,
-				Data: diag.New(diag.SeverityError, "no_handler_registered", source, text).
+				Data: diag.New(diag.SeverityError, "no-handler-registered", source, text).
 					WithDetail(map[string]any{"method": msg.Method}).
 					WithRemedy("this is a broker-side wiring bug, not something the caller can retry around — report it"),
 			}
@@ -152,7 +152,7 @@ func (c *Conn) handleRequest(msg *Message) {
 			if err != nil {
 				encodeMsg := fmt.Sprintf("encoding the result for method %q as JSON failed: %s", msg.Method, err.Error())
 				resp = NewErrorResponse(*msg.ID, ErrCodeInternalError, encodeMsg,
-					diag.New(diag.SeverityError, "result_encode_failed", source, encodeMsg).
+					diag.New(diag.SeverityError, "result-encode-failed", source, encodeMsg).
 						WithDetail(map[string]any{"method": msg.Method}))
 			}
 		}

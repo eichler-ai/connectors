@@ -218,7 +218,7 @@ func ensureInstanceIdle(t *testing.T, c *mcpclient.Client, instanceID, documentI
 			// FAIL loudly -- a probe that skipped on any error would let a
 			// hard execute regression read as an all-green-with-skips run
 			// (independent PR review finding).
-			if strings.Contains(text, "instance_unrecoverable") {
+			if strings.Contains(text, "instance-unrecoverable") {
 				t.Skipf("instance %s is unrecoverable (needs a Revit restart): %s", instanceID, text)
 			}
 			t.Fatalf("idle probe failed -- execute_script itself is broken, not the instance's state: %s", text)

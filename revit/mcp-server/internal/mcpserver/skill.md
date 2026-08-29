@@ -277,7 +277,7 @@ and overloads before writing one, which is far cheaper than a round trip through
 Revit versions connected, omitting `instance_id` fails rather than guessing:
 
 ```json
-{"code":"ambiguous_instance_version",
+{"code":"ambiguous-instance-version",
  "detail":{"candidates":[{"instance_id":"5faf...","revit_version":"2025"},
                          {"instance_id":"eb81...","revit_version":"2027"}]}}
 ```

@@ -325,8 +325,8 @@ func TestListFunctionsToolNoInstanceIsToolError(t *testing.T) {
 	if err := json.Unmarshal([]byte(text.Text), &out); err != nil {
 		t.Fatalf("decoding error content: %v", err)
 	}
-	if out.Error == nil || out.Error.Code != "no_instance_connected" {
-		t.Errorf("out.Error = %+v, want no_instance_connected", out.Error)
+	if out.Error == nil || out.Error.Code != "no-instance-connected" {
+		t.Errorf("out.Error = %+v, want no-instance-connected", out.Error)
 	}
 }
 
@@ -349,8 +349,8 @@ func TestDescribeFunctionToolUnknownInstanceIsToolError(t *testing.T) {
 	text := res.Content[0].(*mcp.TextContent)
 	var out DescribeFunctionOut
 	json.Unmarshal([]byte(text.Text), &out)
-	if out.Error == nil || out.Error.Code != "instance_not_found" {
-		t.Errorf("out.Error = %+v, want instance_not_found", out.Error)
+	if out.Error == nil || out.Error.Code != "instance-not-found" {
+		t.Errorf("out.Error = %+v, want instance-not-found", out.Error)
 	}
 }
 
@@ -380,8 +380,8 @@ func TestDiscoveryToolsMalformedWireResponseIsToolError(t *testing.T) {
 	if err := json.Unmarshal([]byte(text.Text), &out); err != nil {
 		t.Fatalf("decoding error content: %v", err)
 	}
-	if out.Error == nil || out.Error.Code != "wire_response_malformed" {
-		t.Errorf("out.Error = %+v, want wire_response_malformed", out.Error)
+	if out.Error == nil || out.Error.Code != "wire-response-malformed" {
+		t.Errorf("out.Error = %+v, want wire-response-malformed", out.Error)
 	}
 }
 

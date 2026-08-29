@@ -175,8 +175,8 @@ func TestExecuteScriptUnknownInstance(t *testing.T) {
 	if drec == nil {
 		t.Fatal("expected diag error for unknown instance")
 	}
-	if drec.Code != "instance_not_found" {
-		t.Errorf("Code = %q, want instance_not_found", drec.Code)
+	if drec.Code != "instance-not-found" {
+		t.Errorf("Code = %q, want instance-not-found", drec.Code)
 	}
 	if drec.Detail["instance_id"] != "ghost" {
 		t.Errorf("Detail should name the instance_id, got %+v", drec.Detail)
@@ -189,8 +189,8 @@ func TestPollExecutionUnknownID(t *testing.T) {
 	if drec == nil {
 		t.Fatal("expected diag error for unknown execution_id")
 	}
-	if drec.Code != "unknown_execution_id" {
-		t.Errorf("Code = %q, want unknown_execution_id", drec.Code)
+	if drec.Code != "unknown-execution-id" {
+		t.Errorf("Code = %q, want unknown-execution-id", drec.Code)
 	}
 }
 
@@ -319,13 +319,13 @@ func TestCancelExecutionForwardsAndSettles(t *testing.T) {
 func TestCancelExecutionUnknownID(t *testing.T) {
 	m := NewManager()
 	_, drec := m.CancelExecution(context.Background(), "exec-nope")
-	if drec == nil || drec.Code != "unknown_execution_id" {
-		t.Fatalf("got %+v, want unknown_execution_id", drec)
+	if drec == nil || drec.Code != "unknown-execution-id" {
+		t.Fatalf("got %+v, want unknown-execution-id", drec)
 	}
 }
 
 func TestWireErrorPropagatesDiagnosticData(t *testing.T) {
-	addinRecord := diag.New(diag.SeverityError, "revit_api_exception", "mcp-bridge.core.execution", "System.InvalidOperationException: document is not active")
+	addinRecord := diag.New(diag.SeverityError, "revit-api-exception", "mcp-bridge.core.execution", "System.InvalidOperationException: document is not active")
 	_, conn := newFakeInstance(t, func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
 		return nil, &transport.RPCError{
 			Code:    transport.ErrCodeInternalError,
@@ -340,7 +340,7 @@ func TestWireErrorPropagatesDiagnosticData(t *testing.T) {
 	if drec == nil {
 		t.Fatal("expected diag error")
 	}
-	if drec.Code != "revit_api_exception" {
+	if drec.Code != "revit-api-exception" {
 		t.Errorf("Code = %q, want the add-in's own code to pass through unwrapped", drec.Code)
 	}
 }
@@ -362,8 +362,8 @@ func TestInstanceDisconnectedDuringPoll(t *testing.T) {
 	m.DetachInstance("inst-1", conn)
 
 	_, drec2 := m.PollExecution(context.Background(), start.ExecutionID, 1000)
-	if drec2 == nil || drec2.Code != "instance_disconnected" {
-		t.Fatalf("got %+v, want instance_disconnected", drec2)
+	if drec2 == nil || drec2.Code != "instance-disconnected" {
+		t.Fatalf("got %+v, want instance-disconnected", drec2)
 	}
 }
 
@@ -483,8 +483,8 @@ func TestUnrecoverableLatchesInstance(t *testing.T) {
 	m.settle("inst-1", start.ExecutionID, &Result{Status: StatusUnrecoverable, ExecutionID: start.ExecutionID})
 
 	_, drec2 := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "another", 1000, 60000, ScriptOptions{})
-	if drec2 == nil || drec2.Code != "instance_unrecoverable" {
-		t.Fatalf("got %+v, want instance_unrecoverable", drec2)
+	if drec2 == nil || drec2.Code != "instance-unrecoverable" {
+		t.Fatalf("got %+v, want instance-unrecoverable", drec2)
 	}
 
 	// A network blip and reconnect under the SAME instance_id — the latch
@@ -492,8 +492,8 @@ func TestUnrecoverableLatchesInstance(t *testing.T) {
 	m.DetachInstance("inst-1", conn)
 	m.AttachInstance("inst-1", conn)
 	_, drec3 := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "after reconnect", 1000, 60000, ScriptOptions{})
-	if drec3 == nil || drec3.Code != "instance_unrecoverable" {
-		t.Fatalf("got %+v, want instance_unrecoverable to survive a same-id reconnect", drec3)
+	if drec3 == nil || drec3.Code != "instance-unrecoverable" {
+		t.Fatalf("got %+v, want instance-unrecoverable to survive a same-id reconnect", drec3)
 	}
 }
 
@@ -713,8 +713,8 @@ func TestCancelExecutionEscalatesToUnrecoverableAfterGracePeriod(t *testing.T) {
 
 	// The instance must now be unrecoverable, not stuck busy forever.
 	_, drec2 := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "another", 1000, 60000, ScriptOptions{})
-	if drec2 == nil || drec2.Code != "instance_unrecoverable" {
-		t.Fatalf("ExecuteScript after grace-period escalation: %+v, want instance_unrecoverable", drec2)
+	if drec2 == nil || drec2.Code != "instance-unrecoverable" {
+		t.Fatalf("ExecuteScript after grace-period escalation: %+v, want instance-unrecoverable", drec2)
 	}
 
 	m.mu.Lock()
@@ -918,8 +918,8 @@ func TestDetachIgnoresStaleConnection(t *testing.T) {
 	if !m.DetachInstance("inst-1", connB) {
 		t.Fatal("detach keyed by the current connection must apply")
 	}
-	if _, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "1+1", 1000, 60000, ScriptOptions{}); drec == nil || drec.Code != "instance_not_found" {
-		t.Fatalf("got %+v, want instance_not_found after the current connection detached", drec)
+	if _, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "1+1", 1000, 60000, ScriptOptions{}); drec == nil || drec.Code != "instance-not-found" {
+		t.Fatalf("got %+v, want instance-not-found after the current connection detached", drec)
 	}
 }
 
@@ -943,8 +943,8 @@ func TestCloseInstanceConnClosesTheAttachedConnection(t *testing.T) {
 	if drec == nil {
 		t.Fatal("expected a wire failure through a closed connection")
 	}
-	if drec.Code != "wire_call_failed" {
-		t.Errorf("Code = %q, want wire_call_failed", drec.Code)
+	if drec.Code != "wire-call-failed" {
+		t.Errorf("Code = %q, want wire-call-failed", drec.Code)
 	}
 }
 
@@ -1025,7 +1025,7 @@ func TestSettledExecutionRecordsAreBounded(t *testing.T) {
 // half-open connection, so the add-in never received it) previously kept the
 // busy latch held with only auto-cancel -> grace escalation -> a HEALTHY
 // instance falsely latched unrecoverable as the exit. The owning instance's
-// current connection answering unknown_execution_id is authoritative: the
+// current connection answering unknown-execution-id is authoritative: the
 // record settles as error, the instance frees, and no unrecoverable latch is
 // set.
 func TestPollAnsweredUnknownByCurrentConn_SettlesAndFreesInstance(t *testing.T) {
@@ -1040,7 +1040,7 @@ func TestPollAnsweredUnknownByCurrentConn_SettlesAndFreesInstance(t *testing.T) 
 		return nil, &transport.RPCError{
 			Code:    transport.ErrCodeInvalidParams,
 			Message: "unknown execution_id",
-			Data:    diag.New(diag.SeverityError, "unknown_execution_id", "mcp-bridge.core.dispatch", "unknown execution_id"),
+			Data:    diag.New(diag.SeverityError, "unknown-execution-id", "mcp-bridge.core.dispatch", "unknown execution_id"),
 		}
 	})
 	m := NewManager()
@@ -1053,8 +1053,8 @@ func TestPollAnsweredUnknownByCurrentConn_SettlesAndFreesInstance(t *testing.T) 
 
 	// The poll surfaces the add-in's own answer to THIS call unchanged...
 	_, pollDrec := m.PollExecution(context.Background(), start.ExecutionID, 500)
-	if pollDrec == nil || pollDrec.Code != "unknown_execution_id" {
-		t.Fatalf("got %+v, want the add-in's unknown_execution_id passed through", pollDrec)
+	if pollDrec == nil || pollDrec.Code != "unknown-execution-id" {
+		t.Fatalf("got %+v, want the add-in's unknown-execution-id passed through", pollDrec)
 	}
 
 	// ...but the broker-side record must now be settled: the instance is
@@ -1068,8 +1068,8 @@ func TestPollAnsweredUnknownByCurrentConn_SettlesAndFreesInstance(t *testing.T) 
 	if drec2 != nil {
 		t.Fatalf("poll of settled record: %+v", drec2)
 	}
-	if settled.Status != StatusError || settled.ErrorDetail == nil || settled.ErrorDetail.Code != "execution_lost" {
-		t.Errorf("settled = %+v, want error with execution_lost detail", settled)
+	if settled.Status != StatusError || settled.ErrorDetail == nil || settled.ErrorDetail.Code != "execution-lost" {
+		t.Errorf("settled = %+v, want error with execution-lost detail", settled)
 	}
 }
 
@@ -1097,7 +1097,7 @@ func TestUnknownAnswerFromDisplacedConn_DoesNotSettle(t *testing.T) {
 		return nil, &transport.RPCError{
 			Code:    transport.ErrCodeInvalidParams,
 			Message: "unknown execution_id",
-			Data:    diag.New(diag.SeverityError, "unknown_execution_id", "mcp-bridge.core.dispatch", "unknown execution_id"),
+			Data:    diag.New(diag.SeverityError, "unknown-execution-id", "mcp-bridge.core.dispatch", "unknown execution_id"),
 		}
 	})
 	m := NewManager()
@@ -1168,8 +1168,8 @@ func TestGraceEscalationDeclinesWhenTheRedialBeatsTheTimer(t *testing.T) {
 	// The cancel lands in the disconnected gap: escalation is scheduled
 	// (unconditionally, by design — see CancelExecution's comment) with a
 	// NIL connection captured, and the wire forward fails fast.
-	if _, cancelDrec := m.CancelExecution(context.Background(), start.ExecutionID); cancelDrec == nil || cancelDrec.Code != "instance_disconnected" {
-		t.Fatalf("cancel of a disconnected instance's execution: %+v, want instance_disconnected", cancelDrec)
+	if _, cancelDrec := m.CancelExecution(context.Background(), start.ExecutionID); cancelDrec == nil || cancelDrec.Code != "instance-disconnected" {
+		t.Fatalf("cancel of a disconnected instance's execution: %+v, want instance-disconnected", cancelDrec)
 	}
 
 	// The redial BEATS the timer — a fresh, healthy connection is attached
@@ -1185,7 +1185,7 @@ func TestGraceEscalationDeclinesWhenTheRedialBeatsTheTimer(t *testing.T) {
 	fa.fireAll()
 
 	// No false latch, and the record stays non-terminal (the #46
-	// execution_lost path on the first post-redial poll is what resolves
+	// execution-lost path on the first post-redial poll is what resolves
 	// it — the broker must not assert an outcome it doesn't know)...
 	m.mu.Lock()
 	stillOpen := m.executions[start.ExecutionID]

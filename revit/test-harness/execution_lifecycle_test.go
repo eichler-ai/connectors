@@ -132,6 +132,19 @@ func executionIDFromErrorText(text string) string {
 func TestExecutionLifecycle(t *testing.T) {
 	c, instanceID, documentID := targetDocument(t)
 
+	// Warm-up (issue #57, hit three times, always on the FIRST heavy call after a Revit
+	// relaunch): a timed-out execute answer spends timeout_ms waiting and then runs the §07
+	// window-inventory diagnostic (~2.2s worst case), leaving a CONSTANT ~2.7s of the broker's
+	// fixed +5s wire buffer for scheduling churn -- raising timeout_ms changes nothing, since
+	// the add-in spends exactly that much longer before answering (a first fix attempted that;
+	// PR #59's review did the arithmetic). What the flake actually needed was the churn gone:
+	// one trivial warm call absorbs the post-relaunch cold start (Roslyn warmup races, first
+	// ExternalEvent dispatch, journal churn) before any budget-critical call runs.
+	warm := runScript(t, c, instanceID, documentID, "return 1;")
+	if warm.Status != "success" {
+		t.Fatalf("warm-up call failed: %+v", warm)
+	}
+
 	const script = `
 var sw = System.Diagnostics.Stopwatch.StartNew();
 while (!CancellationToken.IsCancellationRequested && sw.Elapsed.TotalSeconds < 60) {
@@ -155,7 +168,7 @@ throw new System.TimeoutException("failsafe: cancellation never arrived within 6
 	})
 
 	// startRun starts the long-runner and returns the decoded answer WITHOUT
-	// fataling on an error-shaped one: an error answer (e.g. wire_call_failed,
+	// fataling on an error-shaped one: an error answer (e.g. wire-call-failed,
 	// whose broker record stays non-terminal by design) names the minted-and-
 	// possibly-stranded id only in error.detail.execution_id, and that id must
 	// be captured for resolution before anything gets to fail the test.

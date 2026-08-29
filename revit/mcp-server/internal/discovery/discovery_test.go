@@ -105,8 +105,8 @@ func TestDescribeFunctionNoInstanceConnected(t *testing.T) {
 	if drec == nil {
 		t.Fatal("expected diag error when no instance is connected")
 	}
-	if drec.Code != "no_instance_connected" {
-		t.Errorf("Code = %q, want no_instance_connected", drec.Code)
+	if drec.Code != "no-instance-connected" {
+		t.Errorf("Code = %q, want no-instance-connected", drec.Code)
 	}
 	if drec.Source != "mcp-server.internal.discovery" {
 		t.Errorf("Source = %q, want mcp-server.internal.discovery", drec.Source)
@@ -122,8 +122,8 @@ func TestListFunctionsUnknownInstanceID(t *testing.T) {
 	if drec == nil {
 		t.Fatal("expected diag error for unknown instance_id")
 	}
-	if drec.Code != "instance_not_found" {
-		t.Errorf("Code = %q, want instance_not_found", drec.Code)
+	if drec.Code != "instance-not-found" {
+		t.Errorf("Code = %q, want instance-not-found", drec.Code)
 	}
 	if drec.Detail["instance_id"] != "ghost" {
 		t.Errorf("Detail should name the instance_id, got %+v", drec.Detail)
@@ -131,7 +131,7 @@ func TestListFunctionsUnknownInstanceID(t *testing.T) {
 }
 
 func TestDescribeFunctionRPCErrorPropagatesDiagnosticData(t *testing.T) {
-	addinRecord := diag.New(diag.SeverityError, "member_not_found", "mcp-bridge.core.discovery", "no member matches \"Bogus.Member\"")
+	addinRecord := diag.New(diag.SeverityError, "member-not-found", "mcp-bridge.core.discovery", "no member matches \"Bogus.Member\"")
 	_, conn := newFakeInstance(t, func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
 		return nil, &transport.RPCError{
 			Code:    transport.ErrCodeInvalidParams,
@@ -146,7 +146,7 @@ func TestDescribeFunctionRPCErrorPropagatesDiagnosticData(t *testing.T) {
 	if drec == nil {
 		t.Fatal("expected diag error")
 	}
-	if drec.Code != "member_not_found" {
+	if drec.Code != "member-not-found" {
 		t.Errorf("Code = %q, want the add-in's own code to pass through unwrapped", drec.Code)
 	}
 }
@@ -161,8 +161,8 @@ func TestListFunctionsWireFailurePropagates(t *testing.T) {
 	if drec == nil {
 		t.Fatal("expected diag error on wire failure")
 	}
-	if drec.Code != "wire_call_failed" {
-		t.Errorf("Code = %q, want wire_call_failed", drec.Code)
+	if drec.Code != "wire-call-failed" {
+		t.Errorf("Code = %q, want wire-call-failed", drec.Code)
 	}
 }
 
@@ -173,13 +173,13 @@ func TestDetachInstanceRemovesFromRouting(t *testing.T) {
 	r.DetachInstance("inst-1", conn)
 
 	_, _, drec := r.ListFunctions(context.Background(), "inst-1", map[string]any{})
-	if drec == nil || drec.Code != "instance_not_found" {
-		t.Fatalf("got %+v, want instance_not_found after detach", drec)
+	if drec == nil || drec.Code != "instance-not-found" {
+		t.Fatalf("got %+v, want instance-not-found after detach", drec)
 	}
 
 	_, _, drec2 := r.ListFunctions(context.Background(), "", map[string]any{})
-	if drec2 == nil || drec2.Code != "no_instance_connected" {
-		t.Fatalf("got %+v, want no_instance_connected after detach leaves the map empty", drec2)
+	if drec2 == nil || drec2.Code != "no-instance-connected" {
+		t.Fatalf("got %+v, want no-instance-connected after detach leaves the map empty", drec2)
 	}
 }
 
@@ -261,8 +261,8 @@ func TestUnscopedCallErrorsWhenConnectedInstancesSpanDifferentVersions(t *testin
 	if drec == nil {
 		t.Fatal("want an ambiguous-instance-version error, got none")
 	}
-	if drec.Code != "ambiguous_instance_version" {
-		t.Errorf("drec.Code = %q, want %q", drec.Code, "ambiguous_instance_version")
+	if drec.Code != "ambiguous-instance-version" {
+		t.Errorf("drec.Code = %q, want %q", drec.Code, "ambiguous-instance-version")
 	}
 }
 
@@ -308,7 +308,7 @@ func TestUnscopedCallVersionDegradeCases(t *testing.T) {
 			registerA:   true,
 			registerB:   false,
 			wantErr:     true,
-			wantErrCode: "ambiguous_instance_version",
+			wantErrCode: "ambiguous-instance-version",
 			wantCandidate: map[string]string{
 				"inst-a": "2027",
 				"inst-b": unknownRevitVersion,

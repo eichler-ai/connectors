@@ -28,7 +28,7 @@ public class JsonRpcErrorMessageTests
         var id = JsonSerializer.SerializeToElement("abc");
         var diagnostic = DiagnosticRecord.Create(
             DiagnosticSeverity.Error,
-            "unknown_execution_id",
+            "unknown-execution-id",
             DiagnosticSource.Execution,
             "execution_id 'exec-1' is not known to this add-in instance.",
             detail: new Dictionary<string, object?> { ["execution_id"] = "exec-1" },
@@ -38,7 +38,7 @@ public class JsonRpcErrorMessageTests
 
         Assert.Contains("\"id\":\"abc\"", json);
         Assert.Contains("\"data\":{", json);
-        Assert.Contains("\"code\":\"unknown_execution_id\"", json);
+        Assert.Contains("\"code\":\"unknown-execution-id\"", json);
         Assert.Contains("\"severity\":\"error\"", json);
     }
 
