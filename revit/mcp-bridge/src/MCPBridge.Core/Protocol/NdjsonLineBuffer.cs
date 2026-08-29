@@ -27,8 +27,26 @@ namespace MCPBridge.Core.Protocol;
 /// </summary>
 public sealed class NdjsonLineBuffer
 {
+    /// <summary>
+    /// Default upper bound on a single line's accumulated length, mirroring the Go broker's own
+    /// per-line cap (transport/framing.go's maxLineBytes, 64MiB) so both ends of the wire agree on
+    /// what a legitimate line can be. Chars, not bytes, for simplicity -- UTF-8 decoded chars never
+    /// outnumber input bytes, so a 64Mi-char cap can only ever be more permissive than the broker's
+    /// 64MiB one, never stricter. Without any cap (v1 integrated review), a peer that streamed bytes
+    /// without ever sending a newline grew _pending without bound; the peer is the authenticated
+    /// broker, so this is robustness against a broken counterpart, not a security boundary.
+    /// </summary>
+    public const int DefaultMaxLineChars = 64 * 1024 * 1024;
+
+    private readonly int _maxLineChars;
     private readonly Decoder _decoder = Encoding.UTF8.GetDecoder();
     private readonly StringBuilder _pending = new();
+
+    /// <summary>maxLineChars is overridable for tests only -- production callers take the default.</summary>
+    public NdjsonLineBuffer(int maxLineChars = DefaultMaxLineChars)
+    {
+        _maxLineChars = maxLineChars;
+    }
 
     // Reused across Append calls (one NdjsonLineBuffer instance lives for a whole connection, and Append
     // is called once per socket read for that connection's lifetime) rather than allocating a fresh char[]
@@ -94,6 +112,17 @@ public sealed class NdjsonLineBuffer
 
         _pending.Clear();
         _pending.Append(text[searchStart..]);
+
+        if (_pending.Length > _maxLineChars)
+        {
+            // Throwing (rather than silently truncating) surfaces through the connection loop's
+            // normal per-connection failure path: the connection tears down with a logged reason and
+            // the reconnect loop dials fresh -- the right recovery for a peer that is provably
+            // speaking something other than NDJSON at this point.
+            _pending.Clear();
+            throw new System.InvalidOperationException(
+                $"NDJSON line exceeded {_maxLineChars} characters without a newline; closing the connection as the peer is not framing correctly.");
+        }
 
         return lines;
     }

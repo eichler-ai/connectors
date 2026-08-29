@@ -32,9 +32,15 @@ public sealed class BrokerDiscovery
         {
             text = File.ReadAllText(BrokerJsonPath);
         }
-        catch (IOException ex)
+        catch (Exception ex)
         {
             // The broker may be mid-write; treat as a transient not-found rather than a hard error.
+            // Exception, not just IOException (v1 integrated review): a read of broker.json can also
+            // throw UnauthorizedAccessException (an ACL hiccup, or a remote-mode UNC share flapping
+            // mid-read) among others, and any escape from here reaches the connection thread's loop --
+            // where an unhandled exception doesn't just end this attempt, it can end the loop (or the
+            // process). Every read failure here means the same thing operationally: no usable
+            // broker.json this attempt; retry on the next one.
             return BuildNotFound(DiagnosticRecord.Create(
                 DiagnosticSeverity.Warning,
                 "broker-json-unreadable",
@@ -61,16 +67,11 @@ public sealed class BrokerDiscovery
         }
     }
 
-    private BrokerDiscoveryResult BuildNotFound(DiagnosticRecord? diagnostic = null)
+    private static BrokerDiscoveryResult BuildNotFound(DiagnosticRecord? diagnostic = null)
     {
-        BrokerAddress? fallback = null;
-        if (_options.Mode == BrokerTopologyMode.Remote &&
-            _options.FallbackHost is not null &&
-            _options.FallbackPort is not null)
-        {
-            fallback = new BrokerAddress(_options.FallbackHost, _options.FallbackPort.Value);
-        }
-
-        return BrokerDiscoveryResult.NotFound(fallback, diagnostic);
+        // No fallback address on the not-found path any more -- see BrokerDiscoveryOptions for why
+        // the remote-mode fallback host:port was removed (an address with no token can never
+        // authenticate, so it was dead configuration).
+        return BrokerDiscoveryResult.NotFound(diagnostic);
     }
 }

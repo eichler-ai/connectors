@@ -146,10 +146,10 @@ public sealed class MCPBridgeApplication : IExternalApplication
     /// project's own Mac+Parallels dev setup, where the broker and Revit are on different machines -- is
     /// opt-in via environment variables, since there's no other configuration mechanism in this add-in
     /// yet: MCPBRIDGE_BROKER_MODE=remote plus MCPBRIDGE_SHARED_ROOT (a UNC path, e.g.
-    /// \\psf\connectors), with MCPBRIDGE_FALLBACK_HOST/MCPBRIDGE_FALLBACK_PORT optionally supplying the
-    /// remote-mode fallback address PRD §05 describes for when no shared drive is reachable. Falls back to
-    /// local mode on any misconfiguration (missing shared root, unparseable port) rather than throwing out
-    /// of OnStartup and failing the whole add-in load over a topology setting.
+    /// \\psf\connectors). Falls back to local mode on any misconfiguration (missing shared root, not a
+    /// UNC path) rather than throwing out of OnStartup and failing the whole add-in load over a topology
+    /// setting. (MCPBRIDGE_FALLBACK_HOST/MCPBRIDGE_FALLBACK_PORT were once read here too and are
+    /// deliberately gone -- see BrokerDiscoveryOptions for why the fallback address could never work.)
     /// </summary>
     private static BrokerDiscoveryOptions BuildDiscoveryOptions()
     {
@@ -165,13 +165,9 @@ public sealed class MCPBridgeApplication : IExternalApplication
             return BrokerDiscoveryOptions.Local();
         }
 
-        var fallbackHost = Environment.GetEnvironmentVariable("MCPBRIDGE_FALLBACK_HOST");
-        var fallbackPortText = Environment.GetEnvironmentVariable("MCPBRIDGE_FALLBACK_PORT");
-        int? fallbackPort = int.TryParse(fallbackPortText, out var parsedPort) ? parsedPort : null;
-
         try
         {
-            return BrokerDiscoveryOptions.Remote(sharedRoot, fallbackHost, fallbackPort);
+            return BrokerDiscoveryOptions.Remote(sharedRoot);
         }
         catch (ArgumentException)
         {

@@ -109,4 +109,30 @@ public class NdjsonLineBufferTests
         var encoded = NdjsonLineBuffer.Encode("{\"a\":1}");
         Assert.Equal("{\"a\":1}\n", encoded);
     }
+
+    [Fact]
+    public void Append_LineExceedingMaxWithoutNewline_Throws_AndResetsBuffer()
+    {
+        // v1 integrated review: with no cap, a peer that streamed bytes without ever sending a
+        // newline grew the pending buffer without bound. The cap is test-sized here; production
+        // uses DefaultMaxLineChars, which mirrors the Go broker's 64MiB per-line cap.
+        var buffer = new NdjsonLineBuffer(maxLineChars: 16);
+
+        buffer.Append(System.Text.Encoding.UTF8.GetBytes("0123456789"));
+        Assert.Throws<System.InvalidOperationException>(
+            () => buffer.Append(System.Text.Encoding.UTF8.GetBytes("0123456789")));
+
+        // The buffer must be usable again after the overflow cleared it -- the connection loop
+        // tears the connection down on the throw, but the object contract stays coherent.
+        var lines = buffer.Append(System.Text.Encoding.UTF8.GetBytes("{\"ok\":1}\n"));
+        Assert.Equal(new[] { "{\"ok\":1}" }, lines);
+    }
+
+    [Fact]
+    public void Append_CompleteLinesNearTheCap_AreUnaffected()
+    {
+        var buffer = new NdjsonLineBuffer(maxLineChars: 16);
+        var lines = buffer.Append(System.Text.Encoding.UTF8.GetBytes("0123456789012345\n0123456789012345\n"));
+        Assert.Equal(2, System.Linq.Enumerable.Count(lines));
+    }
 }

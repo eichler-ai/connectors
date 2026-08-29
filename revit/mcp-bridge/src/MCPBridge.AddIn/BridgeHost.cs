@@ -216,7 +216,26 @@ internal sealed class BridgeHost
         _stopCts = new CancellationTokenSource();
         var stopToken = _stopCts.Token;
 
-        _workerThread = new Thread(() => RunConnectionLoop(dispatcher, documentSnapshotHandler, documentSnapshotEvent, stopToken))
+        _workerThread = new Thread(() =>
+        {
+            // Last-resort guard (v1 integrated review): an unhandled exception on a manual thread
+            // terminates the entire process -- here, all of Revit, with the user's open models. The
+            // loop handles its own per-attempt failures; this catch exists for whatever nobody
+            // anticipated, trading "crash the host" for "connection loop dead until Revit restarts,
+            // with a log line saying exactly that". OperationCanceledException is the loop's own
+            // clean Stop() unwind and needs no log.
+            try
+            {
+                RunConnectionLoop(dispatcher, documentSnapshotHandler, documentSnapshotEvent, stopToken);
+            }
+            catch (OperationCanceledException)
+            {
+            }
+            catch (Exception ex)
+            {
+                LogConnectionDiagnostic($"FATAL: connection loop terminated by an unexpected exception; the add-in will not reconnect until Revit restarts: {ex}");
+            }
+        })
         {
             IsBackground = true,
             Name = "MCPBridge-Connection",
@@ -407,12 +426,39 @@ internal sealed class BridgeHost
         while (!stopToken.IsCancellationRequested)
         {
             LogConnectionDiagnostic("loop iteration: about to TryDiscover");
-            var discoveryResult = TryDiscoverWithTimeout(discovery, stopToken);
+
+            // Discovery gets its own guard (v1 integrated review): it used to run bare, outside the
+            // try that protects RunOneConnection below, so anything TryDiscover threw beyond the two
+            // exception types BrokerDiscovery catches internally -- an UnauthorizedAccessException
+            // from a flapping UNC share, historically a FormatException from a malformed broker.json
+            // -- escaped this loop entirely. On a manual thread that means either the reconnect loop
+            // silently dying (never reconnecting again for the life of the Revit session, breaking
+            // PRD §05's indefinite-retry contract invisibly) or, since nothing above this frame
+            // catches, an unhandled-exception crash of the whole Revit process. Both are worse than
+            // the worst case a discovery attempt can actually represent, which is "no broker this
+            // attempt -- try again".
+            BrokerDiscoveryResult discoveryResult;
+            try
+            {
+                discoveryResult = TryDiscoverWithTimeout(discovery, stopToken);
+            }
+            catch (OperationCanceledException)
+            {
+                break; // Stop() was called during the discovery wait -- clean thread exit, not a crash.
+            }
+            catch (Exception ex)
+            {
+                LogConnectionDiagnostic($"broker discovery attempt threw unexpectedly: {ex}");
+                Backoff(reconnectController, stopToken);
+                continue;
+            }
+
             if (!discoveryResult.Found || discoveryResult.BrokerJson is null || discoveryResult.Address is null)
             {
                 // Not found (or found but unreadable/malformed -- BrokerDiscovery already reports both as
-                // "not found"), or a remote-mode fallback address with no token to authenticate with:
-                // treat identically as a failed attempt and back off, per PRD §05's single retry loop.
+                // "not found"): a failed attempt; back off, per PRD §05's single retry loop. (This check
+                // once also discarded a remote-mode fallback address here -- that config surface is gone
+                // now, see BrokerDiscoveryOptions; on a not-found result there is simply no address.)
                 //
                 // Was previously silent -- PRD §01's observability principle ("caught and swallowed" must
                 // still leave a trace, not mean invisible) didn't actually hold here: a broker.json that's
