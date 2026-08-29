@@ -72,7 +72,17 @@ public sealed class BrokerJson
             throw new BrokerJsonParseException($"broker.json is missing required numeric field '{name}'.");
         }
 
-        return value.GetInt32();
+        // TryGetInt32, not GetInt32: a numeric value that isn't a 32-bit integer (a float, or a
+        // number out of range) made GetInt32 throw FormatException -- which is not
+        // BrokerJsonParseException, so it escaped BrokerDiscovery.TryDiscover's catch entirely and,
+        // with nothing above it on the connection thread catching either, could take down the whole
+        // Revit process on a malformed broker.json (v1 integrated review).
+        if (!value.TryGetInt32(out var parsed))
+        {
+            throw new BrokerJsonParseException($"broker.json field '{name}' is not a valid 32-bit integer.");
+        }
+
+        return parsed;
     }
 
     private static DateTimeOffset RequireDateTimeOffset(JsonElement root, string name)

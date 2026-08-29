@@ -37,7 +37,10 @@
 #
 # Output contract: streams all progress live; the VM side prints "REDEPLOY_RESULT: PASS|FAIL" and
 # this script exits 0 only on PASS (on PASS it also prints a ready-to-paste `go test -tags harness`
-# command with the right remote-mode flags). On FAIL, diagnose in this order: the [redeploy] lines
+# command with the right remote-mode flags). Safe to pipe (`... | tee`, a pipeline consumer that
+# waits for EOF): the brokers this script starts are fully detached from its own stdout/stderr, so
+# the pipe closes the moment the script exits -- see restart_broker's shape comment for the hang
+# the previous form caused. On FAIL, diagnose in this order: the [redeploy] lines
 # above the failure (they include Revit's last connection.log lines), C:\dev\launcher-agent.log on
 # the VM (did the close/launch signals parse and fire?), and `prlctl capture "<vm>" --file x.png`
 # (a modal dialog wedging Revit's idle loop is invisible in every log but obvious on screen).
@@ -148,7 +151,20 @@ restart_broker() {
     # unconfirmed process (still alive retrying the lock; leaving it would leak one secondary per
     # attempt, and it could steal the lock from a LATER restart's fresh process).
     pkill -f "$BROKER_ARGS_PATTERN" 2>/dev/null || true
-    ( cd "$(dirname "$BROKER_EXE")" && nohup bash -c "sleep 100000 | ./$BROKER_ARGS_PATTERN" >>"$BROKER_LOG" 2>&1 & disown )
+    # Shape matters here, found the hard way (live hang, reproduced in isolation):
+    #   ( cd ... && nohup ... & disown )   -- the PREVIOUS form -- left the parenthesized subshell
+    # alive for the broker's entire lifetime, still holding this script's inherited stdout/stderr.
+    # Run as `redeploy-and-verify.sh | anything`, the consumer then never saw EOF: the script
+    # exited but the pipe stayed open, hanging the pipeline indefinitely (the disown inside the
+    # parens was also disowning in the WRONG shell -- the inner one -- which is what produced the
+    # stray "Terminated: 15" job-control noise on each restart cycle). This form fixes all of it:
+    # `exec` replaces the subshell with the nohup'd wrapper (no lingering middleman process),
+    # explicit </dev/null plus the log redirects detach it from every inherited fd, and the
+    # `& disown` OUTSIDE the parens backgrounds+disowns in this shell, the one whose job table
+    # actually matters. The `sleep 100000 |` stdin feeder is still required -- the broker is a
+    # stdio MCP server and exits when its stdin closes; the feeder's own ~27h orphaned sleep after
+    # a broker restart is a known, accepted cosmetic leak (a sleeping process, no fds held).
+    ( cd "$(dirname "$BROKER_EXE")" && exec nohup bash -c "sleep 100000 | ./$BROKER_ARGS_PATTERN" </dev/null >>"$BROKER_LOG" 2>&1 ) & disown
     deadline=$((SECONDS + 10))
     while (( SECONDS < deadline )); do
       # Pretty-printed one-key-per-line JSON written only by our own broker -- sed is enough.
