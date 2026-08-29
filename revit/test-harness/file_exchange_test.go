@@ -107,3 +107,46 @@ return "registered-in-place";
 		t.Fatalf("a direct-write-then-publish into exports/ must register in place as published (PRD §09), got: %+v", inPlace.Files)
 	}
 }
+
+// TestExecutionAuditTrail is the live pin of PRD §09's per-execution audit
+// trail (issue #13): every run that reached the executor leaves a verbatim
+// script copy under scripts/ and an NDJSON log under logs/ in the ROUTED
+// document's workspace. The workspace lives on the machine RUNNING REVIT
+// (%USERPROFILE%\RevitMCPExchange in local mode), so the assertion runs as a
+// FOLLOW-UP SCRIPT reading the directories from inside Revit rather than any
+// Mac-side filesystem guess -- the same posture the audit trail's own docs
+// take about who can see these files.
+func TestExecutionAuditTrail(t *testing.T) {
+	c, instanceID, documentID := targetDocument(t)
+
+	// A uniquely-identifiable run whose audit pair we then go looking for.
+	needle := fmt.Sprintf("audit-probe-%d", time.Now().UnixNano())
+	probe := runScript(t, c, instanceID, documentID, `return "`+needle+`";`)
+	if probe.Status != "success" {
+		t.Fatalf("probe run failed: status=%q output=%s", probe.Status, probe.Output)
+	}
+	if probe.ExecutionID == "" {
+		t.Fatal("probe run carried no execution_id to look for")
+	}
+
+	// The audit pair is written before the probe's own response is sent, so
+	// this follow-up run can read it with no wait. ExportsDirectory's parent
+	// is the document workspace root; logs/ and scripts/ are its siblings.
+	inspect := runScript(t, c, instanceID, documentID, `
+var root = System.IO.Path.GetDirectoryName(ExportsDirectory);
+var logs = System.IO.Path.Combine(root, "logs");
+var scripts = System.IO.Path.Combine(root, "scripts");
+var logMatches = System.IO.Directory.Exists(logs) ? System.IO.Directory.GetFiles(logs, "*`+probe.ExecutionID+`.ndjson") : new string[0];
+var scriptMatches = System.IO.Directory.Exists(scripts) ? System.IO.Directory.GetFiles(scripts, "*`+probe.ExecutionID+`.cs") : new string[0];
+if (logMatches.Length != 1 || scriptMatches.Length != 1)
+    return "MISSING logs=" + logMatches.Length + " scripts=" + scriptMatches.Length;
+var scriptText = System.IO.File.ReadAllText(scriptMatches[0]);
+var logText = System.IO.File.ReadAllText(logMatches[0]);
+if (!scriptText.Contains("`+needle+`")) return "SCRIPT-CONTENT-MISMATCH";
+if (!logText.Contains("execution-audit") || !logText.Contains("\"status\":\"success\"")) return "LOG-SHAPE-MISMATCH: " + logText;
+return "audit-ok";
+`)
+	if inspect.Status != "success" || inspect.Output != "audit-ok" {
+		t.Fatalf("audit trail verification failed: status=%q output=%s", inspect.Status, inspect.Output)
+	}
+}

@@ -158,6 +158,13 @@ public sealed class MCPBridgeApplication : IExternalApplication
     private void OnDocumentCreated(object? sender, Autodesk.Revit.DB.Events.DocumentCreatedEventArgs e) =>
         PushSnapshotFromApplicationEvent(sender);
 
+    // NOTE on §09's "tmp/ cleared on document close" (issue #13): deliberately NOT done here.
+    // DocumentClosedEventArgs carries only Revit's internal integer DocumentId -- the §09 identity
+    // (path- or title-derived) is unrecoverable once the document object is gone, so this handler
+    // cannot know WHICH tmp/<instance-id>/ under WHICH workspace belonged to the closed document.
+    // Pairing the cancellable DocumentClosing event (which still has the Document) with Closed just
+    // to delete scratch a few days earlier than ExecutionAuditTrail's 14-day sweep would is
+    // machinery the overengineering test refuses; the sweep is the retention mechanism.
     private void OnDocumentClosed(object? sender, Autodesk.Revit.DB.Events.DocumentClosedEventArgs e) =>
         PushSnapshotFromApplicationEvent(sender);
 

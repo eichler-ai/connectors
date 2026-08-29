@@ -4,17 +4,16 @@ using System.IO;
 namespace MCPBridge.Core.Workspace;
 
 /// <summary>
-/// The per-document file-exchange workspace tree (PRD §09): `imports/` and `exports/`, rooted at
+/// The per-document file-exchange workspace tree (PRD §09): `imports/`, `exports/`, `logs/`,
+/// `scripts/` and `tmp/&lt;instance-id&gt;/`, rooted at
 /// `%USERPROFILE%\RevitMCPExchange\&lt;document-id&gt;\` in local mode -- a deliberately separate
 /// root from this add-in's own internal app data (`%LOCALAPPDATA%\Connectors\Revit\`, see
 /// <see cref="Connection.BrokerDiscoveryOptions"/>), since this tree is human-facing and meant to
-/// be browsed directly. `logs/`/`scripts/` from PRD §09's full design are not built here at all --
-/// nothing currently writes to them, and a directory the code creates and never fills misleads a
-/// human browsing the workspace (independent PR review finding); reinstating them is a two-line
-/// change once something actually needs them. `tmp/` (<see cref="Tmp"/>) IS implemented, but has no
-/// production caller yet either -- unlike Logs/Scripts it's kept because PRD §09 already specifies
-/// its per-instance-subfolder shape precisely and it's exercised by tests, not because anything
-/// calls it today.
+/// be browsed directly. `logs/`/`scripts/` are the per-execution audit trail
+/// (<see cref="ExecutionAuditTrail"/>, issue #13) and age out on its retention sweep, as does
+/// `tmp/`; `imports/`/`exports/` are user-owned and NEVER swept (§09's retention-by-ownership
+/// split). Audit directories are created lazily on first write, so a workspace whose document
+/// never ran a script doesn't grow empty directories a browsing human would puzzle over.
 ///
 /// Injectable-root factory shape mirrors <see cref="Connection.BrokerDiscoveryOptions.Local"/> so
 /// tests can substitute a temp directory for %USERPROFILE%. Directories are created best-effort,
@@ -53,6 +52,19 @@ public sealed class WorkspacePaths
 
     /// <summary>Images, IFC, families written by scripts via ScriptGlobals.Publish; never auto-deleted.</summary>
     public string Exports => EnsureDirectory(Path.Combine(DocumentRoot, "exports"));
+
+    /// <summary>Per-execution NDJSON audit logs (one PRD §01 record per line); aged out by the retention sweep.</summary>
+    public string Logs => EnsureDirectory(Path.Combine(DocumentRoot, "logs"));
+
+    /// <summary>Per-execution verbatim script history; aged out by the retention sweep.</summary>
+    public string Scripts => EnsureDirectory(Path.Combine(DocumentRoot, "scripts"));
+
+    /// <summary>
+    /// `&lt;root&gt;/RevitMCPExchange/` -- the root ABOVE every document's workspace, which is what the
+    /// retention sweep walks (it ages out audit files for every document, not just the one that
+    /// happened to trigger it).
+    /// </summary>
+    public string ExchangeRoot => Path.GetDirectoryName(DocumentRoot)!;
 
     /// <summary>
     /// Scratch space for this instance sharing this workspace (PRD §09: "tmp/ is the one directory

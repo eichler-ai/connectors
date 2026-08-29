@@ -83,7 +83,8 @@ public sealed class RequestDispatcher
         Func<TimeSpan, Task>? delay = null,
         IWindowInventory? windowInventory = null,
         DiscoveryService? discoveryService = null,
-        string? instanceId = null)
+        string? instanceId = null,
+        Action<string>? auditTrailTrace = null)
     {
         _executionManager = executionManager;
         _bridge = bridge;
@@ -93,7 +94,13 @@ public sealed class RequestDispatcher
         _windowInventory = windowInventory;
         _discoveryService = discoveryService;
         _instanceId = instanceId ?? "";
+        _auditTrailTrace = auditTrailTrace;
     }
+
+    // Where an audit-trail failure's §01-style trace goes (the AddIn passes the connection-log
+    // writer); null (tests, or nothing wired) means the failure is silently swallowed, which the
+    // audit trail's never-affect-the-run contract permits.
+    private readonly Action<string>? _auditTrailTrace;
 
     /// <summary>How often <see cref="HandlePollExecutionAsync"/> re-checks the record while waiting out timeout_ms.</summary>
     private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(100);
@@ -461,6 +468,13 @@ public sealed class RequestDispatcher
                 remedy: remedy);
             _executionManager.CompleteError(executionId, _now(), diagnostic, outcome.StdOut, outcome.Notices, outcome.Files);
         }
+
+        // The §09 audit trail (issue #13): the verbatim script and a per-run NDJSON log land in the
+        // ROUTED document's workspace after the outcome settles -- best-effort by hard contract
+        // (Record never throws), so it can neither fail nor reorder anything above. Runs refused
+        // before a document was resolved never reach here, which is deliberate -- see
+        // ExecutionAuditTrail's own doc for why they leave no audit entry.
+        ExecutionAuditTrail.Record(workspacePaths, executionId, scriptText, outcome, _now(), _auditTrailTrace);
 
         return outcome;
     }
