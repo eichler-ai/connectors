@@ -87,6 +87,86 @@ public class RoslynScriptRunnerTests
     // unreachable from tier 1 rather than to pin it with a test that passes for an unrelated reason.
 
     [Fact]
+    public async Task RunAsync_ConcurrentRuns_CaptureTheirOwnStdOut_Independently()
+    {
+        // Issue #52 / #35: the old process-global Console.SetOut swap made concurrent runs (and
+        // xunit's default parallel test classes) cross-capture stdout. The AsyncLocal ambient
+        // writer isolates per execution context: each run sees exactly its own writes, and a
+        // plain background thread with no ambient writer never leaks into either capture.
+        var runner = NewRunner();
+
+        using var backgroundStop = new System.Threading.CancellationTokenSource();
+        var background = Task.Run(() =>
+        {
+            while (!backgroundStop.IsCancellationRequested)
+            {
+                System.Console.Write("NOISE");
+                System.Threading.Thread.Sleep(1);
+            }
+        });
+
+        var runA = Task.Run(() => runner.RunAsync(
+            "for (var i = 0; i < 50; i++) { System.Console.Write(\"A\"); System.Threading.Thread.Sleep(1); } 1",
+            NewGlobals(), CancellationToken.None));
+        var runB = Task.Run(() => runner.RunAsync(
+            "for (var i = 0; i < 50; i++) { System.Console.Write(\"B\"); System.Threading.Thread.Sleep(1); } 1",
+            NewGlobals(), CancellationToken.None));
+
+        var outcomes = await Task.WhenAll(runA, runB);
+        backgroundStop.Cancel();
+        await background;
+
+        Assert.True(outcomes[0].Success && outcomes[1].Success);
+        Assert.Equal(new string('A', 50), outcomes[0].StdOut);
+        Assert.Equal(new string('B', 50), outcomes[1].StdOut);
+    }
+
+    [Fact]
+    public async Task RunAsync_VerbatimReRun_DoesNotReEmit()
+    {
+        // Issue #52: Emit used to run per EXECUTION even on compilation-cache hits. The emit is
+        // now cached on CompiledScript; asserted here at the unit seam (an emit counter through
+        // GetOrEmitPeImage) plus end-to-end that a re-run still executes correctly off the cached
+        // image.
+        var emitCalls = 0;
+        var compiled = new CompiledScript(
+            Microsoft.CodeAnalysis.CSharp.Scripting.CSharpScript.Create<object>("1 + 1"),
+            ScriptApiAnalysis.Clean);
+        byte[] FakeEmit(Microsoft.CodeAnalysis.Scripting.Script<object> _)
+        {
+            emitCalls++;
+            return new byte[] { 1, 2, 3 };
+        }
+
+        _ = compiled.GetOrEmitPeImage(FakeEmit);
+        var second = compiled.GetOrEmitPeImage(FakeEmit);
+
+        Assert.Equal(1, emitCalls);
+        Assert.Equal(new byte[] { 1, 2, 3 }, second);
+
+        var runner = NewRunner();
+        var first = await runner.RunAsync("40 + 2", NewGlobals(), CancellationToken.None);
+        var rerun = await runner.RunAsync("40 + 2", NewGlobals(), CancellationToken.None);
+        Assert.Equal(42, first.ReturnValue);
+        Assert.Equal(42, rerun.ReturnValue);
+    }
+
+    [Fact]
+    public void WarmupCompile_PopulatesTheCache_AndNeverThrows()
+    {
+        // Issue #52: warmup compiles+emits the marker once; a second call is a cache hit; and the
+        // never-throws contract holds by construction (asserted trivially by running it at all --
+        // a throw fails the test).
+        var compileCount = 0;
+        var runner = NewRunner(compileCounter: () => compileCount++);
+
+        runner.WarmupCompile();
+        runner.WarmupCompile();
+
+        Assert.Equal(1, compileCount);
+    }
+
+    [Fact]
     public async Task RunAsync_CapturesStdOut()
     {
         var runner = NewRunner();

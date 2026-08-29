@@ -190,17 +190,23 @@ internal sealed class RoslynScriptRunner
                 stdOut: "");
         }
 
-        var script = compiled.Script;
         var alc = _alcFactory();
-        var originalOut = Console.Out;
         var writer = new StringWriter();
+
+        // AsyncLocal-scoped capture, not a process-global Console.SetOut swap (issue #52, resolving
+        // #35 properly): the global swap leaked any OTHER thread's console writes into this script's
+        // stdout, and -- measured consequence -- made parallel test classes (xunit's default) a latent
+        // cross-capture race. The ambient writer flows with the execution context, so only THIS
+        // run's code (and whatever it awaits) writes into `writer`; everything else keeps the real
+        // console. A script that calls Console.SetOut itself can still stomp the process-wide router,
+        // exactly as it could stomp the old swap -- unchanged, accepted, same bucket as reflection.
+        using var capture = ScriptConsoleCapture.Begin(writer);
 
         try
         {
-            Console.SetOut(writer);
             cancellationToken.ThrowIfCancellationRequested();
 
-            var result = await InvokeInFreshLoadContextAsync(script, globals, alc).ConfigureAwait(false);
+            var result = await InvokeInFreshLoadContextAsync(compiled, globals, alc).ConfigureAwait(false);
             return ScriptExecutionOutcome.Completed(result, writer.ToString());
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -226,7 +232,6 @@ internal sealed class RoslynScriptRunner
         }
         finally
         {
-            Console.SetOut(originalOut);
             alc.Unload();
         }
     }
@@ -239,21 +244,14 @@ internal sealed class RoslynScriptRunner
     /// are still rooted on RunAsync's stack frame -- that matters for the ALC to actually become collectible
     /// once Unload() is called in RunAsync's finally block.
     /// </summary>
-    private static async Task<object?> InvokeInFreshLoadContextAsync(Script<object> script, ScriptGlobals globals, AssemblyLoadContext alc)
+    private static async Task<object?> InvokeInFreshLoadContextAsync(CompiledScript compiled, ScriptGlobals globals, AssemblyLoadContext alc)
     {
-        var compilation = script.GetCompilation();
+        // Emitted at most once per compiled script (issue #52) -- see CompiledScript.GetOrEmitPeImage
+        // for the caching contract. A verbatim re-run (the LRU's whole purpose) now skips straight to
+        // ALC-load + invoke.
+        var peImage = compiled.GetOrEmitPeImage(EmitToPeImage);
 
-        using var peStream = new MemoryStream();
-        var emitResult = compilation.Emit(peStream);
-        if (!emitResult.Success)
-        {
-            var errors = emitResult.Diagnostics.Where(d => d.Severity == Microsoft.CodeAnalysis.DiagnosticSeverity.Error).ToArray();
-            throw new CompilationErrorException(
-                string.Join(Environment.NewLine, errors.Select(e => e.ToString())),
-                ImmutableArray.CreateRange(errors));
-        }
-
-        peStream.Position = 0;
+        using var peStream = new MemoryStream(peImage, writable: false);
         var assembly = alc.LoadFromStream(peStream);
 
         var submissionType = assembly.GetType(SubmissionTypeName)
@@ -352,6 +350,50 @@ internal sealed class RoslynScriptRunner
     /// itself parse eagerly, but this reuses the one parse the compilation pipeline needs anyway instead of
     /// doing a second, redundant one (PR #2 review, efficiency finding).
     /// </summary>
+    /// <summary>
+    /// Emits one compiled script's Compilation to a PE image. Split out so
+    /// <see cref="CompiledScript.GetOrEmitPeImage"/> can own the once-per-script caching while the
+    /// emit mechanics (and the emit-failure exception shape RunAsync's catch understands) stay here.
+    /// </summary>
+    private static byte[] EmitToPeImage(Script<object> script)
+    {
+        var compilation = script.GetCompilation();
+
+        using var peStream = new MemoryStream();
+        var emitResult = compilation.Emit(peStream);
+        if (!emitResult.Success)
+        {
+            var errors = emitResult.Diagnostics.Where(d => d.Severity == Microsoft.CodeAnalysis.DiagnosticSeverity.Error).ToArray();
+            throw new CompilationErrorException(
+                string.Join(Environment.NewLine, errors.Select(e => e.ToString())),
+                ImmutableArray.CreateRange(errors));
+        }
+
+        return peStream.ToArray();
+    }
+
+    /// <summary>
+    /// Compiles, analyzes, and emits a trivial marker script, swallowing every failure -- the
+    /// startup warmup (issue #52). The first real script in a Revit session otherwise pays Roslyn's
+    /// own cold start (assembly JIT, reference-metadata load: seconds) inside the agent's first
+    /// execute_script call; running it here, on whatever background thread the caller chooses (none
+    /// of this touches the Revit API context), hides that cost inside Revit's startup instead.
+    /// Failure is deliberately silent to the caller -- warmup must never affect startup -- and the
+    /// cost is one LRU slot for the marker text.
+    /// </summary>
+    internal void WarmupCompile()
+    {
+        try
+        {
+            var compiled = GetOrCompile("/* mcpbridge warmup */ 1 + 1");
+            compiled.GetOrEmitPeImage(EmitToPeImage);
+        }
+        catch
+        {
+            // Best-effort by contract; the first real script simply pays the cold start as before.
+        }
+    }
+
     private static void RejectTopLevelAwait(Script<object> script)
     {
         var tree = script.GetCompilation().SyntaxTrees.Single();
