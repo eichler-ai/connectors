@@ -107,25 +107,51 @@ public class DocumentIdentityTests
         Assert.NotEqual(DocumentIdentity.Resolve(a, PassthroughUnc), DocumentIdentity.Resolve(b, PassthroughUnc));
     }
 
+    // ------------------------------------------------------------------------------------------
+    // Unsaved identity is TITLE-derived and wrapper-independent (v1 remediation series). The old
+    // fresh-GUID-per-wrapper scheme meant register advertised tmp-A while a routing lookup computed
+    // tmp-B for the same live document (Revit mints a new wrapper per API entry point -- measured),
+    // so routing to an unsaved document could never match. These pins replaced the old
+    // fresh-GUID-per-call ones, whose behavior was precisely the bug.
+    // ------------------------------------------------------------------------------------------
+
     [Fact]
-    public void Unsaved_MintsTmpPrefix_WithValidGuidSuffix()
+    public void Unsaved_SameTitle_ResolvesToTheSameStableTmpId_AcrossDistinctAdapterObjects()
     {
-        var document = new FakeDocumentAdapter();
+        // Two adapter objects for "the same" document, as Revit actually hands them back.
+        var wrapperA = new FakeDocumentAdapter { Title = "Project1" };
+        var wrapperB = new FakeDocumentAdapter { Title = "Project1" };
 
-        var id = DocumentIdentity.Resolve(document, PassthroughUnc);
+        var idA = DocumentIdentity.Resolve(wrapperA, PassthroughUnc);
+        var idB = DocumentIdentity.Resolve(wrapperB, PassthroughUnc);
 
-        Assert.StartsWith("tmp-", id);
-        Assert.True(Guid.TryParse(id["tmp-".Length..], out _));
+        Assert.StartsWith("tmp-", idA);
+        Assert.Equal(idA, idB);
     }
 
     [Fact]
-    public void Unsaved_EachCallMintsAFreshGuid()
+    public void Unsaved_DifferentTitles_ResolveToDifferentTmpIds()
     {
-        var document = new FakeDocumentAdapter();
+        // Revit auto-uniquifies open documents' titles (Project1, Project2, ...), which is what
+        // makes the title a safe key while both are open.
+        var a = new FakeDocumentAdapter { Title = "Project1" };
+        var b = new FakeDocumentAdapter { Title = "Project2" };
+
+        Assert.NotEqual(
+            DocumentIdentity.Resolve(a, PassthroughUnc),
+            DocumentIdentity.Resolve(b, PassthroughUnc));
+    }
+
+    [Fact]
+    public void Unsaved_WithNoTitleAtAll_FallsBackToAFreshGuidPerResolution()
+    {
+        var document = new FakeDocumentAdapter { Title = "" };
 
         var first = DocumentIdentity.Resolve(document, PassthroughUnc);
         var second = DocumentIdentity.Resolve(document, PassthroughUnc);
 
-        Assert.NotEqual(first, second);
+        Assert.StartsWith("tmp-", first);
+        Assert.True(Guid.TryParse(first["tmp-".Length..], out _));
+        Assert.NotEqual(first, second); // held stable per wrapper by ResolveCached, not by Resolve
     }
 }

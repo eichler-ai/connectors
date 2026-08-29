@@ -33,7 +33,7 @@ const (
 // ExecuteScriptIn is the input schema for the execute_script tool.
 type ExecuteScriptIn struct {
 	InstanceID           string `json:"instance_id" jsonschema:"instance_id of the target Revit instance, from a prior register/list_instances"`
-	DocumentID           string `json:"document_id" jsonschema:"document_id of the target document within that instance"`
+	DocumentID           string `json:"document_id" jsonschema:"document_id of the target document within that instance (from list_instances). Routes for real: the script runs against this document -- active or background -- and its file-exchange workspace follows it; an id matching no open document fails with document-not-found plus an open_documents candidates list. Omit or pass empty to run against the instance's active document."`
 	Script               string `json:"script" jsonschema:"C# script body to compile and run against the document"`
 	TimeoutMs            int    `json:"timeout_ms,omitempty" jsonschema:"milliseconds to wait for completion before returning a pending/running status; default 30000"`
 	MaxDurationMs        int    `json:"max_duration_ms,omitempty" jsonschema:"hard ceiling on total script runtime in milliseconds, independent of timeout_ms; default 600000"`

@@ -5,17 +5,13 @@
 # add-in's registration actually lands with the expected document count -- all of it. Replaces a
 # sequence that used to take five-plus separate manual steps (each its own round trip) per cycle.
 #
-# Document-launch mode (issue #32): opening a document always loses the race against the add-in's
-# one-shot register snapshot (issue #30) -- the add-in connects and registers 0 documents before
-# the document finishes opening, and nothing on the VM side can refresh that (the VM launcher
-# agent's forced reconnect only restarts the LOCAL-mode broker; the add-in here is connected to
-# THIS Mac's broker). So this wrapper streams redeploy-and-verify.ps1's output live and, each time
-# the ps1 reports a fresh-but-document-less registration ("STALE_REGISTRATION" marker), restarts
-# the Mac broker -- dropping the add-in's connection and forcing a fresh registration that includes
-# whatever is open by then. Event-driven on both sides (the ps1's wait is FileSystemWatcher-based;
-# the restarts react to actual registrations, never timers), so the reconnect lands seconds after
-# the first stale registration in the common case. All of this is removable scaffolding around
-# issue #30 -- if the add-in ever pushes live document-snapshot updates, delete it.
+# Document-launch mode needs no special machinery any more: the add-in pushes a live
+# document-snapshot refresh the moment a document finishes opening (issue #30's fix -- "register
+# refreshed: N document(s)" in connection.log), and the ps1's registration wait accepts that line
+# the same as a connect-time register. The former STALE_REGISTRATION marker/reaction loop this
+# wrapper carried (issue #32's workaround: force-restarting the Mac broker per document-less
+# registration) is deleted, exactly as its own comment said to do once live push existed. This
+# wrapper's remaining jobs: build, UNC-alias resolution, ensure-broker, one streamed prlctl call.
 #
 # Run this from the MAC HOST (it drives the VM via prlctl); the VM must be running, with the
 # launcher agent (launcher-agent.ps1) resident -- this script only drops signal files for it.
@@ -67,12 +63,10 @@
 #                            take ~50s before it even attempts to connect)
 #   --skip-copy               Only close/relaunch/verify -- DLLs already deployed
 #   --skip-relaunch            Only redeploy DLLs -- don't touch the running Revit instance
-#   --skip-broker-restart      Don't touch the standalone Mac broker at all: skips both the initial
-#                              ensure/restart AND the reactive stale-registration restarts above
-#                              (so document-launch mode will likely FAIL with it -- only combine
-#                              them if something else forces the post-open reconnect). Use when the
-#                              add-in is already connected to a broker that will pick up the new
-#                              DLLs fine, e.g. redeploying without relaunching Revit at all.
+#   --skip-broker-restart      Don't touch the standalone Mac broker at all (skips the initial
+#                              ensure/restart). Use when the add-in is already connected to a broker
+#                              that will pick up the new DLLs fine, e.g. redeploying without
+#                              relaunching Revit, or when another process owns the broker.
 #
 # On success, prints the `go test -tags harness` command line ready to copy-paste, with
 # -broker-bind/-broker-app-data-dir already filled in.
@@ -99,7 +93,7 @@ BUILD=false
 # All progress lines carry elapsed seconds so a slow phase is visible at a glance (and so future
 # tuning has real numbers to work from). Typical healthy run: build ~60-90s if --build; close ~5s;
 # launch-to-first-registration ~55s (cold Revit start dominates, nothing here can compress it);
-# each reactive reconnect cycle ~8s.
+# a document-open snapshot refresh lands within a moment of the open completing.
 say() { echo "==> [${SECONDS}s] $*"; }
 
 while [[ $# -gt 0 ]]; do
@@ -230,8 +224,7 @@ fi
 if ! $SKIP_BROKER_RESTART; then
   # Ensure-not-churn: a healthy primary already running with our exact arguments is reused as is
   # -- restarting it would drop the add-in's live connection for no benefit (a relaunch produces
-  # its fresh registration from Revit's side, and document-mode reconnects are handled reactively
-  # below). Anything else -- no broker, dead pid in broker.json, or a primary running with
+  # its fresh registration from Revit's side). Anything else -- no broker, dead pid in broker.json, or a primary running with
   # different arguments -- gets the full guarded restart.
   if broker_is_healthy; then
     say "standalone Mac broker already healthy (matching args, live pid) -- reusing it"
@@ -248,31 +241,13 @@ PS_ARGS=(-SrcRoot "$UNC_ROOT\\revit\\mcp-bridge\\src" -Tfm "$TFM" -AddinsVersion
 $SKIP_COPY && PS_ARGS+=(-SkipCopy)
 $SKIP_RELAUNCH && PS_ARGS+=(-SkipRelaunch)
 
-# React to the ps1's stale-registration markers only when we manage the broker AND launched with a
-# document -- otherwise this is a plain passthrough of the streamed output.
-REACT_TO_STALE=false
-if [[ -n "$DOC_DEST" ]] && ! $SKIP_RELAUNCH && ! $SKIP_BROKER_RESTART; then
-  REACT_TO_STALE=true
-fi
-
-# Ceiling on reactive restarts, not a retry schedule: each restart is triggered by an actual
-# stale registration (evidence the add-in reconnected and the document STILL wasn't open), so
-# hitting this many means something else is wrong (a dialog wedging the idle loop, a document too
-# large for the ps1's -TimeoutSec) and more restarts won't help.
-MAX_FORCED_RECONNECTS=5
-
+# (A STALE_REGISTRATION reaction loop lived here -- forced Mac-broker restarts per document-less
+# registration, issue #32's workaround for the one-shot snapshot race. Deleted: the add-in now
+# pushes a live snapshot refresh on document open/close/create/activate, and the ps1's wait
+# accepts the "register refreshed" line directly. The streamed output below is a plain
+# passthrough.)
 say "running redeploy-and-verify.ps1 on the VM (one prlctl exec call, output streamed live)"
-if prlctl exec "$VM_NAME" powershell -ExecutionPolicy Bypass -File "$UNC_ROOT\\revit\\dev-tooling\\redeploy-and-verify.ps1" "${PS_ARGS[@]}" 2>&1 | {
-  reconnects=0
-  while IFS= read -r line; do
-    printf '%s\n' "$line"
-    if $REACT_TO_STALE && [[ "$line" == *"STALE_REGISTRATION:"* ]] && (( reconnects < MAX_FORCED_RECONNECTS )); then
-      reconnects=$((reconnects + 1))
-      say "stale registration seen -- restarting the Mac broker to force re-registration ($reconnects/$MAX_FORCED_RECONNECTS)"
-      restart_broker
-    fi
-  done
-}; then
+if prlctl exec "$VM_NAME" powershell -ExecutionPolicy Bypass -File "$UNC_ROOT\\revit\\dev-tooling\\redeploy-and-verify.ps1" "${PS_ARGS[@]}" 2>&1; then
   echo
   say "ready. Harness command:"
   echo
@@ -285,7 +260,7 @@ else
   status=$?
   echo
   echo "==> FAILED -- see the PowerShell output above." >&2
-  echo "    If it reconnected with 0 documents and a document was expected, a blocking dialog" >&2
+  echo "    If it registered 0 documents with no refresh following and a document was expected, a blocking dialog" >&2
   echo "    (e.g. Revit's trial splash) may be wedging the idle loop -- check the screen:" >&2
   echo "    prlctl capture \"$VM_NAME\" --file /tmp/vm-screen.png" >&2
   exit "$status"

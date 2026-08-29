@@ -21,9 +21,21 @@ namespace MCPBridge.RevitAdapter;
 /// (never the local, per-user copy path, which is regenerated on every fresh local copy).</item>
 /// <item>Saved, non-workshared -&gt; UNC-resolve <see cref="IDocumentAdapter.PathName"/> (so a
 /// mapped drive letter and its UNC-equivalent path hash identically), then hash it.</item>
-/// <item>Unsaved (no path at all) -&gt; a fresh `tmp-&lt;guid&gt;` minted on every call to
-/// <see cref="Resolve"/>. This method has no notion of "the same document across two calls" --
-/// see <see cref="ResolveCached"/> for the caller-side caching every real call site actually uses.</item>
+/// <item>Unsaved (no path at all) -&gt; `tmp-&lt;hash&gt;` derived from a per-process salt plus the
+/// document's TITLE -- stable across every wrapper object and every call for as long as the
+/// document is open. This closed PRD §09's known identity gap the moment document_id routing made
+/// it load-bearing: Revit hands back a DIFFERENT managed wrapper for the same document per API
+/// entry point (measured; see DocumentSnapshotHandler), so the previous fresh-GUID-per-wrapper
+/// scheme meant `register` advertised tmp-A while a routing lookup computed tmp-B for the same
+/// live document, and routing to an unsaved document could never match. Titles work as the key
+/// because Revit auto-uniquifies open documents' titles (Project1, Project2, ... -- observed
+/// live), and a title only changes on save, at which point the id becomes path-derived anyway.
+/// The per-process salt keeps ids session-scoped (the documented tmp- contract) and distinct
+/// across concurrent Revit instances whose unsaved documents share default titles. Known accepted
+/// nuance: close an unsaved document and later create another with the same title in the same
+/// session, and the id (and thus workspace) is reused -- session-scoped scratch, consistent with
+/// tmp/'s own retention story. An unsaved document whose Title accessor yields nothing falls back
+/// to a fresh GUID per resolution (then held stable per wrapper by <see cref="ResolveCached"/>).</item>
 /// </list>
 ///
 /// Hashing: SHA-256 of the case-normalized (invariant-lowercase) path, hex-encoded and truncated
@@ -44,7 +56,7 @@ public static class DocumentIdentity
         {
             if (string.IsNullOrEmpty(document.CentralModelPath))
             {
-                return MintTmp();
+                return TmpFromTitle(document);
             }
 
             var resolvedCentral = uncResolver.Resolve(document.CentralModelPath);
@@ -57,7 +69,44 @@ public static class DocumentIdentity
             return "doc-" + HashNormalizedPath(resolved);
         }
 
-        return MintTmp();
+        return TmpFromTitle(document);
+    }
+
+    /// <summary>
+    /// Per-process salt for unsaved-document ids -- what keeps a tmp- id session-scoped (its
+    /// documented contract) and distinct across concurrent Revit instances whose unsaved documents
+    /// share default titles, while staying identical across wrapper objects within this process.
+    ///
+    /// A NESTED holder type, not a field on DocumentIdentity, and that is load-bearing: reading a
+    /// static field of DocumentIdentity runs its type initializer, which also constructs
+    /// <see cref="Cache"/> -- a ConditionalWeakTable over the Revit `Document` type, which forces
+    /// RevitAPI.dll to load. Tier-1 test hosts cannot load that assembly (mixed-mode; see
+    /// RevitApiReference), and `Resolve` is exactly the member the tier-1 identity tests exercise --
+    /// it deliberately touches no DocumentIdentity static so those tests never trip the initializer.
+    /// A nested type's initializer runs independently, so the salt is readable without RevitAPI.
+    /// (Found the fast way: a plain static field took the whole DocumentIdentityTests class down
+    /// with TypeInitializationException on the first run.)
+    /// </summary>
+    private static class UnsavedIdentitySalt
+    {
+        internal static readonly string Value = Guid.NewGuid().ToString("N");
+    }
+
+    private static string TmpFromTitle(IDocumentAdapter document)
+    {
+        string? title;
+        try
+        {
+            title = document.Title;
+        }
+        catch
+        {
+            title = null; // mid-transition document -- fall back to a per-resolution GUID below.
+        }
+
+        return string.IsNullOrEmpty(title)
+            ? MintTmp()
+            : "tmp-" + HashNormalizedPath(UnsavedIdentitySalt.Value + "|" + title);
     }
 
     // Process-lifetime, keyed by the live Document reference (not by path -- an unsaved document has

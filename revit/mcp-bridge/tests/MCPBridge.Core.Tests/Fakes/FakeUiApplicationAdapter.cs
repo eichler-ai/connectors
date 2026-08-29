@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using MCPBridge.RevitAdapter;
 
 namespace MCPBridge.Core.Tests.Fakes;
@@ -15,6 +16,14 @@ namespace MCPBridge.Core.Tests.Fakes;
 internal sealed class FakeUiApplicationAdapter : IUiApplicationAdapter, IDocumentCreationSource
 {
     public IUiDocumentAdapter? ActiveUiDocument { get; init; }
+
+    /// <summary>Candidates the routing error reports; empty by default.</summary>
+    public IReadOnlyList<OpenDocumentInfo> OpenDocuments { get; init; } = Array.Empty<OpenDocumentInfo>();
+
+    /// <summary>Per-test routing table for FindOpenDocument; null means "nothing else is open".</summary>
+    public Func<string, IDocumentAdapter?>? FindOpenDocumentHandler { get; init; }
+
+    public IDocumentAdapter? FindOpenDocument(string documentId) => FindOpenDocumentHandler?.Invoke(documentId);
 
     /// <summary>The adapter handed back by both creation members; null means "this test never creates one".</summary>
     public IDocumentAdapter? CreatedDocument { get; init; }

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using Autodesk.Revit.UI;
 
 namespace MCPBridge.RevitAdapter;
@@ -74,4 +75,79 @@ internal sealed class RevitUiApplicationAdapter : IUiApplicationAdapter, IRawUiA
     /// no Revit API call to make, unlike CreateProjectDocument/CreateFamilyDocument above.
     /// </summary>
     public IDocumentAdapter WrapExisting(Autodesk.Revit.DB.Document document) => new RevitDocumentAdapter(document);
+
+    /// <summary>
+    /// See <see cref="IUiApplicationAdapter.OpenDocuments"/>. Identities via
+    /// DocumentIdentity.ResolveCached -- the same shared cache the register snapshot and Publish's
+    /// workspace pathing use, so routing, list_instances, and file exchange all agree on one id for
+    /// one live document. IsActive compares §09 identities (plus reference equality as the exact-when-
+    /// it-holds fast path), mirroring DocumentSnapshotHandler's measured finding that Revit hands back
+    /// distinct wrappers for the same document across API entry points.
+    /// </summary>
+    public IReadOnlyList<OpenDocumentInfo> OpenDocuments
+    {
+        get
+        {
+            var activeDocument = _uiApplication.ActiveUIDocument?.Document;
+            var activeDocumentId = TryResolveId(activeDocument);
+            var result = new List<OpenDocumentInfo>();
+            foreach (Autodesk.Revit.DB.Document document in _uiApplication.Application.Documents)
+            {
+                if (document.IsLinked)
+                {
+                    continue; // PRD §09: linked documents get no identity and are not addressable.
+                }
+
+                var documentId = TryResolveId(document);
+                if (documentId is null)
+                {
+                    continue; // mid-transition document whose identity accessors threw -- best-effort, same as the snapshot.
+                }
+
+                var isActive = ReferenceEquals(document, activeDocument)
+                    || (activeDocumentId is not null && documentId == activeDocumentId);
+                result.Add(new OpenDocumentInfo(documentId, document.Title, isActive));
+            }
+
+            return result;
+        }
+    }
+
+    /// <summary>See <see cref="IUiApplicationAdapter.FindOpenDocument"/>.</summary>
+    public IDocumentAdapter? FindOpenDocument(string documentId)
+    {
+        foreach (Autodesk.Revit.DB.Document document in _uiApplication.Application.Documents)
+        {
+            if (document.IsLinked)
+            {
+                continue;
+            }
+
+            if (TryResolveId(document) == documentId)
+            {
+                return new RevitDocumentAdapter(document);
+            }
+        }
+
+        return null;
+    }
+
+    private static string? TryResolveId(Autodesk.Revit.DB.Document? document)
+    {
+        if (document is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            return DocumentIdentity.ResolveCached(document, new Win32UncPathResolver());
+        }
+        catch
+        {
+            // Same best-effort posture as DocumentSnapshotHandler.BuildEntry: a document
+            // mid-transition can throw from the path accessors identity resolves through.
+            return null;
+        }
+    }
 }

@@ -27,19 +27,25 @@ public static class ActiveDocumentPredicate
     ///
     /// <para>Two arms, and both are load-bearing:</para>
     /// <list type="bullet">
-    /// <item><description><paramref name="isSameDocumentReference"/> is exact when it holds,
-    /// and is the ONLY arm that can identify an unsaved document (whose id is a per-wrapper
-    /// <c>tmp-</c> GUID that need not match across call sites; see PRD §09's known gap).</description></item>
-    /// <item><description>The §09 identity comparison is path-derived, so it survives a fresh
-    /// wrapper ; the arm that actually fixes the bug in the normal, saved-document case.</description></item>
+    /// <item><description><paramref name="isSameDocumentReference"/> is exact when it holds --
+    /// kept as the fast path, and the only thing that can match a document whose identity
+    /// resolution degraded to the per-resolution GUID fallback (a Title accessor throwing
+    /// mid-transition).</description></item>
+    /// <item><description>The §09 identity comparison survives a fresh wrapper for EVERY open
+    /// document now: path-derived for saved documents, and title-derived (per-process salt) for
+    /// unsaved ones since the v1 remediation series made tmp- ids wrapper-independent.</description></item>
     /// </list>
     ///
     /// <para>
-    /// <c>tmp-</c> ids are excluded from the identity arm on purpose. Two DIFFERENT unsaved
-    /// documents can each hold a <c>tmp-</c> id, and comparing them is meaningless ; but worse,
-    /// a stale-but-equal <c>tmp-</c> id would be a FALSE POSITIVE, marking the wrong document
-    /// active. Excluding them can only ever cost a false negative (an unsaved active document
-    /// reported inactive when the wrapper check also misses), which is the safe direction.
+    /// <c>tmp-</c> ids are deliberately INCLUDED in the identity arm. They were excluded while
+    /// they were per-wrapper GUIDs (equality was meaningless and a stale match would have been a
+    /// false positive) -- but the moment the ids became stable and title-derived, the exclusion
+    /// itself resurrected the original bug for exactly the unsaved-document class: the reference
+    /// arm is measured-false across wrappers, so an unsaved ACTIVE document reported
+    /// <c>active: false</c> in every snapshot (PR #50 review finding). Two different unsaved
+    /// documents can't collide (Revit auto-uniquifies open titles), and the GUID-fallback case
+    /// can't false-positive (fresh GUIDs never compare equal), so plain equality is both correct
+    /// and safe for every id form.
     /// </para>
     /// </summary>
     /// <param name="isSameDocumentReference">Whether the two documents are the same managed object.</param>
@@ -53,12 +59,6 @@ public static class ActiveDocumentPredicate
         }
 
         if (documentId is null || activeDocumentId is null)
-        {
-            return false;
-        }
-
-        if (activeDocumentId.StartsWith("tmp-", StringComparison.Ordinal) ||
-            documentId.StartsWith("tmp-", StringComparison.Ordinal))
         {
             return false;
         }

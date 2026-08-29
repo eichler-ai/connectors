@@ -117,6 +117,7 @@ public sealed class RequestDispatcher
     {
         string executionId;
         string script;
+        string documentId;
         long maxDurationMs;
         long timeoutMs;
         bool overwriteOutputFiles;
@@ -125,6 +126,7 @@ public sealed class RequestDispatcher
         {
             executionId = request.GetRequiredString("execution_id");
             script = request.GetRequiredString("script");
+            documentId = request.GetOptionalString("document_id") ?? "";
             maxDurationMs = request.GetOptionalInt64("max_duration_ms", DefaultMaxDurationMs);
             timeoutMs = request.GetOptionalInt64("timeout_ms", DefaultTimeoutMs);
 
@@ -140,19 +142,13 @@ public sealed class RequestDispatcher
             // by accident, which is the entire point of gating them.
             confirmLifecycleActions = request.GetOptionalBool("confirm_lifecycle_actions", false);
 
-            // KNOWN LIMITATION (second live-wiring review finding, still true after PRD §09's file-exchange
-            // work): document_id is part of the wire contract (the broker always sends it) but is not read
-            // or enforced here for ROUTING -- every script still runs against whatever
-            // IUiApplicationAdapter.ActiveUiDocument happens to be (see RunScriptWorkItem below), regardless
-            // of which document_id was requested. Real per-document routing needs Application.Documents
-            // (only reachable via DocumentSnapshotHandler's raw-Revit-API path, not the
-            // IUiApplicationAdapter seam RunScriptWorkItem goes through) plus a way to select/activate the
-            // target document -- still deferred, per that file's own comment. Document identity IS now
-            // read (document.DocumentId, backed by DocumentIdentity.ResolveCached's shared cache, PRD §09)
-            // from whichever document actually ends up active, purely to build that document's exports/
-            // workspace path for Publish -- not to select which document runs. Silently ignoring a routing
-            // mismatch (rather than erroring) is a deliberate choice: single active-document Revit
-            // instances (the common case) work correctly either way.
+            // document_id now ROUTES (v1 integrated review; this closed the long-standing
+            // accepted-but-ignored gap CONVENTIONS.md's advertised-but-unimplemented clause was written
+            // about). Empty/omitted keeps the active-document behavior every existing caller relies on;
+            // a non-empty id is resolved against the §09 identities of every open document in
+            // RunScriptWorkItem below -- running against that document (with the workspace paths
+            // following it), erroring loudly with a candidates list when nothing matches, and never
+            // silently falling back to a different document than the one addressed.
         }
         catch (JsonRpcParamException ex)
         {
@@ -179,7 +175,7 @@ public sealed class RequestDispatcher
                 return ExecutionResultMessage.FromInstanceUnrecoverable(request.Id, outcome.Diagnostic!);
         }
 
-        var workTask = RunScriptWorkItemAsync(executionId, script, overwriteOutputFiles, confirmLifecycleActions);
+        var workTask = RunScriptWorkItemAsync(executionId, script, documentId, overwriteOutputFiles, confirmLifecycleActions);
 
         // PRD §06: a script finishing inside timeout_ms returns the completed result inline; one that
         // doesn't returns the current {status, execution_id} instead of hanging the call. The timeout
@@ -268,11 +264,11 @@ public sealed class RequestDispatcher
         };
     }
 
-    private Task RunScriptWorkItemAsync(string executionId, string scriptText, bool overwriteOutputFiles, bool confirmLifecycleActions)
+    private Task RunScriptWorkItemAsync(string executionId, string scriptText, string requestedDocumentId, bool overwriteOutputFiles, bool confirmLifecycleActions)
     {
         var runTask = _bridge.RunAsync(
             executionId,
-            uiApplication => RunScriptWorkItem(executionId, scriptText, overwriteOutputFiles, confirmLifecycleActions, uiApplication));
+            uiApplication => RunScriptWorkItem(executionId, scriptText, requestedDocumentId, overwriteOutputFiles, confirmLifecycleActions, uiApplication));
 
         // Hard requirement 2: ANY fault on this Task -- including ExternalEventRaiseDeniedException, which
         // RunScriptWorkItem below never gets a chance to observe or react to since it never even ran --
@@ -302,6 +298,7 @@ public sealed class RequestDispatcher
     private ScriptExecutionOutcome RunScriptWorkItem(
         string executionId,
         string scriptText,
+        string requestedDocumentId,
         bool overwriteOutputFiles,
         bool confirmLifecycleActions,
         IUiApplicationAdapter uiApplication)
@@ -329,8 +326,52 @@ public sealed class RequestDispatcher
             return ScriptExecutionOutcome.Cancelled("");
         }
 
+        // ROUTING (PRD §05's {instance_id, document_id} addressing, implemented for real -- v1
+        // integrated review). Empty/omitted document_id keeps the active document, today's behavior
+        // for every existing caller. A non-empty id resolves against the §09 identities of every open
+        // document: the active document is the fast path (and the only case with a genuine UIDocument
+        // to expose); a match on any other open document routes there with UIDocument deliberately
+        // null -- Revit has no UIDocument for a background document, and handing the active one's to a
+        // script addressed elsewhere would be exactly the wrong-document hazard routing exists to end.
+        // No match errors loudly with a candidates list, never a silent fallback (CONVENTIONS.md's
+        // advertised-but-unimplemented clause -- this parameter is why it exists).
         var uiDocument = uiApplication.ActiveUiDocument;
         var document = uiDocument?.Document;
+        if (requestedDocumentId.Length != 0 && document?.DocumentId != requestedDocumentId)
+        {
+            document = uiApplication.FindOpenDocument(requestedDocumentId);
+            uiDocument = null;
+            if (document is null)
+            {
+                var candidates = uiApplication.OpenDocuments;
+                var diagnostic = DiagnosticRecord.Create(
+                    DiagnosticSeverity.Error,
+                    "document-not-found",
+                    DiagnosticSource.Execution,
+                    $"execution {executionId} could not run: no open document in this instance has document_id '{requestedDocumentId}'.",
+                    detail: new Dictionary<string, object?>
+                    {
+                        ["execution_id"] = executionId,
+                        ["requested_document_id"] = requestedDocumentId,
+                        ["open_documents"] = candidates
+                            .Select(c => new Dictionary<string, object?>
+                            {
+                                ["document_id"] = c.DocumentId,
+                                ["title"] = c.Title,
+                                ["active"] = c.IsActive,
+                            })
+                            .ToList(),
+                    },
+                    remedy: new[]
+                    {
+                        "Pick a document_id from open_documents in this error's detail (or call list_instances for the same list), then retry.",
+                        "If the document was open a moment ago, it may have been closed or re-identified after a save -- list_instances reflects the current state.",
+                    });
+                _executionManager.CompleteError(executionId, _now(), diagnostic, stdOut: null);
+                return ScriptExecutionOutcome.Failed(new InvalidOperationException(diagnostic.Message), "");
+            }
+        }
+
         if (document is null)
         {
             var diagnostic = DiagnosticRecord.Create(
@@ -339,17 +380,18 @@ public sealed class RequestDispatcher
                 DiagnosticSource.Execution,
                 $"execution {executionId} could not run: this Revit instance has no active document.",
                 detail: new Dictionary<string, object?> { ["execution_id"] = executionId },
-                remedy: new[] { "Open a document in this Revit instance and retry." });
+                remedy: new[] { "Open a document in this Revit instance and retry, or address an open document explicitly by document_id." });
             _executionManager.CompleteError(executionId, _now(), diagnostic, stdOut: null);
             return ScriptExecutionOutcome.Failed(new InvalidOperationException(diagnostic.Message), "");
         }
 
-        // PRD §09: document.DocumentId is used here purely to build THIS document's imports/exports
-        // workspace paths for Publish -- not to select/route which document the script runs against
-        // (that's still whatever ActiveUiDocument already is, per the KNOWN LIMITATION comment above).
-        // Independent PR review finding: document.DocumentId (not a fresh DocumentIdentity.Resolve
-        // call here) is what makes this stable across calls -- see DocumentIdentity.ResolveCached's
-        // own doc comment for why resolving fresh on every execution was wrong.
+        // PRD §09: the workspace paths follow the ROUTED document -- document here is whichever open
+        // document the routing above selected (active by default, or the addressed one), so Publish
+        // and imports/exports always land in the workspace of the document the script actually ran
+        // against. Independent PR review finding: document.DocumentId (not a fresh
+        // DocumentIdentity.Resolve call here) is what makes this stable across calls -- see
+        // DocumentIdentity.ResolveCached's own doc comment for why resolving fresh per execution was
+        // wrong.
         var workspacePaths = WorkspacePaths.Local(document.DocumentId, _instanceId);
         workspacePaths.EnsureDirectoriesExist();
 

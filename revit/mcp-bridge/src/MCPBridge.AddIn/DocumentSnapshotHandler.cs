@@ -109,7 +109,7 @@ public sealed class DocumentSnapshotHandler : IExternalEventHandler
 
         try
         {
-            pending.TrySetResult(BuildSnapshot(app));
+            pending.TrySetResult(BuildSnapshotFor(app, _uncPathResolver));
         }
         catch (Exception ex)
         {
@@ -117,7 +117,20 @@ public sealed class DocumentSnapshotHandler : IExternalEventHandler
         }
     }
 
-    private List<RegisteredDocument> BuildSnapshot(UIApplication app)
+    /// <summary>
+    /// Builds the register document snapshot from a live UIApplication. Static and internal so the
+    /// document-event handlers (issue #30's live snapshot push -- MCPBridgeApplication subscribes
+    /// DocumentOpened/Closed/Created and ViewActivated, all of which fire ON the UI thread and so can
+    /// build a snapshot directly, no ExternalEvent detour needed) share the exact same construction as
+    /// the connect-time snapshot, rather than a second implementation that could drift.
+    /// </summary>
+    internal static List<RegisteredDocument> BuildSnapshotFor(UIApplication app, IUncPathResolver? uncPathResolver = null)
+    {
+        var resolver = uncPathResolver ?? new Win32UncPathResolver();
+        return BuildSnapshot(app, resolver);
+    }
+
+    private static List<RegisteredDocument> BuildSnapshot(UIApplication app, IUncPathResolver uncPathResolver)
     {
         var activeDocument = app.ActiveUIDocument?.Document;
 
@@ -132,17 +145,18 @@ public sealed class DocumentSnapshotHandler : IExternalEventHandler
         //     refEquals=False  activeId=doc-C1ED49972F0D4F4C  id=doc-C1ED49972F0D4F4C
         // on every snapshot -- the two wrappers differ while the §09 identities match exactly.
         //
-        // Compare the PRD §09 identity as well, which is derived from the document's path rather than
-        // from wrapper identity, and so survives a fresh wrapper. ReferenceEquals is kept as the first
-        // test because it's exact when it does hold, and because it's the only one of the two that can
-        // identify an UNSAVED document (which has no path to derive a stable id from -- see the
-        // residual limitation noted on DocumentIdentity.ResolveCached's tmp- ids below).
+        // Compare the PRD §09 identity as well, which survives a fresh wrapper for EVERY open
+        // document now -- path-derived for saved ones, title-derived (per-process salt) for unsaved
+        // ones since the v1 remediation series. ReferenceEquals is kept as the first test because
+        // it's exact when it does hold, and it's the only arm that can match a document whose
+        // identity degraded to the per-resolution GUID fallback (Title accessor threw
+        // mid-transition).
         string? activeDocumentId = null;
         if (activeDocument is not null)
         {
             try
             {
-                activeDocumentId = DocumentIdentity.ResolveCached(activeDocument, _uncPathResolver);
+                activeDocumentId = DocumentIdentity.ResolveCached(activeDocument, uncPathResolver);
             }
             catch
             {
@@ -162,13 +176,13 @@ public sealed class DocumentSnapshotHandler : IExternalEventHandler
                 continue;
             }
 
-            result.Add(BuildEntry(document, activeDocument, activeDocumentId));
+            result.Add(BuildEntry(document, activeDocument, activeDocumentId, uncPathResolver));
         }
 
         return result;
     }
 
-    private RegisteredDocument BuildEntry(Document document, Document? activeDocument, string? activeDocumentId)
+    private static RegisteredDocument BuildEntry(Document document, Document? activeDocument, string? activeDocumentId, IUncPathResolver uncPathResolver)
     {
         string? path;
         var isWorkshared = false;
@@ -193,7 +207,7 @@ public sealed class DocumentSnapshotHandler : IExternalEventHandler
             path = null;
         }
 
-        var documentId = DocumentIdentity.ResolveCached(document, _uncPathResolver);
+        var documentId = DocumentIdentity.ResolveCached(document, uncPathResolver);
 
         // The decision itself lives in Core (ActiveDocumentPredicate) rather than inline here, so it
         // can carry a regression test: this predicate was wrong in every case for the entire life of

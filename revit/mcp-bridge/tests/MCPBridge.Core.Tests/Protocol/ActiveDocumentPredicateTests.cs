@@ -22,10 +22,11 @@ public class ActiveDocumentPredicateTests
     }
 
     [Fact]
-    public void SameWrapperReference_IsActive_EvenForUnsavedDocumentsWithMismatchedTmpIds()
+    public void SameWrapperReference_IsActive_EvenWhenIdsDisagree()
     {
-        // The reference arm is the ONLY thing that can identify an unsaved document, precisely
-        // because its tmp- id is per-wrapper and need not match across call sites (PRD §09 gap).
+        // The reference arm is exact when it holds and covers the one id form that can still
+        // disagree across wrappers: the per-resolution GUID fallback for a document whose Title
+        // accessor threw mid-transition.
         Assert.True(ActiveDocumentPredicate.IsActive(true, "tmp-aaa", "tmp-bbb"));
     }
 
@@ -49,15 +50,25 @@ public class ActiveDocumentPredicateTests
         Assert.False(ActiveDocumentPredicate.IsActive(false, "doc-A", null));
     }
 
+    [Fact]
+    public void DifferentWrappers_SameTmpIdentity_IsActive()
+    {
+        // PR #50 review finding (F1). tmp- ids are title-derived and wrapper-independent now, so
+        // an unsaved active document's two wrappers resolve to the SAME tmp- id -- and the old
+        // exclusion of tmp- ids from the identity arm resurrected the original always-false bug
+        // for exactly the unsaved-document class (the reference arm is measured-false across
+        // wrappers). Equality must count for every id form.
+        Assert.True(ActiveDocumentPredicate.IsActive(false, "tmp-1234567890ABCDEF", "tmp-1234567890ABCDEF"));
+    }
+
     [Theory]
-    // Two DIFFERENT unsaved documents, or one whose tmp- id was minted twice: comparing tmp-
-    // ids is meaningless, and a stale-but-equal one would mark the WRONG document active.
-    // Excluding them can only cost a false negative, which is the safe direction to fail in.
-    [InlineData("tmp-same", "tmp-same")]
+    // Different documents -- different ids, whatever the prefixes: never active. (Two different
+    // unsaved documents can't share an id: Revit auto-uniquifies open titles, and the GUID
+    // fallback mints fresh values that never compare equal.)
     [InlineData("tmp-aaa", "tmp-bbb")]
     [InlineData("doc-A", "tmp-aaa")]
     [InlineData("tmp-aaa", "doc-A")]
-    public void TmpIdsAreNeverMatchedByIdentityAlone(string documentId, string activeDocumentId)
+    public void DifferentIds_AreNotActive_WhateverThePrefix(string documentId, string activeDocumentId)
     {
         Assert.False(ActiveDocumentPredicate.IsActive(false, documentId, activeDocumentId));
     }
