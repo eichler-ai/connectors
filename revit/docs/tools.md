@@ -16,9 +16,9 @@ Design rationale for all of it: [`PRD.md`](PRD.md) §06 (execution), §07 (dialo
 | `execute_script` | yes | compile & run C# in a Revit instance |
 | `poll_execution` | yes | wait on / re-check a long-running execution |
 | `cancel_execution` | yes | cooperative cancellation of a running script |
-| `list_functions` | yes (once) | browse the reflected API: namespaces → types → members |
-| `search_functions` | yes (once) | ranked search over member names + XML docs |
-| `describe_function` | yes (once) | full signature/params/docs for one member |
+| `list_functions` | yes | browse the reflected API: namespaces → types → members |
+| `search_functions` | yes | ranked search over member names + XML docs |
+| `describe_function` | yes | full signature/params/docs for one member |
 | `get_skills` | no | the built-in agent guide for using all of the above |
 
 ### `execute_script`
@@ -33,12 +33,13 @@ Design rationale for all of it: [`PRD.md`](PRD.md) §06 (execution), §07 (dialo
 | `overwrite_output_files` | `false` | whether `Publish` may replace an existing file in `exports/` (per-file failure otherwise) |
 | `confirm_lifecycle_actions` | `false` | opt-in for the confirmation-gated members below; per-request, never cached |
 
-> **Routing caveat — current implementation.** `document_id` is accepted and used for
-> workspace (file-exchange) identity, but scripts currently run against the instance's
-> **active document**, whatever it is — per-document routing is not implemented yet and is
-> in progress (see the PRD §14 note on `RequestDispatcher`). Until it lands, make sure the
-> document you intend to touch is the active one, and treat `list_instances`' `active` flag
-> as the thing that decides what a script sees.
+> **Routing caveat — current implementation.** `document_id` is accepted but currently
+> **ignored**: scripts always run against the instance's **active document**, and the
+> file-exchange workspace is likewise derived from the active document, not the requested
+> one — per-document routing is not implemented yet and is in progress (see the PRD §14
+> note on `RequestDispatcher`). Until it lands, make sure the document you intend to touch
+> is the active one, and treat `list_instances`' `active` flag as the thing that decides
+> what a script sees.
 
 Results are one of two shapes (all three execution tools share it): a terminal result —
 `status` `success` / `error` / `cancelled` / `unrecoverable`, with `output`, `notices[]`,

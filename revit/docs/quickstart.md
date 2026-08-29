@@ -20,14 +20,24 @@ All commands below run from the **repo root**, in PowerShell.
 ## 1. Build the add-in (Windows, needs Revit installed)
 
 The projects reference `RevitAPI.dll` from `C:\Program Files\Autodesk\Revit <version>` —
-they only build on a machine with Revit.
+they only build on a machine with Revit. They multi-target `net10.0-windows` (built against
+Revit 2027's install) and `net8.0-windows` (Revit 2025's), so the plain solution build
+needs **both** versions installed — a missing version's leg fails with compile errors, not
+a warning:
 
 ```powershell
 dotnet build revit\mcp-bridge\MCPBridge.sln -c Release
 ```
 
-Multi-targeted: `net10.0-windows` output is the Revit 2027 build, `net8.0-windows` the
-Revit 2025 build.
+With only one Revit version installed, build just its leg by overriding the target-framework
+list (`-f` isn't accepted for solution builds):
+
+```powershell
+# Revit 2027 only:
+dotnet build revit\mcp-bridge\MCPBridge.sln -c Release -p:TargetFrameworks=net10.0-windows
+# Revit 2025 only:
+dotnet build revit\mcp-bridge\MCPBridge.sln -c Release -p:TargetFrameworks=net8.0-windows
+```
 
 ## 2. Build the broker
 
@@ -63,7 +73,10 @@ Compress-Archive "$($stage.FullName)\*" "$env:TEMP\mcpbridge-release.zip" -Force
 This deploys the add-in to every detected supported Revit version's Addins folder, puts the
 broker in `%LOCALAPPDATA%\Programs\MCPBridge\`, registers `revit` with Claude Code
 (`claude mcp add revit -- ...\mcp-server.exe --mode local`), and writes a Programs & Features
-uninstall entry. Re-running it is safe (idempotent); `-Uninstall` removes it.
+uninstall entry. Re-running it is safe — though note the installer's "already up to date"
+no-op short-circuit applies to the release-download path only; with `-LocalPackagePath` every
+run redeploys, by design (there is no version to compare a local zip against). `-Uninstall`
+removes it.
 
 ## 5. Run a first script
 
