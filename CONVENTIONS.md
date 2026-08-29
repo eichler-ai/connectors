@@ -44,6 +44,18 @@ Every connector's local state lives under a per-connector namespaced root, never
 
 Anywhere a connector automatically resolves something on the agent's behalf (a suppressed dialog, an auto-dismissed warning, a cancelled execution), that resolution gets reported back in the result — never handled invisibly. The agent needs to detect when something was papered over, not just receive a clean-looking success that hides what actually happened. Established for the Revit connector; applies to any connector that does automatic resolution of host-app UI/state on the agent's behalf.
 
+This includes **advertised-but-unimplemented interface dimensions**: if a tool schema accepts a parameter the implementation doesn't honor yet, the implementation must error loudly on a mismatch, never silently fall back to a different target. The Revit connector's `document_id` shipped as accepted-but-ignored — and the sharper lesson is that this wasn't an oversight: the gap was found in review and the silent active-document fallback was *kept as a deliberate choice* ("single-document instances work correctly either way"), which quietly turned into a standing hazard as the agent-facing docs continued to advertise real addressing. A known gap that fails loudly stays a known gap; one that silently succeeds gets forgotten and then trusted. Wire the loud mismatch guard the moment the schema advertises the dimension, even when real support comes later.
+
+## Engineering invariant: the acting connection's identity travels with the action
+
+In any broker that maps stable logical identities (an instance id, a session id) onto transient connections, **no action keyed by the logical identity alone may mutate lifecycle state** — attach, detach, deregister, settle, escalate. The acting connection's identity (a connection pointer, a registration epoch/fencing token) must be checked at the point of mutation, because a stale connection's deferred effects can land arbitrarily late: a half-open socket's teardown may run minutes after the peer has already redialed and re-registered the same logical identity, and an identity-keyed teardown then destroys the live replacement.
+
+Established the hard way in the Revit MCP Server, where one root cause expressed itself four independent ways before being named (a teardown race deregistering live instances, a prune split-brain, a per-drop socket/goroutine leak, and a phantom execution falsely latching a healthy instance unrecoverable). The broker's `DetachInstance(id, conn)` / `Registry.RemoveIfEpoch(id, epoch)` shapes are the reference implementations.
+
+## Engineering invariant: every retained record and buffer has a stated bound
+
+Any per-request record, replay buffer, or accumulation a long-running process retains must carry an explicit eviction story — a count cap, an age, or a documented reason it cannot grow (and "the process restarts eventually" is not one). State the bound in a comment at the declaration, mirroring it across components that hold the same data on both ends of a wire (the Revit broker's settled-execution cache deliberately mirrors the add-in's replay ring buffer's last-N/last-10-minutes shape). The v1 review's unbounded-growth findings fit one pattern: the record was added for a feature, and no one owned the question of when it leaves.
+
 ## Origin
 
 Established while designing and building the Revit connector — see `revit/docs/PRD.md` for the full reasoning behind each of these, and `.claude/skills/revit-connector-development/` for the day-to-day development process built around them. Extract further conventions here as more connectors are built.
