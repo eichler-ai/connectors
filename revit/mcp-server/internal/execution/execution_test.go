@@ -1080,13 +1080,20 @@ func TestPollAnsweredUnknownByCurrentConn_SettlesAndFreesInstance(t *testing.T) 
 // genuinely be executing.
 func TestUnknownAnswerFromDisplacedConn_DoesNotSettle(t *testing.T) {
 	release := make(chan struct{})
+	pollEntered := make(chan struct{})
+	var pollEnteredOnce sync.Once
 	_, connA := newFakeInstance(t, func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
 		var p map[string]any
 		json.Unmarshal(params, &p)
 		if method == "execute_script" {
 			return Result{Status: StatusRunning, ExecutionID: p["execution_id"].(string)}, nil
 		}
-		<-release // hold the poll answer until the test has displaced this conn
+		// Signal the poll has genuinely reached this handler (PR review: a
+		// fixed sleep made the race probabilistic -- the displacement could
+		// land before the poll was even forwarded, passing vacuously), then
+		// hold the answer until the test has displaced this conn.
+		pollEnteredOnce.Do(func() { close(pollEntered) })
+		<-release
 		return nil, &transport.RPCError{
 			Code:    transport.ErrCodeInvalidParams,
 			Message: "unknown execution_id",
@@ -1107,9 +1114,10 @@ func TestUnknownAnswerFromDisplacedConn_DoesNotSettle(t *testing.T) {
 		_, _ = m.PollExecution(context.Background(), start.ExecutionID, 2000)
 	}()
 
-	// Displace connA while its poll answer is still pending, then let the
-	// stale answer land.
-	time.Sleep(50 * time.Millisecond)
+	// Displace connA only once its poll is provably in flight (inside the
+	// handler, answer held), then let the stale answer land -- deterministic,
+	// no scheduler-timing dependence.
+	<-pollEntered
 	_, connB := newFakeInstance(t, func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
 		return Result{Status: StatusRunning}, nil
 	})
