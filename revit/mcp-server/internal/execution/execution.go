@@ -124,8 +124,10 @@ type Manager struct {
 	// graceMs is how long, per PRD §06 ("Cancellation starts a grace
 	// timer (default ~5-10s)"), a cancelled-but-not-yet-terminal execution
 	// gets before the broker gives up on it and flips the owning instance
-	// to unrecoverable. Overridable (tests only) so the escalation path
-	// can be exercised without a real multi-second wait.
+	// to unrecoverable — provided the connection that was asked to cancel
+	// is still the instance's current one when the timer fires (issue #47;
+	// see escalateUnrecoverable). Overridable (tests only) so the
+	// escalation path can be exercised without a real multi-second wait.
 	graceMs int
 	// afterFunc schedules f to run after d elapses, returning a handle
 	// whose Stop cancels it — the same shape as time.AfterFunc, which is
@@ -530,7 +532,11 @@ func (m *Manager) PollExecution(ctx context.Context, executionID string, timeout
 // cancellation token, or the add-in never even answered the cancel_execution
 // wire call at all (a live-but-unresponsive connection, no heartbeat yet to
 // catch it any other way) — the broker itself flips the owning instance to
-// unrecoverable, exactly like the add-in-reported StatusUnrecoverable path.
+// unrecoverable, exactly like the add-in-reported StatusUnrecoverable path,
+// PROVIDED the connection that was asked to cancel is still the instance's
+// current one when the grace period lapses (issue #47: a dropped or
+// replaced connection isn't evidence of a wedged Revit — see
+// escalateUnrecoverable's decline).
 // That escalation is scheduled here unconditionally, independent of whether
 // the wire call below succeeds, fails, or hangs: a wire-level failure on
 // *this* call must not itself assert a terminal outcome (see
@@ -569,12 +575,21 @@ func (m *Manager) CancelExecution(ctx context.Context, executionID string) (*Res
 
 // scheduleGraceEscalation arranges for instanceID to be flipped
 // unrecoverable if executionID still hasn't reached a terminal state once
-// the PRD §06 cancellation grace period lapses. A no-op at fire time if the
-// execution already settled (cooperatively cancelled, completed, or already
-// escalated) by then.
+// the PRD §06 cancellation grace period lapses — PROVIDED the connection
+// that was asked to cancel is still the instance's current one at fire
+// time. The instance's current connection (possibly nil) is captured HERE,
+// at schedule time, and travels to the mutation (CONVENTIONS.md's
+// connection-identity invariant, applied in full): "unrecoverable" is the
+// verdict on a connection that was told to cancel and didn't comply, so
+// the evidence is only valid while that same connection is still the one
+// attached. A no-op at fire time if the execution already settled
+// (cooperatively cancelled, completed, or already escalated) by then.
 func (m *Manager) scheduleGraceEscalation(instanceID, executionID string) {
+	m.mu.Lock()
+	expectedConn := m.conns[instanceID]
+	m.mu.Unlock()
 	m.afterFunc(time.Duration(m.graceMs)*time.Millisecond, func() {
-		m.escalateUnrecoverable(instanceID, executionID)
+		m.escalateUnrecoverable(instanceID, executionID, expectedConn)
 	})
 }
 
@@ -587,7 +602,7 @@ func (m *Manager) scheduleGraceEscalation(instanceID, executionID string) {
 // terminal/latch bookkeeping as a normal StatusUnrecoverable result so
 // list_instances/poll_execution/execute_script all see the instance the same
 // way regardless of which path produced it.
-func (m *Manager) escalateUnrecoverable(instanceID, executionID string) {
+func (m *Manager) escalateUnrecoverable(instanceID, executionID string, expectedConn *transport.Conn) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	rec, ok := m.executions[executionID]
@@ -595,35 +610,40 @@ func (m *Manager) escalateUnrecoverable(instanceID, executionID string) {
 		return
 	}
 
-	// DECLINE when the instance has no attached connection at fire time
-	// (issue #47, the residual sliver of #42's phantom-execution latch;
-	// CONVENTIONS.md's connection-identity invariant applied to a timer:
-	// this callback carries no connection identity of its own, so the only
-	// honest check is against the instance's current attachment at the
-	// moment of mutation). Unrecoverable means "a CONNECTED Revit didn't
-	// stop when told to" — evidence of a wedged UI thread. A DISCONNECTED
-	// instance is different evidence entirely: the connection dropped (the
-	// grace timer here was typically scheduled by max-duration auto-cancel
-	// whose wire call already failed), teardown freed the busy latch, and
-	// the add-in's redial will either answer a later poll with the real
-	// outcome or report the execution unknown — which settles the record
-	// via forwardExisting's execution_lost path. Latching here instead
-	// falsely bricked a healthy instance until a Revit restart, because
-	// the latch deliberately survives same-id reconnects. The record stays
-	// non-terminal on decline, deliberately: asserting an outcome the
-	// broker doesn't know is what the wire-failure paths already refuse to
-	// do, and both recovery paths above need the record alive to resolve.
+	// ESCALATE ONLY IF the connection captured at schedule time is non-nil
+	// AND still the instance's current one (issue #47, the residual sliver
+	// of #42's phantom-execution latch; CONVENTIONS.md's connection-identity
+	// invariant applied in full — the first version of this fix checked only
+	// "is ANY connection attached at fire time", and the independent review
+	// proved that latches a HEALTHY instance in the dominant timing: the
+	// add-in's reconnect backoff starts at 1s while grace is 10s, so a
+	// detach → cancel-in-the-gap → redial sequence has a fresh, innocent
+	// connection attached by the time the timer fires). Unrecoverable is a
+	// verdict about one specific connection — "the one that was told to
+	// cancel is still here and didn't comply", PRD §06's wedged-UI-thread
+	// evidence. A nil capture (nothing attached when the cancel was issued)
+	// or a different connection at fire time (dropped and redialed, or
+	// displaced by a re-register) is different evidence entirely: the
+	// original connection's teardown/displacement already has its own
+	// recovery paths — the #46 execution_lost settle on the first
+	// post-redial poll, or a fresh cancel against the NEW connection, which
+	// captures THAT connection and escalates it if it too doesn't comply.
+	// The record stays non-terminal on decline, deliberately: asserting an
+	// outcome the broker doesn't know is what the wire-failure paths
+	// already refuse to do, and the recovery paths above need it alive.
 	//
-	// The boundary this check must never cross: an instance whose
-	// connection IS attached but isn't answering is exactly what
-	// escalation exists for — the conns lookup, not any responsiveness
-	// heuristic, is the whole test.
-	if _, connected := m.conns[instanceID]; !connected {
-		// No path today leaves the busy latch held while conns lacks the
-		// instance (DetachInstance clears both under this same mutex), but
-		// if a future path ever did, declining escalation would otherwise
-		// remove the busy latch's only exit — same reasoning CancelExecution
-		// gives for scheduling escalation unconditionally.
+	// The boundary this check must never cross: the SAME connection
+	// attached from schedule through fire, not answering, is exactly what
+	// escalation exists for — identity, not any responsiveness heuristic,
+	// is the whole test.
+	if expectedConn == nil || m.conns[instanceID] != expectedConn {
+		// Free the busy latch if this execution still holds it. Live, not
+		// defensive, in the DISPLACED case: an identity-guarded
+		// DetachInstance for the old connection declines once a new one has
+		// attached, so nothing else clears the old execution's latch until
+		// a settle — and a declined escalation was one of the two exits.
+		// Guarded on the execution id so a newer execution's latch is
+		// never touched.
 		if m.activeByInstance[instanceID] == executionID {
 			delete(m.activeByInstance, instanceID)
 		}
