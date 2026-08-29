@@ -118,6 +118,36 @@ public class DiscoveryCacheTests
     }
 
     [Fact]
+    public void ListNamespaces_CoreNamespacesSortBeforeAddinNamespaces_RegardlessOfAlphabeticalOrder()
+    {
+        // Live finding (coverage-plan Phase A session): on a real dev VM with ~690 loaded namespaces, a
+        // straight alphabetical ORDER BY buries every Autodesk.Revit.* namespace behind dozens of pages of
+        // third-party add-in noise. Fixed to sort core-kind namespaces first; this is the regression guard.
+        //
+        // MCPBridge.Core.Discovery (DiscoveryCache's own namespace) sorts ALPHABETICALLY BEFORE
+        // MCPBridge.Discovery.Tests.Fixtures ('C' < 'D') -- so the two are synced below with kinds swapped
+        // from what their names suggest (Core.Discovery as "addin", Fixtures as "core"), which means this
+        // test can only pass if kind, not alphabetical position, actually drives the order. MCPBridge.Core.dll
+        // has no XML-doc sidecar of its own; its types still count as documented via Sync's own
+        // no-sidecar-still-documented fallback, so they still appear in ListNamespaces() to sort against.
+        using var cache = NewCache();
+        cache.Sync(new[]
+        {
+            ("addin", typeof(DiscoveryCache).Assembly),
+            ("core", typeof(Widget).Assembly),
+        });
+
+        var namespaces = cache.ListNamespaces().Select(n => n.Namespace).ToList();
+        var coreIndex = namespaces.IndexOf(FixturesNamespace);
+        var addinIndex = namespaces.FindIndex(n => n.StartsWith("MCPBridge.Core", System.StringComparison.Ordinal));
+
+        Assert.True(coreIndex >= 0, "expected the core-kind fixtures namespace to be present");
+        Assert.True(addinIndex >= 0, "expected the addin-kind MCPBridge.Core.* namespace to be present");
+        Assert.True(coreIndex < addinIndex,
+            $"core namespace at index {coreIndex} should sort before addin namespace at index {addinIndex} despite 'MCPBridge.Core...' being alphabetically earlier");
+    }
+
+    [Fact]
     public void ListTypeNames_ScopesToOneNamespaceOnly()
     {
         using var cache = NewCache();
@@ -256,5 +286,27 @@ public class DiscoveryCacheTests
         var results = cache.Search("Do", namespaceFilter: FixturesNamespace);
 
         Assert.DoesNotContain(results, r => r.Member.Namespace != FixturesNamespace);
+    }
+
+    [Fact]
+    public void Search_CoreAssembly_OutranksAnOtherwiseIdenticalAddinMatch()
+    {
+        // Live finding (coverage-plan Phase A session): an unscoped search_functions query can return
+        // zero core-Revit hits at all, buried under third-party add-in noise -- nothing in Search() used
+        // the assemblies.kind column any query path already carried. Same fixture assembly synced under
+        // both kinds in SEPARATE caches, so this isolates CoreBoost itself rather than depending on two
+        // genuinely different assemblies happening to collide on a type/member name.
+        using var coreCache = NewCache();
+        coreCache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+        using var addinCache = NewCache();
+        addinCache.Sync(new[] { ("addin", typeof(Widget).Assembly) });
+
+        var coreScore = coreCache.Search("Gadget.Run", namespaceFilter: null).OrderByDescending(r => r.Score).First().Score;
+        var addinScore = addinCache.Search("Gadget.Run", namespaceFilter: null).OrderByDescending(r => r.Score).First().Score;
+
+        Assert.True(coreScore > addinScore, $"core match ({coreScore}) must outrank an otherwise-identical addin match ({addinScore})");
+        // The boost must stay small enough to never cross a tier boundary (tiers are 500 points apart) --
+        // a weak core match must never leapfrog a genuinely stronger add-in match in a lower-numbered tier.
+        Assert.True(coreScore - addinScore < 1.0, $"boost ({coreScore - addinScore}) is large enough to risk crossing a tier boundary");
     }
 }
