@@ -18,10 +18,36 @@ namespace MCPBridge.RevitAdapter;
 internal sealed class RevitTransactionAdapter : ITransactionAdapter
 {
     private readonly Transaction _transaction;
+    private bool _disposed;
 
     public RevitTransactionAdapter(Transaction transaction)
     {
         _transaction = transaction;
+    }
+
+    /// <summary>
+    /// See <see cref="ITransactionAdapter.Dispose"/>. Idempotent via the flag; the underlying call is
+    /// additionally swallowed because Revit's disposal semantics after a mid-failure unwind are
+    /// undocumented, and a throw here must never mask the original failure being reported -- the
+    /// object is finalizer-backed regardless, so a failed eager dispose only means the old
+    /// (pre-#34) reclamation timing for that one object.
+    /// </summary>
+    public void Dispose()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        _disposed = true;
+        try
+        {
+            _transaction.Dispose();
+        }
+        catch
+        {
+            // Swallow by contract -- see the doc comment.
+        }
     }
 
     public IReadOnlyList<FailureSummary> CommitFailures { get; private set; } = Array.Empty<FailureSummary>();

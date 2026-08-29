@@ -48,4 +48,16 @@ internal sealed class FakeTransactionAdapter : ITransactionAdapter
             throw new InvalidOperationException("simulated rollback failure");
         }
     }
+
+    /// <summary>Makes Dispose throw -- pins issue #34's contract that a dispose failure never masks the original outcome nor stops later entries' handling.</summary>
+    public bool ThrowOnDispose { get; set; }
+
+    public void Dispose()
+    {
+        Calls.Add("Dispose");
+        if (ThrowOnDispose)
+        {
+            throw new InvalidOperationException("simulated dispose failure");
+        }
+    }
 }

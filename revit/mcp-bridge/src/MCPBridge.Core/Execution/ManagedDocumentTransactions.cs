@@ -189,9 +189,19 @@ internal sealed class ManagedDocumentTransactions
         }
 
         var group = document.CreateTransactionGroup(_transactionName);
-        group.Start();
+        try
+        {
+            group.Start();
+        }
+        catch
+        {
+            // group.Start() itself threw (PR review): nothing tracks this adapter and nothing else
+            // will ever dispose it -- same only-terminal-point reasoning as the catch below.
+            SafeDispose(null, group);
+            throw;
+        }
 
-        ITransactionAdapter transaction;
+        ITransactionAdapter? transaction = null;
         try
         {
             transaction = document.CreateTransaction(_transactionName);
@@ -200,8 +210,11 @@ internal sealed class ManagedDocumentTransactions
         catch
         {
             // The group started but the transaction did not, so nothing tracks the group and nothing
-            // would ever close it. Undo it here rather than leaking an open group into the session.
+            // would ever close it. Undo it here rather than leaking an open group into the session --
+            // and dispose both adapters (issue #34): nothing will ever track them, so this catch is
+            // their only terminal point.
             SafeRollBack(group.RollBack);
+            SafeDispose(transaction, group);
             throw;
         }
 
@@ -306,6 +319,11 @@ internal sealed class ManagedDocumentTransactions
             // is told, and that is where it is tracked.
             SafeRollBack(_entries[i].Transaction.RollBack);
             SafeRollBack(_entries[i].Group.RollBack);
+
+            // Issue #34: dispose strictly after this entry's terminal handling. Also the disposal
+            // path for entries CommitAll deliberately left populated after an unexpected escape --
+            // the executor's finally net routes them here.
+            SafeDispose(_entries[i].Transaction, _entries[i].Group);
         }
 
         _entries.Clear();
@@ -394,10 +412,14 @@ internal sealed class ManagedDocumentTransactions
                     anyCommittedDocumentMayBeReal = true;
                 }
 
+                // Issue #34: terminal for this entry (committed, failures read, described) -- release
+                // the native pair now instead of waiting on finalizers.
+                SafeDispose(entry.Transaction, entry.Group);
                 continue;
             }
 
             (attempt.RollbackVerified ? rolledBack : unknownState).Add(SafeDescribe(entry));
+            SafeDispose(entry.Transaction, entry.Group);
             failure = attempt.Error;
             index++;
             break;
@@ -416,6 +438,7 @@ internal sealed class ManagedDocumentTransactions
             var transactionUnwound = SafeRollBack(entry.Transaction.RollBack);
             var groupUnwound = SafeRollBack(entry.Group.RollBack);
             (transactionUnwound && groupUnwound ? rolledBack : unknownState).Add(SafeDescribe(entry));
+            SafeDispose(entry.Transaction, entry.Group);
         }
 
         return ManagedDocumentCommitResult.Failed(failure, failures, committed, rolledBack, unknownState, anyCommittedDocumentMayBeReal);
@@ -575,6 +598,35 @@ internal sealed class ManagedDocumentTransactions
         catch
         {
             return false;
+        }
+    }
+
+    /// <summary>
+    /// Disposes one entry's pair, each half independently guarded (issue #34). Called strictly AFTER
+    /// the entry's terminal handling -- commit/rollback settled, CommitFailures read, SafeDescribe
+    /// taken -- so a disposed native object is never subsequently touched. The adapters' own Dispose
+    /// already swallows (Revit's mid-failure disposal semantics are undocumented, and a dispose
+    /// failure must never mask the original failure being reported); the try/catch here additionally
+    /// guards the null-conditional plumbing itself, and a dispose failure is deliberately NOT added
+    /// to the §01 report: it changes nothing an agent could act on -- the object simply reverts to
+    /// the pre-#34 finalizer-timed reclamation.
+    /// </summary>
+    private static void SafeDispose(ITransactionAdapter? transaction, ITransactionGroupAdapter? group)
+    {
+        try
+        {
+            transaction?.Dispose();
+        }
+        catch
+        {
+        }
+
+        try
+        {
+            group?.Dispose();
+        }
+        catch
+        {
         }
     }
 }
