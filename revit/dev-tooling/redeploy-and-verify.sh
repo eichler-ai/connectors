@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# One-shot dev-loop helper: kill Revit, deploy freshly-built DLLs, relaunch (optionally with a
-# fixture document), restart the standalone Mac broker to force a fresh add-in reconnect, and wait
-# until that reconnect actually lands -- all of it. Replaces a sequence that used to take five-plus
-# separate manual steps (each its own round trip) per verification cycle.
+# One-shot dev-loop helper: optionally build, close Revit gracefully, deploy freshly-built DLLs,
+# relaunch (optionally with a pristine-copy fixture document), ensure a healthy standalone Mac
+# broker (restarting only if the current one is missing/dead/mismatched), and wait until the
+# add-in's registration actually lands with the expected document count -- all of it. Replaces a
+# sequence that used to take five-plus separate manual steps (each its own round trip) per cycle.
 #
 # Document-launch mode (issue #32): opening a document always loses the race against the add-in's
 # one-shot register snapshot (issue #30) -- the add-in connects and registers 0 documents before
@@ -16,13 +17,37 @@
 # the first stale registration in the common case. All of this is removable scaffolding around
 # issue #30 -- if the add-in ever pushes live document-snapshot updates, delete it.
 #
-# Prerequisite: build first (this script does not build) --
-#   prlctl exec "<vm>" cmd /c "dotnet build \\psf\connectors\revit\mcp-bridge\MCPBridge.sln --no-incremental"
+# Run this from the MAC HOST (it drives the VM via prlctl); the VM must be running, with the
+# launcher agent (launcher-agent.ps1) resident -- this script only drops signal files for it.
 #
 # Usage:
 #   revit/dev-tooling/redeploy-and-verify.sh [options]
 #
+# Examples:
+#   # Full cycle: build, redeploy, relaunch with a pristine fixture copy, verify the document
+#   # actually registered (--marker proves the deployed DLL contains that string, i.e. is fresh):
+#   revit/dev-tooling/redeploy-and-verify.sh --build --marker 'SomeStringUniqueToYourChange' \
+#     --doc-source 'C:\dev\fixtures\harness-live.rvt' --doc-dest 'C:\dev\fixtures\work.rvt'
+#
+#   # Fast relaunch-only cycle, no document (DLLs already deployed):
+#   revit/dev-tooling/redeploy-and-verify.sh --skip-copy
+#
+#   # Redeploy DLLs only, leave the running Revit alone:
+#   revit/dev-tooling/redeploy-and-verify.sh --skip-relaunch
+#
+# Output contract: streams all progress live; the VM side prints "REDEPLOY_RESULT: PASS|FAIL" and
+# this script exits 0 only on PASS (on PASS it also prints a ready-to-paste `go test -tags harness`
+# command with the right remote-mode flags). On FAIL, diagnose in this order: the [redeploy] lines
+# above the failure (they include Revit's last connection.log lines), C:\dev\launcher-agent.log on
+# the VM (did the close/launch signals parse and fire?), and `prlctl capture "<vm>" --file x.png`
+# (a modal dialog wedging Revit's idle loop is invisible in every log but obvious on screen).
+#
 # Options (all optional; defaults match this project's own dev environment):
+#   --build                  Build MCPBridge.sln on the VM first (--no-incremental). Without this,
+#                             the build outputs already under bin\Debug\<tfm>\ are what get deployed
+#                             -- pass --marker to prove they contain your change. (If building
+#                             manually instead, beware: prlctl exec mangles \\psf\... paths in
+#                             double-quoted bash strings -- single-quote them.)
 #   --vm NAME                Parallels VM name (default: "Windows 11")
 #   --mac-bind IP            This Mac's address the VM can reach (default: auto-detected, first
 #                             10.211.55.x address from ifconfig -- override if that ever changes)
@@ -40,7 +65,7 @@
 #   --skip-copy               Only close/relaunch/verify -- DLLs already deployed
 #   --skip-relaunch            Only redeploy DLLs -- don't touch the running Revit instance
 #   --skip-broker-restart      Don't touch the standalone Mac broker at all: skips both the initial
-#                              restart AND the reactive stale-registration restarts described above
+#                              ensure/restart AND the reactive stale-registration restarts above
 #                              (so document-launch mode will likely FAIL with it -- only combine
 #                              them if something else forces the post-open reconnect). Use when the
 #                              add-in is already connected to a broker that will pick up the new
@@ -66,9 +91,17 @@ TIMEOUT_SEC="150"
 SKIP_COPY=false
 SKIP_RELAUNCH=false
 SKIP_BROKER_RESTART=false
+BUILD=false
+
+# All progress lines carry elapsed seconds so a slow phase is visible at a glance (and so future
+# tuning has real numbers to work from). Typical healthy run: build ~60-90s if --build; close ~5s;
+# launch-to-first-registration ~55s (cold Revit start dominates, nothing here can compress it);
+# each reactive reconnect cycle ~8s.
+say() { echo "==> [${SECONDS}s] $*"; }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --build) BUILD=true; shift ;;
     --vm) VM_NAME="$2"; shift 2 ;;
     --mac-bind) MAC_BIND="$2"; shift 2 ;;
     --app-data-dir) APP_DATA_DIR="$2"; shift 2 ;;
@@ -82,7 +115,9 @@ while [[ $# -gt 0 ]]; do
     --skip-copy) SKIP_COPY=true; shift ;;
     --skip-relaunch) SKIP_RELAUNCH=true; shift ;;
     --skip-broker-restart) SKIP_BROKER_RESTART=true; shift ;;
-    -h|--help) sed -n '2,50p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    # Print the whole comment header verbatim -- length-proof, unlike a hardcoded line range
+    # (which silently truncated once already when the header grew).
+    -h|--help) awk 'NR>1 { if (!/^#/) exit; sub(/^# ?/,""); print }' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 1 ;;
   esac
 done
@@ -138,12 +173,59 @@ restart_broker() {
   return 0   # don't abort: the registration wait downstream will surface the failure with context
 }
 
-if ! $SKIP_BROKER_RESTART; then
-  echo "==> restarting the standalone Mac broker (fresh primary, confirmed via broker.json)"
-  restart_broker
+# True iff broker.json currently names a live process running with exactly our arguments.
+broker_is_healthy() {
+  local pid cmd
+  pid="$(sed -n 's/.*"pid": *\([0-9][0-9]*\).*/\1/p' "$APP_DATA_DIR/broker.json" 2>/dev/null | head -1)"
+  [[ -n "$pid" ]] && cmd="$(ps -p "$pid" -o command= 2>/dev/null)" && [[ "$cmd" == *"$BROKER_ARGS_PATTERN"* ]]
+}
+
+# The VM's UNC alias for this repo's share can FLIP between \\psf\connectors and \\Mac\connectors
+# across VM restarts (documented SKILL.md gotcha; PR #33 review finding when this was hardcoded).
+# Resolve it fresh each run -- costs well under a second and removes the single most likely
+# environment-drift failure. tr strips the CR that Windows output carries.
+say "resolving the VM's UNC alias for the connectors share"
+# Deliberately NO double quotes inside the -Command string: prlctl exec STRIPS them (confirmed
+# live -- a quoted "\\psf\connectors" arrived as a bare token and PowerShell tried to run it as a
+# command; a new variant of the documented inline--Command corruption class). Every token here is
+# spaceless, so unquoted parses fine on the PowerShell side. `|| true` because under set -e a
+# prlctl failure would otherwise kill the script before the actionable error below can print.
+UNC_ROOT="$(prlctl exec "$VM_NAME" powershell -Command 'if (Test-Path \\psf\connectors\revit) { Write-Output \\psf\connectors } elseif (Test-Path \\Mac\connectors\revit) { Write-Output \\Mac\connectors }' | tr -d '\r' || true)"
+if [[ -z "$UNC_ROOT" ]]; then
+  echo "the VM resolves neither \\\\psf\\connectors nor \\\\Mac\\connectors -- check the share mapping:" >&2
+  echo "  prlctl list \"$VM_NAME\" --info | grep -A2 'Host Shared Folders'" >&2
+  exit 1
+fi
+say "share resolves as $UNC_ROOT"
+
+if $BUILD; then
+  say "building MCPBridge.sln on the VM (--no-incremental)"
+  # powershell, not cmd /c: prlctl exec + cmd mangles \\...\ UNC paths (documented gotcha,
+  # reconfirmed live while writing this flag -- the path arrived as \psf\... and MSBuild failed
+  # with 'project file does not exist'). Filter to errors + the summary lines: MSBuild warning
+  # blocks (e.g. MSB3277 reference conflicts) ran to 2.3MB on a real run of this repo's solution;
+  # the Warning(s) count still shows, rerun by hand if you need the detail.
+  if ! prlctl exec "$VM_NAME" powershell -Command "dotnet build '$UNC_ROOT\revit\mcp-bridge\MCPBridge.sln' --no-incremental" | grep -E ': error |Build succeeded|Build FAILED|Warning\(s\)|Error\(s\)|Time Elapsed' ; then
+    echo "==> BUILD FAILED -- rerun the dotnet build by hand for full output" >&2
+    exit 1
+  fi
 fi
 
-PS_ARGS=(-Tfm "$TFM" -AddinsVersion "$REVIT_VERSION" -TimeoutSec "$TIMEOUT_SEC")
+if ! $SKIP_BROKER_RESTART; then
+  # Ensure-not-churn: a healthy primary already running with our exact arguments is reused as is
+  # -- restarting it would drop the add-in's live connection for no benefit (a relaunch produces
+  # its fresh registration from Revit's side, and document-mode reconnects are handled reactively
+  # below). Anything else -- no broker, dead pid in broker.json, or a primary running with
+  # different arguments -- gets the full guarded restart.
+  if broker_is_healthy; then
+    say "standalone Mac broker already healthy (matching args, live pid) -- reusing it"
+  else
+    say "restarting the standalone Mac broker (fresh primary, confirmed via broker.json)"
+    restart_broker
+  fi
+fi
+
+PS_ARGS=(-SrcRoot "$UNC_ROOT\\revit\\mcp-bridge\\src" -Tfm "$TFM" -AddinsVersion "$REVIT_VERSION" -TimeoutSec "$TIMEOUT_SEC")
 [[ -n "$DOC_SOURCE" ]] && PS_ARGS+=(-DocSource "$DOC_SOURCE")
 [[ -n "$DOC_DEST" ]] && PS_ARGS+=(-DocDest "$DOC_DEST")
 [[ -n "$MARKER" ]] && PS_ARGS+=(-Marker "$MARKER")
@@ -163,20 +245,20 @@ fi
 # large for the ps1's -TimeoutSec) and more restarts won't help.
 MAX_FORCED_RECONNECTS=5
 
-echo "==> running redeploy-and-verify.ps1 on the VM (one prlctl exec call, output streamed live)"
-if prlctl exec "$VM_NAME" powershell -ExecutionPolicy Bypass -File '\\psf\connectors\revit\dev-tooling\redeploy-and-verify.ps1' "${PS_ARGS[@]}" 2>&1 | {
+say "running redeploy-and-verify.ps1 on the VM (one prlctl exec call, output streamed live)"
+if prlctl exec "$VM_NAME" powershell -ExecutionPolicy Bypass -File "$UNC_ROOT\\revit\\dev-tooling\\redeploy-and-verify.ps1" "${PS_ARGS[@]}" 2>&1 | {
   reconnects=0
   while IFS= read -r line; do
     printf '%s\n' "$line"
     if $REACT_TO_STALE && [[ "$line" == *"STALE_REGISTRATION:"* ]] && (( reconnects < MAX_FORCED_RECONNECTS )); then
       reconnects=$((reconnects + 1))
-      echo "==> stale registration seen -- restarting the Mac broker to force re-registration ($reconnects/$MAX_FORCED_RECONNECTS)"
+      say "stale registration seen -- restarting the Mac broker to force re-registration ($reconnects/$MAX_FORCED_RECONNECTS)"
       restart_broker
     fi
   done
 }; then
   echo
-  echo "==> ready. Harness command:"
+  say "ready. Harness command:"
   echo
   echo "cd revit/test-harness && go test -tags harness ./... -v -run <TestName> \\"
   echo "  -broker-exe \"$BROKER_EXE\" \\"

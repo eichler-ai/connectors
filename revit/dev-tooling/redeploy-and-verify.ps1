@@ -7,9 +7,10 @@
 # own signal files rather than reimplementing close/launch here, so the graceful-close/pristine-copy
 # behavior that agent already gets right (issue #26) isn't duplicated or allowed to drift out of sync.
 #
-# Deploy: this file is read directly off the shared folder via `-File \\psf\connectors\...` --
-# nothing to copy into place first, unlike launcher-agent.ps1 (which has to be a long-lived resident
-# process, this one is not).
+# Deploy: this file is read directly off the shared folder via `-File <unc-root>\revit\...` (the
+# wrapper resolves the current \\psf\ / \\Mac\ alias fresh each run -- it can flip across VM
+# restarts) -- nothing to copy into place first, unlike launcher-agent.ps1 (which has to be a
+# long-lived resident process, this one is not).
 #
 # Document-launch mode (-DocSource/-DocDest) additionally depends on the WRAPPER for the one thing
 # this script cannot do from the VM side: forcing the add-in to re-register after the document
@@ -21,21 +22,27 @@
 # produces a fresh registration (issue #32). Run standalone without the wrapper, document-launch
 # mode will keep reporting STALE_REGISTRATION until something else forces a reconnect.
 
+# Output contract: every progress line is prefixed "[redeploy +<elapsed>s]"; the very last line is
+# "REDEPLOY_RESULT: PASS" or "REDEPLOY_RESULT: FAIL", and the exit code matches (0/1). PASS in a
+# document launch means a registration with the expected document count was actually observed in
+# connection.log -- not merely that Revit started.
 param(
+    # Default is only a fallback for running this file by hand -- the wrapper always passes the
+    # alias it resolved (\\psf\ vs \\Mac\ can flip across VM restarts).
     [string]$SrcRoot = '\\psf\connectors\revit\mcp-bridge\src',
     [string]$Tfm = 'net10.0-windows',
     [string]$AddinsVersion = '2027',
-    [string]$DocSource = '',
-    [string]$DocDest = '',
-    [string]$Marker = '',
+    [string]$DocSource = '',   # pristine fixture .rvt (VM path); copied fresh over DocDest on every launch
+    [string]$DocDest = '',     # working-copy .rvt actually opened; given alone, opened directly (no pristine refresh)
+    [string]$Marker = '',      # if set, FAIL unless the DEPLOYED MCPBridge.Core.dll contains this string (stale-build guard)
     # 150s default, not a rounder-looking 60-90s: a live-measured cold Revit launch on this VM took
     # ~49s just to reach RunConnectionLoop (before any connection attempt at all), confirmed via
     # C:\dev\launcher-agent.log's own started-pid timestamp vs. connection.log's RunConnectionLoop
     # line -- a tight timeout here fails on nothing but Revit's own ordinary startup time.
     [int]$TimeoutSec = 150,
     [int]$MinDocuments = -1,   # -1 = auto: 1 if DocDest given, else 0 (see resolution below)
-    [switch]$SkipCopy,
-    [switch]$SkipRelaunch,
+    [switch]$SkipCopy,         # skip the DLL deploy -- close/relaunch/verify only
+    [switch]$SkipRelaunch,     # skip close/relaunch/wait -- deploy DLLs only, no verification
     # The interactive user Revit/the add-in/the launcher agent actually run as. Deliberately NOT
     # $env:APPDATA/$env:LOCALAPPDATA -- this whole script runs via `prlctl exec`, which executes as
     # NT AUTHORITY\SYSTEM (SKILL.md's own documented gotcha), so those environment variables resolve
@@ -54,7 +61,10 @@ $addinsDir = Join-Path $userProfile "AppData\Roaming\Autodesk\Revit\Addins\$Addi
 
 if ($MinDocuments -lt 0) { $MinDocuments = if ($DocDest) { 1 } else { 0 } }
 
-function Say([string]$msg) { Write-Output "[redeploy] $msg" }
+# Elapsed-seconds prefix on every line: phase costs stay visible at a glance (cold Revit launch
+# ~50s is the expected dominant chunk of any relaunch cycle -- see the wrapper's own timing notes).
+$scriptStart = Get-Date
+function Say([string]$msg) { Write-Output "[redeploy +$([int]((Get-Date) - $scriptStart).TotalSeconds)s] $msg" }
 
 # Drops a signal file the way the launcher agent's own doc comment asks callers to (its SETTLE
 # GUARD section): write under a non-matching name, then rename into place, so the agent's poll loop
@@ -162,10 +172,26 @@ function Wait-ForFreshConnection([string]$LogPath, [int]$MinDocuments, [int]$Tim
                 $stream.Seek($startLength, [System.IO.SeekOrigin]::Begin) | Out-Null
                 $reader = New-Object System.IO.StreamReader($stream)
                 $newContent = $reader.ReadToEnd()
+                # Advance by what was actually CONSUMED (stream position after ReadToEnd), not the
+                # Get-Item length snapshotted before the read (PR #33 review finding): the log can
+                # grow between that snapshot and the read completing, and advancing only to the
+                # stale snapshot would re-read -- and re-emit STALE_REGISTRATION markers for --
+                # the overlap on the next iteration, burning the wrapper's reconnect budget on
+                # phantoms. And if the read caught a PARTIAL last line (writer mid-append), hold
+                # that fragment back: advance only past the last complete line and re-read the
+                # fragment next iteration, so a registration line can never be half-consumed and
+                # thereby missed entirely.
+                $consumed = $stream.Position
+                $lastNewline = $newContent.LastIndexOf("`n")
+                if ($lastNewline -lt $newContent.Length - 1) {
+                    $partialTail = $newContent.Substring($lastNewline + 1)
+                    $consumed -= [System.Text.Encoding]::UTF8.GetByteCount($partialTail)
+                    $newContent = $newContent.Substring(0, $lastNewline + 1)
+                }
+                $startLength = $consumed
             } finally {
                 $stream.Dispose()
             }
-            $startLength = $currentLength
 
             foreach ($line in ($newContent -split "`r?`n")) {
                 if ($line -match 'connected: auth\+register succeeded.*,\s*(?<n>\d+) document') {
@@ -188,7 +214,7 @@ function Wait-ForFreshConnection([string]$LogPath, [int]$MinDocuments, [int]$Tim
                     # $matchedLine at the call site, turning a timeout into a spurious PASS. Both
                     # happened on this fix's own first live run; direct console writes bypass the
                     # pipeline and stream immediately.
-                    [Console]::Out.WriteLine("[redeploy] STALE_REGISTRATION: fresh registration reports $n document(s), need >= $MinDocuments -- a broker restart is required to force re-registration")
+                    [Console]::Out.WriteLine("[redeploy +$([int]((Get-Date) - $scriptStart).TotalSeconds)s] STALE_REGISTRATION: fresh registration reports $n document(s), need >= $MinDocuments -- a broker restart is required to force re-registration")
                 }
             }
             if ($timedOut) { return $null }
