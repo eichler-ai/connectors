@@ -33,13 +33,18 @@ Design rationale for all of it: [`PRD.md`](PRD.md) §06 (execution), §07 (dialo
 | `overwrite_output_files` | `false` | whether `Publish` may replace an existing file in `exports/` (per-file failure otherwise) |
 | `confirm_lifecycle_actions` | `false` | opt-in for the confirmation-gated members below; per-request, never cached |
 
-> **Routing caveat — current implementation.** `document_id` is accepted but currently
-> **ignored**: scripts always run against the instance's **active document**, and the
-> file-exchange workspace is likewise derived from the active document, not the requested
-> one — per-document routing is not implemented yet and is in progress (see the PRD §14
-> note on `RequestDispatcher`). Until it lands, make sure the document you intend to touch
-> is the active one, and treat `list_instances`' `active` flag as the thing that decides
-> what a script sees.
+> **Routing.** `document_id` genuinely routes: the script runs against the open document
+> whose identity matches it — the active document or any background one — and the
+> file-exchange workspace follows the routed document. Omitting it (or `""`) runs against
+> the active document. An id matching no open document fails loudly with
+> `document-not-found`, whose `detail.open_documents` lists every addressable document
+> (id, title, active flag) so you can correct without a `list_instances` round trip. One
+> asymmetry to know: `UIDocument` is only non-null in script scope when the routed
+> document is the active one — Revit has no UIDocument for a background document — so a
+> script addressed at a background document should use `Document`, not `UIDocument`.
+> `list_instances` stays current on its own: the add-in pushes a fresh document snapshot
+> on every document open/close/create/activate, so the ids it reports are live, not a
+> connect-time snapshot.
 
 Results are one of two shapes (all three execution tools share it): a terminal result —
 `status` `success` / `error` / `cancelled` / `unrecoverable`, with `output`, `notices[]`,

@@ -44,8 +44,8 @@ Two facts that shape everything below:
 
 **The add-in dials out and retries on its own**, so start order doesn't matter and a broker restart
 heals itself. **If something isn't connected, wait a few seconds and re-check** rather than reporting
-a failure. On each connect the add-in sends a snapshot of the documents open *at that instant* — not
-a live feed, so `documents[]` lags a document opened later.
+a failure. `documents[]` is live: the add-in pushes a fresh snapshot on every document
+open/close/create/activate, so a just-opened document appears within moments.
 
 ## Addressing: instances and versions
 
@@ -70,7 +70,11 @@ surfaces. Scripts are always explicitly targeted, so they're unaffected. Discove
 ## Running a script
 
 `execute_script` takes `instance_id`, `document_id`, `script`, and optional `timeout_ms`,
-`max_duration_ms`, `overwrite_output_files` and `confirm_lifecycle_actions`. `return` a value and it
+`max_duration_ms`, `overwrite_output_files` and `confirm_lifecycle_actions`. `document_id` routes:
+the script runs against that document — active or background — and its workspace follows it. An
+unknown id fails with `document-not-found` plus an `open_documents` candidates list; omitted means
+the active document. `UIDocument` is null unless the routed document is the active one — use
+`Document` when addressing a background document. `return` a value and it
 comes back as `output`:
 
 ```csharp
@@ -232,9 +236,10 @@ Each document gets a workspace with `exports/` and `imports/`. Both directions g
 filesystem, not through MCP, so size is not a constraint. **Never hard-code the paths** — read them
 from the globals; the workspace root has changed before.
 
-**Revit → you.** Write the file, then `Publish` it. Published files come back in the result's
-`files[]` with a path you can open directly. Each entry carries its own `status`: publishing onto a
-name that already exists **fails that file** unless you pass `overwrite_output_files: true`.
+**Revit → you.** Write the file, then `Publish` it. Published files come back in `files[]`, each
+with its own `status`; publishing onto an existing name **fails that file** unless you pass
+`overwrite_output_files: true`. Paths are Windows-native — with a broker on another machine
+(remote mode), map them through the shared folder yourself; path rewriting isn't built yet.
 
 ```csharp
 var p = System.IO.Path.Combine(ExportsDirectory, "rooms.csv");
@@ -281,28 +286,24 @@ Pick one from `candidates` and pass its `instance_id`. Every discovery response 
 
 ## When something isn't working
 
-**`list_instances` is your entry point**, but it reports *successful connections only* — a Revit that
-never connected is simply absent, with no reason given. For that, ask a human to click
-**MCP Bridge → Status** on the Revit ribbon: it shows that instance's id, whether it's connected and
-to which broker, and the loaded build.
+**`list_instances` reports successful connections only** — a Revit that never connected is simply
+absent. For the why, ask a human to click **MCP Bridge → Status** on the Revit ribbon (instance id,
+connection state and broker, loaded build).
 
 | Symptom | Most likely cause | What to do |
 |---|---|---|
 | `instances[]` empty | Revit not running, or the add-in didn't load | Wait a few seconds and re-check (the add-in retries on a backoff). If it stays empty, ask the user to confirm Revit is open and check **MCP Bridge → Status**. |
-| Instance present, `documents[]` empty | Document still opening, a modal dialog is blocking Revit, or the snapshot predates the open | Wait and re-check. A dialog needs a human to dismiss it. |
+| Instance present, `documents[]` empty | Document still opening, or a modal dialog is blocking Revit | Wait and re-check. A dialog needs a human to dismiss it. |
 | Script stays `pending` | Revit's UI thread is blocked — usually a modal dialog, or the user is mid-edit | Don't retry; a second call just returns `busy`. Ask the user to check for an open dialog. |
 | `status: "unresponsive"` | Revit stopped answering heartbeats | Wait; if it persists, Revit needs attention from the user. |
 | `status: "unrecoverable"` | A prior script ignored cancellation | Nothing you send will run. Revit must be restarted; the instance gets a new `instance_id`. |
-| Script fails with `CS0103`/`CS1503`/`CS0246` | A compile error, not an infrastructure problem | Fix the script. `CS0246` almost always means an unqualified Revit type — only `System` is imported, so write `Autodesk.Revit.DB.Wall` or add `using Autodesk.Revit.DB;`. Use `describe_function` to check an overload rather than guessing at a `CS1503`. |
+| Script fails with `CS0103`/`CS1503`/`CS0246` | A compile error, not infrastructure | Fix the script. `CS0246` usually means an unqualified Revit type — only `System` is imported, so write `Autodesk.Revit.DB.Wall` or add a `using`. Check overloads with `describe_function` rather than guessing at a `CS1503`. |
 | Error `code` is `script-api-denied` | You used something flatly rejected — most often opening your own `Transaction` | See "What you may not do". Nothing ran and nothing changed; no argument lifts this, the script has to change. |
-| Error `code` is `script-lifecycle-confirmation-required` | You used a gated document-lifecycle or worksharing member without confirming | Nothing ran and nothing changed. If the action is genuinely intended, resend the **identical** call with `confirm_lifecycle_actions: true`; otherwise drop that call. The `message` names every gated member you used. |
+| Error `code` is `script-lifecycle-confirmation-required` | A gated lifecycle/worksharing member without confirmation | Nothing ran. If genuinely intended, resend the **identical** call with `confirm_lifecycle_actions: true`. The `message` names every gated member used. |
 
-For a human debugging deeper, the add-in always writes `connection.log` and `startup-errors.log` to
-`%LOCALAPPDATA%\Connectors\Revit\` on the machine running Revit, regardless of local/remote mode. The
-broker's own discovery file, `broker.json`, lives there too in local mode (Revit and the broker on the
-same machine); in remote mode (broker on a different machine, e.g. this project's own Mac+Parallels
-dev setup) `broker.json` moves to the shared drive instead — ask a human where that's configured if you
-need it.
+For a human debugging deeper: the add-in writes `connection.log` and `startup-errors.log` to
+`%LOCALAPPDATA%\Connectors\Revit\` on the machine running Revit. `broker.json` lives there too in
+local mode; in remote mode it moves to the shared drive — ask a human where that's configured.
 
 ## Quick reference
 

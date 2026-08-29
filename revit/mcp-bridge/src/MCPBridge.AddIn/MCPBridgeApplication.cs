@@ -54,6 +54,7 @@ public sealed class MCPBridgeApplication : IExternalApplication
 
             CreateStatusRibbonButton(application);
             DialogSuppressionHandler.Register(application, TryLogDiagnostic);
+            SubscribeDocumentEvents(application);
 
             return Result.Succeeded;
         }
@@ -100,11 +101,89 @@ public sealed class MCPBridgeApplication : IExternalApplication
 
     public Result OnShutdown(UIControlledApplication application)
     {
+        UnsubscribeDocumentEvents(application);
         DialogSuppressionHandler.Unregister(application);
         _host?.Stop();
         _host = null;
         CurrentHost = null;
         return Result.Succeeded;
+    }
+
+    /// <summary>
+    /// The live document-snapshot push that closes issue #30's one-shot-register race: PRD §05's
+    /// register document list was a snapshot taken only at connect time, so a document opened, closed,
+    /// or activated afterwards was invisible to list_instances until something forced a reconnect (the
+    /// entire reason redeploy-and-verify.sh grew its forced-broker-restart scaffolding, now removed).
+    /// Every one of these events fires ON Revit's UI thread, so the handler can build the snapshot
+    /// directly -- the exact same construction as the connect-time one (DocumentSnapshotHandler
+    /// .BuildSnapshotFor), no ExternalEvent detour -- and hand it to BridgeHost.PushRegisterRefresh,
+    /// whose write is serialized with every other socket write. Bursts (opening a document fires
+    /// Created/Opened plus a ViewActivated) just push a few registers in a row; the broker's Register
+    /// replaces the entry each time, so coalescing would buy nothing but a timer to own.
+    /// </summary>
+    private void SubscribeDocumentEvents(UIControlledApplication application)
+    {
+        application.ControlledApplication.DocumentOpened += OnDocumentOpened;
+        application.ControlledApplication.DocumentCreated += OnDocumentCreated;
+        application.ControlledApplication.DocumentClosed += OnDocumentClosed;
+        application.ViewActivated += OnViewActivated;
+    }
+
+    private void UnsubscribeDocumentEvents(UIControlledApplication application)
+    {
+        application.ControlledApplication.DocumentOpened -= OnDocumentOpened;
+        application.ControlledApplication.DocumentCreated -= OnDocumentCreated;
+        application.ControlledApplication.DocumentClosed -= OnDocumentClosed;
+        application.ViewActivated -= OnViewActivated;
+    }
+
+    private void OnDocumentOpened(object? sender, Autodesk.Revit.DB.Events.DocumentOpenedEventArgs e) =>
+        PushSnapshotFromApplicationEvent(sender);
+
+    private void OnDocumentCreated(object? sender, Autodesk.Revit.DB.Events.DocumentCreatedEventArgs e) =>
+        PushSnapshotFromApplicationEvent(sender);
+
+    private void OnDocumentClosed(object? sender, Autodesk.Revit.DB.Events.DocumentClosedEventArgs e) =>
+        PushSnapshotFromApplicationEvent(sender);
+
+    private void OnViewActivated(object? sender, Autodesk.Revit.UI.Events.ViewActivatedEventArgs e)
+    {
+        // ViewActivated's sender is the live UIApplication itself -- the active document may have
+        // changed, which flips the snapshot's per-document active flag.
+        if (sender is UIApplication uiApplication)
+        {
+            PushSnapshot(uiApplication);
+        }
+    }
+
+    private void PushSnapshotFromApplicationEvent(object? sender)
+    {
+        // Application-level events' sender is the ApplicationServices.Application; a UIApplication is
+        // constructible from it (the documented way to reach UI state from an application event).
+        if (sender is Autodesk.Revit.ApplicationServices.Application app)
+        {
+            PushSnapshot(new UIApplication(app));
+        }
+    }
+
+    private void PushSnapshot(UIApplication uiApplication)
+    {
+        try
+        {
+            var host = _host;
+            if (host is null || !host.IsConnected)
+            {
+                return; // no live connection -- the next connect's own register carries the state
+            }
+
+            host.PushRegisterRefresh(DocumentSnapshotHandler.BuildSnapshotFor(uiApplication));
+        }
+        catch (Exception ex)
+        {
+            // A refresh push must never turn a document open/close into a UI-thread exception --
+            // logged, per PRD §01, never rethrown into Revit's event dispatch.
+            TryLogDiagnostic($"document snapshot push failed: {ex}");
+        }
     }
 
     /// <summary>

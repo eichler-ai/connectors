@@ -12,15 +12,12 @@
 # restarts) -- nothing to copy into place first, unlike launcher-agent.ps1 (which has to be a
 # long-lived resident process, this one is not).
 #
-# Document-launch mode (-DocSource/-DocDest) additionally depends on the WRAPPER for the one thing
-# this script cannot do from the VM side: forcing the add-in to re-register after the document
-# finishes opening (the one-shot snapshot race, issue #30 -- and the VM launcher agent's own forced
-# reconnect can't help either, it restarts the local-mode broker, a no-op for a remote-mode
-# connection). When a fresh registration arrives short of -MinDocuments, this script emits a
-# "[redeploy] STALE_REGISTRATION:" line; redeploy-and-verify.sh streams this output live and
-# restarts the Mac-side broker each time it sees one, which drops the add-in's connection and
-# produces a fresh registration (issue #32). Run standalone without the wrapper, document-launch
-# mode will keep reporting STALE_REGISTRATION until something else forces a reconnect.
+# Document-launch mode (-DocSource/-DocDest) needs nothing special any more: the add-in pushes a
+# live document-snapshot refresh ("register refreshed: N document(s)" in connection.log) the moment
+# a document finishes opening (issue #30's fix), and this script's registration wait accepts that
+# line the same as a connect-time register. The old flow -- a STALE_REGISTRATION marker emitted here,
+# with redeploy-and-verify.sh reacting by force-restarting the Mac-side broker per marker (issue
+# #32's workaround) -- is deleted; this file works standalone in document mode now.
 
 # Output contract: every progress line is prefixed "[redeploy +<elapsed>s]"; the very last line is
 # "REDEPLOY_RESULT: PASS" or "REDEPLOY_RESULT: FAIL", and the exit code matches (0/1). PASS in a
@@ -184,9 +181,9 @@ function Wait-ForFreshConnection([string]$LogPath, [int]$MinDocuments, [int]$Tim
                 # Advance by what was actually CONSUMED (stream position after ReadToEnd), not the
                 # Get-Item length snapshotted before the read (PR #33 review finding): the log can
                 # grow between that snapshot and the read completing, and advancing only to the
-                # stale snapshot would re-read -- and re-emit STALE_REGISTRATION markers for --
-                # the overlap on the next iteration, burning the wrapper's reconnect budget on
-                # phantoms. And if the read caught a PARTIAL last line (writer mid-append), hold
+                # stale snapshot would re-read the overlap on the next iteration -- duplicate
+                # processing of lines already judged. And if the read caught a PARTIAL last line
+                # (writer mid-append), hold
                 # that fragment back: advance only past the last complete line and re-read the
                 # fragment next iteration, so a registration line can never be half-consumed and
                 # thereby missed entirely.
@@ -203,27 +200,21 @@ function Wait-ForFreshConnection([string]$LogPath, [int]$MinDocuments, [int]$Tim
             }
 
             foreach ($line in ($newContent -split "`r?`n")) {
-                if ($line -match 'connected: auth\+register succeeded.*,\s*(?<n>\d+) document') {
+                # Two line shapes satisfy the wait, both carrying a document count:
+                #   connected: auth+register succeeded ... N document(s)   -- the connect-time register
+                #   register refreshed: N document(s) ...                  -- the live snapshot push the
+                # add-in sends on document open/close/create/activate (issue #30's fix). The second is
+                # what usually completes a document-launch cycle now: the add-in connects with 0
+                # documents while the .rvt is still opening, then pushes the refresh the moment the
+                # open completes -- no broker restart involved. (This function once emitted a
+                # STALE_REGISTRATION marker here for redeploy-and-verify.sh to react to with forced
+                # Mac-broker restarts -- issue #32's workaround for the one-shot snapshot race. That
+                # scaffolding is deleted, as its own comments always said it should be once the add-in
+                # pushed live snapshot updates.)
+                if ($line -match 'connected: auth\+register succeeded.*,\s*(?<n>\d+) document' -or
+                    $line -match 'register refreshed:\s*(?<n>\d+) document') {
                     $n = [int]$Matches.n
                     if ($n -ge $MinDocuments) { return $line }
-                    # A fresh registration arrived, but WITHOUT the expected document(s) -- the
-                    # one-shot snapshot race (issue #30): the add-in connected before the document
-                    # finished opening, and nothing refreshes the snapshot until the connection
-                    # itself drops. This script cannot fix that from the VM side: in remote mode
-                    # the add-in is connected to the MAC-side broker, which only the Mac can
-                    # restart (the VM launcher agent's own forced reconnect, issue #26, restarts
-                    # the local-mode broker -- a no-op for a remote-mode connection). So emit a
-                    # machine-readable marker; redeploy-and-verify.sh streams this output live and
-                    # restarts its broker each time it sees one, forcing the add-in to reconnect
-                    # and re-register (issue #32). Harmless noise when nothing is listening.
-                    #
-                    # [Console]::Out, NOT Say/Write-Output: inside a function, the output stream IS
-                    # the return value, so Write-Output here would (a) never reach the wrapper until
-                    # the function returned -- defeating the live reaction entirely -- and (b) pollute
-                    # $matchedLine at the call site, turning a timeout into a spurious PASS. Both
-                    # happened on this fix's own first live run; direct console writes bypass the
-                    # pipeline and stream immediately.
-                    [Console]::Out.WriteLine("[redeploy +$([int]((Get-Date) - $scriptStart).TotalSeconds)s] STALE_REGISTRATION: fresh registration reports $n document(s), need >= $MinDocuments -- a broker restart is required to force re-registration")
                 }
             }
             if ($timedOut) { return $null }

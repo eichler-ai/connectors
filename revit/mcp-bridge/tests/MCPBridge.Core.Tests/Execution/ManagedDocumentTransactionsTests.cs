@@ -881,6 +881,10 @@ public class ManagedDocumentTransactionsTests
     private sealed class NonCreatingUiApplicationAdapter : IUiApplicationAdapter
     {
         public IUiDocumentAdapter? ActiveUiDocument => null;
+
+        public System.Collections.Generic.IReadOnlyList<OpenDocumentInfo> OpenDocuments => System.Array.Empty<OpenDocumentInfo>();
+
+        public IDocumentAdapter? FindOpenDocument(string documentId) => null;
     }
 
     // ---------------------------------------------------------------------------------------------

@@ -45,6 +45,12 @@ internal sealed class BridgeHost
     private CancellationTokenSource? _stopCts;
     private Thread? _workerThread;
     private volatile TcpClient? _activeTcpClient;
+
+    // The current connection's stream, published for PushRegisterRefresh (issue #30's live snapshot
+    // push, called from Revit's UI thread on document events) -- set once auth+register has succeeded,
+    // cleared in the same finally that clears _activeTcpClient. Every write through it goes via
+    // WriteLine's _writeLock, the same serialization the heartbeat timer already relies on.
+    private volatile NetworkStream? _activeStream;
     private Timer? _timeoutTimer;
 
     // Rooted for the same reason _timeoutTimer is a field rather than a local: an unreferenced Timer is
@@ -505,6 +511,7 @@ internal sealed class BridgeHost
             }
             finally
             {
+                _activeStream = null;
                 _activeTcpClient = null;
                 _isConnected = false;
             }
@@ -701,6 +708,7 @@ internal sealed class BridgeHost
         // stale/null BrokerAddress from a previous connection.
         _brokerAddress = $"{address.Host}:{address.Port}";
         Interlocked.Exchange(ref _connectedSinceUtcTicks, DateTimeOffset.UtcNow.Ticks);
+        _activeStream = stream; // published only once the connection is fully established (auth+register done)
         _isConnected = true;
 
         // The single most important line in this log: "connected" is otherwise invisible, and its absence
@@ -817,6 +825,40 @@ internal sealed class BridgeHost
                     }
                 },
                 TaskScheduler.Default);
+        }
+    }
+
+    /// <summary>
+    /// Sends a fresh `register` (same message, same broker-side replace semantics as the connect-time
+    /// one) over the current live connection -- the live document-snapshot push that closes issue #30's
+    /// one-shot-snapshot race. Called from Revit's UI thread by MCPBridgeApplication's document-event
+    /// handlers (DocumentOpened/Closed/Created, ViewActivated); WriteLine's _writeLock serializes it
+    /// against the connection thread's own writes and the heartbeat timer, the same way the heartbeat
+    /// already shares that stream. A push racing a disconnect fails or no-ops harmlessly: the next
+    /// connect's own register carries an equally-fresh snapshot regardless.
+    /// </summary>
+    public void PushRegisterRefresh(List<RegisteredDocument> documents)
+    {
+        var stream = _activeStream;
+        if (stream is null || !_isConnected)
+        {
+            return; // no live connection -- connect-time register will carry the current snapshot
+        }
+
+        var message = new RegisterMessage(_instanceId, Process.GetCurrentProcess().Id, _revitVersion, documents);
+        try
+        {
+            WriteLine(stream, message.ToJson());
+
+            // This log line's shape is LOAD-BEARING for dev tooling: redeploy-and-verify.ps1's
+            // registration wait matches "register refreshed: ... N document(s)" as evidence the
+            // document snapshot caught up, now that the push (not a forced broker restart) is what
+            // refreshes it. Keep the count phrasing in sync with that script if either changes.
+            LogConnectionDiagnostic($"register refreshed: {documents.Count} document(s), pushed on a document open/close/activate event");
+        }
+        catch (Exception ex)
+        {
+            LogConnectionDiagnostic($"register refresh push failed (connection likely tearing down; the next reconnect's register carries the same state): {ex.Message}");
         }
     }
 

@@ -30,13 +30,16 @@ public class RequestDispatcherTests
 
     private static TransactionScriptExecutor NewScriptExecutor() => new(new RoslynScriptRunner(additionalMetadataReferencePaths: RevitApiReference.Paths));
 
-    private static JsonRpcRequest ExecuteScriptRequest(int id, string executionId, string script, long timeoutMs = 30_000, long maxDurationMs = 600_000) =>
+    // document_id defaults to the fake active document's own identity (FakeDocumentAdapter's default
+    // DocumentId) -- document_id ROUTES now, so a request naming an id no open document has would be
+    // document-not-found, and these tests' requests address the document they mean, like a real agent.
+    private static JsonRpcRequest ExecuteScriptRequest(int id, string executionId, string script, long timeoutMs = 30_000, long maxDurationMs = 600_000, string documentId = "doc-fake0000000000") =>
         Parse(new
         {
             jsonrpc = "2.0",
             id,
             method = "execute_script",
-            @params = new { execution_id = executionId, document_id = "doc-1", script, timeout_ms = timeoutMs, max_duration_ms = maxDurationMs },
+            @params = new { execution_id = executionId, document_id = documentId, script, timeout_ms = timeoutMs, max_duration_ms = maxDurationMs },
         });
 
     private static JsonRpcRequest PollRequest(int id, string executionId, long timeoutMs = 30_000) =>
@@ -49,6 +52,97 @@ public class RequestDispatcherTests
 
     private static FakeUiApplicationAdapter NewUiApp(FakeDocumentAdapter? document = null) =>
         new() { ActiveUiDocument = new FakeUiDocumentAdapter { Document = document ?? new FakeDocumentAdapter() } };
+
+    // ------------------------------------------------------------------------------------------
+    // document_id ROUTING (v1 integrated review -- the advertised-but-ignored parameter is real now)
+    // ------------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task ExecuteScript_DocumentIdOfANonActiveDocument_RoutesTheScriptToIt()
+    {
+        var executionManager = NewExecutionManager();
+        var bridge = new ExternalEventBridge<ScriptExecutionOutcome>(new FakeExternalEventRaiser());
+        var dispatcher = new RequestDispatcher(executionManager, bridge, NewScriptExecutor());
+
+        var activeDocument = new FakeDocumentAdapter { DocumentId = "doc-active000000000" };
+        var routedDocument = new FakeDocumentAdapter { DocumentId = "doc-routed000000000" };
+        var uiApp = new FakeUiApplicationAdapter
+        {
+            ActiveUiDocument = new FakeUiDocumentAdapter { Document = activeDocument },
+            FindOpenDocumentHandler = id => id == "doc-routed000000000" ? routedDocument : null,
+        };
+
+        var dispatchTask = dispatcher.DispatchAsync(ExecuteScriptRequest(1, "exec-1", "1 + 1", documentId: "doc-routed000000000"));
+        bridge.OnExecute(uiApp);
+        var json = await dispatchTask;
+
+        Assert.Contains("\"status\":\"success\"", json);
+        // The ambient transaction opened on the ROUTED document -- the script ran against the
+        // document the request addressed, and the active document was never touched. This pair of
+        // assertions is the entire point of routing: before it, the transaction always landed on the
+        // active document no matter what the request said.
+        Assert.NotNull(routedDocument.LastTransaction);
+        Assert.Equal(new[] { "Start", "Commit" }, routedDocument.LastTransaction!.Calls);
+        Assert.Null(activeDocument.LastTransaction);
+    }
+
+    [Fact]
+    public async Task ExecuteScript_UnknownDocumentId_ReportsDocumentNotFoundWithCandidates_NeverASilentFallback()
+    {
+        var executionManager = NewExecutionManager();
+        var bridge = new ExternalEventBridge<ScriptExecutionOutcome>(new FakeExternalEventRaiser());
+        var dispatcher = new RequestDispatcher(executionManager, bridge, NewScriptExecutor());
+
+        var activeDocument = new FakeDocumentAdapter { DocumentId = "doc-active000000000" };
+        var uiApp = new FakeUiApplicationAdapter
+        {
+            ActiveUiDocument = new FakeUiDocumentAdapter { Document = activeDocument },
+            OpenDocuments = new[] { new OpenDocumentInfo("doc-active000000000", "Active.rvt", IsActive: true) },
+        };
+
+        var dispatchTask = dispatcher.DispatchAsync(ExecuteScriptRequest(1, "exec-1", "1 + 1", documentId: "doc-closed999999999"));
+        bridge.OnExecute(uiApp);
+        var json = await dispatchTask;
+
+        Assert.Contains("\"status\":\"error\"", json);
+        Assert.Contains("\"code\":\"document-not-found\"", json);
+        Assert.Contains("doc-closed999999999", json);
+        // Candidates: the error names what IS addressable (PRD §01), so the agent corrects without a
+        // list_instances round trip.
+        Assert.Contains("doc-active000000000", json);
+        Assert.Contains("Active.rvt", json);
+        // The silent-fallback hazard routing exists to end: the active document must NOT have run
+        // anything.
+        Assert.Null(activeDocument.LastTransaction);
+    }
+
+    [Fact]
+    public async Task ExecuteScript_OmittedDocumentId_KeepsTheActiveDocumentBehavior()
+    {
+        var executionManager = NewExecutionManager();
+        var bridge = new ExternalEventBridge<ScriptExecutionOutcome>(new FakeExternalEventRaiser());
+        var dispatcher = new RequestDispatcher(executionManager, bridge, NewScriptExecutor());
+
+        var activeDocument = new FakeDocumentAdapter { DocumentId = "doc-active000000000" };
+        var uiApp = new FakeUiApplicationAdapter
+        {
+            ActiveUiDocument = new FakeUiDocumentAdapter { Document = activeDocument },
+        };
+
+        var request = Parse(new
+        {
+            jsonrpc = "2.0",
+            id = 1,
+            method = "execute_script",
+            @params = new { execution_id = "exec-1", script = "1 + 1", timeout_ms = 30_000, max_duration_ms = 600_000 },
+        });
+        var dispatchTask = dispatcher.DispatchAsync(request);
+        bridge.OnExecute(uiApp);
+        var json = await dispatchTask;
+
+        Assert.Contains("\"status\":\"success\"", json);
+        Assert.NotNull(activeDocument.LastTransaction);
+    }
 
     [Fact]
     public async Task ExecuteScript_Success_ReturnsSuccessResultWithOutput()
@@ -156,7 +250,10 @@ public class RequestDispatcherTests
         var bridge = new ExternalEventBridge<ScriptExecutionOutcome>(new FakeExternalEventRaiser());
         var dispatcher = new RequestDispatcher(executionManager, bridge, NewScriptExecutor());
 
-        var dispatchTask = dispatcher.DispatchAsync(ExecuteScriptRequest(1, "exec-1", "1 + 1"));
+        // document_id deliberately empty: naming an id against a document-less instance now gets the
+        // more specific document-not-found (with an empty candidates list); no-active-document is the
+        // omitted-id shape's error.
+        var dispatchTask = dispatcher.DispatchAsync(ExecuteScriptRequest(1, "exec-1", "1 + 1", documentId: ""));
         bridge.OnExecute(new FakeUiApplicationAdapter()); // ActiveUiDocument is null
 
         var json = await dispatchTask;
