@@ -212,6 +212,20 @@ throw new System.TimeoutException("failsafe: cancellation never arrived within 6
 		t.Fatalf("non-terminal status carried no execution_id, so nothing can ever poll it: %+v", started)
 	}
 
+	// The §07 v1 fallback rides this exact answer: a timed-out execute with the
+	// run still live must carry the window-inventory notice -- the tier-2 pin of
+	// the inventory's whole reachability story (its unbounded form deadlocked
+	// THIS answer; see Win32WindowInventory). Asserted on the code, per §01.
+	foundInventoryNotice := false
+	for _, n := range started.Notices {
+		if n.Code == "window-inventory-timeout-fallback" {
+			foundInventoryNotice = true
+		}
+	}
+	if !foundInventoryNotice {
+		t.Errorf("a timed-out execute with the run still pending/running should carry the window-inventory-timeout-fallback notice (PRD §07 v1); notices: %+v", started.Notices)
+	}
+
 	// Instance busy state (PRD §06): a second execute_script against the same
 	// instance names the run already in flight rather than queuing silently.
 	second := decodeToolResult[executeScriptOut](t, callExecuteScriptWith(t, c, instanceID, documentID, `return 1;`,

@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/eichler-ai/connectors/revit/test-harness/mcpclient"
 )
@@ -94,11 +95,32 @@ func closeDocumentByTitle(t *testing.T, c *mcpclient.Client, instanceID, documen
 	if deletePathAfter != "" {
 		deleteStatement = "try { System.IO.File.Delete(" + strconv.Quote(deletePathAfter) + "); } catch {}\n"
 	}
-	script := fixtureLookupPreamble(title) + `
+	// The lookup-and-close is wrapped so the file deletion runs UNCONDITIONALLY
+	// (independent PR review finding): a document already closed (or never
+	// created) must not leave the on-disk copy behind just because the by-Title
+	// lookup threw. The close failure is still reported, via the return value.
+	script := `
+string closeError = "";
+try {
+` + fixtureLookupPreamble(title) + `
 doc.Close(false);
-` + deleteStatement + `return "closed";
+} catch (System.Exception ex) { closeError = ex.Message; }
+` + deleteStatement + `return closeError.Length == 0 ? "closed" : "close-failed: " + closeError;
 `
-	raw := callExecuteScriptWith(t, c, instanceID, documentID, script, map[string]any{"confirm_lifecycle_actions": true})
+	// Transport errors are logged, not fatal -- this helper runs inside
+	// t.Cleanup, where its own never-fatal contract (see the doc comment) has
+	// to cover the CallTool layer too, not just the decode below (independent
+	// PR review finding: callExecuteScriptWith's Fatalf broke that promise).
+	raw, err := c.CallTool("execute_script", map[string]any{
+		"instance_id":               instanceID,
+		"document_id":               documentID,
+		"script":                    script,
+		"confirm_lifecycle_actions": true,
+	}, 45*time.Second)
+	if err != nil {
+		t.Logf("cleanup: close-document call for %q failed at the transport layer: %v", title, err)
+		return
+	}
 
 	var tr toolResult
 	if err := json.Unmarshal(raw, &tr); err != nil {
@@ -121,6 +143,10 @@ doc.Close(false);
 	}
 	if out.Status != "success" {
 		t.Logf("cleanup: failed to close fixture document %q: status=%q output=%s", title, out.Status, out.Output)
+		return
+	}
+	if strings.Contains(out.Output, "close-failed:") {
+		t.Logf("cleanup: closing document %q reported: %s", title, strings.TrimSpace(out.Output))
 	}
 }
 

@@ -207,8 +207,21 @@ func ensureInstanceIdle(t *testing.T, c *mcpclient.Client, instanceID, documentI
 			t.Fatalf("decode idle-probe envelope: %v\nraw: %s", err, raw)
 		}
 		if tr.IsError {
-			// e.g. instance_unrecoverable -- nothing this preamble can fix.
-			t.Skipf("instance %s cannot run scripts right now: %s", instanceID, tr.Content[0].Text)
+			text := "(no content)"
+			if len(tr.Content) > 0 {
+				text = tr.Content[0].Text
+			}
+			// SKIP only for the one state that is an environment precondition
+			// rather than a regression: unrecoverable needs a Revit restart
+			// and no suite run can fix or meaningfully fail on it. Every
+			// OTHER probe error is a real execute_script failure and must
+			// FAIL loudly -- a probe that skipped on any error would let a
+			// hard execute regression read as an all-green-with-skips run
+			// (independent PR review finding).
+			if strings.Contains(text, "instance_unrecoverable") {
+				t.Skipf("instance %s is unrecoverable (needs a Revit restart): %s", instanceID, text)
+			}
+			t.Fatalf("idle probe failed -- execute_script itself is broken, not the instance's state: %s", text)
 		}
 		var out executeScriptOut
 		if err := json.Unmarshal(tr.StructuredContent, &out); err != nil {
@@ -218,12 +231,12 @@ func ensureInstanceIdle(t *testing.T, c *mcpclient.Client, instanceID, documentI
 			return
 		}
 		if out.Status != "busy" || out.ExecutionID == "" {
-			t.Skipf("instance %s not idle (probe answered %q) and not self-healable", instanceID, out.Status)
+			t.Fatalf("idle probe answered %q (execution_id %q) -- neither idle nor a resolvable busy", out.Status, out.ExecutionID)
 		}
-		t.Logf("instance busy with stale execution %s; resolving", out.ExecutionID)
+		t.Logf("WARNING: instance busy with stale execution %s (a prior run left it unresolved); resolving before this test proceeds", out.ExecutionID)
 		resolveExecutionBestEffort(t, c, out.ExecutionID)
 	}
-	t.Skipf("instance %s still busy after two resolve attempts -- clearing it needs a human (or a Revit relaunch)", instanceID)
+	t.Fatalf("instance %s still busy after two resolve attempts -- a stale execution is not resolving; clear it manually (poll/cancel its id) or relaunch Revit", instanceID)
 }
 
 // runScript executes one script that is expected to SUCCEED.

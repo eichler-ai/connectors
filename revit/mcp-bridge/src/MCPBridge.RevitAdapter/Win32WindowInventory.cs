@@ -34,16 +34,21 @@ public sealed class Win32WindowInventory : IWindowInventory
 
     private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 
-    public IReadOnlyList<WindowInfo> EnumerateOwnedTopLevelWindows()
+    /// <summary>Placeholder for a title whose WM_GETTEXT read timed out -- reported, not dropped (PRD §01).</summary>
+    internal const string TextUnavailablePlaceholder = "<text unavailable within budget>";
+
+    public WindowInventorySnapshot EnumerateOwnedTopLevelWindows()
     {
         var currentProcessId = (uint)Environment.ProcessId;
         var results = new List<WindowInfo>();
         var budget = System.Diagnostics.Stopwatch.StartNew();
+        var truncated = false;
 
         bool TopLevelCallback(IntPtr hWnd, IntPtr lParam)
         {
             if (budget.ElapsedMilliseconds > OverallBudgetMs)
             {
+                truncated = true;
                 return false; // stop enumerating -- see OverallBudgetMs
             }
 
@@ -53,9 +58,15 @@ public sealed class Win32WindowInventory : IWindowInventory
                 return true;
             }
 
-            var title = GetWindowText(hWnd);
+            var title = GetWindowText(hWnd, out var titleTimedOut);
+            if (titleTimedOut)
+            {
+                title = TextUnavailablePlaceholder;
+                truncated = true;
+            }
+
             var className = GetClassNameOf(hWnd);
-            var childText = CollectChildText(hWnd, budget);
+            var childText = CollectChildText(hWnd, budget, ref truncated);
 
             results.Add(new WindowInfo(title, className, childText));
             return true;
@@ -68,25 +79,38 @@ public sealed class Win32WindowInventory : IWindowInventory
         catch
         {
             // Diagnosis-only feature: an empty inventory is a safe, honest degrade -- never worth
-            // risking the caller's own poll/execute response over.
-            return Array.Empty<WindowInfo>();
+            // risking the caller's own poll/execute response over. Truncated, though: an exception
+            // mid-pass means an unknown amount was never enumerated.
+            return new WindowInventorySnapshot(Array.Empty<WindowInfo>(), Truncated: true);
         }
 
-        return results;
+        return new WindowInventorySnapshot(results, truncated);
     }
 
-    private static IReadOnlyList<string> CollectChildText(IntPtr parent, System.Diagnostics.Stopwatch budget)
+    private static IReadOnlyList<string> CollectChildText(IntPtr parent, System.Diagnostics.Stopwatch budget, ref bool truncated)
     {
         var texts = new List<string>();
+        var timedOutChildren = 0;
+        var localTruncated = false;
 
         bool ChildCallback(IntPtr hWnd, IntPtr lParam)
         {
             if (budget.ElapsedMilliseconds > OverallBudgetMs)
             {
+                localTruncated = true;
                 return false; // stop enumerating -- see OverallBudgetMs
             }
 
-            var text = GetWindowText(hWnd);
+            var text = GetWindowText(hWnd, out var timedOut);
+            if (timedOut)
+            {
+                // Counted and summarized below rather than one placeholder per child: a busy UI
+                // thread times out for EVERY child, and hundreds of identical placeholder lines
+                // would bloat the §01 notice without adding information.
+                timedOutChildren++;
+                return true;
+            }
+
             if (!string.IsNullOrWhiteSpace(text))
             {
                 texts.Add(text);
@@ -101,7 +125,19 @@ public sealed class Win32WindowInventory : IWindowInventory
         }
         catch
         {
-            return Array.Empty<string>();
+            truncated = true;
+            return texts;
+        }
+
+        if (timedOutChildren > 0)
+        {
+            texts.Add($"<{timedOutChildren} child window(s): text unavailable within budget>");
+            localTruncated = true;
+        }
+
+        if (localTruncated)
+        {
+            truncated = true;
         }
 
         return texts;
@@ -118,15 +154,19 @@ public sealed class Win32WindowInventory : IWindowInventory
     // expired (wire_call_failed), and the instance stranded busy. PRD §07's "this diagnostic itself
     // is always reachable" claim only becomes true with a bounded read: SendMessageTimeout with
     // SMTO_ABORTIFHUNG (returns immediately once the thread is deemed hung) and a small per-window
-    // budget, degrading that window's text to "" -- an honest partial inventory beats a hung answer.
-    private static string GetWindowText(IntPtr hWnd)
+    // budget -- a timed-out read is REPORTED as such by the caller (timedOut out-param), never
+    // silently dropped: an honest partial inventory beats a hung answer, and honesty means saying
+    // which parts are missing.
+    private static string GetWindowText(IntPtr hWnd, out bool timedOut)
     {
         var buffer = new StringBuilder(MaxLength);
         if (SendMessageTimeoutW(hWnd, WM_GETTEXT, (IntPtr)MaxLength, buffer, SMTO_ABORTIFHUNG | SMTO_BLOCK, PerWindowTextTimeoutMs, out _) == IntPtr.Zero)
         {
+            timedOut = true;
             return "";
         }
 
+        timedOut = false;
         return buffer.ToString();
     }
 
