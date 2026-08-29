@@ -145,11 +145,12 @@ public sealed class DocumentSnapshotHandler : IExternalEventHandler
         //     refEquals=False  activeId=doc-C1ED49972F0D4F4C  id=doc-C1ED49972F0D4F4C
         // on every snapshot -- the two wrappers differ while the §09 identities match exactly.
         //
-        // Compare the PRD §09 identity as well, which is derived from the document's path rather than
-        // from wrapper identity, and so survives a fresh wrapper. ReferenceEquals is kept as the first
-        // test because it's exact when it does hold, and because it's the only one of the two that can
-        // identify an UNSAVED document (which has no path to derive a stable id from -- see the
-        // residual limitation noted on DocumentIdentity.ResolveCached's tmp- ids below).
+        // Compare the PRD §09 identity as well, which survives a fresh wrapper for EVERY open
+        // document now -- path-derived for saved ones, title-derived (per-process salt) for unsaved
+        // ones since the v1 remediation series. ReferenceEquals is kept as the first test because
+        // it's exact when it does hold, and it's the only arm that can match a document whose
+        // identity degraded to the per-resolution GUID fallback (Title accessor threw
+        // mid-transition).
         string? activeDocumentId = null;
         if (activeDocument is not null)
         {

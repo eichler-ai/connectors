@@ -126,6 +126,13 @@ public sealed class MCPBridgeApplication : IExternalApplication
         application.ControlledApplication.DocumentOpened += OnDocumentOpened;
         application.ControlledApplication.DocumentCreated += OnDocumentCreated;
         application.ControlledApplication.DocumentClosed += OnDocumentClosed;
+        // Saves matter too (PR #50 review finding): a save is the ONE event that CHANGES a
+        // document's id (tmp- -> doc- promotion on first save; a new doc- on Save-As), so without
+        // these the registry advertises a dead tmp- id until some unrelated event fires -- making
+        // the routing error's "list_instances reflects the current state" remedy false in exactly
+        // that window.
+        application.ControlledApplication.DocumentSaved += OnDocumentSaved;
+        application.ControlledApplication.DocumentSavedAs += OnDocumentSavedAs;
         application.ViewActivated += OnViewActivated;
     }
 
@@ -134,8 +141,16 @@ public sealed class MCPBridgeApplication : IExternalApplication
         application.ControlledApplication.DocumentOpened -= OnDocumentOpened;
         application.ControlledApplication.DocumentCreated -= OnDocumentCreated;
         application.ControlledApplication.DocumentClosed -= OnDocumentClosed;
+        application.ControlledApplication.DocumentSaved -= OnDocumentSaved;
+        application.ControlledApplication.DocumentSavedAs -= OnDocumentSavedAs;
         application.ViewActivated -= OnViewActivated;
     }
+
+    private void OnDocumentSaved(object? sender, Autodesk.Revit.DB.Events.DocumentSavedEventArgs e) =>
+        PushSnapshotFromApplicationEvent(sender);
+
+    private void OnDocumentSavedAs(object? sender, Autodesk.Revit.DB.Events.DocumentSavedAsEventArgs e) =>
+        PushSnapshotFromApplicationEvent(sender);
 
     private void OnDocumentOpened(object? sender, Autodesk.Revit.DB.Events.DocumentOpenedEventArgs e) =>
         PushSnapshotFromApplicationEvent(sender);

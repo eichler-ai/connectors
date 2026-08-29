@@ -628,6 +628,16 @@ internal sealed class BridgeHost
         }
 
         using var stream = tcpClient.GetStream();
+
+        // Bounded writes (PR #50 review finding): stream.Write against a wedged-but-connected broker
+        // blocks indefinitely by default -- the heartbeat's self-rearm design already documents that
+        // hazard for its own thread, but PushRegisterRefresh writes from Revit's UI THREAD (document
+        // events), where an unbounded block freezes Revit itself with no escape. A timed-out write
+        // throws IOException into the existing per-path handling: the push's catch drops the refresh
+        // (the next connect's register carries it), and a response/heartbeat write tears the
+        // connection down into the normal reconnect loop -- both the right outcome against a peer
+        // that has stopped draining the socket.
+        stream.WriteTimeout = 10_000;
         var buffer = new NdjsonLineBuffer();
         var pendingLines = new Queue<string>();
         var readBuffer = new byte[8192];
