@@ -1132,3 +1132,160 @@ func TestUnknownAnswerFromDisplacedConn_DoesNotSettle(t *testing.T) {
 		t.Fatalf("record = %+v; a stale connection's unknown answer must not settle it", rec)
 	}
 }
+
+// TestGraceEscalationDeclinesWhenTheRedialBeatsTheTimer pins issue #47 in
+// its DOMINANT timing, proved by the PR's independent review: the add-in's
+// reconnect backoff starts at 1s while the grace period is 10s, so the
+// realistic sequence is detach → cancel in the disconnected gap → redial ~1s
+// later → grace fires at T+10s with a fresh, innocent connection attached.
+// A fire-time "is anything attached" check (this fix's own first version)
+// latches exactly that healthy redialed instance; the schedule-time capture
+// declines, because the connection that was told to cancel (none — nil at
+// schedule) is not the one attached now. The connected-but-unresponsive
+// boundary (same connection from schedule through fire — escalation's whole
+// job) is pinned by TestCancelExecutionEscalatesToUnrecoverableAfterGracePeriod
+// and must not regress.
+func TestGraceEscalationDeclinesWhenTheRedialBeatsTheTimer(t *testing.T) {
+	_, conn := newFakeInstance(t, func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
+		var p map[string]any
+		json.Unmarshal(params, &p)
+		return Result{Status: StatusRunning, ExecutionID: p["execution_id"].(string)}, nil
+	})
+	m, fa := newManagerWithFakeClock()
+	m.AttachInstance("inst-1", conn)
+
+	start, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "about to vanish", 50, 0, ScriptOptions{})
+	if drec != nil {
+		t.Fatalf("ExecuteScript: %+v", drec)
+	}
+
+	// The connection drops and its teardown runs (identity-guarded detach,
+	// as serveAddIn does) before anything cancels.
+	if !m.DetachInstance("inst-1", conn) {
+		t.Fatal("test setup: detach should have applied to the current connection")
+	}
+
+	// The cancel lands in the disconnected gap: escalation is scheduled
+	// (unconditionally, by design — see CancelExecution's comment) with a
+	// NIL connection captured, and the wire forward fails fast.
+	if _, cancelDrec := m.CancelExecution(context.Background(), start.ExecutionID); cancelDrec == nil || cancelDrec.Code != "instance_disconnected" {
+		t.Fatalf("cancel of a disconnected instance's execution: %+v, want instance_disconnected", cancelDrec)
+	}
+
+	// The redial BEATS the timer — a fresh, healthy connection is attached
+	// by the time the grace period lapses. This is the interleaving the
+	// review's demonstration test proved the first fix latched on.
+	_, conn2 := newFakeInstance(t, func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
+		var p map[string]any
+		json.Unmarshal(params, &p)
+		return Result{Status: StatusSuccess, ExecutionID: p["execution_id"].(string), Output: "alive"}, nil
+	})
+	m.AttachInstance("inst-1", conn2)
+
+	fa.fireAll()
+
+	// No false latch, and the record stays non-terminal (the #46
+	// execution_lost path on the first post-redial poll is what resolves
+	// it — the broker must not assert an outcome it doesn't know)...
+	m.mu.Lock()
+	stillOpen := m.executions[start.ExecutionID]
+	latched := m.unrecoverable["inst-1"]
+	m.mu.Unlock()
+	if stillOpen == nil || IsTerminal(stillOpen.status) {
+		t.Fatalf("record = %+v; a declined escalation must leave it non-terminal", stillOpen)
+	}
+	if latched {
+		t.Fatal("a healthy redialed instance must not be latched unrecoverable by a grace timer scheduled against its predecessor")
+	}
+
+	// ...and the redialed instance is fully usable.
+	res, drec2 := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "post-redial", 1000, 0, ScriptOptions{})
+	if drec2 != nil {
+		t.Fatalf("ExecuteScript after redial: %+v — the instance must not be bricked", drec2)
+	}
+	if res.Status != StatusSuccess || res.Output != "alive" {
+		t.Errorf("res = %+v, want the redialed instance to execute normally", res)
+	}
+}
+
+// TestGraceEscalationDeclinesWhenTheConnectionWasDisplaced pins the
+// displaced-connection sibling: the cancel captured connection A, but a
+// re-register displaced A with B before the grace period lapsed (A's
+// identity-guarded teardown then declines to clear anything, so the OLD
+// execution's busy latch survives displacement). Escalation must decline —
+// A, the connection that was told to cancel, is gone — and the decline path
+// is what frees that surviving busy latch, without touching a newer
+// execution running on B.
+func TestGraceEscalationDeclinesWhenTheConnectionWasDisplaced(t *testing.T) {
+	blockCancel := make(chan struct{})
+	t.Cleanup(func() { close(blockCancel) })
+	_, connA := newFakeInstance(t, func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
+		var p map[string]any
+		json.Unmarshal(params, &p)
+		if method == "execute_script" {
+			return Result{Status: StatusRunning, ExecutionID: p["execution_id"].(string)}, nil
+		}
+		<-blockCancel // the cancel wire call never completes on A
+		return Result{Status: StatusCancelled, ExecutionID: p["execution_id"].(string)}, nil
+	})
+	m, fa := newManagerWithFakeClock()
+	m.AttachInstance("inst-1", connA)
+
+	start, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "on the doomed conn", 50, 0, ScriptOptions{})
+	if drec != nil {
+		t.Fatalf("ExecuteScript: %+v", drec)
+	}
+
+	// Cancel while A is still current: the escalation captures A.
+	cancelCtx, cancelCause := context.WithCancel(context.Background())
+	t.Cleanup(cancelCause)
+	cancelDone := make(chan struct{})
+	go func() {
+		_, _ = m.CancelExecution(cancelCtx, start.ExecutionID)
+		close(cancelDone)
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		fa.mu.Lock()
+		n := len(fa.calls)
+		fa.mu.Unlock()
+		if n > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("CancelExecution never scheduled a grace-escalation timer")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// A re-register displaces A with B before the grace period lapses.
+	_, connB := newFakeInstance(t, func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
+		var p map[string]any
+		json.Unmarshal(params, &p)
+		return Result{Status: StatusSuccess, ExecutionID: p["execution_id"].(string), Output: "from-B"}, nil
+	})
+	if displaced := m.AttachInstance("inst-1", connB); displaced != connA {
+		t.Fatalf("attach of B should displace A, displaced %v", displaced)
+	}
+
+	fa.fireAll()
+	cancelCause()
+	<-cancelDone
+
+	// No latch — the connection that was told to cancel is gone — and the
+	// old execution's busy latch (which displacement left standing) is
+	// freed by the decline: a fresh execute_script on B runs, not busy.
+	m.mu.Lock()
+	latched := m.unrecoverable["inst-1"]
+	m.mu.Unlock()
+	if latched {
+		t.Fatal("a displaced connection's lapsed grace period must not latch the instance its replacement is serving")
+	}
+	res, drec2 := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "on the new conn", 1000, 0, ScriptOptions{})
+	if drec2 != nil {
+		t.Fatalf("ExecuteScript on the displacing connection: %+v", drec2)
+	}
+	if res.Status != StatusSuccess || res.Output != "from-B" {
+		t.Errorf("res = %+v, want success from the displacing connection", res)
+	}
+}
