@@ -19,7 +19,7 @@ const UnresponsiveThreshold = 30 * time.Second
 // PruneAfterSilence is how long an instance can go without a heartbeat
 // ping before it's dropped from the registry entirely (PRD §05). A cleanly
 // disconnected instance is already removed immediately by the broker's own
-// connection-teardown path (Remove) — this sweep exists for the case PRD
+// connection-teardown path (RemoveIfEpoch) — this sweep exists for the case PRD
 // §05 actually describes: a socket that's still open but has gone quiet
 // (Revit wedged without the connection dropping), which Remove alone can
 // never catch.
@@ -51,6 +51,12 @@ type Registry struct {
 	mu         sync.RWMutex
 	instances  map[string]*Instance
 	lastPingAt map[string]time.Time
+
+	// epochs tracks a monotonically-increasing registration epoch per
+	// instance_id, minted by Register and consumed by RemoveIfEpoch — see
+	// that method for the reconnect-overlap race this exists to close.
+	epochs    map[string]uint64
+	nextEpoch uint64
 }
 
 // New creates an empty Registry.
@@ -58,6 +64,7 @@ func New() *Registry {
 	return &Registry{
 		instances:  make(map[string]*Instance),
 		lastPingAt: make(map[string]time.Time),
+		epochs:     make(map[string]uint64),
 	}
 }
 
@@ -70,14 +77,17 @@ func cloneInstance(inst *Instance) *Instance {
 	return &cp
 }
 
-// Register records or replaces the entry for inst.InstanceID. A second
-// register for an already-known instance_id (e.g. after a reconnect, per
-// PRD §05) overwrites the prior entry outright rather than merging it. now
-// is the caller-supplied clock reading used to stamp ConnectedSince when
-// inst doesn't already specify one (same caller-supplies-now convention as
+// Register records or replaces the entry for inst.InstanceID and returns
+// the registration's epoch — a token the registering connection's own
+// teardown later hands to RemoveIfEpoch, so a stale connection can never
+// remove a newer registration (see RemoveIfEpoch). A second register for
+// an already-known instance_id (e.g. after a reconnect, per PRD §05)
+// overwrites the prior entry outright rather than merging it. now is the
+// caller-supplied clock reading used to stamp ConnectedSince when inst
+// doesn't already specify one (same caller-supplies-now convention as
 // IsResponsive/PruneStale/RecordPing below — Registry itself schedules
 // nothing and so has no need for an injected clock field).
-func (r *Registry) Register(inst *Instance, now time.Time) {
+func (r *Registry) Register(inst *Instance, now time.Time) uint64 {
 	cp := cloneInstance(inst)
 	if cp.ConnectedSince.IsZero() {
 		cp.ConnectedSince = now.UTC()
@@ -86,11 +96,14 @@ func (r *Registry) Register(inst *Instance, now time.Time) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.instances[cp.InstanceID] = cp
+	r.nextEpoch++
+	r.epochs[cp.InstanceID] = r.nextEpoch
 	// A fresh register (first connect or reconnect) supersedes whatever
 	// silence preceded it — reset liveness tracking so a just-reconnected
 	// instance isn't immediately eligible for pruning based on a ping
 	// timestamp from before the reconnect.
 	delete(r.lastPingAt, cp.InstanceID)
+	return r.nextEpoch
 }
 
 // Get returns the current record for instanceID, if any.
@@ -104,13 +117,27 @@ func (r *Registry) Get(instanceID string) (*Instance, bool) {
 	return cloneInstance(inst), true
 }
 
-// Remove drops instanceID from the registry. Removing an instance that
-// isn't present is a no-op.
-func (r *Registry) Remove(instanceID string) {
+// RemoveIfEpoch drops instanceID only if epoch is still its current
+// registration epoch. This is the connection-teardown form of Remove,
+// closing a reconnect-overlap race (v1 integrated review): a half-open
+// connection's serve goroutine can observe its socket error long after the
+// add-in has redialed and re-registered the same stable instance_id, and
+// an unconditional Remove at that point would delete the live replacement's
+// entry. Each register mints a fresh epoch, so a teardown holding the
+// epoch its own connection's register minted can never remove a later
+// registration — including in the narrow interleaving where the new
+// connection's Register has run but its execution-manager attach hasn't
+// yet, which is why this is keyed on the registry's own epoch rather than
+// on the execution manager's conn-identity answer.
+func (r *Registry) RemoveIfEpoch(instanceID string, epoch uint64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.epochs[instanceID] != epoch {
+		return
+	}
 	delete(r.instances, instanceID)
 	delete(r.lastPingAt, instanceID)
+	delete(r.epochs, instanceID)
 }
 
 // List returns a snapshot of every currently-registered instance.
@@ -177,6 +204,7 @@ func (r *Registry) PruneStale(now time.Time) []string {
 	for _, id := range pruned {
 		delete(r.instances, id)
 		delete(r.lastPingAt, id)
+		delete(r.epochs, id)
 	}
 	return pruned
 }

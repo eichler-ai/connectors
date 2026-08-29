@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -57,6 +58,11 @@ var version = "dev"
 type stdinRelay struct {
 	chunks chan []byte
 
+	// closed flips true just before chunks is closed — i.e. once the
+	// physical stdin has hit EOF or a read error and no new input can ever
+	// arrive. Read via exhausted() below.
+	closed atomic.Bool
+
 	// pending carries forward data a departing turnReader couldn't finish
 	// consuming — its own buffered leftover, or a chunk it happened to
 	// read from chunks right as it was told to stop — so the NEXT
@@ -81,12 +87,29 @@ func newStdinRelay() *stdinRelay {
 				r.chunks <- chunk
 			}
 			if err != nil {
+				r.closed.Store(true)
 				close(r.chunks)
 				return
 			}
 		}
 	}()
 	return r
+}
+
+// exhausted reports whether the physical stdin has reached EOF (or a read
+// error) AND no donated data remains for a next reader — i.e. no possible
+// future input exists for any role this process could take. run()'s
+// re-election loop checks this after a secondary's turn ends: an MCP
+// client closing stdin is the documented stdio shutdown signal, and
+// without this check a secondary whose upstream also dropped would re-run
+// the election forever — every turnReader.Read returning EOF instantly,
+// re-dialing and re-authing against the primary about twice a second, a
+// leaked process for any host that closes stdin without also killing the
+// subprocess (v1 integrated review).
+func (r *stdinRelay) exhausted() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.closed.Load() && len(r.pending) == 0
 }
 
 // donate pushes data a departing turnReader couldn't finish consuming back
@@ -354,6 +377,16 @@ func run(mode, bindAddr string, port int, appDataDirOverride string, logger *log
 		if ctx.Err() != nil {
 			return nil // clean shutdown (signal), not a dropped-primary retry case
 		}
+		if relay.exhausted() {
+			// The MCP client closed stdin — its normal stdio shutdown
+			// signal, after which it is not waiting on further responses —
+			// and nothing remains for a successor role to consume. Exit
+			// instead of re-running the election: there is no session left
+			// to proxy, and retrying anyway busy-loops dialing the primary
+			// forever (see stdinRelay.exhausted).
+			logger.Printf("secondary: stdin closed and drained; exiting")
+			return nil
+		}
 		logger.Printf("secondary: upstream connection to primary ended (%v); re-attempting lock acquisition", err)
 		time.Sleep(500 * time.Millisecond) // bound the retry rate if the lock is held by something that never releases it
 	}
@@ -423,6 +456,18 @@ func runPrimary(ctx context.Context, bindAddr string, port int, dataDir string, 
 			case <-ticker.C:
 				if pruned := reg.PruneStale(time.Now()); len(pruned) > 0 {
 					logger.Printf("registry: pruned %d stale instance(s): %v", len(pruned), pruned)
+					for _, id := range pruned {
+						// Pruning removed only the registry entry; the
+						// socket may well still be open (a quiet, wedged,
+						// or suspended add-in). Close it too, or the
+						// instance lingers executable-but-invisible —
+						// absent from list_instances forever (resumed
+						// pings no-op for unregistered ids) while
+						// execute_script still routes to it. Closing runs
+						// recovery through the normal teardown-then-
+						// reconnect-then-re-register path instead.
+						execMgr.CloseInstanceConn(id)
+					}
 				}
 			}
 		}

@@ -170,7 +170,7 @@ func TestDetachInstanceRemovesFromRouting(t *testing.T) {
 	_, conn := newFakeInstance(t, handlerReturning(map[string]any{"members": []any{}}))
 	r := NewRouter(registry.New())
 	r.AttachInstance("inst-1", conn)
-	r.DetachInstance("inst-1")
+	r.DetachInstance("inst-1", conn)
 
 	_, _, drec := r.ListFunctions(context.Background(), "inst-1", map[string]any{})
 	if drec == nil || drec.Code != "instance_not_found" {

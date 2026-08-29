@@ -3,6 +3,7 @@ package execution
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -358,7 +359,7 @@ func TestInstanceDisconnectedDuringPoll(t *testing.T) {
 		t.Fatalf("ExecuteScript: %+v", drec)
 	}
 
-	m.DetachInstance("inst-1")
+	m.DetachInstance("inst-1", conn)
 
 	_, drec2 := m.PollExecution(context.Background(), start.ExecutionID, 1000)
 	if drec2 == nil || drec2.Code != "instance_disconnected" {
@@ -387,7 +388,7 @@ func TestReconnectClearsStaleBusyState(t *testing.T) {
 	}
 
 	// The add-in reconnects: its old connection is detached...
-	m.DetachInstance("inst-1")
+	m.DetachInstance("inst-1", conn)
 
 	// ...and a fresh execute_script against the same instance_id must
 	// succeed, not report busy against the now-orphaned execution.
@@ -488,7 +489,7 @@ func TestUnrecoverableLatchesInstance(t *testing.T) {
 
 	// A network blip and reconnect under the SAME instance_id — the latch
 	// must survive this, since it's still the same wedged Revit process.
-	m.DetachInstance("inst-1")
+	m.DetachInstance("inst-1", conn)
 	m.AttachInstance("inst-1", conn)
 	_, drec3 := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "after reconnect", 1000, 60000, ScriptOptions{})
 	if drec3 == nil || drec3.Code != "instance_unrecoverable" {
@@ -515,7 +516,7 @@ func TestUnrecoverableDoesNotAffectADifferentInstanceID(t *testing.T) {
 		t.Fatalf("ExecuteScript: %+v", drec)
 	}
 	m.settle("inst-1", start.ExecutionID, &Result{Status: StatusUnrecoverable, ExecutionID: start.ExecutionID})
-	m.DetachInstance("inst-1")
+	m.DetachInstance("inst-1", conn)
 
 	_, conn2 := newFakeInstance(t, func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
 		var p map[string]any
@@ -869,5 +870,152 @@ func TestExecuteScriptForwardsConfirmLifecycleActions(t *testing.T) {
 		if got != confirm {
 			t.Errorf("params[\"confirm_lifecycle_actions\"] = %v, want %v", got, confirm)
 		}
+	}
+}
+
+// TestDetachIgnoresStaleConnection is the regression test for the
+// reconnect-overlap race (v1 integrated review): a half-open connection's
+// late teardown, running after the add-in already re-registered the same
+// instance_id on a new connection, must not tear down the live replacement.
+func TestDetachIgnoresStaleConnection(t *testing.T) {
+	okHandler := func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
+		var p map[string]any
+		json.Unmarshal(params, &p)
+		return Result{Status: StatusSuccess, ExecutionID: p["execution_id"].(string), Output: "from-B"}, nil
+	}
+	_, connA := newFakeInstance(t, okHandler)
+	_, connB := newFakeInstance(t, okHandler)
+	m := NewManager()
+
+	if displaced := m.AttachInstance("inst-1", connA); displaced != nil {
+		t.Fatalf("first attach displaced %v, want nil", displaced)
+	}
+	// Re-attaching the SAME connection must not report it as displaced —
+	// the caller would close it, killing the live connection.
+	if displaced := m.AttachInstance("inst-1", connA); displaced != nil {
+		t.Fatalf("same-conn re-attach displaced %v, want nil", displaced)
+	}
+	// The redial: connB replaces connA, and connA is handed back for the
+	// caller to close.
+	if displaced := m.AttachInstance("inst-1", connB); displaced != connA {
+		t.Fatalf("attach of the new connection displaced %v, want the old connection", displaced)
+	}
+
+	// The stale connection's late teardown must be a no-op...
+	if m.DetachInstance("inst-1", connA) {
+		t.Fatal("detach keyed by a stale connection must report false and change nothing")
+	}
+	// ...leaving the instance routable through the new connection.
+	res, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "1+1", 1000, 60000, ScriptOptions{})
+	if drec != nil {
+		t.Fatalf("ExecuteScript after stale detach: %+v", drec)
+	}
+	if res.Status != StatusSuccess || res.Output != "from-B" {
+		t.Errorf("res = %+v, want success routed to the new connection", res)
+	}
+
+	// The current connection's own teardown still detaches normally.
+	if !m.DetachInstance("inst-1", connB) {
+		t.Fatal("detach keyed by the current connection must apply")
+	}
+	if _, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "1+1", 1000, 60000, ScriptOptions{}); drec == nil || drec.Code != "instance_not_found" {
+		t.Fatalf("got %+v, want instance_not_found after the current connection detached", drec)
+	}
+}
+
+// TestCloseInstanceConnClosesTheAttachedConnection covers the prune sweep's
+// half of the split-brain fix: closing a pruned instance's socket is what
+// forces its add-in back through the reconnect/re-register path instead of
+// leaving it executable-but-invisible.
+func TestCloseInstanceConnClosesTheAttachedConnection(t *testing.T) {
+	m := NewManager()
+	m.CloseInstanceConn("never-registered") // must be a safe no-op
+
+	_, conn := newFakeInstance(t, func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
+		return Result{Status: StatusSuccess}, nil
+	})
+	m.AttachInstance("inst-1", conn)
+	m.CloseInstanceConn("inst-1")
+
+	// The connection is closed, so a wire call through it must fail rather
+	// than hang or succeed.
+	_, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "1+1", 500, 60000, ScriptOptions{})
+	if drec == nil {
+		t.Fatal("expected a wire failure through a closed connection")
+	}
+	if drec.Code != "wire_call_failed" {
+		t.Errorf("Code = %q, want wire_call_failed", drec.Code)
+	}
+}
+
+// TestSettledExecutionRecordsAreBounded pins the terminal-record cache
+// bound (v1 integrated review: the primary's executions map previously grew
+// by one record per execute_script forever).
+func TestSettledExecutionRecordsAreBounded(t *testing.T) {
+	m := NewManager()
+	cur := time.Unix(1_000_000, 0)
+	m.now = func() time.Time { return cur }
+
+	countTerminal := func() int {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		n := 0
+		for _, rec := range m.executions {
+			if IsTerminal(rec.status) {
+				n++
+			}
+		}
+		return n
+	}
+
+	// Count bound: settle well past the cap; the oldest settled records
+	// must be evicted, newest retained.
+	total := maxSettledExecutions + 50
+	for i := 0; i < total; i++ {
+		id := fmt.Sprintf("exec-%d", i)
+		m.mu.Lock()
+		m.executions[id] = &record{instanceID: "inst-1", status: StatusRunning}
+		m.mu.Unlock()
+		m.settle("inst-1", id, &Result{Status: StatusSuccess, ExecutionID: id})
+		cur = cur.Add(time.Millisecond)
+	}
+	if got := countTerminal(); got > maxSettledExecutions {
+		t.Fatalf("terminal records = %d, want <= %d", got, maxSettledExecutions)
+	}
+	m.mu.Lock()
+	_, oldestPresent := m.executions["exec-0"]
+	_, newestPresent := m.executions[fmt.Sprintf("exec-%d", total-1)]
+	m.mu.Unlock()
+	if oldestPresent {
+		t.Error("oldest settled record should have been evicted by the count bound")
+	}
+	if !newestPresent {
+		t.Error("newest settled record must be retained")
+	}
+
+	// A non-terminal record is never evicted, no matter how old.
+	m.mu.Lock()
+	m.executions["exec-live"] = &record{instanceID: "inst-2", status: StatusRunning}
+	m.mu.Unlock()
+
+	// Age bound: once retention lapses, a new settle sweeps the aged ones.
+	cur = cur.Add(settledRetention + time.Minute)
+	m.mu.Lock()
+	m.executions["exec-final"] = &record{instanceID: "inst-1", status: StatusRunning}
+	m.mu.Unlock()
+	m.settle("inst-1", "exec-final", &Result{Status: StatusSuccess, ExecutionID: "exec-final"})
+
+	if got := countTerminal(); got != 1 {
+		t.Errorf("terminal records after retention lapse = %d, want just the fresh one", got)
+	}
+	m.mu.Lock()
+	_, livePresent := m.executions["exec-live"]
+	_, finalPresent := m.executions["exec-final"]
+	m.mu.Unlock()
+	if !livePresent {
+		t.Error("a non-terminal record must never be evicted")
+	}
+	if !finalPresent {
+		t.Error("the freshly settled record must be retained")
 	}
 }

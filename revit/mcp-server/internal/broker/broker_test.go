@@ -361,3 +361,102 @@ func TestAgentClientRoleProxiesMCPSession(t *testing.T) {
 		t.Errorf("execute_script tool not visible through the agent-client proxy path: %+v", list.Tools)
 	}
 }
+
+// TestReconnectOverlapKeepsLiveInstanceRegistered is the end-to-end
+// regression test for the v1 integrated review's teardown-race finding: a
+// half-open connection's late teardown must not deregister the live
+// replacement the add-in already re-registered on a new connection. It
+// also pins the displacement half of the fix: the broker closes the old
+// connection the moment the new register displaces it, so its teardown
+// runs now (as a guarded no-op) instead of the socket leaking.
+func TestReconnectOverlapKeepsLiveInstanceRegistered(t *testing.T) {
+	b, ln := newTestBroker(t)
+
+	// Connection A: the "original" connection, about to go half-open.
+	connA, brA, respA := dialAndAuth(t, ln.Addr().String(), testToken, RoleAddIn)
+	defer connA.Close()
+	if respA.Error != nil {
+		t.Fatalf("auth A failed: %+v", respA.Error)
+	}
+	addinA := transport.NewConn(&tail{r: brA, conn: connA})
+	go addinA.Serve()
+	if err := addinA.Notify("register", registerParams{InstanceID: "inst-overlap", PID: 1, RevitVersion: "2027"}); err != nil {
+		t.Fatalf("Notify register (A): %v", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if inst, ok := b.Registry.Get("inst-overlap"); ok && inst.PID == 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Connection B: the add-in redials (network blip) and re-registers the
+	// same stable instance_id while A is still officially attached.
+	connB, brB, respB := dialAndAuth(t, ln.Addr().String(), testToken, RoleAddIn)
+	defer connB.Close()
+	if respB.Error != nil {
+		t.Fatalf("auth B failed: %+v", respB.Error)
+	}
+	addinB := transport.NewConn(&tail{r: brB, conn: connB})
+	addinB.SetRequestHandler(func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
+		var p map[string]any
+		json.Unmarshal(params, &p)
+		return map[string]any{"status": "success", "execution_id": p["execution_id"], "output": "from-B"}, nil
+	})
+	go addinB.Serve()
+	if err := addinB.Notify("register", registerParams{InstanceID: "inst-overlap", PID: 2, RevitVersion: "2027"}); err != nil {
+		t.Fatalf("Notify register (B): %v", err)
+	}
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if inst, ok := b.Registry.Get("inst-overlap"); ok && inst.PID == 2 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// The displacement should close connection A from the broker's side —
+	// that is what forces A's teardown to run *now*, while B is live, which
+	// is exactly the interleaving the guards exist for. Wait until A's
+	// stream actually reports closed before asserting anything.
+	_ = connA.SetReadDeadline(time.Now().Add(5 * time.Second))
+	buf := make([]byte, 1)
+	if _, err := brA.Read(buf); err == nil {
+		t.Fatal("expected the broker to close the displaced connection A")
+	}
+
+	// Give A's teardown a moment to fully run, then confirm it did NOT
+	// clobber B: the registry entry must still be B's, and execute_script
+	// must still route to B.
+	assertDeadline := time.Now().Add(2 * time.Second)
+	for {
+		inst, ok := b.Registry.Get("inst-overlap")
+		if ok && inst.PID == 2 {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			res, drec := b.Execution.ExecuteScript(ctx, "inst-overlap", "doc-1", "1+1", 1000, 60000, execution.ScriptOptions{})
+			cancel()
+			if drec == nil && res.Status == execution.StatusSuccess && res.Output == "from-B" {
+				break // registered AND routable through B — the race didn't clobber anything
+			}
+		}
+		if time.Now().After(assertDeadline) {
+			inst, ok := b.Registry.Get("inst-overlap")
+			t.Fatalf("after A's teardown, instance should remain registered (got ok=%v inst=%+v) and routable to B", ok, inst)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// And B's own clean close must still deregister normally — the guards
+	// must not have broken the ordinary teardown path.
+	addinB.Close()
+	connB.Close()
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, ok := b.Registry.Get("inst-overlap"); !ok {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("instance should deregister when its live connection closes cleanly")
+}
