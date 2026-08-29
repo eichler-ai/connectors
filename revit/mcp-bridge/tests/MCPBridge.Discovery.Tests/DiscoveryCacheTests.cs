@@ -125,11 +125,11 @@ public class DiscoveryCacheTests
         // third-party add-in noise. Fixed to sort core-kind namespaces first; this is the regression guard.
         //
         // MCPBridge.Core.Discovery (DiscoveryCache's own namespace) sorts ALPHABETICALLY BEFORE
-        // MCPBridge.Discovery.Tests.Fixtures ('C' < 'D') -- deliberately synced with kinds swapped from
-        // what their names suggest (Core.Discovery as "addin", Fixtures as "core") so this test can only
-        // pass if kind, not alphabetical position, actually drives the order. MCPBridge.Core.dll has no
-        // XML-doc sidecar (deliberately, per the "no sidecar" comment above) -- its types still count as
-        // documented via that escape hatch, so they still appear in ListNamespaces() to sort against.
+        // MCPBridge.Discovery.Tests.Fixtures ('C' < 'D') -- so the two are synced below with kinds swapped
+        // from what their names suggest (Core.Discovery as "addin", Fixtures as "core"), which means this
+        // test can only pass if kind, not alphabetical position, actually drives the order. MCPBridge.Core.dll
+        // has no XML-doc sidecar of its own; its types still count as documented via Sync's own
+        // no-sidecar-still-documented fallback, so they still appear in ListNamespaces() to sort against.
         using var cache = NewCache();
         cache.Sync(new[]
         {

@@ -419,8 +419,9 @@ public sealed class DiscoveryCache : IDisposable
     // -------------------------------------------------------------------------------------------------
 
     /// <summary>
-    /// Every namespace with at least one documented type, alphabetical, with a per-namespace documented-type
-    /// count. Independent PR review finding: the global/no-namespace bucket (types whose <c>Type.Namespace</c>
+    /// Every namespace with at least one documented type, core-namespaces-first then alphabetical (see the
+    /// ordering paragraph below), with a per-namespace documented-type count. Independent PR review
+    /// finding: the global/no-namespace bucket (types whose <c>Type.Namespace</c>
     /// is null -- e.g. some C++/CLI interop artifacts) is excluded here, not just left in as one more row:
     /// list_functions' tree has no way to *scope into* an empty-string namespace (namespaceFilter treats ""
     /// and null identically, per the mutual-exclusivity check above it), so leaving it in the namespaces tier
@@ -645,7 +646,17 @@ public sealed class DiscoveryCache : IDisposable
     private List<DiscoveryMemberRow> GetOwnMembers(long typeId, string namespaceName, string declaringTypeFullName)
     {
         using var cmd = _connection.CreateCommand();
-        cmd.CommandText = "SELECT kind, name, signature, summary, member_id, returns, params_json FROM members WHERE type_id = @typeId";
+        // Independent PR review finding: IsCoreAssembly used to be hardcoded false here with a comment
+        // claiming "no consumer on this path" -- true today (describe_function/WalkInheritance never rank
+        // these rows), but GetMembersIncludingInherited is a PUBLIC method with no such guarantee about
+        // its future callers, and a hardcoded false is a silently-wrong answer the moment one shows up,
+        // not a loud one. Joining assemblies here costs nothing (same pattern ReadMemberRow's other query
+        // sites already use) and makes this row genuinely correct regardless of who reads it.
+        cmd.CommandText = """
+            SELECT m.kind, m.name, m.signature, m.summary, m.member_id, m.returns, m.params_json, a.kind
+            FROM members m JOIN types t ON m.type_id = t.id JOIN assemblies a ON t.assembly_id = a.id
+            WHERE m.type_id = @typeId
+            """;
         cmd.Parameters.AddWithValue("@typeId", typeId);
         using var reader = cmd.ExecuteReader();
 
@@ -663,10 +674,7 @@ public sealed class DiscoveryCache : IDisposable
                 Parameters = JsonSerializer.Deserialize<List<ReflectedParameter>>(reader.GetString(6)) ?? new List<ReflectedParameter>(),
                 Namespace = namespaceName,
                 DeclaringType = declaringTypeFullName,
-                // Not queried here -- describe_function/WalkInheritance never ranks these rows (a single
-                // named type's members, not a search result set), so IsCoreAssembly has no consumer on
-                // this path. Only Search()'s three tiers below read it.
-                IsCoreAssembly = false,
+                IsCoreAssembly = reader.GetString(7) == "core",
             });
         }
 
@@ -686,9 +694,15 @@ public sealed class DiscoveryCache : IDisposable
     /// query can return zero core-Revit hits at all, buried under third-party add-in noise, because
     /// nothing in <see cref="Search"/> previously used the <c>kind</c> column any query path already
     /// carried. Deliberately small (0.5) relative to the 500-point gaps between tiers 1/2/3, so this can
-    /// only ever break a tie WITHIN a tier -- a genuinely stronger add-in match still outranks a weaker
-    /// core one, matching PRD §08's explicit design intent that add-in APIs remain fully searchable, not
-    /// suppressed. Mirrors the same "core wins ties" policy <see cref="FindTypeRow"/>/
+    /// only ever move a result within a tier, never across one -- tier boundaries stay untouched,
+    /// matching PRD §08's explicit design intent that add-in APIs remain fully searchable, not
+    /// suppressed. Independent PR review finding: within tier 3 specifically, "never across a tier" is a
+    /// softer guarantee than "a genuinely stronger add-in match always outranks a weaker core one" might
+    /// suggest -- the bm25-derived <c>normalized</c> score below is asymptotically bounded by 499 and
+    /// saturates quickly for a strong match, so two close-but-unequal tier-3 matches can legitimately
+    /// land within 0.5 of each other, which this boost can then flip. Tiers 1 and 2 give every row in a
+    /// tier the SAME base score (1000 / 500), so there this boost is the only ranking signal within the
+    /// tier and no such flip is possible. Mirrors the same "core wins ties" policy <see cref="FindTypeRow"/>/
     /// <see cref="FindTypeRowByFullName"/> already apply to type lookups.
     /// </summary>
     private static double CoreBoost(DiscoveryMemberRow row) => row.IsCoreAssembly ? 0.5 : 0.0;
@@ -843,10 +857,18 @@ public sealed class DiscoveryCache : IDisposable
         }
 
         cmd.Parameters.AddWithValue("@ns", (object?)namespaceFilter ?? DBNull.Value);
+        // Independent PR review finding: this had NO ORDER BY at all before LIMIT, so on a broad query
+        // returning more than TierCandidateLimit rows, SQLite truncated in whatever order the query
+        // planner happened to walk the join in -- BEFORE Search() ever gets a chance to apply CoreBoost.
+        // A genuinely core-Revit match could be cut from the candidate set entirely while a third-party
+        // add-in match with the same tier score survived, defeating the whole point of CoreBoost for
+        // exactly the broad queries it exists to help most. Ordering core rows first here means a core
+        // match is never the one that gets truncated away in favor of a non-core one.
         cmd.CommandText = $"""
             SELECT m.kind, m.name, m.signature, m.summary, m.member_id, m.returns, m.params_json, t.namespace, t.full_name, a.kind
             FROM members m JOIN types t ON m.type_id = t.id JOIN assemblies a ON t.assembly_id = a.id
             WHERE {string.Join(" AND ", whereClauses)}
+            ORDER BY (a.kind != 'core')
             LIMIT {TierCandidateLimit}
             """;
         using var reader = cmd.ExecuteReader();
@@ -874,7 +896,7 @@ public sealed class DiscoveryCache : IDisposable
             JOIN types t ON m.type_id = t.id
             JOIN assemblies a ON t.assembly_id = a.id
             WHERE members_fts MATCH @match AND t.documented = 1 AND (@ns IS NULL OR t.namespace = @ns)
-            ORDER BY bm25(members_fts)
+            ORDER BY (a.kind != 'core'), bm25(members_fts)
             LIMIT @limit
             """;
         cmd.Parameters.AddWithValue("@match", matchExpression);
