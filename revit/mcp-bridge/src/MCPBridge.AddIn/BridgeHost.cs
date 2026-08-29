@@ -228,8 +228,11 @@ internal sealed class BridgeHost
             {
                 RunConnectionLoop(dispatcher, documentSnapshotHandler, documentSnapshotEvent, stopToken);
             }
-            catch (OperationCanceledException)
+            catch (OperationCanceledException) when (stopToken.IsCancellationRequested)
             {
+                // Stop()'s own clean unwind -- the only OCE that means "shut down quietly". An OCE
+                // from any other source falls through to the fatal log below rather than being
+                // silently mistaken for a shutdown (PR review suggestion).
             }
             catch (Exception ex)
             {
@@ -442,12 +445,14 @@ internal sealed class BridgeHost
             {
                 discoveryResult = TryDiscoverWithTimeout(discovery, stopToken);
             }
-            catch (OperationCanceledException)
+            catch (OperationCanceledException) when (stopToken.IsCancellationRequested)
             {
                 break; // Stop() was called during the discovery wait -- clean thread exit, not a crash.
             }
             catch (Exception ex)
             {
+                // Includes an OCE that ISN'T Stop()'s (the when-filter above): a cancellation nobody
+                // requested is an anomaly to log and retry past, not a reason to end the loop.
                 LogConnectionDiagnostic($"broker discovery attempt threw unexpectedly: {ex}");
                 Backoff(reconnectController, stopToken);
                 continue;

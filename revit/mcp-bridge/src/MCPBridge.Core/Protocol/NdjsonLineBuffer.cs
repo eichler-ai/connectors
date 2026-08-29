@@ -69,12 +69,15 @@ public sealed class NdjsonLineBuffer
             // calling it and then GetChars on the very same chunk would process the same incomplete
             // trailing byte sequence twice, corrupting the decode (confirmed empirically: this used to
             // turn a 3-byte sequence split across two prior Append calls into replacement characters
-            // instead of the real code point). A char buffer sized to the byte count is always big enough
-            // for UTF-8 (decoded chars can never outnumber input bytes), so there's no need for the GetCharCount
-            // call at all.
-            if (_charScratch.Length < chunk.Length)
+            // instead of the real code point). Sized to the byte count PLUS TWO, not the byte count
+            // alone (PR review finding): "decoded chars never outnumber input bytes" is false at the
+            // seam this class exists for -- up to 3 bytes of a split 4-byte sequence carried over from
+            // a PRIOR Append complete against this chunk's first byte into a surrogate PAIR (2 chars),
+            // so a chunk of N bytes can produce N+1 chars and a byte-count buffer made GetChars throw
+            // ArgumentException, tearing down a healthy connection over one unluckily-split emoji.
+            if (_charScratch.Length < chunk.Length + 2)
             {
-                _charScratch = new char[chunk.Length];
+                _charScratch = new char[chunk.Length + 2];
             }
 
             var written = _decoder.GetChars(chunk, _charScratch, flush: false);
@@ -118,8 +121,12 @@ public sealed class NdjsonLineBuffer
             // Throwing (rather than silently truncating) surfaces through the connection loop's
             // normal per-connection failure path: the connection tears down with a logged reason and
             // the reconnect loop dials fresh -- the right recovery for a peer that is provably
-            // speaking something other than NDJSON at this point.
+            // speaking something other than NDJSON at this point. The Decoder is reset alongside the
+            // text buffer (PR review finding): a stale partial multibyte sequence surviving the
+            // overflow would corrupt the first characters of any subsequent Append, so the
+            // usable-again contract held for ASCII only until both halves of the state were cleared.
             _pending.Clear();
+            _decoder.Reset();
             throw new System.InvalidOperationException(
                 $"NDJSON line exceeded {_maxLineChars} characters without a newline; closing the connection as the peer is not framing correctly.");
         }
