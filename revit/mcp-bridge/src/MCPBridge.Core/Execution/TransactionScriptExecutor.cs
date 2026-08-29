@@ -48,6 +48,11 @@ internal sealed class TransactionScriptExecutor
 
     private readonly RoslynScriptRunner _runner;
 
+    /// <summary>See <see cref="RoslynScriptRunner.WarmupCompile"/> -- exposed here so the AddIn's
+    /// startup wiring can warm the pipeline without reaching the runner (which stays fully owned by
+    /// this executor).</summary>
+    internal void WarmupCompile() => _runner.WarmupCompile();
+
     public TransactionScriptExecutor(RoslynScriptRunner runner)
     {
         _runner = runner;

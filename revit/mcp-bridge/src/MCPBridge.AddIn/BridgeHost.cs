@@ -251,6 +251,14 @@ internal sealed class BridgeHost
         };
         _workerThread.Start();
 
+        // Roslyn warmup (issue #52): the first script in a session otherwise pays Roslyn's cold
+        // start (assembly JIT + reference-metadata load, seconds) inside the agent's first
+        // execute_script. Fire-and-forget on a threadpool thread -- compilation never touches the
+        // Revit API context, WarmupCompile swallows every failure by contract, and nothing awaits
+        // it: a warmup that loses the race to a real first script is merely useless, never harmful
+        // (the compilation cache is thread-safe and the runner serializes nothing else).
+        Task.Run(scriptExecutor.WarmupCompile);
+
         // Second live-wiring review finding: ExecutionManager.CheckMaxDuration/CheckGraceExpiry
         // (ExecutionManager.cs's own doc comment: "a caller (the AddIn wiring) is expected to drive
         // [these] periodically") were never actually driven anywhere in the add-in -- this IS that AddIn
