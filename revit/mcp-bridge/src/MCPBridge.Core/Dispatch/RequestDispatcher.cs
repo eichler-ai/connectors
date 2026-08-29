@@ -223,24 +223,24 @@ public sealed class RequestDispatcher
             return null;
         }
 
-        IReadOnlyList<WindowInfo> windows;
+        WindowInventorySnapshot snapshot;
         try
         {
-            windows = _windowInventory.EnumerateOwnedTopLevelWindows();
+            snapshot = _windowInventory.EnumerateOwnedTopLevelWindows();
         }
         catch
         {
             return null;
         }
 
-        if (windows.Count == 0)
+        if (snapshot.Windows.Count == 0 && !snapshot.Truncated)
         {
             return null;
         }
 
         var detail = new Dictionary<string, object?>
         {
-            ["windows"] = windows
+            ["windows"] = snapshot.Windows
                 .Select(w => new Dictionary<string, object?>
                 {
                     ["title"] = w.Title,
@@ -248,7 +248,24 @@ public sealed class RequestDispatcher
                     ["text"] = w.ChildText,
                 })
                 .ToArray(),
+            // PRD §01 honesty (independent PR review finding): the enumeration runs under a hard
+            // time budget precisely because the UI thread it inspects may not be pumping, so a
+            // busy session can yield a PARTIAL inventory -- and a partial list presented as
+            // complete would have a reader conclude a window doesn't exist when it merely wasn't
+            // reached. Present on every notice (not only when true) so its absence is never
+            // ambiguous with an older add-in that didn't report it.
+            ["inventory_truncated"] = snapshot.Truncated,
         };
+
+        var message = "poll/execute timed out while the execution was still pending/running; top-level windows " +
+            "owned by this Revit process are listed in detail.windows for manual triage (PRD §07 v1 -- " +
+            "diagnosis only, no automatic action).";
+        if (snapshot.Truncated)
+        {
+            message += " NOTE: the inventory is INCOMPLETE -- enumeration or window-text reads exceeded " +
+                "their time budget (a busy UI thread does not answer text queries), so windows or text " +
+                "may be missing from this list.";
+        }
 
         return new[]
         {
@@ -256,9 +273,7 @@ public sealed class RequestDispatcher
                 DiagnosticSeverity.Info,
                 "window-inventory-timeout-fallback",
                 DiagnosticSource.Dialogs,
-                "poll/execute timed out while the execution was still pending/running; top-level windows " +
-                "owned by this Revit process are listed in detail.windows for manual triage (PRD §07 v1 -- " +
-                "diagnosis only, no automatic action).",
+                message,
                 detail: detail,
                 remedy: new[] { "Check Revit's screen for a modal dialog and dismiss it manually." }),
         };

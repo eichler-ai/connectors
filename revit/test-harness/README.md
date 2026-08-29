@@ -105,11 +105,26 @@ the same process) also drops that tool's own connection — `/mcp` reconnects it
   script-supplied callback), `TestConfirmationTierCannotBeSelfGranted` (reaching the live
   `ScriptGlobals` via `Delegate.Target` and starting a nested run with the confirmation flag set),
   and `TestScriptCannotTamperWithDialogSuppression` (mutating the static dialog context).
+- `document_routing_test.go` — `TestDocumentIdRouting`: the live pin of `document_id` routing and
+  the issue #30 live snapshot push as one loop (open a background copy, watch it appear in
+  `list_instances` with no reconnect, route a script to it by id, assert it ran there with
+  `UIDocument` null).
+- `execution_lifecycle_test.go` — `TestExecutionLifecycle`: PRD §06's non-inline contract end to
+  end (pending/running shape with an `execution_id`, the busy latch pointing at the in-flight run,
+  `poll_execution`, cooperative `cancel_execution` resolving to `cancelled`, instance freed after).
+- `file_exchange_test.go` — `TestPublishFileExchange`: PRD §09's `Publish`/`files[]` contract
+  (per-file `published`; collision without `overwrite_output_files` fails THAT FILE, naming the
+  flag, without failing the run; the flag makes the identical publish succeed).
+- `zz_cleanup_check_test.go` — `TestZZDocumentCleanupRoundTrip`: runs last by file-name order and
+  verifies the cleanup discipline itself, baseline-relative (create → appears in `list_instances`
+  via the snapshot push → `closeDocumentByTitle` → disappears).
 - `fixtures_test.go` — the fixture-system helpers PRD §13's coverage-plan corpus bundles share:
   `createBlankFixtureDocument` (creates one blank, writable document via `CreateProjectDocument`,
-  returns its Title -- the only way a later `execute_script` call can find it again, since a created
-  document has no `document_id`; registers a `t.Cleanup` that closes it via `closeFixtureDocument`
-  when the bundle finishes), `fixtureLookupPreamble` (the by-Title re-find every subtest needs), and
+  returns its Title; registers a `t.Cleanup` that closes it via `closeDocumentByTitle` when the
+  bundle finishes), `closeDocumentByTitle` (the shared confirm-gated close-and-optionally-delete
+  cleanup every document-creating case registers), `cleanupTitles`/`registerCreatedDocumentCleanup`
+  (extract the `cleanup-title=` stdout markers scripts print when their return value is spoken
+  for), `fixtureLookupPreamble` (the by-Title re-find every subtest needs), and
   `fixtureWritePreamble` (that plus `OpenForWriting(doc)` -- use this one instead whenever a subtest
   WRITES to the fixture document; without it every write throws "Attempt to modify the model outside
   of transaction", since a created document's managed transaction commits and closes the moment the
@@ -135,19 +150,25 @@ the same process) also drops that tool's own connection — `/mcp` reconnects it
   `TestOpenDocumentCount` (reports `Application.Documents`' current count/titles). Kept around as
   ready-made tools for revisiting that issue, not run as part of a normal test pass.
 
-Fourteen test functions across `harness_test.go`, `denylist_bypass_test.go`,
-`open_for_writing_test.go`, and `phase_a_test.go` make up the actual coverage corpus;
-`memcheck_test.go`'s two are diagnostics, not corpus.
+Eighteen test functions across `harness_test.go`, `denylist_bypass_test.go`,
+`document_routing_test.go`, `execution_lifecycle_test.go`, `file_exchange_test.go`,
+`open_for_writing_test.go`, `phase_a_test.go`, and `zz_cleanup_check_test.go` make up the actual
+coverage corpus; `memcheck_test.go`'s two are diagnostics, not corpus. The remaining gaps issue
+#36 tracked — broker-restart replay and a live heartbeat→`unresponsive` transition — stay
+deferred with reasons on record there (disruptive to the shared dev broker; not practically
+scriptable without killing Revit).
 
 `TestApplicationCreatesDocuments` is the first case whose subtests are *heterogeneous* — each
 asserting a different thing about one capability — rather than table-driven over a single shape
 the way the two bundles above it are. That is the shape PRD §13's corpus plan calls for. It covers the
 top-level `Autodesk.Revit.ApplicationServices.Application` (reached as `UIApplication.Application`)
-and its `NewProjectDocument`/`NewFamilyDocument`, and it also pins the two boundaries a corpus
-fixture system runs into: a created document is outside the executor's ambient transaction, and
-it is addressed by a later script through `Application.Documents`, never through a `document_id`.
-Each run leaves its documents open in the live Revit session on purpose — see the case's own
-comment, and PRD §14.
+and its `NewProjectDocument`/`NewFamilyDocument`, and it also pins a boundary a corpus fixture
+system runs into: a created document is outside the executor's ambient transaction. (In-script
+addressing through `Application.Documents` is pinned there too; since the v1 remediation series a
+created document also gets a routable `tmp-` `document_id`, so that is a convenience rather than
+the only mechanism.) Every document-creating case now registers a `closeDocumentByTitle` cleanup —
+the old leave-everything-open posture ended when the live snapshot push made leftovers visible in
+`list_instances`.
 
 The denylist and lifecycle cases exist here rather than in `MCPBridge.Core.Tests` because they cannot exist there.
 Since PRD §14 shipped, `ScriptGlobals.Document` is the real `Autodesk.Revit.DB.Document` — sealed,

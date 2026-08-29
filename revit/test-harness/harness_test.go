@@ -142,6 +142,14 @@ type executeScriptOut struct {
 		Message  string   `json:"message"`
 		Remedy   []string `json:"remedy"`
 	} `json:"notices"`
+	// Files carries the PRD §09 per-published-file records -- read by
+	// file_exchange_test.go, which is the live pin of the Publish contract.
+	Files []struct {
+		Name    string `json:"name"`
+		Path    string `json:"path"`
+		Status  string `json:"status"`
+		Message string `json:"message"`
+	} `json:"files"`
 }
 
 // Note there is deliberately no Error field here. A script that fails to
@@ -166,13 +174,69 @@ func targetDocument(t *testing.T) (*mcpclient.Client, string, string) {
 	target := inst.Documents[0].DocumentID
 	for _, d := range inst.Documents {
 		if d.Active {
-			return c, inst.InstanceID, d.DocumentID
+			target = d.DocumentID
+			break
 		}
 		if strings.HasPrefix(d.DocumentID, "doc-") && !strings.HasPrefix(target, "doc-") {
 			target = d.DocumentID
 		}
 	}
+
+	ensureInstanceIdle(t, c, inst.InstanceID, target)
 	return c, inst.InstanceID, target
+}
+
+// ensureInstanceIdle probes the instance with a trivial script and, if the
+// answer is `busy`, drives the stale execution it names to a terminal state
+// (cancel + poll) and re-probes -- suite-level self-healing. The broker's
+// busy latch frees only when a stale non-terminal execution is POLLED (or
+// cancelled) to terminal; the add-in finishing on its own is not enough. So
+// one interrupted run (a crashed suite, a Ctrl-C mid-test) used to leave the
+// shared live session answering `busy` to every later suite until someone
+// happened to poll the right id -- observed as a full-suite cascade, twice,
+// while this discipline lived in just one test instead of the shared
+// preamble. Bounded: two resolve attempts, then skip with the state named --
+// a wedged instance is an environment problem, not a fact about the case
+// that happened to probe it.
+func ensureInstanceIdle(t *testing.T, c *mcpclient.Client, instanceID, documentID string) {
+	t.Helper()
+	for attempt := 0; attempt < 2; attempt++ {
+		raw := callExecuteScriptWith(t, c, instanceID, documentID, `return "idle-probe";`, nil)
+		var tr toolResult
+		if err := json.Unmarshal(raw, &tr); err != nil {
+			t.Fatalf("decode idle-probe envelope: %v\nraw: %s", err, raw)
+		}
+		if tr.IsError {
+			text := "(no content)"
+			if len(tr.Content) > 0 {
+				text = tr.Content[0].Text
+			}
+			// SKIP only for the one state that is an environment precondition
+			// rather than a regression: unrecoverable needs a Revit restart
+			// and no suite run can fix or meaningfully fail on it. Every
+			// OTHER probe error is a real execute_script failure and must
+			// FAIL loudly -- a probe that skipped on any error would let a
+			// hard execute regression read as an all-green-with-skips run
+			// (independent PR review finding).
+			if strings.Contains(text, "instance_unrecoverable") {
+				t.Skipf("instance %s is unrecoverable (needs a Revit restart): %s", instanceID, text)
+			}
+			t.Fatalf("idle probe failed -- execute_script itself is broken, not the instance's state: %s", text)
+		}
+		var out executeScriptOut
+		if err := json.Unmarshal(tr.StructuredContent, &out); err != nil {
+			t.Fatalf("decode idle-probe structuredContent: %v\nraw: %s", err, tr.StructuredContent)
+		}
+		if out.Status == "success" {
+			return
+		}
+		if out.Status != "busy" || out.ExecutionID == "" {
+			t.Fatalf("idle probe answered %q (execution_id %q) -- neither idle nor a resolvable busy", out.Status, out.ExecutionID)
+		}
+		t.Logf("WARNING: instance busy with stale execution %s (a prior run left it unresolved); resolving before this test proceeds", out.ExecutionID)
+		resolveExecutionBestEffort(t, c, out.ExecutionID)
+	}
+	t.Fatalf("instance %s still busy after two resolve attempts -- a stale execution is not resolving; clear it manually (poll/cancel its id) or relaunch Revit", instanceID)
 }
 
 // runScript executes one script that is expected to SUCCEED.
@@ -549,11 +613,12 @@ func TestLifecycleGateCoversTheNewlyAddedMembers(t *testing.T) {
 // creation stays unrestricted and the gate sits exactly where the effect becomes
 // irreversible, not one step earlier.
 //
-// SESSION COST, deliberately accepted: every run leaves its documents open in the
-// live Revit session (nothing here closes them -- Document.Close is gated, and
-// Dispose with it). That matches the corpus plan's own position: fresh throwaway
-// documents accumulate in memory and are reclaimed by restarting Revit between full
-// runs, not by inventing a cleanup mechanism.
+// SESSION HYGIENE: every document-creating subtest registers a
+// closeDocumentByTitle cleanup (scripts report their document's title via the
+// cleanup-title stdout marker where the return value is spoken for). The old
+// leave-everything-open posture ("restart Revit between runs") stopped being
+// tenable when the live snapshot push (issue #30) made every leftover visible
+// in list_instances, polluting later cases' targetDocument choice.
 func TestApplicationCreatesDocuments(t *testing.T) {
 	c, instanceID, documentID := targetDocument(t)
 
@@ -604,6 +669,7 @@ return new {
 		out := runScript(t, c, instanceID, documentID, `
 var app = UIApplication.Application;
 var doc = app.NewProjectDocument(app.DefaultProjectTemplate);
+System.Console.WriteLine("cleanup-title=" + doc.Title + ";");
 var levels = new Autodesk.Revit.DB.FilteredElementCollector(doc)
     .OfClass(typeof(Autodesk.Revit.DB.Level)).GetElementCount();
 return new {
@@ -616,6 +682,7 @@ return new {
 		if out.Status != "success" {
 			t.Fatalf("expected status=success, got %q (output: %s)", out.Status, out.Output)
 		}
+		registerCreatedDocumentCleanup(t, c, instanceID, documentID, out.Output)
 		for _, want := range []string{
 			"docType = Autodesk.Revit.DB.Document",
 			"isFamily = False",
@@ -645,6 +712,7 @@ return new {
 		out := runScript(t, c, instanceID, documentID, `
 var app = UIApplication.Application;
 var doc = app.NewProjectDocument(app.DefaultProjectTemplate);
+System.Console.WriteLine("cleanup-title=" + doc.Title + ";");
 try {
   Autodesk.Revit.DB.Level.Create(doc, 123.0);
   return "modified";
@@ -655,6 +723,7 @@ try {
 		if out.Status != "success" {
 			t.Fatalf("expected status=success, got %q (output: %s)", out.Status, out.Output)
 		}
+		registerCreatedDocumentCleanup(t, c, instanceID, documentID, out.Output)
 		if !strings.Contains(out.Output, "outside-transaction") {
 			t.Fatalf("a freshly created document was writable without its own transaction -- if that is now genuinely true, this test and the corpus plan's fixture design both need revisiting; output: %s", out.Output)
 		}
@@ -682,6 +751,7 @@ return app.NewProjectDocument(app.DefaultProjectTemplate).Title;
 		if title == "" {
 			t.Fatalf("created document reported no title, so nothing can address it later")
 		}
+		t.Cleanup(func() { closeDocumentByTitle(t, c, instanceID, documentID, title, "") })
 
 		// strconv.Quote, not a raw splice: a title carrying a quote, a backslash or
 		// a newline would otherwise produce a C# syntax error, and the failure
@@ -770,6 +840,7 @@ if (System.IO.Directory.Exists(app.FamilyTemplatePath)) {
 }
 if (template.Length == 0) { return "no-template"; }
 var doc = app.NewFamilyDocument(template);
+System.Console.WriteLine("cleanup-title=" + doc.Title + ";");
 return new {
   docType = doc.GetType().FullName,
   isFamily = doc.IsFamilyDocument,
@@ -783,6 +854,7 @@ return new {
 		if strings.Contains(out.Output, "no-template") {
 			t.Skip("no \"Generic Model.rft\" under Application.FamilyTemplatePath on this machine")
 		}
+		registerCreatedDocumentCleanup(t, c, instanceID, documentID, out.Output)
 		for _, want := range []string{
 			"docType = Autodesk.Revit.DB.Document",
 			"isFamily = True",
@@ -817,8 +889,9 @@ return new {
 // NewDocumentIsOutsideTheAmbientTransaction subtest pins the read-only half and
 // must keep passing alongside this — the raw path was not broken or replaced.
 //
-// SESSION COST, as with TestApplicationCreatesDocuments: every run leaves its
-// documents open in the live session. Same accepted trade, same reason.
+// SESSION HYGIENE, as with TestApplicationCreatesDocuments: every
+// document-creating subtest registers a closeDocumentByTitle cleanup, via the
+// cleanup-title stdout marker or the title the script already returns.
 func TestCreatedDocumentIsWritable(t *testing.T) {
 	c, instanceID, documentID := targetDocument(t)
 
@@ -841,6 +914,7 @@ func TestCreatedDocumentIsWritable(t *testing.T) {
 	t.Run("CreateProjectDocumentThenWriteToIt", func(t *testing.T) {
 		out := runScript(t, c, instanceID, documentID, `
 var doc = CreateProjectDocument();
+System.Console.WriteLine("cleanup-title=" + doc.Title + ";");
 var before = new Autodesk.Revit.DB.FilteredElementCollector(doc)
     .OfClass(typeof(Autodesk.Revit.DB.Level)).GetElementCount();
 var level = Autodesk.Revit.DB.Level.Create(doc, 4242.0);
@@ -856,6 +930,7 @@ return new {
 		if out.Status != "success" {
 			t.Fatalf("expected status=success, got %q (output: %s)", out.Status, out.Output)
 		}
+		registerCreatedDocumentCleanup(t, c, instanceID, documentID, out.Output)
 		for _, want := range []string{
 			"docType = Autodesk.Revit.DB.Document",
 			// Guards against the whole test passing for the wrong reason: if
@@ -891,6 +966,7 @@ return doc.Title;
 		if title == "" {
 			t.Fatalf("created document reported no title; output: %s", created.Output)
 		}
+		t.Cleanup(func() { closeDocumentByTitle(t, c, instanceID, documentID, title, "") })
 
 		found := runScript(t, c, instanceID, documentID, `
 int matches = 0;
@@ -935,6 +1011,7 @@ throw new System.InvalidOperationException("deliberate");
 		if rolledBackTitle == "" {
 			t.Fatalf("the throwing run reported no stdout, so there is no document to check; record: %s", thrown.Text)
 		}
+		t.Cleanup(func() { closeDocumentByTitle(t, c, instanceID, documentID, rolledBackTitle, "") })
 
 		// That document still exists (nothing closes it) but must carry no level at
 		// this elevation: its managed transaction was rolled back with everything else.
@@ -972,6 +1049,7 @@ if (System.IO.Directory.Exists(app.FamilyTemplatePath)) {
 }
 if (template.Length == 0) { return "no-template"; }
 var doc = CreateFamilyDocument(template);
+System.Console.WriteLine("cleanup-title=" + doc.Title + ";");
 var before = doc.FamilyManager.Types.Size;
 doc.FamilyManager.NewType("MCPBridgeIssue24Type");
 return new {
@@ -985,6 +1063,7 @@ return new {
 		if strings.Contains(out.Output, "no-template") {
 			t.Skip("no \"Generic Model.rft\" under Application.FamilyTemplatePath on this machine")
 		}
+		registerCreatedDocumentCleanup(t, c, instanceID, documentID, out.Output)
 		for _, want := range []string{"isFamily = True", "typeAdded = True"} {
 			if !strings.Contains(out.Output, want) {
 				t.Errorf("wanted %q in output: %s", want, out.Output)
@@ -1013,11 +1092,13 @@ return "opened";
 	t.Run("CallingTheCreationHelperIsNotADenylistViolation", func(t *testing.T) {
 		out := runScript(t, c, instanceID, documentID, `
 var doc = CreateProjectDocument();
+System.Console.WriteLine("cleanup-title=" + doc.Title + ";");
 return "ok:" + (doc != null);
 `)
 		if out.Status != "success" {
 			t.Fatalf("expected status=success, got %q (output: %s)", out.Status, out.Output)
 		}
+		registerCreatedDocumentCleanup(t, c, instanceID, documentID, out.Output)
 		if !strings.Contains(out.Output, "ok:True") {
 			t.Fatalf("unexpected output: %s", out.Output)
 		}
@@ -1040,6 +1121,10 @@ return a.Title + "|" + b.Title;
 		titles := strings.Split(strings.TrimSpace(created.Output), "|")
 		if len(titles) != 2 {
 			t.Fatalf("expected two document titles, got %q", created.Output)
+		}
+		for _, title := range titles {
+			title := title
+			t.Cleanup(func() { closeDocumentByTitle(t, c, instanceID, documentID, title, "") })
 		}
 
 		// Scoped to the two documents by title rather than scanning every open one.
@@ -1090,6 +1175,7 @@ return "a = " + a + "; b = " + b + ";";
 	t.Run("ACreatedDocumentCannotBeClosedWhileItsTransactionIsOpen", func(t *testing.T) {
 		out := decodeToolResult[executeScriptOut](t, callExecuteScriptWith(t, c, instanceID, documentID, `
 var doc = CreateProjectDocument();
+System.Console.WriteLine("cleanup-title=" + doc.Title + ";");
 Autodesk.Revit.DB.Level.Create(doc, 5050.0);
 try { doc.Close(false); return "closed"; }
 catch (Autodesk.Revit.Exceptions.InvalidOperationException ex) { return "refused: " + ex.Message; }
@@ -1097,6 +1183,7 @@ catch (Autodesk.Revit.Exceptions.InvalidOperationException ex) { return "refused
 		if out.Status != "success" {
 			t.Fatalf("expected status=success, got %q (output: %s)", out.Status, out.Output)
 		}
+		registerCreatedDocumentCleanup(t, c, instanceID, documentID, out.Output)
 		if !strings.Contains(out.Output, "refused:") {
 			t.Fatalf("closing a created document was not refused; if Revit now allows this, the partial-commit reasoning in ManagedDocumentTransactions needs revisiting; output: %s", out.Output)
 		}
@@ -1111,6 +1198,7 @@ catch (Autodesk.Revit.Exceptions.InvalidOperationException ex) { return "refused
 	t.Run("FailuresInACreatedDocumentAreReportedAsNotices", func(t *testing.T) {
 		out := runScript(t, c, instanceID, documentID, `
 var doc = CreateProjectDocument();
+System.Console.WriteLine("cleanup-title=" + doc.Title + ";");
 var lvl = Autodesk.Revit.DB.Level.Create(doc, 0.0);
 doc.Create.NewRoom(lvl, new Autodesk.Revit.DB.UV(5, 5));
 return "room-created";
@@ -1118,6 +1206,7 @@ return "room-created";
 		if out.Status != "success" {
 			t.Fatalf("expected status=success, got %q (output: %s)", out.Status, out.Output)
 		}
+		registerCreatedDocumentCleanup(t, c, instanceID, documentID, out.Output)
 		var found bool
 		for _, n := range out.Notices {
 			if n.Code == "transaction-failure-warning" {
@@ -1136,6 +1225,7 @@ return "room-created";
 	t.Run("TheAmbientDocumentStillCommitsAlongsideCreatedOnes", func(t *testing.T) {
 		out := runScript(t, c, instanceID, documentID, `
 var created = CreateProjectDocument();
+System.Console.WriteLine("cleanup-title=" + created.Title + ";");
 Autodesk.Revit.DB.Level.Create(created, `+elevA+`);
 Autodesk.Revit.DB.Level.Create(Document, `+elevAmbient+`);
 return "done";
@@ -1143,6 +1233,7 @@ return "done";
 		if out.Status != "success" {
 			t.Fatalf("expected status=success, got %q (output: %s)", out.Status, out.Output)
 		}
+		registerCreatedDocumentCleanup(t, c, instanceID, documentID, out.Output)
 
 		check := runScript(t, c, instanceID, documentID, `
 int ambient = 0;
