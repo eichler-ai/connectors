@@ -54,16 +54,11 @@ func TestRegisterOverwritesExistingInstance(t *testing.T) {
 	}
 }
 
-func TestRemove(t *testing.T) {
-	r := New()
-	r.Register(&Instance{InstanceID: "inst-1"}, time.Now())
-	r.Remove("inst-1")
-	if _, ok := r.Get("inst-1"); ok {
-		t.Fatalf("instance should be gone after Remove")
-	}
-	// Remove of an already-absent instance must not panic or error.
-	r.Remove("inst-1")
-}
+// (An unconditional Remove used to live here; it lost its last production
+// caller when connection teardown moved to the epoch-guarded RemoveIfEpoch
+// and the prune sweep kept its own in-place deletion, so it was deleted
+// rather than kept as dead API. RemoveIfEpoch's own test covers the
+// absent-id no-op case.)
 
 func TestList(t *testing.T) {
 	r := New()

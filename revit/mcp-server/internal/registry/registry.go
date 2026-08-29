@@ -19,7 +19,7 @@ const UnresponsiveThreshold = 30 * time.Second
 // PruneAfterSilence is how long an instance can go without a heartbeat
 // ping before it's dropped from the registry entirely (PRD §05). A cleanly
 // disconnected instance is already removed immediately by the broker's own
-// connection-teardown path (Remove) — this sweep exists for the case PRD
+// connection-teardown path (RemoveIfEpoch) — this sweep exists for the case PRD
 // §05 actually describes: a socket that's still open but has gone quiet
 // (Revit wedged without the connection dropping), which Remove alone can
 // never catch.
@@ -115,18 +115,6 @@ func (r *Registry) Get(instanceID string) (*Instance, bool) {
 		return nil, false
 	}
 	return cloneInstance(inst), true
-}
-
-// Remove drops instanceID from the registry unconditionally. Removing an
-// instance that isn't present is a no-op. For a connection-teardown path,
-// use RemoveIfEpoch instead — this unconditional form is for callers whose
-// evidence isn't tied to one particular connection (the prune sweep).
-func (r *Registry) Remove(instanceID string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	delete(r.instances, instanceID)
-	delete(r.lastPingAt, instanceID)
-	delete(r.epochs, instanceID)
 }
 
 // RemoveIfEpoch drops instanceID only if epoch is still its current
