@@ -58,21 +58,12 @@ return dest;`, copyTitle)
 		}
 		copyPath := strings.TrimSpace(opened.Output)
 
-		// Best-effort cleanup regardless of what happens below: close the
-		// background copy FROM the active document's context (a routed
-		// document's own ambient transaction makes it un-closable from
-		// within itself -- PRD §14's investigated behavior), then delete the
-		// file. Close is confirmation-gated, so the flag rides along.
-		t.Cleanup(func() {
-			cleanup := fmt.Sprintf(`
-foreach (Autodesk.Revit.DB.Document d in UIApplication.Application.Documents) {
-    if (d.Title == %q) { d.Close(false); break; }
-}
-try { System.IO.File.Delete(%q); } catch {}
-return "cleaned";`, copyTitle, copyPath)
-			_ = callExecuteScriptWith(t, c, instanceID, documentID, cleanup,
-				map[string]any{"confirm_lifecycle_actions": true})
-		})
+		// Best-effort cleanup regardless of what happens below, via the shared
+		// helper: close the background copy FROM the active document's context
+		// (a routed document's own ambient transaction makes it un-closable
+		// from within itself -- PRD §14's investigated behavior), then delete
+		// the on-disk copy.
+		t.Cleanup(func() { closeDocumentByTitle(t, c, instanceID, documentID, copyTitle, copyPath) })
 
 		// THE ISSUE #30 ASSERTION: the new document must appear in
 		// list_instances WITHOUT any reconnect or broker restart -- the

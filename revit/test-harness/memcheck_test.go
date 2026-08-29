@@ -48,7 +48,7 @@ func TestOpenForWritingMemoryCycles(t *testing.T) {
 			// (not the outer loop, which would keep every cycle's document open until the whole test
 			// returns, defeating the actual "close between cycles" pattern being measured) so it always
 			// runs once this cycle's create succeeded, regardless of what happens to the write.
-			defer closeFixtureDocument(t, c, instanceID, documentID, title)
+			defer closeDocumentByTitle(t, c, instanceID, documentID, title, "")
 
 			written := runScript(t, c, instanceID, documentID, fixtureWritePreamble(title)+
 				fmt.Sprintf("var level = Autodesk.Revit.DB.Level.Create(doc, %d.0);\nreturn level != null;\n", 10+i))

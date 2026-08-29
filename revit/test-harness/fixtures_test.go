@@ -14,14 +14,12 @@ import (
 
 // createBlankFixtureDocument creates one blank, writable project document via
 // the CreateProjectDocument script global (default template; issue #24) and
-// returns its Title -- the ONLY way a later execute_script call can find it
-// again. There is no document_id for a created document: it never appears in
-// list_instances (a one-shot snapshot taken at connect, PRD §05), and
-// execute_script always routes by ActiveUIDocument, never by document_id
-// (see TestApplicationCreatesDocuments/CreatedDocumentStaysInApplicationDocuments
-// and the coverage-plan's own "document_id resolution" note). Every later
-// script that wants this document must find it by Title in
-// UIApplication.Application.Documents -- see fixtureLookupPreamble below.
+// returns its Title. (Since the v1 remediation series, a created document DOES
+// get a routable tmp- document_id in list_instances -- live snapshot push plus
+// title-derived identity -- but these helpers predate that and in-script
+// lookup by Title in UIApplication.Application.Documents remains simple,
+// correct, and free of a list_instances round trip, so they keep using it.
+// See fixtureLookupPreamble below.)
 //
 // Call this ONCE per bundle (per t.Run group), not once per subtest: creating
 // a document has real cost, and the coverage plan's fixture-system section is
@@ -47,17 +45,37 @@ func createBlankFixtureDocument(t *testing.T, c *mcpclient.Client, instanceID, d
 	if title == "" {
 		t.Fatalf("blank fixture document reported an empty title; output=%q", out.Output)
 	}
-	t.Cleanup(func() { closeFixtureDocument(t, c, instanceID, documentID, title) })
+	t.Cleanup(func() { closeDocumentByTitle(t, c, instanceID, documentID, title, "") })
 	return title
 }
 
-// closeFixtureDocument closes the fixture document named by title via
+// closeDocumentByTitle closes the open document named by title via
 // Document.Close(false) -- the explicit-bool overload, never the no-arg one,
 // so there is no "save changes?" prompt to hang behind in this headless
-// script-execution model (these documents are never saved to begin with;
-// nothing is lost by discarding). Close is confirm_lifecycle_actions-gated
-// (PRD §14) since it acts outside the ambient transaction; that's correct
-// here too, not worked around -- see callExecuteScriptWith's extra param.
+// script-execution model (harness-created documents are never saved; nothing
+// is lost by discarding). Close is confirm_lifecycle_actions-gated (PRD §14)
+// since it acts outside the ambient transaction; that's correct here too, not
+// worked around -- see callExecuteScriptWith's extra param. The closing script
+// runs routed to the ACTIVE document (documentID), which is what makes closing
+// a created document possible at all: a created document holds its managed
+// transaction only during the run that created it, so a later run with no
+// transaction on it may close it (PRD §14's live-pinned rule -- see
+// ACreatedDocumentCannotBeClosedWhileItsTransactionIsOpen for the
+// within-the-same-run refusal).
+//
+// deletePathAfter, when non-empty, is a file to best-effort File.Delete after
+// the close -- for cases (document_routing_test.go) whose fixture is an
+// on-disk copy rather than an unsaved document. Same script, so one round
+// trip covers both.
+//
+// This is the shared cleanup helper every document-creating case registers
+// via t.Cleanup (or calls directly). The suite used to leave 8-12 unsaved
+// documents open per full run -- deliberately at first ("restart Revit
+// between corpus runs"), but the live snapshot push (issue #30) made every
+// leftover visible in list_instances, where it polluted later cases'
+// targetDocument choice and, before targetDocument learned to prefer the
+// active document, broke them outright. Cleanup is cheap now that closing is
+// one confirm-gated script; the restart-Revit posture is gone.
 //
 // Independent PR review finding: this used to route through decodeToolResult,
 // which calls t.Fatalf on an isError MCP response. Cleanup running in
@@ -70,11 +88,15 @@ func createBlankFixtureDocument(t *testing.T, c *mcpclient.Client, instanceID, d
 // out.Status != "success" branch below already treats a "success"-shaped
 // failure. Decodes the envelope by hand here instead of reusing
 // decodeToolResult specifically to avoid its Fatalf-on-isError behavior.
-func closeFixtureDocument(t *testing.T, c *mcpclient.Client, instanceID, documentID, title string) {
+func closeDocumentByTitle(t *testing.T, c *mcpclient.Client, instanceID, documentID, title, deletePathAfter string) {
 	t.Helper()
+	deleteStatement := ""
+	if deletePathAfter != "" {
+		deleteStatement = "try { System.IO.File.Delete(" + strconv.Quote(deletePathAfter) + "); } catch {}\n"
+	}
 	script := fixtureLookupPreamble(title) + `
 doc.Close(false);
-return "closed";
+` + deleteStatement + `return "closed";
 `
 	raw := callExecuteScriptWith(t, c, instanceID, documentID, script, map[string]any{"confirm_lifecycle_actions": true})
 
@@ -153,4 +175,51 @@ func fixtureWritePreamble(title string) string {
 if (!string.IsNullOrEmpty(doc.PathName)) { throw new System.Exception("fixture document " + %s + " is unexpectedly saved to disk (PathName=" + doc.PathName + "); refusing to write to what may not be the throwaway fixture document"); }
 OpenForWriting(doc);
 `, strconv.Quote(title))
+}
+
+// cleanupTitles extracts every "cleanup-title=<Title>;" marker a script
+// printed to stdout. Document-creating scripts whose RETURN value is already
+// spoken for (an anonymous result object, a status string an assertion
+// matches on) print this marker instead --
+// System.Console.WriteLine("cleanup-title=" + doc.Title + ";") -- so the Go
+// side can register closeDocumentByTitle without changing what the test
+// asserts (stdout is prepended to Output; substring assertions are
+// unaffected). The trailing semicolon terminates the title the same way the
+// suite's counted assertions terminate numbers: without it, a title that is
+// a prefix of another could not be extracted unambiguously.
+func cleanupTitles(output string) []string {
+	var titles []string
+	rest := output
+	for {
+		idx := strings.Index(rest, "cleanup-title=")
+		if idx < 0 {
+			return titles
+		}
+		rest = rest[idx+len("cleanup-title="):]
+		end := strings.Index(rest, ";")
+		if end < 0 {
+			return titles
+		}
+		if title := strings.TrimSpace(rest[:end]); title != "" {
+			titles = append(titles, title)
+		}
+		rest = rest[end+1:]
+	}
+}
+
+// registerCreatedDocumentCleanup registers a closeDocumentByTitle t.Cleanup
+// for every cleanup-title marker in output, logging (not failing) when a
+// script that was expected to report one didn't -- cleanup problems must
+// never change a test's own verdict.
+func registerCreatedDocumentCleanup(t *testing.T, c *mcpclient.Client, instanceID, documentID, output string) {
+	t.Helper()
+	titles := cleanupTitles(output)
+	if len(titles) == 0 {
+		t.Logf("cleanup: no cleanup-title marker in output; a created document may be left open: %s", output)
+		return
+	}
+	for _, title := range titles {
+		title := title
+		t.Cleanup(func() { closeDocumentByTitle(t, c, instanceID, documentID, title, "") })
+	}
 }
