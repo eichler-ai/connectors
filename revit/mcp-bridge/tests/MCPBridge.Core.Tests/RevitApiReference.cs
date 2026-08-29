@@ -32,6 +32,16 @@ internal static class RevitApiReference
     /// </summary>
     internal static string[] Paths { get; } = new[] { Read("RevitApiPath"), Read("RevitApiUiPath") };
 
+    /// <summary>
+    /// The same two assemblies as ALREADY-BUILT metadata references, parsed exactly once per test
+    /// process (test-quality pass): CreateFromFile re-reads the DLL's metadata every call, and the
+    /// suites construct ~100 runners -- the repeated parse was a measurable slice of the tier-1
+    /// wall clock. MetadataReference instances are immutable and safe to share across runners; no
+    /// runner STATE is shared. Every test helper should pass these, not <see cref="Paths"/>.
+    /// </summary>
+    internal static System.Collections.Generic.IReadOnlyList<Microsoft.CodeAnalysis.MetadataReference> References { get; } =
+        Paths.Select(p => (Microsoft.CodeAnalysis.MetadataReference)Microsoft.CodeAnalysis.MetadataReference.CreateFromFile(p)).ToArray();
+
     private static string Read(string key)
     {
         var value = typeof(RevitApiReference).Assembly

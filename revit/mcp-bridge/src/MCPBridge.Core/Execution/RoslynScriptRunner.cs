@@ -103,11 +103,20 @@ internal sealed class RoslynScriptRunner
     /// (PRD §14) -- the scripts in those tests are rejected before anything is ever emitted or executed,
     /// so nothing needs the assembly to actually load.
     /// </param>
+    /// <param name="additionalMetadataReferences">
+    /// Same purpose as <paramref name="additionalMetadataReferencePaths"/>, taking ALREADY-BUILT
+    /// references. Also tests-only, and it exists for test-suite wall clock (test-quality pass):
+    /// <c>MetadataReference.CreateFromFile</c> re-parses RevitAPI.dll/RevitAPIUI.dll's metadata on
+    /// every call, and the tier-1 suites construct ~100 runners -- a shared, once-per-process pair of
+    /// references (see the test project's RevitApiReference.References) removes that repeated parse
+    /// without sharing any runner state between tests.
+    /// </param>
     public RoslynScriptRunner(
         int cacheCapacity = 32,
         Func<AssemblyLoadContext>? alcFactory = null,
         Action? compileCounter = null,
-        IEnumerable<string>? additionalMetadataReferencePaths = null)
+        IEnumerable<string>? additionalMetadataReferencePaths = null,
+        IEnumerable<MetadataReference>? additionalMetadataReferences = null)
     {
         _cache = new ScriptCompilationCache(cacheCapacity);
         _alcFactory = alcFactory ?? (() => new AssemblyLoadContext($"mcpbridge-script-{Guid.NewGuid()}", isCollectible: true));
@@ -120,6 +129,11 @@ internal sealed class RoslynScriptRunner
         {
             _options = _options.AddReferences(
                 additionalMetadataReferencePaths.Select(path => MetadataReference.CreateFromFile(path)));
+        }
+
+        if (additionalMetadataReferences is not null)
+        {
+            _options = _options.AddReferences(additionalMetadataReferences);
         }
     }
 

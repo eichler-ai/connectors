@@ -30,7 +30,7 @@ public class RoslynScriptRunnerTests
     }
 
     private static RoslynScriptRunner NewRunner(Action? compileCounter = null) =>
-        new(compileCounter: compileCounter, additionalMetadataReferencePaths: RevitApiReference.Paths);
+        new(compileCounter: compileCounter, additionalMetadataReferences: RevitApiReference.References);
 
     private static ScriptGlobals NewGlobals(CancellationToken token = default) => new(
         document: new FakeDocumentAdapter(),
@@ -170,7 +170,7 @@ public class RoslynScriptRunnerTests
             captured = alc;
             return alc;
         },
-            additionalMetadataReferencePaths: RevitApiReference.Paths);
+            additionalMetadataReferences: RevitApiReference.References);
 
         var outcome = await runner.RunAsync("1 + 1", NewGlobals(), CancellationToken.None);
 
@@ -234,7 +234,7 @@ public class RoslynScriptRunnerTests
             captured = alc;
             return alc;
         },
-            additionalMetadataReferencePaths: RevitApiReference.Paths);
+            additionalMetadataReferences: RevitApiReference.References);
 
         var outcome = await runner.RunAsync("1 + 1", NewGlobals(), CancellationToken.None);
 

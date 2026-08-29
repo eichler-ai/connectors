@@ -201,19 +201,15 @@ func TestRegisterPopulatesRegistryAndAttachesExecution(t *testing.T) {
 // elsewhere, so the seam between the notification switch and the registry
 // call needs its own coverage.
 //
-// This can only be proven by letting real time actually pass: ConnectedSince
-// (stamped by the wire register itself, not settable through the protocol)
-// has to genuinely age past UnresponsiveThreshold before a ping's arrival is
-// distinguishable from the ConnectedSince fallback alone -- there's no way
-// to fake that with a virtual/future query time, since a ping's timestamp is
-// always real wall-clock "now". Kept to just over the threshold (not
-// PruneAfterSilence) to bound the real sleep this test needs; skipped in
-// -short runs since it's a genuine ~31s wall-clock wait, not a slow-but-
-// parallelizable one.
+// No 31-second wait (test-quality pass; this test used to be the whole
+// suite's wall-clock ceiling). An earlier comment here claimed the aging
+// "can't be faked with a virtual/future query time" -- that stopped being
+// true when IsResponsive gained its caller-supplied `now`: pick a QUERY time
+// past the threshold relative to everything that happened before the ping
+// (so the ConnectedSince fallback reads unresponsive) but within it relative
+// to a ping sent a real ~50ms later (so a recorded ping flips the answer).
+// Timestamps stay real; only the question's "as of when" is virtual.
 func TestPingNotificationReachesRegistry(t *testing.T) {
-	if testing.Short() {
-		t.Skip("real ~31s wall-clock wait; run without -short")
-	}
 	b, ln := newTestBroker(t)
 	conn, br, resp := dialAndAuth(t, ln.Addr().String(), testToken, RoleAddIn)
 	defer conn.Close()
@@ -239,26 +235,39 @@ func TestPingNotificationReachesRegistry(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	time.Sleep(registry.UnresponsiveThreshold + time.Second)
-	if b.Registry.IsResponsive("inst-ping", time.Now()) {
-		t.Fatalf("test setup: instance should have gone unresponsive via the ConnectedSince fallback by now")
+	// Everything up to here -- including ConnectedSince -- happened at or
+	// before this instant, so a query 25ms past the threshold from NOW reads
+	// unresponsive through the ConnectedSince fallback...
+	registeredBy := time.Now()
+	query := registeredBy.Add(registry.UnresponsiveThreshold + 25*time.Millisecond)
+	if b.Registry.IsResponsive("inst-ping", query) {
+		t.Fatalf("pre-ping: the ConnectedSince fallback should read unresponsive at the virtual query time")
 	}
 
+	// ...while a ping recorded a real >=50ms AFTER registeredBy lands within
+	// the threshold of that same query time. Only Registry.RecordPing being
+	// actually wired to the "ping" notification can flip the answer.
+	time.Sleep(50 * time.Millisecond)
 	if err := addinConn.Notify("ping", struct{}{}); err != nil {
 		t.Fatalf("Notify ping: %v", err)
 	}
 
-	// Poll for RecordPing's effect: a ping recorded at real "now" makes
-	// IsResponsive(id, now) true again -- but only if the notification
-	// actually reached Registry.RecordPing.
 	deadline = time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if b.Registry.IsResponsive("inst-ping", time.Now()) {
+		if b.Registry.IsResponsive("inst-ping", query) {
+			// Guard against the one vacuous-pass path (PR review): IsResponsive
+			// answers true for an UNKNOWN instance, so a regression that made the
+			// broker tear the connection down on "ping" would flip the answer
+			// without RecordPing ever running. Responsive-because-recorded and
+			// responsive-because-deregistered must not be conflated.
+			if _, ok := b.Registry.Get("inst-ping"); !ok {
+				t.Fatal("instance vanished from the registry after ping -- IsResponsive flipped for the wrong reason")
+			}
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatal("ping notification never reached Registry.RecordPing (IsResponsive still reflects pre-ping staleness)")
+	t.Fatal("ping notification never reached Registry.RecordPing (IsResponsive at the virtual query time still reflects pre-ping staleness)")
 }
 
 // TestRegisterThenImmediateCloseDetachesCleanly is a regression test for a

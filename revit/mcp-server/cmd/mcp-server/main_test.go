@@ -269,7 +269,14 @@ func TestTurnReaderDeliverOrDonate_StopStillOpen_DeliversNormally(t *testing.T) 
 // TestTurnReaderDeliverOrDonate_StopAlreadyClosed_DonatesRatherThanDelivers
 // and its sibling above.
 func TestTurnReaderStopDoesNotStealFromNextReader(t *testing.T) {
-	const rounds = 300
+	// 100 rounds under -short (the routine dev loop), 300 for the full run:
+	// the rate check below is informational-only (see the comment above), so
+	// the statistical margin extra rounds buy is not worth ~2s of every
+	// -short cycle (test-quality pass).
+	rounds := 300
+	if testing.Short() {
+		rounds = 100
+	}
 	r1Wins := 0
 	for i := 0; i < rounds; i++ {
 		relay := &stdinRelay{chunks: make(chan []byte)}

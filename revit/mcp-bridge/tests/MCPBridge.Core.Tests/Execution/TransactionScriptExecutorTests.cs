@@ -17,7 +17,7 @@ public class TransactionScriptExecutorTests
     // members are real Revit types as of PRD §14, so without them nothing here would bind. See
     // RevitApiReference's doc comment for why they cannot simply be loaded.
     private static TransactionScriptExecutor NewExecutor() =>
-        new(new RoslynScriptRunner(additionalMetadataReferencePaths: RevitApiReference.Paths));
+        new(new RoslynScriptRunner(additionalMetadataReferences: RevitApiReference.References));
 
     private static string CreateTempDir()
     {
@@ -725,7 +725,7 @@ throw new System.TimeoutException(""cancellation was never observed"");";
         // document's Transaction and TransactionGroup are left open in the live Revit session.
         var executor = new TransactionScriptExecutor(new RoslynScriptRunner(
             alcFactory: () => throw new InvalidOperationException("simulated load-context failure"),
-            additionalMetadataReferencePaths: RevitApiReference.Paths));
+            additionalMetadataReferences: RevitApiReference.References));
         var document = new FakeDocumentAdapter();
         var uiApp = new FakeUiApplicationAdapter();
 

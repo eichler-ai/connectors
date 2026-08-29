@@ -139,10 +139,12 @@ public class BrokerDiscoveryTests : IDisposable
         // (UnauthorizedAccessException from an ACL hiccup or a flapping UNC share) escaped
         // TryDiscover entirely and could kill the connection thread -- or the Revit process. The
         // contract pinned here: whatever the read failure, TryDiscover answers not-found with the
-        // broker-json-unreadable diagnostic; it never throws. The denial is platform-appropriate --
-        // Windows (where the tier-1 suite actually runs, on the dev VM) uses an exclusive-share
-        // lock; Unix (this repo's Mac side, or any future Linux CI) uses a no-read file mode, which
-        // exercises the non-IOException breadth specifically.
+        // broker-json-unreadable diagnostic; it never throws. Both platforms deny via a mechanism
+        // that throws a NON-IOException (UnauthorizedAccessException) -- Windows (where the tier-1
+        // suite actually runs, on the dev VM) with an ACL deny-read, Unix with a no-read file mode
+        // -- because an IOException-producing denial (an exclusive-share lock, this test's first
+        // Windows shape) was caught by the PRE-fix code too and couldn't detect the widening
+        // regressing on the platform that matters.
         var options = BrokerDiscoveryOptions.Local(localAppDataRoot: _tempRoot);
         var discovery = new BrokerDiscovery(options);
         Directory.CreateDirectory(Path.GetDirectoryName(discovery.BrokerJsonPath)!);
@@ -150,13 +152,31 @@ public class BrokerDiscoveryTests : IDisposable
 
         if (OperatingSystem.IsWindows())
         {
-            using var hold = new FileStream(discovery.BrokerJsonPath, FileMode.Open, FileAccess.Read, FileShare.None);
+            // ACL deny-read, not a FileShare.None lock (PR #43 review follow-up): the sharing
+            // violation throws IOException, which the PRE-fix catch also handled -- so that shape
+            // couldn't detect the Exception-breadth widening regressing on the platform where the
+            // suite actually runs. A denied read throws UnauthorizedAccessException, the exact
+            // class the widening exists for.
+            var fileInfo = new FileInfo(discovery.BrokerJsonPath);
+            var user = System.Security.Principal.WindowsIdentity.GetCurrent().User!;
+            var denyRead = new System.Security.AccessControl.FileSystemAccessRule(
+                user, System.Security.AccessControl.FileSystemRights.Read, System.Security.AccessControl.AccessControlType.Deny);
+            var security = fileInfo.GetAccessControl();
+            security.AddAccessRule(denyRead);
+            fileInfo.SetAccessControl(security);
+            try
+            {
+                var result = discovery.TryDiscover();
 
-            var result = discovery.TryDiscover();
-
-            Assert.False(result.Found);
-            Assert.NotNull(result.Diagnostic);
-            Assert.Equal("broker-json-unreadable", result.Diagnostic!.Code);
+                Assert.False(result.Found);
+                Assert.NotNull(result.Diagnostic);
+                Assert.Equal("broker-json-unreadable", result.Diagnostic!.Code);
+            }
+            finally
+            {
+                security.RemoveAccessRule(denyRead);
+                fileInfo.SetAccessControl(security);
+            }
         }
         else
         {
