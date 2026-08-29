@@ -255,6 +255,14 @@ func TestPingNotificationReachesRegistry(t *testing.T) {
 	deadline = time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		if b.Registry.IsResponsive("inst-ping", query) {
+			// Guard against the one vacuous-pass path (PR review): IsResponsive
+			// answers true for an UNKNOWN instance, so a regression that made the
+			// broker tear the connection down on "ping" would flip the answer
+			// without RecordPing ever running. Responsive-because-recorded and
+			// responsive-because-deregistered must not be conflated.
+			if _, ok := b.Registry.Get("inst-ping"); !ok {
+				t.Fatal("instance vanished from the registry after ping -- IsResponsive flipped for the wrong reason")
+			}
 			return
 		}
 		time.Sleep(10 * time.Millisecond)

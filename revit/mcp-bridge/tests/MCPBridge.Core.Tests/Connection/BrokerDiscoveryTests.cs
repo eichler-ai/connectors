@@ -139,10 +139,12 @@ public class BrokerDiscoveryTests : IDisposable
         // (UnauthorizedAccessException from an ACL hiccup or a flapping UNC share) escaped
         // TryDiscover entirely and could kill the connection thread -- or the Revit process. The
         // contract pinned here: whatever the read failure, TryDiscover answers not-found with the
-        // broker-json-unreadable diagnostic; it never throws. The denial is platform-appropriate --
-        // Windows (where the tier-1 suite actually runs, on the dev VM) uses an exclusive-share
-        // lock; Unix (this repo's Mac side, or any future Linux CI) uses a no-read file mode, which
-        // exercises the non-IOException breadth specifically.
+        // broker-json-unreadable diagnostic; it never throws. Both platforms deny via a mechanism
+        // that throws a NON-IOException (UnauthorizedAccessException) -- Windows (where the tier-1
+        // suite actually runs, on the dev VM) with an ACL deny-read, Unix with a no-read file mode
+        // -- because an IOException-producing denial (an exclusive-share lock, this test's first
+        // Windows shape) was caught by the PRE-fix code too and couldn't detect the widening
+        // regressing on the platform that matters.
         var options = BrokerDiscoveryOptions.Local(localAppDataRoot: _tempRoot);
         var discovery = new BrokerDiscovery(options);
         Directory.CreateDirectory(Path.GetDirectoryName(discovery.BrokerJsonPath)!);
