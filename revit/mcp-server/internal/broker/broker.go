@@ -222,17 +222,19 @@ func writeAuthRejection(fr *transport.Framer, id *json.RawMessage, code, message
 // to the execution manager so execute_script/poll_execution/
 // cancel_execution can route to it.
 //
-// instanceID is safe to read after conn.Serve() returns with no extra
-// synchronization: Conn dispatches notifications inline on the same
-// goroutine that's driving Serve's read loop (see transport.Conn.Serve's
-// own comment), so the register handler below has always finished running
-// — including having called AttachInstance — by the time Serve returns.
-// Attach is therefore guaranteed to happen-before the DetachInstance call
-// at the end of this function, never after it.
+// instanceID (and registerEpoch alongside it) is safe to read after
+// conn.Serve() returns with no extra synchronization: Conn dispatches
+// notifications inline on the same goroutine that's driving Serve's read
+// loop (see transport.Conn.Serve's own comment), so the register handler
+// below has always finished running — including having called
+// AttachInstance — by the time Serve returns. Attach is therefore
+// guaranteed to happen-before the DetachInstance call at the end of this
+// function, never after it.
 func (b *Broker) serveAddIn(rwc io.ReadWriteCloser) {
 	conn := transport.NewConn(rwc)
 	defer conn.Close() // idempotent alongside failPending's own close; belt-and-suspenders against any path that skips it
 	var instanceID string
+	var registerEpoch uint64
 
 	conn.SetNotificationHandler(func(method string, params json.RawMessage) {
 		switch method {
@@ -243,13 +245,24 @@ func (b *Broker) serveAddIn(rwc io.ReadWriteCloser) {
 				return
 			}
 			instanceID = rp.InstanceID
-			b.Registry.Register(&registry.Instance{
+			registerEpoch = b.Registry.Register(&registry.Instance{
 				InstanceID:   rp.InstanceID,
 				PID:          rp.PID,
 				RevitVersion: rp.RevitVersion,
 				Documents:    rp.Documents,
 			}, time.Now())
-			b.Execution.AttachInstance(rp.InstanceID, conn)
+			if displaced := b.Execution.AttachInstance(rp.InstanceID, conn); displaced != nil {
+				// A register under an instance_id that's already attached
+				// means the add-in redialed (usually after a network blip
+				// left the old socket half-open, its serve goroutine still
+				// blocked in a read that may not error for a long time).
+				// Close the displaced connection: that unblocks its
+				// goroutine so its teardown runs now — harmlessly, per the
+				// identity/epoch guards below — and releases the socket,
+				// instead of leaking both until TCP itself notices.
+				b.logf("broker: instance %s re-registered on a new connection; closing its displaced one", rp.InstanceID)
+				displaced.Close()
+			}
 			b.Discovery.AttachInstance(rp.InstanceID, conn)
 		case "ping":
 			// Heartbeat (PRD §05) — instanceID is only known once this
@@ -263,16 +276,23 @@ func (b *Broker) serveAddIn(rwc io.ReadWriteCloser) {
 
 	_ = conn.Serve()
 	if instanceID != "" {
-		b.Execution.DetachInstance(instanceID)
-		b.Discovery.DetachInstance(instanceID)
-		// A cleanly torn-down connection is immediate, certain proof this
-		// instance is gone -- remove it from the registry now rather than
+		// A torn-down connection is immediate, certain proof that THIS
+		// connection's registration is gone -- remove it now rather than
 		// leaving it to age out via the heartbeat prune sweep (PRD §05),
 		// which exists for the different case of a socket that's still
-		// open but has gone quiet. A genuine reconnect creates a brand-new
-		// entry via Register regardless, so removing the old one first
-		// doesn't introduce any flicker for the normal, healthy case.
-		b.Registry.Remove(instanceID)
+		// open but has gone quiet. Every step is guarded on this
+		// connection (or the epoch its own register minted) still being
+		// current, because this teardown can run arbitrarily late: a
+		// half-open socket's Serve may not return until long after the
+		// add-in redialed and re-registered the same stable instance_id,
+		// and an unguarded teardown here would deregister that live
+		// replacement (v1 integrated review). Each store guards itself —
+		// conn identity for the two conn maps, the register epoch for the
+		// registry — so no cross-store interleaving with a concurrent
+		// re-register can strand or clobber anything.
+		b.Execution.DetachInstance(instanceID, conn)
+		b.Discovery.DetachInstance(instanceID, conn)
+		b.Registry.RemoveIfEpoch(instanceID, registerEpoch)
 	}
 }
 

@@ -215,3 +215,38 @@ func TestPruneStaleNothingToPruneReturnsEmpty(t *testing.T) {
 		t.Errorf("PruneStale should return nothing when no instance has gone silent, got %+v", pruned)
 	}
 }
+
+// TestRemoveIfEpochIgnoresStaleEpoch pins the epoch guard on the
+// connection-teardown removal path (v1 integrated review): a stale
+// connection's teardown, holding the epoch its own register minted, must
+// not remove a later registration under the same instance_id — including
+// the interleaving where the new connection's Register has already run
+// before the old connection's teardown gets to its registry removal.
+func TestRemoveIfEpochIgnoresStaleEpoch(t *testing.T) {
+	r := New()
+	now := time.Now()
+
+	epochA := r.Register(&Instance{InstanceID: "inst-1", PID: 1}, now)
+	epochB := r.Register(&Instance{InstanceID: "inst-1", PID: 2}, now) // the redial's re-register
+	if epochA == epochB {
+		t.Fatalf("re-register must mint a fresh epoch, got %d twice", epochA)
+	}
+
+	r.RemoveIfEpoch("inst-1", epochA) // the stale connection's late teardown
+	inst, ok := r.Get("inst-1")
+	if !ok {
+		t.Fatal("stale-epoch removal deleted the live registration")
+	}
+	if inst.PID != 2 {
+		t.Errorf("PID = %d, want the re-registered entry (2)", inst.PID)
+	}
+
+	r.RemoveIfEpoch("inst-1", epochB) // the current connection's teardown
+	if _, ok := r.Get("inst-1"); ok {
+		t.Fatal("current-epoch removal should have applied")
+	}
+
+	// Removing an already-removed (or never-registered) id is a no-op.
+	r.RemoveIfEpoch("inst-1", epochB)
+	r.RemoveIfEpoch("never-registered", 42)
+}

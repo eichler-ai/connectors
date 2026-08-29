@@ -450,3 +450,34 @@ func TestRunRejectsUnspecifiedBindAddr(t *testing.T) {
 		})
 	}
 }
+
+// TestStdinRelayExhausted pins the terminal-state signal the re-election
+// loop uses to exit once the MCP client has closed stdin (v1 integrated
+// review: without it, a secondary whose upstream dropped after stdin EOF
+// re-ran the election forever, redialing the primary about twice a second).
+// Built by hand rather than via newStdinRelay, which is hard-wired to the
+// real os.Stdin.
+func TestStdinRelayExhausted(t *testing.T) {
+	r := &stdinRelay{chunks: make(chan []byte)}
+	if r.exhausted() {
+		t.Fatal("a relay with stdin still open must not report exhausted")
+	}
+
+	r.closed.Store(true)
+	if !r.exhausted() {
+		t.Fatal("stdin closed with nothing pending must report exhausted")
+	}
+
+	// Donated leftover keeps the relay non-exhausted — a successor role
+	// still has input to consume even though stdin itself is closed.
+	r.donate([]byte("tail"))
+	if r.exhausted() {
+		t.Fatal("stdin closed but with donated data pending must not report exhausted")
+	}
+	if got := string(r.takePending()); got != "tail" {
+		t.Fatalf("takePending = %q, want the donated tail", got)
+	}
+	if !r.exhausted() {
+		t.Fatal("once pending is drained and stdin is closed, exhausted must be true")
+	}
+}

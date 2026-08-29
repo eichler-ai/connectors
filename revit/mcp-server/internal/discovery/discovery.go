@@ -88,11 +88,18 @@ func (r *Router) AttachInstance(instanceID string, conn *transport.Conn) {
 	r.conns[instanceID] = conn
 }
 
-// DetachInstance drops the wire connection for instanceID.
-func (r *Router) DetachInstance(instanceID string) {
+// DetachInstance drops the wire connection for instanceID — but only if
+// conn is still the one currently attached. Same identity guard, for the
+// same reason, as execution.Manager.DetachInstance: a stale connection's
+// late teardown (a half-open socket finally erroring out after the add-in
+// already redialed and re-registered) must not tear down the live
+// replacement it was displaced by.
+func (r *Router) DetachInstance(instanceID string, conn *transport.Conn) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	delete(r.conns, instanceID)
+	if r.conns[instanceID] == conn {
+		delete(r.conns, instanceID)
+	}
 }
 
 func errNoInstanceConnected() *diag.Record {

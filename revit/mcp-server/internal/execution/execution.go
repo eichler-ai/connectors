@@ -17,6 +17,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -87,7 +88,26 @@ type record struct {
 	instanceID string
 	status     Status
 	result     *Result
+	// settledAt is stamped when status turns terminal; zero while the
+	// execution is still live. It drives pruneSettledLocked's eviction.
+	settledAt time.Time
 }
+
+const (
+	// maxSettledExecutions and settledRetention bound how many terminal
+	// execution records the broker retains for late poll_execution calls,
+	// mirroring the add-in's own bounded replay buffer (PRD §05: "a small
+	// ring buffer of recent execution results (last N / ~10 minutes)").
+	// Without a bound the primary — a long-running process — grew its
+	// executions map by one record per execute_script for its whole
+	// lifetime (v1 integrated review). Non-terminal records are never
+	// evicted: they are live state, and their instance's busy latch
+	// depends on them. A poll_execution against an evicted id gets
+	// unknown_execution_id — the same answer PRD §05 already specifies
+	// for an id the add-in's own bounded buffer no longer knows.
+	maxSettledExecutions = 200
+	settledRetention     = 10 * time.Minute
+)
 
 // Manager owns the live set of instance wire connections and in-flight
 // executions.
@@ -129,22 +149,42 @@ func NewManager() *Manager {
 	}
 }
 
-// AttachInstance registers the wire connection to use for instanceID. A
-// second call for the same instanceID (e.g. after a reconnect) replaces the
-// prior connection.
-func (m *Manager) AttachInstance(instanceID string, conn *transport.Conn) {
+// AttachInstance registers the wire connection to use for instanceID and
+// returns the connection it displaced, if any. A second call for the same
+// instanceID (e.g. after a reconnect) replaces the prior connection. The
+// caller is expected to Close a non-nil displaced connection: it's usually
+// a half-open socket left over from a network blip, and closing it is what
+// unblocks its serve goroutine so its own teardown can run — harmlessly,
+// per DetachInstance's identity check below — instead of the socket and
+// goroutine leaking until TCP itself gives up.
+func (m *Manager) AttachInstance(instanceID string, conn *transport.Conn) *transport.Conn {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	prev := m.conns[instanceID]
 	m.conns[instanceID] = conn
+	if prev == conn {
+		return nil
+	}
+	return prev
 }
 
-// DetachInstance drops the wire connection for instanceID. Also clears the
-// instance's busy bookkeeping: a disconnected instance can't still be
-// "busy" once its connection is gone (otherwise every reconnect would
-// permanently wedge execute_script behind an execution that will never
-// complete). In-flight execution *records* are left as-is (a subsequent
-// poll/cancel against them will surface an "instance disconnected"
-// diagnostic rather than silently vanishing).
+// DetachInstance drops the wire connection for instanceID — but only if
+// conn is still the instance's *current* connection — and reports whether
+// it detached anything. The identity check is load-bearing, not defensive
+// trim: a half-open TCP drop can leave the old connection's serve goroutine
+// blocked in its read loop long after the add-in has redialed and
+// re-registered the same stable instance_id (PRD §05) on a new connection.
+// When the old socket finally errors out, a detach keyed by instance_id
+// alone would tear down the live replacement — the instance vanishes from
+// routing while the add-in, seeing a perfectly healthy connection, never
+// re-registers, permanently.
+//
+// A detach that applies also clears the instance's busy bookkeeping: a
+// disconnected instance can't still be "busy" once its connection is gone
+// (otherwise every reconnect would permanently wedge execute_script behind
+// an execution that will never complete). In-flight execution *records* are
+// left as-is (a subsequent poll/cancel against them will surface an
+// "instance disconnected" diagnostic rather than silently vanishing).
 //
 // The unrecoverable latch is deliberately NOT cleared here. PRD §05: an
 // instance_id is stable for the life of the Revit *process*, independent of
@@ -154,12 +194,33 @@ func (m *Manager) AttachInstance(instanceID string, conn *transport.Conn) {
 // §05, a different map key this latch never touches — so leaving a stale
 // instance_id's entry here forever is harmless, and clearing it on a
 // same-id reconnect would silently un-latch a still-wedged instance.
-func (m *Manager) DetachInstance(instanceID string) {
+func (m *Manager) DetachInstance(instanceID string, conn *transport.Conn) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.conns[instanceID] != conn {
+		return false
+	}
 	delete(m.conns, instanceID)
-	if m.activeByInstance[instanceID] != "" {
-		delete(m.activeByInstance, instanceID)
+	delete(m.activeByInstance, instanceID)
+	return true
+}
+
+// CloseInstanceConn closes the wire connection currently attached for
+// instanceID, if any. Used by the heartbeat prune sweep (PRD §05): pruning
+// an instance that went silent removes only its registry entry, so a
+// still-open-but-quiet socket would otherwise leave a split-brain instance
+// — invisible in list_instances forever (RecordPing no-ops for
+// unregistered ids, so resumed pings can't resurrect it) yet still
+// executable through this manager's intact conns map. Closing the socket
+// routes recovery through the one path that already works end to end: the
+// serve goroutine's teardown, then the add-in's reconnect loop producing a
+// fresh register.
+func (m *Manager) CloseInstanceConn(instanceID string) {
+	m.mu.Lock()
+	conn := m.conns[instanceID]
+	m.mu.Unlock()
+	if conn != nil {
+		conn.Close()
 	}
 }
 
@@ -420,13 +481,14 @@ func (m *Manager) PollExecution(ctx context.Context, executionID string, timeout
 // instance wedged busy forever with no operator-visible recovery — the
 // grace-period escalation is what closes that gap.
 //
-// As of this writing, the add-in side (revit/mcp-bridge/) has no RPC
-// dispatcher/handler for cancel_execution wired up at all yet — that's
-// deferred, pending BridgeHost.Start()'s live-wiring work. So today, ANY
-// cancel_execution call hits this "no response" branch of the wire-failure
-// path, not just a genuinely hung/unresponsive one; the grace-period
-// escalation described above still fires correctly either way, but a
-// responsive add-in-side cancel handler isn't reachable yet in practice.
+// (An earlier version of this comment claimed the add-in had no
+// cancel_execution handler wired up at all. That has been false since the
+// live-wiring work landed: RequestDispatcher dispatches cancel_execution
+// and ExecutionManager signals the script's CancellationToken, so a
+// cooperative script genuinely resolves to "cancelled" over the wire. The
+// grace-period escalation above is the fallback for a script that ignores
+// the token or an add-in that never answers — not, as the old text said,
+// the path every cancel takes.)
 func (m *Manager) CancelExecution(ctx context.Context, executionID string) (*Result, *diag.Record) {
 	const cancelTimeoutMs = 10_000 // grace-period ceiling per PRD §06; not caller-configurable.
 
@@ -482,10 +544,12 @@ func (m *Manager) escalateUnrecoverable(instanceID, executionID string) {
 	}
 	rec.status = StatusUnrecoverable
 	rec.result = result
+	rec.settledAt = m.now()
 	m.unrecoverable[instanceID] = true
 	if m.activeByInstance[instanceID] == executionID {
 		delete(m.activeByInstance, instanceID)
 	}
+	m.pruneSettledLocked(rec.settledAt)
 }
 
 // callWire performs one JSON-RPC round trip for method against conn,
@@ -537,11 +601,43 @@ func (m *Manager) settle(instanceID, executionID string, res *Result) {
 	rec.status = res.Status
 	if IsTerminal(res.Status) {
 		rec.result = res
+		rec.settledAt = m.now()
 		if res.Status == StatusUnrecoverable {
 			m.unrecoverable[instanceID] = true
 		}
 		if m.activeByInstance[instanceID] == executionID {
 			delete(m.activeByInstance, instanceID)
 		}
+		m.pruneSettledLocked(rec.settledAt)
+	}
+}
+
+// pruneSettledLocked evicts settled (terminal) execution records that have
+// aged past settledRetention, then the oldest settled records beyond
+// maxSettledExecutions. Runs opportunistically at settle time — no
+// background sweep goroutine to own or shut down — which is enough, since
+// the map only ever grows at settle time too. Caller must hold m.mu.
+func (m *Manager) pruneSettledLocked(now time.Time) {
+	type settled struct {
+		id string
+		at time.Time
+	}
+	var kept []settled
+	for id, rec := range m.executions {
+		if !IsTerminal(rec.status) {
+			continue
+		}
+		if now.Sub(rec.settledAt) > settledRetention {
+			delete(m.executions, id)
+			continue
+		}
+		kept = append(kept, settled{id: id, at: rec.settledAt})
+	}
+	if len(kept) <= maxSettledExecutions {
+		return
+	}
+	sort.Slice(kept, func(i, j int) bool { return kept[i].at.Before(kept[j].at) })
+	for _, s := range kept[:len(kept)-maxSettledExecutions] {
+		delete(m.executions, s.id)
 	}
 }
