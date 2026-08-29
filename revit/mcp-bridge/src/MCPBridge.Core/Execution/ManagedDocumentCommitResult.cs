@@ -21,13 +21,15 @@ public sealed class ManagedDocumentCommitResult
         IReadOnlyList<FailureSummary> commitFailures,
         IReadOnlyList<string> committedDocuments,
         IReadOnlyList<string> rolledBackDocuments,
-        IReadOnlyList<string> unknownStateDocuments)
+        IReadOnlyList<string> unknownStateDocuments,
+        bool anyCommittedDocumentMayBeReal)
     {
         Failure = failure;
         CommitFailures = commitFailures;
         CommittedDocuments = committedDocuments;
         RolledBackDocuments = rolledBackDocuments;
         UnknownStateDocuments = unknownStateDocuments;
+        AnyCommittedDocumentMayBeReal = anyCommittedDocumentMayBeReal;
     }
 
     /// <summary>True when every document committed and every group assimilated.</summary>
@@ -75,16 +77,33 @@ public sealed class ManagedDocumentCommitResult
     /// </summary>
     public bool IsPartial => !Success && (CommittedDocuments.Count > 0 || UnknownStateDocuments.Count > 0);
 
+    /// <summary>
+    /// True when a committed document could be a document the script did NOT itself create this run --
+    /// i.e. one adopted via ScriptGlobals.OpenForWriting (DocumentOrigin.AdoptedExisting), or the ambient
+    /// document itself (DocumentOrigin.Ambient). Independent PR review finding: PartialCommitNotice's
+    /// remedy text used to unconditionally claim every committed document is "unsaved and in-memory," which
+    /// was true when CreateProjectDocument/CreateFamilyDocument were the only two members of this tier, but
+    /// is a straightforward lie about an adopted or ambient document -- both can be real, saved, on-disk
+    /// models. This flag is what lets that remedy text tell the two cases apart.
+    /// </summary>
+    public bool AnyCommittedDocumentMayBeReal { get; }
+
+    // anyCommittedDocumentMayBeReal is REQUIRED, not defaulted (independent PR review finding): an
+    // optional parameter defaulting to false exists only to keep old call sites compiling, and its
+    // actual effect would be a future call site silently under-reporting in the one notice whose entire
+    // job is honesty about partial state -- the exact class of bug the flag itself was added to fix.
     public static ManagedDocumentCommitResult Succeeded(
         IReadOnlyList<FailureSummary> commitFailures,
-        IReadOnlyList<string> committedDocuments) =>
-        new(null, commitFailures, committedDocuments, Array.Empty<string>(), Array.Empty<string>());
+        IReadOnlyList<string> committedDocuments,
+        bool anyCommittedDocumentMayBeReal) =>
+        new(null, commitFailures, committedDocuments, Array.Empty<string>(), Array.Empty<string>(), anyCommittedDocumentMayBeReal);
 
     public static ManagedDocumentCommitResult Failed(
         Exception failure,
         IReadOnlyList<FailureSummary> commitFailures,
         IReadOnlyList<string> committedDocuments,
         IReadOnlyList<string> rolledBackDocuments,
-        IReadOnlyList<string> unknownStateDocuments) =>
-        new(failure, commitFailures, committedDocuments, rolledBackDocuments, unknownStateDocuments);
+        IReadOnlyList<string> unknownStateDocuments,
+        bool anyCommittedDocumentMayBeReal) =>
+        new(failure, commitFailures, committedDocuments, rolledBackDocuments, unknownStateDocuments, anyCommittedDocumentMayBeReal);
 }

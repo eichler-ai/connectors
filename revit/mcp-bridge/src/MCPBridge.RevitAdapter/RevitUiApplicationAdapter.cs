@@ -11,7 +11,7 @@ namespace MCPBridge.RevitAdapter;
 /// IDocumentCreationSource members below hand back an IDocumentAdapter whose CreateTransaction a script
 /// could then call. Public, it was a one-line route to an unmanaged transaction on a brand-new document.
 /// </summary>
-internal sealed class RevitUiApplicationAdapter : IUiApplicationAdapter, IRawUiApplicationSource, IDocumentCreationSource
+internal sealed class RevitUiApplicationAdapter : IUiApplicationAdapter, IRawUiApplicationSource, IDocumentCreationSource, IExistingDocumentSource
 {
     private readonly UIApplication _uiApplication;
 
@@ -67,4 +67,11 @@ internal sealed class RevitUiApplicationAdapter : IUiApplicationAdapter, IRawUiA
 
         return new RevitDocumentAdapter(_uiApplication.Application.NewFamilyDocument(templatePath));
     }
+
+    /// <summary>
+    /// See <see cref="IExistingDocumentSource"/>. Nothing beyond RevitDocumentAdapter's ordinary
+    /// constructor -- the document already exists (found by the script, not created here), so there is
+    /// no Revit API call to make, unlike CreateProjectDocument/CreateFamilyDocument above.
+    /// </summary>
+    public IDocumentAdapter WrapExisting(Autodesk.Revit.DB.Document document) => new RevitDocumentAdapter(document);
 }

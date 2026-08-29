@@ -174,6 +174,52 @@ public class ManagedDocumentTransactionsTests
     }
 
     [Fact]
+    public void Open_ThrowsWhenCalledTwiceForTheSameDocumentId()
+    {
+        // OpenForWriting (ScriptGlobals) specifically targets a document that may already be tracked --
+        // the ambient one, or one opened earlier this run -- a real, script-triggerable hazard
+        // CreateProjectDocument/CreateFamilyDocument never had (they only ever hand back a document that
+        // didn't exist until that call returned). Comparison is by DocumentId, never ReferenceEquals, per
+        // this project's own standing gotcha that Revit hands back different wrapper objects for "the
+        // same" document depending on API entry point -- JournalingDocumentAdapter's DocumentId is
+        // derived from Title ("tmp-" + Title), so two adapters sharing a Title collide exactly as two
+        // separate RevitDocumentAdapter wrappers around the same live Document would.
+        var journal = new List<string>();
+        var set = NewSet();
+        set.Open(new JournalingDocumentAdapter("ambient", journal), isAmbient: true);
+
+        var duplicate = new JournalingDocumentAdapter("ambient", journal);
+        var ex = Assert.Throws<InvalidOperationException>(() => set.Open(duplicate));
+
+        Assert.Contains("already open", ex.Message);
+        // Independent PR review finding: this used to assert Assert.Contains("ambient", ex.Message),
+        // which passes even on boilerplate text ("...already opened via CreateProjectDocument/
+        // CreateFamilyDocument/OpenForWriting...") that names "ambient" as a documented CASE, not the
+        // document this guard actually named. Assert on the real SafeDescribe output instead, so this
+        // test genuinely fails if the guard ever names the wrong document.
+        Assert.Contains("ambient (active document)", ex.Message);
+        Assert.Equal(1, set.Count); // the duplicate must not have been added alongside the original.
+        // No TransactionGroup/Transaction was started for the rejected duplicate -- the guard fires
+        // before any Revit-side allocation, not after. Journal still holds exactly the first Open's two
+        // entries; a second group.Start/tx.Start pair would mean the duplicate got through.
+        Assert.Equal(new[] { "ambient:group.Start", "ambient:tx.Start" }, journal);
+    }
+
+    [Fact]
+    public void Open_AllowsTwoDifferentDocuments_NoFalsePositiveOnTheGuard()
+    {
+        // Sanity check the new DocumentId guard doesn't reject legitimately different documents --
+        // distinct titles mean distinct DocumentIds here (JournalingDocumentAdapter's own convention).
+        var journal = new List<string>();
+        var set = NewSet();
+
+        set.Open(new JournalingDocumentAdapter("ambient", journal), isAmbient: true);
+        set.Open(new JournalingDocumentAdapter("created", journal));
+
+        Assert.Equal(2, set.Count);
+    }
+
+    [Fact]
     public void CommitAll_CommitsCreatedDocumentsFirstAndTheAmbientDocumentLast()
     {
         // The ordering is the whole partial-failure defence (see ManagedDocumentTransactions' doc
@@ -199,6 +245,95 @@ public class ManagedDocumentTransactionsTests
         Assert.Equal(new[] { "created-1", "created-2", "ambient (active document)" }, result.CommittedDocuments);
         Assert.Empty(result.RolledBackDocuments);
         Assert.False(result.IsPartial);
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Independent PR review (2nd round): DocumentOrigin.AdoptedExisting had ZERO tier-1 coverage --
+    // not the 3-tier commit ordering, not Describe()'s "(adopted via OpenForWriting)" branch, not the
+    // AnyCommittedDocumentMayBeReal true branch. All three below use OpenAdoptedForTesting, the
+    // internal test-only entry point added for exactly this gap.
+    // ---------------------------------------------------------------------------------------------
+
+    [Fact]
+    public void CommitAll_CommitsCreatedDocumentsThenAdoptedThenAmbientLast()
+    {
+        // The three-tier ordering this class' own doc comment describes: CreatedThisRun (safest,
+        // unsaved/in-memory) first, AdoptedExisting (may be a real saved model OpenForWriting adopted)
+        // next, Ambient always last -- collapsing AdoptedExisting into the CreatedThisRun bucket would
+        // let a real adopted document commit alongside genuinely-throwaway ones, exactly the ordering
+        // mistake DocumentOrigin's own doc comment exists to prevent.
+        var journal = new List<string>();
+        var set = NewSet();
+        set.Open(new JournalingDocumentAdapter("ambient", journal), isAmbient: true);
+        set.Open(new JournalingDocumentAdapter("created", journal));
+        set.OpenAdoptedForTesting(new JournalingDocumentAdapter("adopted", journal));
+
+        var result = set.CommitAll();
+
+        Assert.True(result.Success);
+        Assert.Equal(
+            new[] { "created", "adopted (adopted via OpenForWriting)", "ambient (active document)" },
+            result.CommittedDocuments);
+    }
+
+    [Fact]
+    public void Entry_Describe_NamesAnAdoptedDocumentDistinctlyFromACreatedOne()
+    {
+        var journal = new List<string>();
+        var set = NewSet();
+        set.OpenAdoptedForTesting(new JournalingDocumentAdapter("adopted", journal));
+
+        var result = set.CommitAll();
+
+        Assert.Equal(new[] { "adopted (adopted via OpenForWriting)" }, result.CommittedDocuments);
+    }
+
+    [Fact]
+    public void CommitAll_SetsAnyCommittedDocumentMayBeReal_WhenAnAdoptedDocumentCommits()
+    {
+        // The whole point of the flag (see ManagedDocumentCommitResult's own doc comment): an adopted
+        // document may be a real, saved model, unlike a CreatedThisRun one -- this is the true branch
+        // that was previously unreachable at tier 1, since AdoptedExisting could only be constructed
+        // through the Revit-typed OpenExisting.
+        var journal = new List<string>();
+        var set = NewSet();
+        set.OpenAdoptedForTesting(new JournalingDocumentAdapter("adopted", journal));
+
+        var result = set.CommitAll();
+
+        Assert.True(result.AnyCommittedDocumentMayBeReal);
+    }
+
+    [Fact]
+    public void CommitAll_DoesNotSetAnyCommittedDocumentMayBeReal_WhenOnlyCreatedDocumentsCommit()
+    {
+        // The false branch, for contrast -- a run with only CreatedThisRun documents (the pre-OpenForWriting
+        // shape) must not trip the flag.
+        var journal = new List<string>();
+        var set = NewSet();
+        set.Open(new JournalingDocumentAdapter("created", journal));
+
+        var result = set.CommitAll();
+
+        Assert.False(result.AnyCommittedDocumentMayBeReal);
+    }
+
+    [Fact]
+    public void RollBackAll_RollsBackAnAdoptedDocument_SameAsAnyOther()
+    {
+        // OpenForWriting's headline safety guarantee: a thrown script rolls back an adopted document's
+        // writes exactly like any other managed document. Nothing about AdoptedExisting changes
+        // RollBackAll's behavior -- this pins that explicitly rather than leaving it to be re-derived
+        // from the fact that RollBackAll doesn't branch on Origin at all.
+        var journal = new List<string>();
+        var set = NewSet();
+        set.OpenAdoptedForTesting(new JournalingDocumentAdapter("adopted", journal));
+        journal.Clear();
+
+        set.RollBackAll();
+
+        Assert.Equal(new[] { "adopted:tx.RollBack", "adopted:group.RollBack" }, journal);
+        Assert.Equal(0, set.Count);
     }
 
     [Fact]
@@ -746,5 +881,27 @@ public class ManagedDocumentTransactionsTests
     private sealed class NonCreatingUiApplicationAdapter : IUiApplicationAdapter
     {
         public IUiDocumentAdapter? ActiveUiDocument => null;
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Independent PR review, finding 3: RequireExistingDocumentSource was split out of OpenExisting
+    // specifically so this "does this run's adapter support OpenForWriting at all" check is tier-1
+    // testable on its own -- see that method's own doc comment. This test is what actually exercises
+    // it; without it the split existed but nothing pinned the behaviour it exists to make testable.
+    // ---------------------------------------------------------------------------------------------
+
+    [Fact]
+    public void RequireExistingDocumentSource_FailsWithASignpostedMessage_WhenTheAdapterCannotOpenExistingDocuments()
+    {
+        // NonCreatingUiApplicationAdapter implements neither IDocumentCreationSource nor
+        // IExistingDocumentSource -- exactly the tier-1 case OpenForWriting needs a clear, actionable
+        // error for, mirroring CreateAndOpenProjectDocument's own signposted-NotSupportedException test
+        // above.
+        var set = new ManagedDocumentTransactions(TransactionName, new NonCreatingUiApplicationAdapter());
+
+        var ex = Assert.Throws<NotSupportedException>(() => set.RequireExistingDocumentSource());
+
+        Assert.Contains(nameof(IExistingDocumentSource), ex.Message);
+        Assert.Contains("revit/test-harness", ex.Message);
     }
 }
