@@ -18,4 +18,16 @@ internal sealed class FakeTransactionGroupAdapter : ITransactionGroupAdapter
     public void Assimilate() => Calls.Add("Assimilate");
 
     public void RollBack() => Calls.Add("RollBack");
+
+    /// <summary>See FakeTransactionAdapter.ThrowOnDispose.</summary>
+    public bool ThrowOnDispose { get; set; }
+
+    public void Dispose()
+    {
+        Calls.Add("Dispose");
+        if (ThrowOnDispose)
+        {
+            throw new InvalidOperationException("simulated dispose failure");
+        }
+    }
 }
