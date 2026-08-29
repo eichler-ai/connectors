@@ -1,9 +1,17 @@
+# The VM's interactive user the agent should run as. This script is run BY that user in their
+# own session (the task it registers is Interactive/AtLogOn for them), so $env:USERNAME is the
+# right default -- unlike redeploy-and-verify.ps1, which runs via `prlctl exec` as SYSTEM and
+# must detect the console user instead.
+param(
+    [string]$InteractiveUser = $env:USERNAME
+)
+
 Unregister-ScheduledTask -TaskName 'MCPBridgeDevLauncherAgent' -Confirm:$false -ErrorAction SilentlyContinue
 
 $action = New-ScheduledTaskAction -Execute 'powershell.exe' `
     -Argument '-WindowStyle Hidden -ExecutionPolicy Bypass -File C:\dev\launcher-agent.ps1'
-$trigger = New-ScheduledTaskTrigger -AtLogOn -User 'nicholas'
-$principal = New-ScheduledTaskPrincipal -UserId 'nicholas' -LogonType Interactive -RunLevel Limited
+$trigger = New-ScheduledTaskTrigger -AtLogOn -User $InteractiveUser
+$principal = New-ScheduledTaskPrincipal -UserId $InteractiveUser -LogonType Interactive -RunLevel Limited
 
 # Review finding (issue #26 PR, independent review): default TaskSettingsSet is wrong for a script
 # meant to run in `while ($true)` indefinitely. ExecutionTimeLimit defaults to PT72H -- after 3 days

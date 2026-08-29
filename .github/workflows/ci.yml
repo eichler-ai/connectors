@@ -1,0 +1,67 @@
+# CI for the connectors repo.
+#
+# What runs here and what deliberately does not (see CONTRIBUTING.md's testing-tiers section):
+#
+#   - MCP Server (Go): the full tier-1 suite — gofmt, go vet, `go test -race`, plus a
+#     GOOS=windows cross-compile check, since the primary shipping target is Windows (PRD §04)
+#     while these runners are Linux.
+#   - Test harness (Go): type-check only, including its `harness`-tagged test files. The tests
+#     themselves need a live Revit + broker stack by design (tier 2) and are never run in CI.
+#   - MCP Bridge (C#): NOT built here at all — every project hard-references RevitAPI.dll /
+#     RevitAPIUI.dll from a real Revit install, which GitHub runners don't have. Running the
+#     tier-1 C# suites in CI via NuGet-packaged Revit API references is tracked as
+#     https://github.com/eichler-ai/connectors/issues/39; until then the C# tiers run in the
+#     documented VM-side dev loop. Do not add a C# job that "builds" without the Revit
+#     references or skips the test assemblies — a green job that tests nothing is worse than
+#     no job (this repo has already been bitten by `dotnet test` exiting 0 while silently
+#     skipping an entire assembly; see the revit-connector-development skill).
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  mcp-server:
+    name: MCP Server (Go)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: revit/mcp-server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: revit/mcp-server/go.mod
+          cache-dependency-path: revit/mcp-server/go.sum
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "gofmt needed on:" && echo "$unformatted" && exit 1
+          fi
+      - name: go vet
+        run: go vet ./...
+      - name: go test -race
+        run: go test -race ./...
+      - name: cross-compile the Windows build (primary shipping target)
+        run: GOOS=windows GOARCH=amd64 go build ./...
+
+  test-harness:
+    name: Test harness type-check (Go)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: revit/test-harness
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: revit/test-harness/go.mod
+          # No go.sum in this module (zero external deps) — setup-go's cache would fail
+          # looking for one.
+          cache: false
+      - name: go vet (harness build tag — compiles the tier-2 test files without running them)
+        run: go vet -tags harness ./...

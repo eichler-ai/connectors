@@ -115,6 +115,10 @@ the same process) also drops that tool's own connection — `/mcp` reconnects it
   of transaction", since a created document's managed transaction commits and closes the moment the
   call that created it returns). Call `createBlankFixtureDocument` ONCE per bundle, not once per
   subtest.
+- `open_for_writing_test.go` — `TestOpenForWritingSafety`: the `OpenForWriting` global's
+  headline rollback-on-throw guarantee plus its two negative paths ("adopt the ambient
+  document", "adopt the same document twice"), added after an independent review round found
+  the adopted-document origin had zero coverage at any tier.
 - `phase_a_test.go` — the first coverage-plan corpus bundle, `TestPhaseACoreCRUDAndQuery` (core
   CRUD + query): `CreateWall`, `QueryElementsByCategory`, `GetSetParameter`, `DeleteElement`,
   `CreateSharedParameter`, `EditGroupPropagatesToAllInstances`, each an INDEPENDENT subtest (its own
@@ -131,8 +135,9 @@ the same process) also drops that tool's own connection — `/mcp` reconnects it
   `TestOpenDocumentCount` (reports `Application.Documents`' current count/titles). Kept around as
   ready-made tools for revisiting that issue, not run as part of a normal test pass.
 
-Thirteen test functions across `harness_test.go`, `denylist_bypass_test.go`, and `phase_a_test.go`
-make up the actual coverage corpus; `memcheck_test.go`'s two are diagnostics, not corpus.
+Fourteen test functions across `harness_test.go`, `denylist_bypass_test.go`,
+`open_for_writing_test.go`, and `phase_a_test.go` make up the actual coverage corpus;
+`memcheck_test.go`'s two are diagnostics, not corpus.
 
 `TestApplicationCreatesDocuments` is the first case whose subtests are *heterogeneous* — each
 asserting a different thing about one capability — rather than table-driven over a single shape
@@ -153,7 +158,11 @@ denied script surfaces end to end, therefore belongs in this tier by constructio
 No `corpus/`/`runner/`/`fixtures/` yet — PRD §13's tutorial-workflow corpus (place a wall, tag a
 room, etc.) was blocked on there being no *sanctioned* way for scripts to reach real Revit API
 elements; that is resolved (PRD §14, "Real Revit API access from scripts"), so the corpus is now
-buildable, just not built. What's testable today (registration, discovery, file exchange, error
-shapes, execution status transitions, the sanctioned globals, denylist rejections) is a genuine
-regression suite in its own right and doesn't need that structure — a data-driven corpus format is
-worth introducing once there are enough cases for one to earn its keep, not before.
+buildable, just not built. What the suite actually covers today — registration, error shapes,
+the sanctioned script globals, the denylist/lifecycle-gate rejections, core CRUD + query, and
+the `OpenForWriting` safety cases — is a genuine regression suite in its own right and doesn't
+need that structure; a data-driven corpus format is worth introducing once there are enough
+cases for one to earn its keep, not before. Known end-to-end coverage gaps — `poll_execution`
+/ `cancel_execution` lifecycle transitions and the `Publish`/`files[]` file-exchange path have
+no harness cases yet — are tracked in
+[issue #36](https://github.com/eichler-ai/connectors/issues/36).

@@ -40,7 +40,7 @@
 #                    poisons the *next* launch either way -- belt and suspenders, not either/or.
 #   *.startbroker -- contents (optional) are the mcp-server exe path; defaults to the dev
 #                    worktree binary below. Starts it hidden, in THIS interactive session, so
-#                    its broker.json lands under nicholas's profile -- the same reason Revit
+#                    its broker.json lands under the interactive user's profile -- the same reason Revit
 #                    itself has to launch from here rather than from a bare `prlctl exec`. Issue
 #                    #26, "broker-lock-race guard": after starting, this agent now reads
 #                    broker.json back and confirms its `pid` field actually matches the process
@@ -53,7 +53,7 @@
 #   *.runexe      -- line 1 = exe path, line 2 (optional) = one argument string. Runs it in THIS
 #                    session and waits for exit -- needed for anything (e.g. the test-harness
 #                    binary) that must see the real broker.json/Revit connections under
-#                    nicholas's profile, which a bare `prlctl exec` (SYSTEM) cannot. Output:
+#                    the interactive user's profile, which a bare `prlctl exec` (SYSTEM) cannot. Output:
 #                    C:\dev\runexe-{out,err}.log, exit code in C:\dev\runexe-exit.txt once done.
 
 $signalDir = "C:\dev\.launcher-signals"
@@ -360,7 +360,7 @@ while ($true) {
     # Same session-isolation reason as .launch/.startbroker: a test-harness binary spawned via a
     # bare `prlctl exec` runs as SYSTEM, which has its OWN, separate app-data profile
     # (C:\WINDOWS\system32\config\systemprofile\...) -- so it can never see the real broker.json
-    # or any Revit instance connected under nicholas's own profile. Confirmed live: run this way,
+    # or any Revit instance connected under the interactive user's own profile. Confirmed live: run this way,
     # the harness became its own isolated "primary" broker with zero connected instances instead
     # of proxying to the real one.
     #
