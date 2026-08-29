@@ -42,7 +42,7 @@ public class ExecutionResultMessageTests
     {
         var record = ExecutionRecord.CreatePending("exec-1", "1+1", 600_000, Now);
         record.MarkRunning(Now);
-        record.MarkCompleted(Now, result: 2, stdOut: "hello\n", notices: Array.Empty<DiagnosticRecord>());
+        record.MarkCompleted(Now, result: "2", stdOut: "hello\n", notices: Array.Empty<DiagnosticRecord>());
 
         var json = ExecutionResultMessage.FromRecord(Id, record);
 
@@ -58,7 +58,7 @@ public class ExecutionResultMessageTests
     {
         var record = ExecutionRecord.CreatePending("exec-1", "1+1", 600_000, Now);
         record.MarkRunning(Now);
-        record.MarkCompleted(Now, result: 2, stdOut: "", notices: Array.Empty<DiagnosticRecord>());
+        record.MarkCompleted(Now, result: "2", stdOut: "", notices: Array.Empty<DiagnosticRecord>());
 
         var json = ExecutionResultMessage.FromRecord(Id, record);
 

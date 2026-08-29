@@ -139,7 +139,7 @@ public class ExecutionManagerTests
         var record = manager.Start(NewId(), "// script", 600_000, now).Record!;
         manager.MarkRunning(record.ExecutionId, now);
 
-        manager.CompleteSuccess(record.ExecutionId, now, result: 42, stdOut: null, notices: Array.Empty<DiagnosticRecord>());
+        manager.CompleteSuccess(record.ExecutionId, now, result: "42", stdOut: null, notices: Array.Empty<DiagnosticRecord>());
 
         Assert.Equal(ExecutionStatus.Completed, record.Status);
         var next = manager.Start(NewId(), "// next", 600_000, now);
@@ -556,11 +556,11 @@ public class ExecutionManagerTests
         Assert.Equal(ExecutionStatus.Unrecoverable, record.Status);
 
         var diagnostic = Record.Exception(() =>
-            manager.CompleteSuccess(record.ExecutionId, now.AddSeconds(10.1), result: 1, stdOut: null, notices: Array.Empty<DiagnosticRecord>()));
+            manager.CompleteSuccess(record.ExecutionId, now.AddSeconds(10.1), result: "1", stdOut: null, notices: Array.Empty<DiagnosticRecord>()));
 
         Assert.Null(diagnostic); // no exception thrown
 
-        var raceDiagnostic = manager.CompleteSuccess(record.ExecutionId, now.AddSeconds(10.2), result: 1, stdOut: null, notices: Array.Empty<DiagnosticRecord>());
+        var raceDiagnostic = manager.CompleteSuccess(record.ExecutionId, now.AddSeconds(10.2), result: "1", stdOut: null, notices: Array.Empty<DiagnosticRecord>());
         Assert.NotNull(raceDiagnostic);
         Assert.Equal(DiagnosticSeverity.Warning, raceDiagnostic!.Severity);
         Assert.Equal("execution-transition-raced-terminal", raceDiagnostic.Code);
@@ -610,10 +610,10 @@ public class ExecutionManagerTests
         var unknownId = NewId();
 
         var diagnostic = Record.Exception(() =>
-            manager.CompleteSuccess(unknownId, DateTimeOffset.UtcNow, result: 1, stdOut: null, notices: Array.Empty<DiagnosticRecord>()));
+            manager.CompleteSuccess(unknownId, DateTimeOffset.UtcNow, result: "1", stdOut: null, notices: Array.Empty<DiagnosticRecord>()));
         Assert.Null(diagnostic); // no exception thrown
 
-        var result = manager.CompleteSuccess(unknownId, DateTimeOffset.UtcNow, result: 1, stdOut: null, notices: Array.Empty<DiagnosticRecord>());
+        var result = manager.CompleteSuccess(unknownId, DateTimeOffset.UtcNow, result: "1", stdOut: null, notices: Array.Empty<DiagnosticRecord>());
         Assert.NotNull(result);
         Assert.Equal(DiagnosticSeverity.Warning, result!.Severity);
         Assert.Equal("execution-transition-unknown-execution-id", result.Code);
@@ -722,7 +722,7 @@ public class ExecutionManagerTests
         var record = manager.Start(NewId(), "// script", 600_000, now).Record!;
         manager.MarkRunning(record.ExecutionId, now);
 
-        var diagnostic = manager.CompleteSuccess(record.ExecutionId, now, result: 42, stdOut: null, notices: Array.Empty<DiagnosticRecord>());
+        var diagnostic = manager.CompleteSuccess(record.ExecutionId, now, result: "42", stdOut: null, notices: Array.Empty<DiagnosticRecord>());
 
         Assert.Null(diagnostic);
         Assert.Equal(ExecutionStatus.Completed, record.Status);

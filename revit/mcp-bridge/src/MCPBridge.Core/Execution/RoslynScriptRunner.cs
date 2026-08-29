@@ -189,9 +189,18 @@ internal sealed class RoslynScriptRunner
             var result = await InvokeInFreshLoadContextAsync(script, globals, alc).ConfigureAwait(false);
             return ScriptExecutionOutcome.Completed(result, writer.ToString());
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             return ScriptExecutionOutcome.Cancelled(writer.ToString());
+        }
+        catch (OperationCanceledException ex)
+        {
+            // v1 integrated review: an OperationCanceledException the SCRIPT itself threw (its own
+            // code, or a Revit call surfacing one) with no cancellation ever requested is a script
+            // failure, not a cancellation -- PRD §06 defines `cancelled` as "the agent asked for
+            // this", and reporting it otherwise records a cancel nobody issued. The when-guard
+            // above keeps the genuine path (token signalled, script observed it) exactly as it was.
+            return ScriptExecutionOutcome.Failed(ex, writer.ToString());
         }
         catch (CompilationErrorException ex)
         {
@@ -332,7 +341,17 @@ internal sealed class RoslynScriptRunner
     private static void RejectTopLevelAwait(Script<object> script)
     {
         var tree = script.GetCompilation().SyntaxTrees.Single();
-        var hasAwait = tree.GetRoot().DescendantNodes().OfType<AwaitExpressionSyntax>().Any();
+
+        // TOKENS, not AwaitExpressionSyntax nodes (PR #45 review finding, pre-existing): `await using`
+        // and `await foreach` carry their await as a keyword TOKEN on the using/foreach/declaration
+        // statement, with no AwaitExpressionSyntax anywhere in the tree -- the same
+        // compiler-synthesized-shape class as ScriptApiDenylist's using-Dispose gap, one guard over.
+        // A node-typed walk let a script-defined IAsyncDisposable smuggle a genuine yield past this
+        // guard, resuming script code off Revit's API context with the ambient transaction open. The
+        // ordinary `await expr` form also contains an AwaitKeyword token, so this single check covers
+        // every spelling; an identifier merely NAMED await lexes as an IdentifierToken, not this kind,
+        // and stays unaffected.
+        var hasAwait = tree.GetRoot().DescendantTokens().Any(t => t.IsKind(SyntaxKind.AwaitKeyword));
         if (hasAwait)
         {
             throw new ScriptAwaitNotAllowedException();

@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using System.Linq;
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 
 namespace MCPBridge.Core.Execution;
@@ -242,10 +243,179 @@ internal static class ScriptApiDenylist
                 {
                     CheckConstruction(FullName(semanticModel.GetTypeInfo(node).Type));
                 }
+
+                // COMPILER-SYNTHESIZED DISPOSE (v1 integrated review; live-exploitable before this):
+                // `using (Document) { }` and `using var d = Document;` close the ambient document when
+                // the scope ends -- Dispose is Close under another spelling, gated above -- but the
+                // Dispose call they imply never appears as a bindable node: the compiler synthesizes
+                // it, so the IMethodSymbol path above sees nothing. And `using` on an IDisposable is
+                // precisely the idiomatic, plausible-looking mistake this gate exists for -- unlike
+                // `dynamic` (the documented accepted gap), no deliberate intent is needed to write it.
+                // Judged by the RESOURCE EXPRESSION's bound type -- still the semantic model, never
+                // syntax text -- so aliases and `var` flow through identically.
+                switch (node)
+                {
+                    case UsingStatementSyntax usingStatement:
+                        if (usingStatement.Expression is not null)
+                        {
+                            RegisterSynthesizedDispose(semanticModel, usingStatement.Expression, seen, lifecycleMembers);
+                        }
+
+                        if (usingStatement.Declaration is not null)
+                        {
+                            foreach (var variable in usingStatement.Declaration.Variables)
+                            {
+                                if (variable.Initializer is not null)
+                                {
+                                    RegisterSynthesizedDispose(semanticModel, variable.Initializer.Value, seen, lifecycleMembers);
+                                }
+                            }
+                        }
+
+                        break;
+
+                    case LocalDeclarationStatementSyntax localDeclaration when localDeclaration.UsingKeyword.IsKind(SyntaxKind.UsingKeyword):
+                        foreach (var variable in localDeclaration.Declaration.Variables)
+                        {
+                            if (variable.Initializer is not null)
+                            {
+                                RegisterSynthesizedDispose(semanticModel, variable.Initializer.Value, seen, lifecycleMembers);
+                            }
+                        }
+
+                        break;
+
+                    // INTERFACE-DISPATCH LAUNDERING of the same member:
+                    // `((System.IDisposable)Document).Dispose()` binds to System.IDisposable.Dispose,
+                    // a containing type the gated table deliberately doesn't list (it would gate every
+                    // Dispose in .NET). The cast/`as`/pattern node is where the gated type is still
+                    // visible, so that is what's judged -- converting a gated-Dispose type to
+                    // IDisposable has essentially one use from script scope. The operand is judged
+                    // through any wrapping parentheses and intermediate casts (PR review finding:
+                    // `((System.IDisposable)(object)Document)` otherwise laundered via `object` in one
+                    // extra step). An implicit conversion with no conversion syntax at all
+                    // (`System.IDisposable x = Document;`) is NOT caught: that is the same
+                    // deliberate-laundering bucket as `dynamic`, accepted and documented at
+                    // LifecycleMembersByType.
+                    case CastExpressionSyntax cast
+                        when FullName(semanticModel.GetTypeInfo(cast.Type).Type) == "System.IDisposable":
+                        RegisterSynthesizedDispose(semanticModel, PeelConversions(cast.Expression), seen, lifecycleMembers);
+                        break;
+
+                    case BinaryExpressionSyntax asExpression
+                        when asExpression.IsKind(SyntaxKind.AsExpression) &&
+                             FullName(semanticModel.GetTypeInfo(asExpression.Right).Type) == "System.IDisposable":
+                        RegisterSynthesizedDispose(semanticModel, PeelConversions(asExpression.Left), seen, lifecycleMembers);
+                        break;
+
+                    // Same laundering through PATTERN forms (PR review finding): `Document is
+                    // System.IDisposable d` and `case System.IDisposable d:` / `System.IDisposable _ =>`
+                    // hand out an IDisposable-typed binding to the same effect as the cast above. The
+                    // judged type is the pattern's INPUT EXPRESSION's -- found by walking up to the
+                    // is-expression / switch statement / switch expression the pattern belongs to --
+                    // since that is where the gated type is visible.
+                    case DeclarationPatternSyntax declarationPattern
+                        when FullName(semanticModel.GetTypeInfo(declarationPattern.Type).Type) == "System.IDisposable"
+                             && PatternInputExpression(declarationPattern) is { } declarationInput:
+                        RegisterSynthesizedDispose(semanticModel, PeelConversions(declarationInput), seen, lifecycleMembers);
+                        break;
+
+                    case TypePatternSyntax typePattern
+                        when FullName(semanticModel.GetTypeInfo(typePattern.Type).Type) == "System.IDisposable"
+                             && PatternInputExpression(typePattern) is { } typePatternInput:
+                        RegisterSynthesizedDispose(semanticModel, PeelConversions(typePatternInput), seen, lifecycleMembers);
+                        break;
+                }
             }
         }
 
         return lifecycleMembers.Count == 0 ? ScriptApiAnalysis.Clean : new ScriptApiAnalysis(lifecycleMembers);
+    }
+
+    /// <summary>
+    /// Registers <c>&lt;Type&gt;.Dispose</c> as a used lifecycle member when <paramref name="resource"/>'s
+    /// bound type has a gated Dispose -- the shared tail of every compiler-synthesized/interface-laundered
+    /// Dispose shape above. A type with no gated Dispose (every ordinary IDisposable a script legitimately
+    /// uses -- StreamWriter, FileStream, ...) registers nothing.
+    /// </summary>
+    private static void RegisterSynthesizedDispose(SemanticModel semanticModel, ExpressionSyntax resource, HashSet<string> seen, List<string> lifecycleMembers)
+    {
+        RegisterSynthesizedDisposeByTypeName(FullName(semanticModel.GetTypeInfo(resource).Type), seen, lifecycleMembers);
+    }
+
+    private static void RegisterSynthesizedDisposeByTypeName(string? typeName, HashSet<string> seen, List<string> lifecycleMembers)
+    {
+        if (typeName is null
+            || !LifecycleMembersByType.TryGetValue(typeName, out var gatedMembers)
+            || !gatedMembers.Contains("Dispose"))
+        {
+            return;
+        }
+
+        var member = $"{typeName}.Dispose";
+        if (seen.Add(member))
+        {
+            lifecycleMembers.Add(member);
+        }
+    }
+
+    /// <summary>
+    /// The expression a pattern is matched AGAINST -- its input -- found by walking up to the nearest
+    /// is-expression, switch statement, or switch expression. Returns null for a pattern whose input
+    /// isn't one of those carriers (e.g. a nested property subpattern, where the input is a member of
+    /// the governing expression rather than the expression itself -- judging the governing expression
+    /// there would over-gate, so those are left to the documented implicit-conversion accepted bucket).
+    /// </summary>
+    private static ExpressionSyntax? PatternInputExpression(SyntaxNode pattern)
+    {
+        for (var node = pattern.Parent; node is not null; node = node.Parent)
+        {
+            switch (node)
+            {
+                case IsPatternExpressionSyntax isPattern:
+                    return isPattern.Expression;
+                case SwitchStatementSyntax switchStatement:
+                    return switchStatement.Expression;
+                case SwitchExpressionSyntax switchExpression:
+                    return switchExpression.GoverningExpression;
+                case SubpatternSyntax:
+                    return null; // nested property subpattern -- input is not the governing expression
+                case PatternSyntax:
+                case CasePatternSwitchLabelSyntax:
+                case SwitchSectionSyntax:
+                case SwitchExpressionArmSyntax:
+                    continue; // still inside the pattern's own carrier chain -- keep walking up
+                default:
+                    return null;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Unwraps parentheses and intermediate casts around a conversion's operand so the judged type is
+    /// the innermost expression's -- what a chained-cast laundering shape is actually converting.
+    /// </summary>
+    private static ExpressionSyntax PeelConversions(ExpressionSyntax expression)
+    {
+        while (true)
+        {
+            switch (expression)
+            {
+                case ParenthesizedExpressionSyntax parenthesized:
+                    expression = parenthesized.Expression;
+                    continue;
+                case CastExpressionSyntax innerCast:
+                    expression = innerCast.Expression;
+                    continue;
+                case BinaryExpressionSyntax innerAs when innerAs.IsKind(SyntaxKind.AsExpression):
+                    expression = innerAs.Left;
+                    continue;
+                default:
+                    return expression;
+            }
+        }
     }
 
     /// <summary>

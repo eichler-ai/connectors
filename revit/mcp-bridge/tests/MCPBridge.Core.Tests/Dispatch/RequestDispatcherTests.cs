@@ -379,7 +379,7 @@ public class RequestDispatcherTests
         var now = DateTimeOffset.UtcNow;
         executionManager.Start("exec-1", "1 + 1", 600_000, now);
         executionManager.MarkRunning("exec-1", now);
-        executionManager.CompleteSuccess("exec-1", now, result: 2, stdOut: null, notices: Array.Empty<DiagnosticRecord>());
+        executionManager.CompleteSuccess("exec-1", now, result: "2", stdOut: null, notices: Array.Empty<DiagnosticRecord>());
 
         var stopwatch = System.Diagnostics.Stopwatch.StartNew();
         var json = await dispatcher.DispatchAsync(PollRequest(1, "exec-1", timeoutMs: 30_000));

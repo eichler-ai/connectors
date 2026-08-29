@@ -145,8 +145,14 @@ public sealed class ExecutionManager
     public DiagnosticRecord? MarkRunning(string executionId, DateTimeOffset now) =>
         Transition(executionId, "mark-running", record => record.MarkRunning(now), clearActive: false);
 
-    /// <summary>See <see cref="Transition"/> for why this never throws on a terminal race.</summary>
-    public DiagnosticRecord? CompleteSuccess(string executionId, DateTimeOffset now, object? result, string? stdOut, IReadOnlyList<DiagnosticRecord> notices, IReadOnlyList<PublishedFileRecord>? files = null) =>
+    /// <summary>
+    /// See <see cref="Transition"/> for why this never throws on a terminal race. <paramref name="result"/>
+    /// is the ALREADY-FORMATTED display string, never the raw returned object -- the caller formats on the
+    /// UI thread at completion time (RequestDispatcher.SafeFormatReturnValue has the full reasoning: a raw
+    /// object retained for the ring buffer's window pins collectible script ALCs and Revit wrappers).
+    /// The parameter type is string, not object, precisely so that can't regress silently.
+    /// </summary>
+    public DiagnosticRecord? CompleteSuccess(string executionId, DateTimeOffset now, string? result, string? stdOut, IReadOnlyList<DiagnosticRecord> notices, IReadOnlyList<PublishedFileRecord>? files = null) =>
         Transition(executionId, "complete-success", record => record.MarkCompleted(now, result, stdOut, notices, files), clearActive: true);
 
     /// <summary>See <see cref="Transition"/> for why this never throws on a terminal race.</summary>
@@ -339,10 +345,10 @@ public sealed class ExecutionManager
     ///
     /// Third review finding: a Pending record's CancellationTokenSource must still be Cancel()'d, and its
     /// dictionary entry must NOT be removed. The work item this execution's ExternalEventBridge raise
-    /// already queued is still going to fire eventually (nothing can currently un-queue it from Revit's
-    /// side -- see the BridgeHost.cs TODO), and per that same TODO the work item's first move must be to
-    /// check GetCancellationToken(executionId).IsCancellationRequested and bail out without touching the
-    /// model if it's set. Both halves of that contract depend on this dictionary entry surviving with its
+    /// already queued is still going to fire eventually (nothing can un-queue it from Revit's side), and
+    /// per the live-wiring contract (RequestDispatcher's class doc, requirement 1) the work item's first
+    /// move must be to check GetCancellationToken(executionId).IsCancellationRequested and bail out
+    /// without touching the model if it's set. Both halves of that contract depend on this dictionary entry surviving with its
     /// token actually cancelled: removing it here would make GetCancellationToken silently return
     /// CancellationToken.None (permanently unset) for an id that legitimately still has a pending raise in
     /// flight, defeating the exact check the TODO mandates and letting an already-cancelled script run
