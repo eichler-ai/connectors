@@ -1019,3 +1019,108 @@ func TestSettledExecutionRecordsAreBounded(t *testing.T) {
 		t.Error("the freshly settled record must be retained")
 	}
 }
+
+// TestPollAnsweredUnknownByCurrentConn_SettlesAndFreesInstance pins issue
+// #42's fix: a phantom execution (the execute_script wire call lost on a
+// half-open connection, so the add-in never received it) previously kept the
+// busy latch held with only auto-cancel -> grace escalation -> a HEALTHY
+// instance falsely latched unrecoverable as the exit. The owning instance's
+// current connection answering unknown_execution_id is authoritative: the
+// record settles as error, the instance frees, and no unrecoverable latch is
+// set.
+func TestPollAnsweredUnknownByCurrentConn_SettlesAndFreesInstance(t *testing.T) {
+	_, conn := newFakeInstance(t, func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
+		var p map[string]any
+		json.Unmarshal(params, &p)
+		if method == "execute_script" {
+			return Result{Status: StatusRunning, ExecutionID: p["execution_id"].(string)}, nil
+		}
+		// The add-in has no record of this execution — the wire answer for
+		// a poll of a phantom (matches RequestDispatcher's own code string).
+		return nil, &transport.RPCError{
+			Code:    transport.ErrCodeInvalidParams,
+			Message: "unknown execution_id",
+			Data:    diag.New(diag.SeverityError, "unknown_execution_id", "mcp-bridge.core.dispatch", "unknown execution_id"),
+		}
+	})
+	m := NewManager()
+	m.AttachInstance("inst-1", conn)
+
+	start, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "phantom", 50, 60000, ScriptOptions{})
+	if drec != nil {
+		t.Fatalf("ExecuteScript: %+v", drec)
+	}
+
+	// The poll surfaces the add-in's own answer to THIS call unchanged...
+	_, pollDrec := m.PollExecution(context.Background(), start.ExecutionID, 500)
+	if pollDrec == nil || pollDrec.Code != "unknown_execution_id" {
+		t.Fatalf("got %+v, want the add-in's unknown_execution_id passed through", pollDrec)
+	}
+
+	// ...but the broker-side record must now be settled: the instance is
+	// idle (not busy, not unrecoverable) and a NEW execute_script routes.
+	if got := m.StatusForInstance("inst-1"); got != StatusIdle {
+		t.Fatalf("StatusForInstance = %q, want idle after the lost execution settled", got)
+	}
+
+	// A later poll of the settled id returns the stored terminal result.
+	settled, drec2 := m.PollExecution(context.Background(), start.ExecutionID, 500)
+	if drec2 != nil {
+		t.Fatalf("poll of settled record: %+v", drec2)
+	}
+	if settled.Status != StatusError || settled.ErrorDetail == nil || settled.ErrorDetail.Code != "execution_lost" {
+		t.Errorf("settled = %+v, want error with execution_lost detail", settled)
+	}
+}
+
+// TestUnknownAnswerFromDisplacedConn_DoesNotSettle pins the conn-identity
+// guard on that settle (CONVENTIONS.md: the acting connection's identity
+// travels with the action): a connection displaced by a re-register while
+// its answer was in flight must not settle a run the live connection may
+// genuinely be executing.
+func TestUnknownAnswerFromDisplacedConn_DoesNotSettle(t *testing.T) {
+	release := make(chan struct{})
+	_, connA := newFakeInstance(t, func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
+		var p map[string]any
+		json.Unmarshal(params, &p)
+		if method == "execute_script" {
+			return Result{Status: StatusRunning, ExecutionID: p["execution_id"].(string)}, nil
+		}
+		<-release // hold the poll answer until the test has displaced this conn
+		return nil, &transport.RPCError{
+			Code:    transport.ErrCodeInvalidParams,
+			Message: "unknown execution_id",
+			Data:    diag.New(diag.SeverityError, "unknown_execution_id", "mcp-bridge.core.dispatch", "unknown execution_id"),
+		}
+	})
+	m := NewManager()
+	m.AttachInstance("inst-1", connA)
+
+	start, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "slow", 50, 60000, ScriptOptions{})
+	if drec != nil {
+		t.Fatalf("ExecuteScript: %+v", drec)
+	}
+
+	pollDone := make(chan struct{})
+	go func() {
+		defer close(pollDone)
+		_, _ = m.PollExecution(context.Background(), start.ExecutionID, 2000)
+	}()
+
+	// Displace connA while its poll answer is still pending, then let the
+	// stale answer land.
+	time.Sleep(50 * time.Millisecond)
+	_, connB := newFakeInstance(t, func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
+		return Result{Status: StatusRunning}, nil
+	})
+	m.AttachInstance("inst-1", connB)
+	close(release)
+	<-pollDone
+
+	m.mu.Lock()
+	rec := m.executions[start.ExecutionID]
+	m.mu.Unlock()
+	if rec == nil || IsTerminal(rec.status) {
+		t.Fatalf("record = %+v; a stale connection's unknown answer must not settle it", rec)
+	}
+}

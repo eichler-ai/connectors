@@ -439,16 +439,73 @@ func (m *Manager) forwardExisting(ctx context.Context, executionID, wireMethod s
 
 	res, drec := m.callWire(ctx, conn, wireMethod, executionID, timeoutMs, params)
 	if drec != nil {
-		// Same reasoning as ExecuteScript's own wire-failure path: don't
-		// assert a terminal outcome the broker doesn't actually know.
-		// Leaving the record non-terminal lets a retry against a still-live
-		// connection recover the real answer, and DetachInstance — not this
-		// call — is what frees the instance once the connection is
-		// genuinely gone.
+		// One diagnostic IS a terminal answer, not a wire failure: the
+		// add-in itself reporting unknown_execution_id (issue #42, from PR
+		// #41's review). That happens when the execute_script wire call was
+		// lost on a half-open connection — the add-in never received the
+		// script — and the add-in that answered is authoritative that it is
+		// not running this execution. Without settling here, the record
+		// stayed non-terminal with the busy latch held, and the only exit
+		// was auto-cancel → grace escalation → a HEALTHY instance falsely
+		// latched unrecoverable until a Revit restart. Guarded on the
+		// answering connection still being the instance's current one
+		// (CONVENTIONS.md: the acting connection's identity travels with
+		// the action) — a displaced connection's late answer must not
+		// settle a run the live connection may genuinely be executing.
+		if drec.Code == "unknown_execution_id" {
+			m.settleLostExecution(instanceID, executionID, conn)
+		}
+
+		// Anything else: same reasoning as ExecuteScript's own wire-failure
+		// path — don't assert a terminal outcome the broker doesn't
+		// actually know. Leaving the record non-terminal lets a retry
+		// against a still-live connection recover the real answer, and
+		// DetachInstance — not this call — is what frees the instance once
+		// the connection is genuinely gone.
 		return nil, drec
 	}
 	m.settle(instanceID, executionID, res)
 	return res, nil
+}
+
+// settleLostExecution marks executionID terminally failed after its OWNING
+// instance's CURRENT connection answered unknown_execution_id — see the call
+// site in forwardExisting for the phantom-execution scenario (issue #42).
+// The conn-identity re-check happens here, under the lock, at the moment of
+// mutation: the connection that was current when the poll was forwarded may
+// have been displaced by a re-register while the answer was in flight. The
+// stored result says plainly what happened and that the instance is free —
+// deliberately NOT the unrecoverable latch, which is for a wedged Revit,
+// the opposite of what this evidence shows.
+func (m *Manager) settleLostExecution(instanceID, executionID string, conn *transport.Conn) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.conns[instanceID] != conn {
+		return
+	}
+	rec, ok := m.executions[executionID]
+	if !ok || IsTerminal(rec.status) {
+		return
+	}
+	result := &Result{
+		Status:      StatusError,
+		ExecutionID: executionID,
+		ErrorDetail: errExecutionLost(instanceID, executionID),
+	}
+	rec.status = StatusError
+	rec.result = result
+	rec.settledAt = m.now()
+	if m.activeByInstance[instanceID] == executionID {
+		delete(m.activeByInstance, instanceID)
+	}
+	m.pruneSettledLocked(rec.settledAt)
+}
+
+func errExecutionLost(instanceID, executionID string) *diag.Record {
+	return diag.New(diag.SeverityError, "execution_lost", source,
+		fmt.Sprintf("execution %q was reported unknown by instance %q's own live connection — either the script never reached the add-in (a connection drop raced the request; the common case) or its result aged out of the add-in's replay buffer before any poll retrieved it. The broker has settled it as failed and freed the instance", executionID, instanceID)).
+		WithDetail(map[string]any{"instance_id": instanceID, "execution_id": executionID}).
+		WithRemedy("re-issue execute_script (verify current document state first if the original script may have run to completion unobserved)")
 }
 
 // PollExecution forwards a poll to the owning instance, per PRD §06. An
