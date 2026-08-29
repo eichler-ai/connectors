@@ -594,6 +594,43 @@ func (m *Manager) escalateUnrecoverable(instanceID, executionID string) {
 	if !ok || IsTerminal(rec.status) {
 		return
 	}
+
+	// DECLINE when the instance has no attached connection at fire time
+	// (issue #47, the residual sliver of #42's phantom-execution latch;
+	// CONVENTIONS.md's connection-identity invariant applied to a timer:
+	// this callback carries no connection identity of its own, so the only
+	// honest check is against the instance's current attachment at the
+	// moment of mutation). Unrecoverable means "a CONNECTED Revit didn't
+	// stop when told to" — evidence of a wedged UI thread. A DISCONNECTED
+	// instance is different evidence entirely: the connection dropped (the
+	// grace timer here was typically scheduled by max-duration auto-cancel
+	// whose wire call already failed), teardown freed the busy latch, and
+	// the add-in's redial will either answer a later poll with the real
+	// outcome or report the execution unknown — which settles the record
+	// via forwardExisting's execution_lost path. Latching here instead
+	// falsely bricked a healthy instance until a Revit restart, because
+	// the latch deliberately survives same-id reconnects. The record stays
+	// non-terminal on decline, deliberately: asserting an outcome the
+	// broker doesn't know is what the wire-failure paths already refuse to
+	// do, and both recovery paths above need the record alive to resolve.
+	//
+	// The boundary this check must never cross: an instance whose
+	// connection IS attached but isn't answering is exactly what
+	// escalation exists for — the conns lookup, not any responsiveness
+	// heuristic, is the whole test.
+	if _, connected := m.conns[instanceID]; !connected {
+		// No path today leaves the busy latch held while conns lacks the
+		// instance (DetachInstance clears both under this same mutex), but
+		// if a future path ever did, declining escalation would otherwise
+		// remove the busy latch's only exit — same reasoning CancelExecution
+		// gives for scheduling escalation unconditionally.
+		if m.activeByInstance[instanceID] == executionID {
+			delete(m.activeByInstance, instanceID)
+		}
+
+		return
+	}
+
 	result := &Result{
 		Status:      StatusUnrecoverable,
 		ExecutionID: executionID,

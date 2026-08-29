@@ -1132,3 +1132,75 @@ func TestUnknownAnswerFromDisplacedConn_DoesNotSettle(t *testing.T) {
 		t.Fatalf("record = %+v; a stale connection's unknown answer must not settle it", rec)
 	}
 }
+
+// TestGraceEscalationDeclinesForADisconnectedInstance pins issue #47, the
+// residual sliver of #42's phantom-execution latch: when the grace period
+// lapses with NO connection attached for the owning instance, escalation
+// must decline rather than latch a healthy instance unrecoverable — a
+// disconnected instance is evidence of a dropped connection, not a wedged
+// Revit, and the latch deliberately survives same-id reconnects, so a false
+// latch here cost a full Revit restart. The connected-but-unresponsive
+// boundary (escalation's actual job) is pinned by
+// TestCancelExecutionEscalatesToUnrecoverableAfterGracePeriod above and must
+// not regress.
+func TestGraceEscalationDeclinesForADisconnectedInstance(t *testing.T) {
+	_, conn := newFakeInstance(t, func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
+		var p map[string]any
+		json.Unmarshal(params, &p)
+		return Result{Status: StatusRunning, ExecutionID: p["execution_id"].(string)}, nil
+	})
+	m, fa := newManagerWithFakeClock()
+	m.AttachInstance("inst-1", conn)
+
+	start, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "about to vanish", 50, 0, ScriptOptions{})
+	if drec != nil {
+		t.Fatalf("ExecuteScript: %+v", drec)
+	}
+
+	// The connection drops and its teardown runs (identity-guarded detach,
+	// as serveAddIn does) BEFORE anything cancels — the #47 shape: the
+	// add-in hasn't redialed yet when auto-cancel fires.
+	if !m.DetachInstance("inst-1", conn) {
+		t.Fatal("test setup: detach should have applied to the current connection")
+	}
+
+	// CancelExecution still schedules the grace escalation unconditionally
+	// (by design — see its own comment); the wire forward fails fast with
+	// instance_disconnected since nothing is attached.
+	if _, cancelDrec := m.CancelExecution(context.Background(), start.ExecutionID); cancelDrec == nil || cancelDrec.Code != "instance_disconnected" {
+		t.Fatalf("cancel of a disconnected instance's execution: %+v, want instance_disconnected", cancelDrec)
+	}
+
+	// The grace period lapses with the instance still disconnected.
+	fa.fireAll()
+
+	// No false latch: the record stays non-terminal (the #46 execution_lost
+	// path or a post-redial poll is what resolves it — the broker must not
+	// assert an outcome it doesn't know)...
+	m.mu.Lock()
+	stillOpen := m.executions[start.ExecutionID]
+	latched := m.unrecoverable["inst-1"]
+	m.mu.Unlock()
+	if stillOpen == nil || IsTerminal(stillOpen.status) {
+		t.Fatalf("record = %+v; a declined escalation must leave it non-terminal", stillOpen)
+	}
+	if latched {
+		t.Fatal("a disconnected instance must not be latched unrecoverable by a lapsed grace period")
+	}
+
+	// ...and the healthy Revit that redials under the same instance_id is
+	// fully usable: fresh registrations route and execute.
+	_, conn2 := newFakeInstance(t, func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
+		var p map[string]any
+		json.Unmarshal(params, &p)
+		return Result{Status: StatusSuccess, ExecutionID: p["execution_id"].(string), Output: "alive"}, nil
+	})
+	m.AttachInstance("inst-1", conn2)
+	res, drec2 := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "post-redial", 1000, 0, ScriptOptions{})
+	if drec2 != nil {
+		t.Fatalf("ExecuteScript after redial: %+v — the instance must not be bricked", drec2)
+	}
+	if res.Status != StatusSuccess || res.Output != "alive" {
+		t.Errorf("res = %+v, want the redialed instance to execute normally", res)
+	}
+}
