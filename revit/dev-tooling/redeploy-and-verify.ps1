@@ -44,16 +44,25 @@ param(
     [switch]$SkipCopy,         # skip the DLL deploy -- close/relaunch/verify only
     [switch]$SkipRelaunch,     # skip close/relaunch/wait -- deploy DLLs only, no verification
     # The interactive user Revit/the add-in/the launcher agent actually run as. Deliberately NOT
-    # $env:APPDATA/$env:LOCALAPPDATA -- this whole script runs via `prlctl exec`, which executes as
-    # NT AUTHORITY\SYSTEM (SKILL.md's own documented gotcha), so those environment variables resolve
-    # to SYSTEM's own profile, not nicholas's -- confirmed live the first time this script ran: it
-    # silently deployed DLLs into SYSTEM's Addins folder and polled SYSTEM's own (nonexistent)
-    # connection.log, timing out with zero explanation. Hardcoded to match
-    # register-launcher-agent.ps1's own hardcoded user, for the same reason.
-    [string]$InteractiveUser = 'nicholas'
+    # $env:APPDATA/$env:LOCALAPPDATA (or $env:USERNAME) -- this whole script runs via `prlctl exec`,
+    # which executes as NT AUTHORITY\SYSTEM (SKILL.md's own documented gotcha), so those environment
+    # variables resolve to SYSTEM's own profile, not the interactive user's -- confirmed live the
+    # first time this script ran: it silently deployed DLLs into SYSTEM's Addins folder and polled
+    # SYSTEM's own (nonexistent) connection.log, timing out with zero explanation. Default '' means
+    # auto-detect the console-logged-on user below (Win32_ComputerSystem.UserName, readable from
+    # SYSTEM); pass it explicitly if that ever guesses wrong.
+    [string]$InteractiveUser = ''
 )
 
 $ErrorActionPreference = 'Stop'
+
+if (-not $InteractiveUser) {
+    $consoleUser = (Get-CimInstance Win32_ComputerSystem).UserName
+    if (-not $consoleUser) {
+        throw 'Could not auto-detect the console-logged-on user (no one logged on?). Pass -InteractiveUser explicitly.'
+    }
+    $InteractiveUser = $consoleUser -replace '^.*\\', ''  # DOMAIN\user -> user
+}
 $signalDir = 'C:\dev\.launcher-signals'
 $userProfile = "C:\Users\$InteractiveUser"
 $connectionLog = Join-Path $userProfile 'AppData\Local\Connectors\Revit\connection.log'

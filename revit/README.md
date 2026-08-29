@@ -13,6 +13,11 @@ Plus:
 - [`install-mac.sh`](./install-mac.sh) — Mac-side setup for this project's own Mac+Parallels dev topology (PRD §12 "Mac + Parallels")
 - [`test-harness/`](./test-harness/) — live MCP test harness (see its own README)
 
+## Getting started
+
+- [`docs/quickstart.md`](./docs/quickstart.md) — build from source, install, run a first script
+- [`docs/tools.md`](./docs/tools.md) — the MCP tools, script globals, and error codes
+
 ## Design
 
 Full design doc: [`docs/PRD.md`](./docs/PRD.md).
