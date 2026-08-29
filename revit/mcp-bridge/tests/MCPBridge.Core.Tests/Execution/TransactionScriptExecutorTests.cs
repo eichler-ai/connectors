@@ -748,6 +748,7 @@ public class TransactionScriptExecutorTests
         public bool IsWorkshared => _inner.IsWorkshared;
         public string? CentralModelPath => _inner.CentralModelPath;
         public string DocumentId => _inner.DocumentId;
+        public bool ReferencesSameUnderlyingDocumentAs(MCPBridge.RevitAdapter.IDocumentAdapter other) => false;
 
         public MCPBridge.RevitAdapter.ITransactionAdapter CreateTransaction(string name) => _riggedTransaction;
 

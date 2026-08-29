@@ -188,14 +188,26 @@ internal sealed class TransactionScriptExecutor
         var remedy = new List<string>();
         if (commit.CommittedDocuments.Count > 0)
         {
+            // Independent PR review finding (PR #28 #1): this used to unconditionally claim every
+            // committed document is "unsaved and in-memory." That was true when CreateProjectDocument/
+            // CreateFamilyDocument were the only two members of this tier, but ScriptGlobals.OpenForWriting
+            // adds a genuine adopt-by-title WRITE path (a script can now open a managed transaction on a
+            // document it did not itself create this run, including one that is saved on disk), so the
+            // claim is a straightforward lie whenever ManagedDocumentCommitResult.AnyCommittedDocumentMayBeReal
+            // is true. Report honestly instead of guessing which committed document was which.
             remedy.Add(
-                "Documents a script creates are unsaved and in-memory, so nothing was written to disk -- " +
-                "the committed changes exist only in this Revit session.");
-            // NOT "or undo": the connector has no adopt-by-title WRITE path. Only documents created in
-            // the current run get a managed transaction, and a script may never open its own
-            // (ScriptApiDenylist check 1), so a follow-up script can read a committed document and
-            // nothing more. Telling an agent it can undo the changes would send it after a capability
-            // that does not exist.
+                commit.AnyCommittedDocumentMayBeReal
+                    ? "At least one committed document may be a real, saved document -- one adopted via " +
+                      "OpenForWriting, or the ambient document itself -- not necessarily an unsaved, " +
+                      "in-memory one created this run. Do not assume the committed changes are throwaway."
+                    : "Documents a script creates are unsaved and in-memory, so nothing was written to disk -- " +
+                      "the committed changes exist only in this Revit session.");
+            // NOT "or undo": the connector has no way to un-commit an already-committed Transaction (Revit
+            // itself offers none), and this run's own script can never open a fresh transaction on a
+            // document from a later, separate execute_script call (ScriptApiDenylist check 1) -- so even
+            // with OpenForWriting's adopt-by-title path, a follow-up script can inspect a committed
+            // document and open ITS OWN new managed transaction on it (via OpenForWriting again) to make
+            // further changes, but it can never undo what already committed.
             remedy.Add(
                 "Find a committed document by Title in UIApplication.Application.Documents from a follow-up " +
                 "script to inspect what landed.");

@@ -4,9 +4,23 @@ package harness_test
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 )
+
+// memcheckGate skips a diagnostic test unless MCP_HARNESS_MEMCHECK is set. Independent PR review
+// finding: neither test in this file was actually gated despite this file's own doc comment (and
+// the README's) claiming they are "not run as part of a normal test pass" -- an unfiltered
+// `go test -tags harness ./...` executed both of them anyway, cycling real Revit documents every
+// time, which contradicts their own stated purpose as opt-in, ready-made diagnostics for
+// revisiting issue #31, not corpus regression tests.
+func memcheckGate(t *testing.T) {
+	t.Helper()
+	if os.Getenv("MCP_HARNESS_MEMCHECK") == "" {
+		t.Skip("skipping memcheck diagnostic: set MCP_HARNESS_MEMCHECK=1 to run it explicitly")
+	}
+}
 
 // TestOpenForWritingMemoryCycles is a throwaway diagnostic, not part of the
 // coverage corpus: N true cross-call cycles (create in one execute_script
@@ -16,6 +30,7 @@ import (
 // `prlctl exec ... Get-Process` externally; this test only drives the
 // cycles themselves.
 func TestOpenForWritingMemoryCycles(t *testing.T) {
+	memcheckGate(t)
 	c, instanceID, documentID := targetDocument(t)
 	const cycles = 6
 
@@ -41,6 +56,7 @@ func TestOpenForWritingMemoryCycles(t *testing.T) {
 // been closed are still open" from "memory grew despite documents actually
 // being closed" while investigating the memory-cycle numbers.
 func TestOpenDocumentCount(t *testing.T) {
+	memcheckGate(t)
 	c, instanceID, documentID := targetDocument(t)
 
 	out := runScript(t, c, instanceID, documentID, `

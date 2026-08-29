@@ -3,6 +3,7 @@
 package harness_test
 
 import (
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -57,6 +58,18 @@ func createBlankFixtureDocument(t *testing.T, c *mcpclient.Client, instanceID, d
 // nothing is lost by discarding). Close is confirm_lifecycle_actions-gated
 // (PRD §14) since it acts outside the ambient transaction; that's correct
 // here too, not worked around -- see callExecuteScriptWith's extra param.
+//
+// Independent PR review finding: this used to route through decodeToolResult,
+// which calls t.Fatalf on an isError MCP response. Cleanup running in
+// t.Cleanup happens after every subtest in the bundle has already recorded
+// its own pass/fail -- a t.Fatalf here doesn't change that outcome, it just
+// panics the cleanup goroutine and can mask which subtest, if any, actually
+// caused a lingering document. A cleanup failure is realistic (the fixture
+// document may already be in an odd state from whatever a subtest did to it)
+// and must be logged, never fatal, exactly like the pre-existing
+// out.Status != "success" branch below already treats a "success"-shaped
+// failure. Decodes the envelope by hand here instead of reusing
+// decodeToolResult specifically to avoid its Fatalf-on-isError behavior.
 func closeFixtureDocument(t *testing.T, c *mcpclient.Client, instanceID, documentID, title string) {
 	t.Helper()
 	script := fixtureLookupPreamble(title) + `
@@ -64,7 +77,26 @@ doc.Close(false);
 return "closed";
 `
 	raw := callExecuteScriptWith(t, c, instanceID, documentID, script, map[string]any{"confirm_lifecycle_actions": true})
-	out := decodeToolResult[executeScriptOut](t, raw)
+
+	var tr toolResult
+	if err := json.Unmarshal(raw, &tr); err != nil {
+		t.Logf("cleanup: failed to decode close-fixture-document response for %q: %v\nraw: %s", title, err, raw)
+		return
+	}
+	if tr.IsError {
+		text := "(no content)"
+		if len(tr.Content) > 0 {
+			text = tr.Content[0].Text
+		}
+		t.Logf("cleanup: closing fixture document %q returned an error: %s", title, text)
+		return
+	}
+
+	var out executeScriptOut
+	if err := json.Unmarshal(tr.StructuredContent, &out); err != nil {
+		t.Logf("cleanup: failed to decode close-fixture-document structuredContent for %q: %v\nraw: %s", title, err, tr.StructuredContent)
+		return
+	}
 	if out.Status != "success" {
 		t.Logf("cleanup: failed to close fixture document %q: status=%q output=%s", title, out.Status, out.Output)
 	}
@@ -77,25 +109,48 @@ return "closed";
 // document should start its script with this, since a created document has
 // no document_id and must be re-found by Title in every separate
 // execute_script call (see createBlankFixtureDocument above).
+//
+// Independent PR review finding: this used to take the FIRST Title match and
+// stop, silently tolerating a same-titled second document (e.g. a stale one
+// left over from a prior failed cleanup, or a coincidental Title collision
+// with something else open in the session) by picking whichever one Revit
+// happened to enumerate first -- a subtest could then silently read or write
+// the wrong document instead of failing loudly. Now collects every match and
+// throws unless there is exactly one.
 func fixtureLookupPreamble(title string) string {
 	return fmt.Sprintf(`
 Autodesk.Revit.DB.Document doc = null;
+int matchCount = 0;
 foreach (Autodesk.Revit.DB.Document candidate in UIApplication.Application.Documents) {
-  if (candidate.Title == %s) { doc = candidate; break; }
+  if (candidate.Title == %s) { doc = candidate; matchCount++; }
 }
-if (doc == null) { throw new System.Exception("fixture document not found by title: " + %s); }
-`, strconv.Quote(title), strconv.Quote(title))
+if (matchCount == 0) { throw new System.Exception("fixture document not found by title: " + %s); }
+if (matchCount > 1) { throw new System.Exception("fixture document title is ambiguous -- " + matchCount + " open documents share the title: " + %s); }
+`, strconv.Quote(title), strconv.Quote(title), strconv.Quote(title))
 }
 
-// fixtureWritePreamble is fixtureLookupPreamble plus OpenForWriting(doc) -- use this instead of
-// fixtureLookupPreamble in any subtest that WRITES to the fixture document. Without it, `doc` is
-// fully readable but every write throws "Attempt to modify the model outside of transaction":
-// createBlankFixtureDocument's own CreateProjectDocument call opened a managed transaction that
-// already committed and closed the moment THAT script returned, so a later, separate
-// execute_script call finds an ordinary, un-transacted document -- confirmed live, the bug that
-// motivated adding the OpenForWriting script global in the first place. Kept as a distinct helper
-// from fixtureLookupPreamble, not folded into it unconditionally, so a read-only subtest's own
-// script signals its intent and never pays for (or risks) a write transaction it doesn't need.
+// fixtureWritePreamble is fixtureLookupPreamble plus an unsaved-document assertion plus
+// OpenForWriting(doc) -- use this instead of fixtureLookupPreamble in any subtest that WRITES to
+// the fixture document. Without OpenForWriting, `doc` is fully readable but every write throws
+// "Attempt to modify the model outside of transaction": createBlankFixtureDocument's own
+// CreateProjectDocument call opened a managed transaction that already committed and closed the
+// moment THAT script returned, so a later, separate execute_script call finds an ordinary,
+// un-transacted document -- confirmed live, the bug that motivated adding the OpenForWriting
+// script global in the first place. Kept as a distinct helper from fixtureLookupPreamble, not
+// folded into it unconditionally, so a read-only subtest's own script signals its intent and
+// never pays for (or risks) a write transaction it doesn't need.
+//
+// Independent PR review finding: the PathName assertion below is what actually keeps this helper
+// scoped to what it's meant for -- a throwaway document createBlankFixtureDocument itself made
+// this session. Without it, a Title collision with a real, saved, on-disk document (unlikely, but
+// exactly the kind of unlikely a fixture helper should not depend on excluding by luck) would
+// pass fixtureLookupPreamble's now-uniqueness-checked match and then OpenForWriting would happily
+// adopt and this subtest would write into it. PathName is empty for a document that has never
+// been saved, so asserting it here is a direct, load-bearing check that this is that
+// document, not a defensive nicety.
 func fixtureWritePreamble(title string) string {
-	return fixtureLookupPreamble(title) + "OpenForWriting(doc);\n"
+	return fixtureLookupPreamble(title) + fmt.Sprintf(`
+if (!string.IsNullOrEmpty(doc.PathName)) { throw new System.Exception("fixture document " + %s + " is unexpectedly saved to disk (PathName=" + doc.PathName + "); refusing to write to what may not be the throwaway fixture document"); }
+OpenForWriting(doc);
+`, strconv.Quote(title))
 }

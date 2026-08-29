@@ -39,6 +39,10 @@ public class ManagedDocumentTransactionsTests
         public string? CentralModelPath => null;
         public string DocumentId => "tmp-" + Title;
 
+        /// <summary>Always false -- see IDocumentAdapter's own doc comment. RawReferenceDocumentAdapter,
+        /// below, is the fake that answers true, for the one test that needs it.</summary>
+        public bool ReferencesSameUnderlyingDocumentAs(IDocumentAdapter other) => false;
+
         public bool ThrowOnCommit { get; set; }
         public bool ThrowOnStartTransaction { get; set; }
         public bool ThrowOnAssimilate { get; set; }
@@ -192,7 +196,12 @@ public class ManagedDocumentTransactionsTests
         var ex = Assert.Throws<InvalidOperationException>(() => set.Open(duplicate));
 
         Assert.Contains("already open", ex.Message);
-        Assert.Contains("ambient", ex.Message);
+        // Independent PR review finding: this used to assert Assert.Contains("ambient", ex.Message),
+        // which passes even on boilerplate text ("...already opened via CreateProjectDocument/
+        // CreateFamilyDocument/OpenForWriting...") that names "ambient" as a documented CASE, not the
+        // document this guard actually named. Assert on the real SafeDescribe output instead, so this
+        // test genuinely fails if the guard ever names the wrong document.
+        Assert.Contains("ambient (active document)", ex.Message);
         Assert.Equal(1, set.Count); // the duplicate must not have been added alongside the original.
         // No TransactionGroup/Transaction was started for the rejected duplicate -- the guard fires
         // before any Revit-side allocation, not after. Journal still holds exactly the first Open's two
@@ -212,6 +221,73 @@ public class ManagedDocumentTransactionsTests
         set.Open(new JournalingDocumentAdapter("created", journal));
 
         Assert.Equal(2, set.Count);
+    }
+
+    /// <summary>
+    /// A fake with a distinct DocumentId per instance (like two independently-obtained real adapters for
+    /// the SAME unsaved document legitimately can have, per DocumentIdentity's own cache-miss behavior)
+    /// but a shared backing token it compares by reference -- the one fake that answers true from
+    /// ReferencesSameUnderlyingDocumentAs, for the test below that needs the backstop to actually catch
+    /// something the DocumentId check alone would miss.
+    /// </summary>
+    private sealed class RawReferenceDocumentAdapter : IDocumentAdapter
+    {
+        private readonly object _backingToken;
+
+        public RawReferenceDocumentAdapter(string title, string documentId, object backingToken)
+        {
+            Title = title;
+            DocumentId = documentId;
+            _backingToken = backingToken;
+        }
+
+        public string Title { get; }
+        public string? PathName => null;
+        public bool IsWorkshared => false;
+        public string? CentralModelPath => null;
+        public string DocumentId { get; }
+
+        public bool ReferencesSameUnderlyingDocumentAs(IDocumentAdapter other) =>
+            other is RawReferenceDocumentAdapter otherAdapter && ReferenceEquals(otherAdapter._backingToken, _backingToken);
+
+        public ITransactionAdapter CreateTransaction(string name) => new NoOpTransaction();
+
+        public ITransactionGroupAdapter CreateTransactionGroup(string name) => new NoOpGroup();
+
+        private sealed class NoOpTransaction : ITransactionAdapter
+        {
+            public IReadOnlyList<FailureSummary> CommitFailures => Array.Empty<FailureSummary>();
+            public void Start() { }
+            public TransactionCommitResult Commit() => TransactionCommitResult.Committed;
+            public void RollBack() { }
+        }
+
+        private sealed class NoOpGroup : ITransactionGroupAdapter
+        {
+            public void Start() { }
+            public void Assimilate() { }
+            public void RollBack() { }
+        }
+    }
+
+    [Fact]
+    public void Open_ThrowsWhenTwoAdaptersWithDifferentDocumentIdsShareTheSameRawDocument()
+    {
+        // THE EXACT GAP DocumentId ALONE MISSES: two independently-obtained adapters for the same
+        // unsaved document can legitimately get different DocumentIds (DocumentIdentity mints a fresh
+        // tmp-<guid> on every cache MISS -- see Open's own doc comment). Here both adapters report
+        // different DocumentIds but share one backing token, exactly modeling that case. The DocumentId
+        // check alone would let the second Open through; the ReferencesSameUnderlyingDocumentAs backstop
+        // is what actually catches it.
+        var set = NewSet();
+        var backingToken = new object();
+        set.Open(new RawReferenceDocumentAdapter("doc", "tmp-aaaa", backingToken), isAmbient: true);
+
+        var duplicate = new RawReferenceDocumentAdapter("doc", "tmp-bbbb", backingToken);
+        var ex = Assert.Throws<InvalidOperationException>(() => set.Open(duplicate));
+
+        Assert.Contains("already open", ex.Message);
+        Assert.Equal(1, set.Count);
     }
 
     [Fact]
@@ -662,6 +738,7 @@ public class ManagedDocumentTransactionsTests
         public bool IsWorkshared => false;
         public string? CentralModelPath => null;
         public string DocumentId => "tmp-" + _name;
+        public bool ReferencesSameUnderlyingDocumentAs(IDocumentAdapter other) => false;
 
         public ITransactionAdapter CreateTransaction(string name) => new Transaction(this);
 
@@ -740,6 +817,7 @@ public class ManagedDocumentTransactionsTests
         public bool IsWorkshared => false;
         public string? CentralModelPath => null;
         public string DocumentId => "tmp-" + Title;
+        public bool ReferencesSameUnderlyingDocumentAs(IDocumentAdapter other) => false;
 
         public ITransactionAdapter CreateTransaction(string name) => new Transaction(this);
 
@@ -787,5 +865,27 @@ public class ManagedDocumentTransactionsTests
     private sealed class NonCreatingUiApplicationAdapter : IUiApplicationAdapter
     {
         public IUiDocumentAdapter? ActiveUiDocument => null;
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Independent PR review, finding 3: RequireExistingDocumentSource was split out of OpenExisting
+    // specifically so this "does this run's adapter support OpenForWriting at all" check is tier-1
+    // testable on its own -- see that method's own doc comment. This test is what actually exercises
+    // it; without it the split existed but nothing pinned the behaviour it exists to make testable.
+    // ---------------------------------------------------------------------------------------------
+
+    [Fact]
+    public void RequireExistingDocumentSource_FailsWithASignpostedMessage_WhenTheAdapterCannotOpenExistingDocuments()
+    {
+        // NonCreatingUiApplicationAdapter implements neither IDocumentCreationSource nor
+        // IExistingDocumentSource -- exactly the tier-1 case OpenForWriting needs a clear, actionable
+        // error for, mirroring CreateAndOpenProjectDocument's own signposted-NotSupportedException test
+        // above.
+        var set = new ManagedDocumentTransactions(TransactionName, new NonCreatingUiApplicationAdapter());
+
+        var ex = Assert.Throws<NotSupportedException>(() => set.RequireExistingDocumentSource());
+
+        Assert.Contains(nameof(IExistingDocumentSource), ex.Message);
+        Assert.Contains("revit/test-harness", ex.Message);
     }
 }

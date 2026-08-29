@@ -54,20 +54,44 @@ namespace MCPBridge.Core.Execution;
 /// </summary>
 internal sealed class ManagedDocumentTransactions
 {
+    /// <summary>
+    /// Independent PR review finding: a plain <c>bool IsAmbient</c> conflated two genuinely different
+    /// kinds of "not ambient" document once <c>OpenForWriting</c> shipped. Before it, every non-ambient
+    /// entry was a document THIS run created (unsaved, in-memory, touching no file/central model/session)
+    /// -- the entire justification <see cref="CommitAll"/>'s "created first, ambient last" ordering and
+    /// <see cref="TransactionScriptExecutor"/>'s partial-commit remedy text both give for why confining
+    /// partial-failure fallout to non-ambient documents is safe. <c>OpenForWriting</c> can adopt a
+    /// PRE-EXISTING document that is just as real as the ambient one -- a saved, possibly workshared model
+    /// that merely isn't the active document -- and a bare bool would have silently let that document
+    /// commit FIRST, alongside genuinely-throwaway created ones, exposing it to exactly the fallout the
+    /// ordering exists to avoid. Three states, ordered by how safe committing them early is.
+    /// </summary>
+    private enum DocumentOrigin
+    {
+        /// <summary>A document THIS run created via CreateProjectDocument/CreateFamilyDocument -- unsaved, in-memory, safest to commit first.</summary>
+        CreatedThisRun,
+
+        /// <summary>A PRE-EXISTING document THIS run adopted via OpenForWriting -- may be a real, saved model; committed after created documents but still before the ambient one.</summary>
+        AdoptedExisting,
+
+        /// <summary>The run's active document -- always committed last (see this class's own doc comment).</summary>
+        Ambient,
+    }
+
     private sealed class Entry
     {
-        public Entry(IDocumentAdapter document, ITransactionGroupAdapter group, ITransactionAdapter transaction, bool isAmbient)
+        public Entry(IDocumentAdapter document, ITransactionGroupAdapter group, ITransactionAdapter transaction, DocumentOrigin origin)
         {
             Document = document;
             Group = group;
             Transaction = transaction;
-            IsAmbient = isAmbient;
+            Origin = origin;
         }
 
         public IDocumentAdapter Document { get; }
         public ITransactionGroupAdapter Group { get; }
         public ITransactionAdapter Transaction { get; }
-        public bool IsAmbient { get; }
+        public DocumentOrigin Origin { get; }
 
         /// <summary>
         /// How this document is named in a partial-commit report. Title, because that is also how a
@@ -75,7 +99,12 @@ internal sealed class ManagedDocumentTransactions
         /// Application.Documents and is found there by Title -- there is no document_id for it), so the
         /// name in the report is one an agent can act on.
         /// </summary>
-        public string Describe() => IsAmbient ? $"{Document.Title} (active document)" : Document.Title;
+        public string Describe() => Origin switch
+        {
+            DocumentOrigin.Ambient => $"{Document.Title} (active document)",
+            DocumentOrigin.AdoptedExisting => $"{Document.Title} (adopted via OpenForWriting)",
+            _ => Document.Title,
+        };
     }
 
     private readonly string _transactionName;
@@ -95,22 +124,43 @@ internal sealed class ManagedDocumentTransactions
     /// Opens and starts a TransactionGroup + Transaction for <paramref name="document"/> and tracks
     /// them. <paramref name="isAmbient"/> marks the run's active document -- at most one, opened by
     /// TransactionScriptExecutor before the script runs; created documents are opened lazily as the
-    /// script creates them.
+    /// script creates them (via the internal <see cref="DocumentOrigin"/> overload below, which
+    /// distinguishes them from a document OpenForWriting adopted -- see that enum's own doc comment).
     ///
-    /// Guards against opening the SAME document twice, by <see cref="IDocumentAdapter.DocumentId"/> --
-    /// never by reference equality, per this project's own standing gotcha that Revit hands back
-    /// different wrapper objects for "the same" document depending on API entry point. This was never a
-    /// real risk for CreateProjectDocument/CreateFamilyDocument (they only ever hand back a document that
-    /// didn't exist until that call returned -- nothing else could already reference it), but
-    /// OpenForWriting (ScriptGlobals) specifically targets a document that MAY already be tracked -- the
-    /// ambient one, or one opened earlier this same run -- which a second Transaction.Start() on the same
-    /// document cannot safely do (Revit allows only one open Transaction per document at a time) and
-    /// which CommitAll/RollBackAll were never written to iterate twice for one document. Fails fast,
-    /// before any TransactionGroup/Transaction is created for the duplicate -- no wasted allocation.
+    /// Guards against opening the SAME document twice, primarily by <see cref="IDocumentAdapter.DocumentId"/>.
+    /// TWO LAYERS, DELIBERATELY, not one: an earlier version of this comment claimed DocumentId alone was
+    /// "never reference equality" -- independent PR review found that claim false for exactly the
+    /// documents OpenForWriting targets. DocumentId is cached in DocumentIdentity's process-lifetime table
+    /// (MCPBridge.RevitAdapter/DocumentIdentity.cs), but for an UNSAVED document -- the primary case here,
+    /// since a document a prior call created is unsaved by construction -- resolution mints a fresh
+    /// `tmp-&lt;guid&gt;` on every cache MISS, so two independently-obtained adapters for the SAME unsaved
+    /// document can legitimately get different ids if Revit hands back different wrapper objects for
+    /// either lookup (the same "different wrappers per API entry point" gotcha this file already
+    /// documents elsewhere). A second check backstops that blind spot: compare the incoming adapter
+    /// against every already-tracked entry via <see cref="IDocumentAdapter.ReferencesSameUnderlyingDocumentAs"/>
+    /// -- true only for two real adapters wrapping the same live Document by REFERENCE; every test fake
+    /// answers false, so this never affects tier-1 behavior. Neither layer alone is complete; together
+    /// they catch the case each other misses.
+    /// KNOWN, ACCEPTED gap in the other direction: a workshared document's DocumentId is derived from its
+    /// CentralModelPath, so a local copy and its own central model opened in the same session legitimately
+    /// share one DocumentId -- OpenForWriting on the second would be refused as a false-positive "already
+    /// open". Not worth restructuring for; noted so a future reader doesn't have to rediscover it live.
+    ///
+    /// This guard was never needed before OpenForWriting shipped: CreateProjectDocument/CreateFamilyDocument
+    /// only ever hand back a document that didn't exist until that call returned -- nothing else could
+    /// already reference it -- but OpenForWriting specifically targets a document that MAY already be
+    /// tracked (the ambient one, or one opened earlier this same run), which a second Transaction.Start()
+    /// on the same document cannot safely do (Revit allows only one open Transaction per document at a
+    /// time) and which CommitAll/RollBackAll were never written to iterate twice for one document. Fails
+    /// fast, before any TransactionGroup/Transaction is created for the duplicate -- no wasted allocation.
     /// </summary>
-    public void Open(IDocumentAdapter document, bool isAmbient = false)
+    public void Open(IDocumentAdapter document, bool isAmbient = false) =>
+        Open(document, isAmbient ? DocumentOrigin.Ambient : DocumentOrigin.CreatedThisRun);
+
+    private void Open(IDocumentAdapter document, DocumentOrigin origin)
     {
-        var existing = _entries.FirstOrDefault(e => e.Document.DocumentId == document.DocumentId);
+        var existing = _entries.FirstOrDefault(e => e.Document.DocumentId == document.DocumentId)
+            ?? FindByRawReference(document);
         if (existing is not null)
         {
             throw new InvalidOperationException(
@@ -137,8 +187,20 @@ internal sealed class ManagedDocumentTransactions
             throw;
         }
 
-        _entries.Add(new Entry(document, group, transaction, isAmbient));
+        _entries.Add(new Entry(document, group, transaction, origin));
     }
+
+    /// <summary>
+    /// The DocumentId guard's reference-equality backstop -- see <see cref="Open(IDocumentAdapter, bool)"/>'s
+    /// own doc comment for why this exists alongside, not instead of, the DocumentId comparison. Routed
+    /// through <see cref="IDocumentAdapter.ReferencesSameUnderlyingDocumentAs"/> specifically so this
+    /// method never references a Revit type -- see that member's own doc comment for the tier-1 JIT
+    /// failure an earlier IRawDocumentSource-based version of this method caused. Every test fake answers
+    /// false (no fake wraps a distinct backing document to compare), so this never affects ordinary
+    /// tier-1 behavior, only the real tier-2 double-open case it targets.
+    /// </summary>
+    private Entry? FindByRawReference(IDocumentAdapter document) =>
+        _entries.FirstOrDefault(entry => entry.Document.ReferencesSameUnderlyingDocumentAs(document));
 
     /// <summary>
     /// Creates a new project document and opens its managed transaction in one step -- the whole point
@@ -172,21 +234,48 @@ internal sealed class ManagedDocumentTransactions
     /// ScriptGlobals.OpenForWriting. Unlike <see cref="CreateAndOpen"/>, this document is not new: Open's
     /// own DocumentId guard is what actually protects against double-tracking it (the ambient document,
     /// or one already opened via CreateProjectDocument/CreateFamilyDocument/OpenForWriting this run).
+    /// Tracked as <see cref="DocumentOrigin.AdoptedExisting"/>, not <see cref="DocumentOrigin.CreatedThisRun"/>
+    /// -- see that enum's own doc comment for why the distinction matters to commit ordering.
     /// </summary>
     public IDocumentAdapter OpenExisting(Autodesk.Revit.DB.Document rawDocument)
     {
-        var source = _uiApplication as IExistingDocumentSource
-            ?? throw new NotSupportedException(
-                $"OpenForWriting needs a live Revit session, but {_uiApplication.GetType().Name} does not " +
-                $"implement {nameof(IExistingDocumentSource)}. Only the live adapter does -- " +
-                "Autodesk.Revit.DB.Document is non-constructible/non-wrappable outside a running Revit " +
-                "session, so a fake genuinely cannot supply one. A test that needs this belongs in the " +
-                "tier-2 live harness (revit/test-harness), not MCPBridge.Core.Tests.");
+        // Independent PR review finding: a script calling OpenForWriting(null) -- easy, since the
+        // standard by-Title lookup preamble leaves `doc` null when nothing matches and a script forgets
+        // the null check -- used to reach RevitDocumentAdapter's constructor and fail deep inside
+        // DocumentIdentity's ConditionalWeakTable with a bare ArgumentNullException naming "key", not
+        // "document". Signposted here instead, per PRD §01 (Raw<T>'s own doc comment names this exact
+        // class of unexplained-exception as the thing to avoid).
+        if (rawDocument is null)
+        {
+            throw new ArgumentNullException(nameof(rawDocument),
+                "OpenForWriting was called with a null document -- likely a by-Title lookup that found no " +
+                "match and wasn't null-checked before being passed in.");
+        }
 
+        var source = RequireExistingDocumentSource();
         var adapter = source.WrapExisting(rawDocument);
-        Open(adapter);
+        Open(adapter, DocumentOrigin.AdoptedExisting);
         return adapter;
     }
+
+    /// <summary>
+    /// Split out from <see cref="OpenExisting"/> specifically so the "does this run's adapter support
+    /// OpenForWriting at all" check is tier-1 testable on its own (independent PR review finding: the
+    /// combined method was untestable in its ENTIRETY at tier 1, when only the raw-Document-wrapping half
+    /// genuinely needs live Revit -- mirrors <see cref="CreateAndOpen"/>'s own existing shape, which keeps
+    /// the same cast-and-throw check separable from its Revit-typed template-path argument). A test needs
+    /// no Autodesk.Revit.DB.Document reference to call this -- only an adapter that does or doesn't
+    /// implement IExistingDocumentSource, which every existing tier-1 fake already is (the "doesn't"
+    /// case).
+    /// </summary>
+    internal IExistingDocumentSource RequireExistingDocumentSource() =>
+        _uiApplication as IExistingDocumentSource
+        ?? throw new NotSupportedException(
+            $"OpenForWriting needs a live Revit session, but {_uiApplication.GetType().Name} does not " +
+            $"implement {nameof(IExistingDocumentSource)}. Only the live adapter does -- " +
+            "Autodesk.Revit.DB.Document is non-constructible/non-wrappable outside a running Revit " +
+            "session, so a fake genuinely cannot supply one. A test that needs this belongs in the " +
+            "tier-2 live harness (revit/test-harness), not MCPBridge.Core.Tests.");
 
     /// <summary>
     /// Rolls back every managed document, most recently opened first, best-effort. Used for every
@@ -228,7 +317,15 @@ internal sealed class ManagedDocumentTransactions
     /// </summary>
     public ManagedDocumentCommitResult CommitAll()
     {
-        var order = _entries.Where(e => !e.IsAmbient).Concat(_entries.Where(e => e.IsAmbient)).ToList();
+        // Three tiers now, not two (independent PR review finding) -- CreatedThisRun (safest: unsaved,
+        // in-memory) first, AdoptedExisting (may be a real, saved model OpenForWriting adopted) next,
+        // Ambient (the run's active document) always last. See DocumentOrigin's own doc comment for why
+        // collapsing AdoptedExisting into the old "commit early" bucket alongside CreatedThisRun would
+        // have been wrong.
+        var order = _entries.Where(e => e.Origin == DocumentOrigin.CreatedThisRun)
+            .Concat(_entries.Where(e => e.Origin == DocumentOrigin.AdoptedExisting))
+            .Concat(_entries.Where(e => e.Origin == DocumentOrigin.Ambient))
+            .ToList();
 
         var result = CommitInOrder(order);
 
@@ -271,6 +368,12 @@ internal sealed class ManagedDocumentTransactions
         var rolledBack = new List<string>();
         var unknownState = new List<string>();
         Exception? failure = null;
+        // Independent PR review finding: PartialCommitNotice's remedy used to unconditionally claim every
+        // committed document was "unsaved and in-memory" -- true when every non-ambient entry was
+        // CreatedThisRun, false the moment OpenForWriting could adopt a real, saved document as
+        // AdoptedExisting or the ambient one itself commits. Tracked here, at the one place that already
+        // knows each entry's origin AND which of them actually committed.
+        var anyCommittedDocumentMayBeReal = false;
 
         var index = 0;
         for (; index < order.Count; index++)
@@ -280,6 +383,11 @@ internal sealed class ManagedDocumentTransactions
             if (attempt.Succeeded)
             {
                 committed.Add(SafeDescribe(entry));
+                if (entry.Origin != DocumentOrigin.CreatedThisRun)
+                {
+                    anyCommittedDocumentMayBeReal = true;
+                }
+
                 continue;
             }
 
@@ -291,7 +399,7 @@ internal sealed class ManagedDocumentTransactions
 
         if (failure is null)
         {
-            return ManagedDocumentCommitResult.Succeeded(failures, committed);
+            return ManagedDocumentCommitResult.Succeeded(failures, committed, anyCommittedDocumentMayBeReal);
         }
 
         // Whatever has not been attempted yet must not be left open: the run is a failure now, and
@@ -304,7 +412,7 @@ internal sealed class ManagedDocumentTransactions
             (transactionUnwound && groupUnwound ? rolledBack : unknownState).Add(SafeDescribe(entry));
         }
 
-        return ManagedDocumentCommitResult.Failed(failure, failures, committed, rolledBack, unknownState);
+        return ManagedDocumentCommitResult.Failed(failure, failures, committed, rolledBack, unknownState, anyCommittedDocumentMayBeReal);
     }
 
     /// <summary>

@@ -36,4 +36,11 @@ internal sealed class FakeDocumentAdapter : IDocumentAdapter
         LastTransactionGroup = group;
         return group;
     }
+
+    /// <summary>
+    /// Always false -- this fake has no real backing Document to compare by reference, and no fake needs
+    /// one: DocumentId is what tier-1 tests dedupe on. See IDocumentAdapter's own doc comment for why
+    /// this member exists and stays Revit-type-free.
+    /// </summary>
+    public bool ReferencesSameUnderlyingDocumentAs(IDocumentAdapter other) => false;
 }

@@ -77,4 +77,26 @@ internal interface IDocumentAdapter
     /// already reported for the same document.
     /// </summary>
     string DocumentId { get; }
+
+    /// <summary>
+    /// True when <paramref name="other"/> wraps the exact same underlying document as this adapter --
+    /// the reference-equality backstop <see cref="MCPBridge.Core.Execution.ManagedDocumentTransactions"/>'s
+    /// double-open guard uses alongside <see cref="DocumentId"/> (see that guard's own doc comment for why
+    /// DocumentId alone is not enough for the primary OpenForWriting case).
+    ///
+    /// DELIBERATELY A PLAIN BOOL, NOT THE RAW Autodesk.Revit.DB.Document ITSELF -- exactly like
+    /// <see cref="DocumentId"/> already is, and for the identical reason (see that member's own doc
+    /// comment: "a plain string, not a Revit type -- crosses the Core/RevitAdapter seam without Core ever
+    /// needing to see the underlying Document"). A first attempt at this backstop had ManagedDocumentTransactions
+    /// pattern-match the incoming adapter against IRawDocumentSource directly. That broke every tier-1 test
+    /// that exercises Open() with a fake: an `is IRawDocumentSource` check forces the CLR to fully resolve
+    /// that interface's own member signatures (including RawDocument's Autodesk.Revit.DB.Document return
+    /// type) to build its interface map, which throws FileNotFoundException loading RevitAPI.dll --
+    /// confirmed live via `dotnet test`, even though the object under test never implements that interface
+    /// and the check would have returned false. Putting the comparison behind THIS interface instead keeps
+    /// Core's hot Open() path free of any Revit-typed reference, so it JITs the same for a fake as for a
+    /// real adapter -- only RevitDocumentAdapter's own implementation, compiled and always loaded alongside
+    /// real Revit references, ever touches Document.
+    /// </summary>
+    bool ReferencesSameUnderlyingDocumentAs(IDocumentAdapter other);
 }

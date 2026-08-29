@@ -148,6 +148,13 @@ return new { deleted = !stillThere };
 	//      API version (Revit 2025+) -- BindingMap.Insert's third parameter
 	//      is a ForgeTypeId, and GroupTypeId.Data is the modern replacement
 	//      for the old BuiltInParameterGroup.PG_DATA.
+	// Independent PR review finding: this used to set app.SharedParametersFilename and never
+	// restore it, and never deleted the temp file it wrote -- a real, process-wide Revit
+	// application setting left pointed at a file this test created in the OS temp directory,
+	// leaking both the setting change (affecting whatever a human or another script does next in
+	// this same Revit session) and the file itself across every run. Now captures the original
+	// value up front and restores it, and deletes the temp file, in a try/finally so both happen
+	// even if OpenSharedParameterFile or the binding calls below throw.
 	t.Run("CreateSharedParameter", func(t *testing.T) {
 		out := runScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+`
 var app = UIApplication.Application;
@@ -156,17 +163,26 @@ var sharedParamPath = System.IO.Path.Combine(
 var guid = System.Guid.NewGuid().ToString();
 var fileContent = "# This is a Revit shared parameter file.\n# Do not edit manually.\n*META\tVERSION\tMINVERSION\nMETA\t2\t1\n*GROUP\tID\tNAME\nGROUP\t1\tMCPHarness\n*PARAM\tGUID\tNAME\tDATATYPE\tDATACATEGORY\tGROUP\tVISIBLE\tDESCRIPTION\tUSERMODIFIABLE\nPARAM\t" + guid + "\tMCPHarnessTestParam\tTEXT\t\t1\t1\t\t1\n";
 System.IO.File.WriteAllText(sharedParamPath, fileContent);
-app.SharedParametersFilename = sharedParamPath;
-var defFile = app.OpenSharedParameterFile();
-var group = defFile.Groups.get_Item("MCPHarness");
-var definition = group.Definitions.get_Item("MCPHarnessTestParam") as Autodesk.Revit.DB.ExternalDefinition;
+var originalSharedParamsFilename = app.SharedParametersFilename;
+bool bound;
+string definitionName;
+try {
+    app.SharedParametersFilename = sharedParamPath;
+    var defFile = app.OpenSharedParameterFile();
+    var group = defFile.Groups.get_Item("MCPHarness");
+    var definition = group.Definitions.get_Item("MCPHarnessTestParam") as Autodesk.Revit.DB.ExternalDefinition;
 
-var categorySet = app.Create.NewCategorySet();
-categorySet.Insert(doc.Settings.Categories.get_Item(Autodesk.Revit.DB.BuiltInCategory.OST_Walls));
-var binding = app.Create.NewInstanceBinding(categorySet);
-var bound = doc.ParameterBindings.Insert(definition, binding, Autodesk.Revit.DB.GroupTypeId.Data);
+    var categorySet = app.Create.NewCategorySet();
+    categorySet.Insert(doc.Settings.Categories.get_Item(Autodesk.Revit.DB.BuiltInCategory.OST_Walls));
+    var binding = app.Create.NewInstanceBinding(categorySet);
+    bound = doc.ParameterBindings.Insert(definition, binding, Autodesk.Revit.DB.GroupTypeId.Data);
+    definitionName = definition == null ? "null" : definition.Name;
+} finally {
+    app.SharedParametersFilename = originalSharedParamsFilename;
+    System.IO.File.Delete(sharedParamPath);
+}
 
-return new { bound, definitionName = definition == null ? "null" : definition.Name };
+return new { bound, definitionName };
 `)
 		if out.Status != "success" {
 			t.Fatalf("expected status=success, got %q (output: %s)", out.Status, out.Output)
