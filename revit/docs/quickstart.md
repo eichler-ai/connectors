@@ -15,14 +15,15 @@ now; when GitHub Releases exist, step 3 collapses to the one-liner in
 | Go (1.25+) | builds the MCP Server (broker) |
 | [Claude Code](https://claude.com/claude-code) CLI | or any MCP client; the installer registers the server with `claude mcp add` if `claude` is on `PATH` |
 
+All commands below run from the **repo root**, in PowerShell.
+
 ## 1. Build the add-in (Windows, needs Revit installed)
 
 The projects reference `RevitAPI.dll` from `C:\Program Files\Autodesk\Revit <version>` —
 they only build on a machine with Revit.
 
 ```powershell
-cd revit\mcp-bridge
-dotnet build MCPBridge.sln -c Release
+dotnet build revit\mcp-bridge\MCPBridge.sln -c Release
 ```
 
 Multi-targeted: `net10.0-windows` output is the Revit 2027 build, `net8.0-windows` the
@@ -31,8 +32,7 @@ Revit 2025 build.
 ## 2. Build the broker
 
 ```powershell
-cd revit\mcp-server
-go build -o mcp-server.exe .\cmd\mcp-server
+go build -C revit\mcp-server -o mcp-server.exe ./cmd/mcp-server
 ```
 
 ## 3. Assemble the local package zip
@@ -57,8 +57,7 @@ Compress-Archive "$($stage.FullName)\*" "$env:TEMP\mcpbridge-release.zip" -Force
 ## 4. Install
 
 ```powershell
-cd revit
-.\install.ps1 -LocalPackagePath "$env:TEMP\mcpbridge-release.zip"
+.\revit\install.ps1 -LocalPackagePath "$env:TEMP\mcpbridge-release.zip"
 ```
 
 This deploys the add-in to every detected supported Revit version's Addins folder, puts the

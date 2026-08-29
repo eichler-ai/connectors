@@ -19,8 +19,8 @@ are what keep it reviewable.
 
 There is no mocked-broker integration tier in between; don't add one.
 
-1. **Tier 1 — unit tests.** The Go broker (`revit/mcp-server`) is pure logic and is
-   unit-tested everything, TDD-first (`go test ./...`). The C# add-in's decision logic lives
+1. **Tier 1 — unit tests.** The Go broker (`revit/mcp-server`) is pure logic and
+   unit-tested throughout, TDD-first (`go test ./...`). The C# add-in's decision logic lives
    in `MCPBridge.Core` behind the `MCPBridge.RevitAdapter` seam and is tested with fakes
    (`dotnet test` on `MCPBridge.Core.Tests` / `MCPBridge.Discovery.Tests`) — note these
    need a machine with Revit installed to build (see issue #39 for CI plans).
