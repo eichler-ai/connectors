@@ -145,6 +145,27 @@ public class ExecutionAuditTrailTests : IDisposable
     }
 
     [Fact]
+    public void Record_PathSeparatorsInAnExecutionId_CannotEscapeTheWorkspace()
+    {
+        // The broker mints well-formed ids, but execution_id arrives over the wire, and the wire --
+        // not the broker's good behavior -- is the §10 trust boundary. A traversal-shaped id must
+        // land (mangled) INSIDE the workspace, never outside it.
+        var workspace = NewWorkspace();
+        var hostile = "..\\..\\escape/..\\evil";
+
+        ExecutionAuditTrail.Record(workspace, hostile, "1;", ScriptExecutionOutcome.Completed(null, ""), CompletedAt, trace: null);
+
+        // The decisive property is WHERE the files landed: directly inside the workspace's own
+        // scripts/ and logs/ dirs (separators mangled into the name -- a literal ".." WITHIN a
+        // file name is harmless; a path segment would not have been), and nothing anywhere above.
+        var scriptFile = Assert.Single(Directory.GetFiles(workspace.Scripts));
+        Assert.Equal(workspace.Scripts, Path.GetDirectoryName(scriptFile));
+        var logFile = Assert.Single(Directory.GetFiles(workspace.Logs));
+        Assert.Equal(workspace.Logs, Path.GetDirectoryName(logFile));
+        Assert.Empty(Directory.GetFiles(_root)); // nothing landed at the substitute profile root
+    }
+
+    [Fact]
     public void Sweep_MissingRootOrLockedEntries_NeverThrows()
     {
         var exception = Xunit.Record.Exception(() => ExecutionAuditTrail.Sweep(

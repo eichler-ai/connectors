@@ -61,8 +61,12 @@ internal static class ExecutionAuditTrail
         {
             // Sortable, filesystem-safe, millisecond-distinct alongside the execution id -- two
             // runs can't collide (ids are unique) and a directory listing reads chronologically.
+            // The id itself is SANITIZED before touching a path (fresh-eyes self-review): the
+            // broker mints well-formed ids, but execution_id arrives over the wire, and the wire --
+            // not the broker's good behavior -- is the §10 trust boundary; a path separator in an
+            // id must never let an audit file land outside the workspace.
             var stamp = completedAtUtc.UtcDateTime.ToString("yyyyMMdd-HHmmssfff");
-            var baseName = $"{stamp}-{executionId}";
+            var baseName = $"{stamp}-{SanitizeForFileName(executionId)}";
 
             File.WriteAllText(Path.Combine(workspace.Scripts, baseName + ".cs"), scriptText);
 
@@ -180,6 +184,23 @@ internal static class ExecutionAuditTrail
         {
             trace?.Invoke($"audit retention sweep failed (will retry next process start): {ex.GetType().Name}: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// Replaces every character that can't appear in a file name -- path separators very much
+    /// included -- with '_'. Lossy on purpose: the stamp keeps names unique enough, and a mangled
+    /// name for a malformed id beats an audit file escaping the workspace.
+    /// </summary>
+    private static string SanitizeForFileName(string executionId)
+    {
+        var invalid = Path.GetInvalidFileNameChars();
+        var builder = new StringBuilder(executionId.Length);
+        foreach (var ch in executionId)
+        {
+            builder.Append(Array.IndexOf(invalid, ch) >= 0 || ch == '/' || ch == '\\' ? '_' : ch);
+        }
+
+        return builder.ToString();
     }
 
     private static void TryDelete(string file, DateTime cutoffUtc, Action<string>? trace)
