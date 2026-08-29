@@ -33,7 +33,15 @@ the platform app-data directory automatically (PRD §05). This is the target dep
 and needs nothing machine-specific.
 
 ### Remote mode (this project's own Mac + Parallels VM dev environment, or any setup where the
-broker and Revit are on different machines)
+broker and Revit are on different machines) — **the normal way to run this harness in this project**
+
+Run this NATIVELY ON THE MAC, not through the VM. This was confirmed dramatically faster once
+actually tried: the same 6-subtest bundle that used to require cross-compiling for Windows,
+copying the binary to the VM, dropping a launcher-agent `*.runexe` signal, and polling for a
+result (minutes) ran in **28 seconds** end to end run this way instead — `go test` compiles and
+runs directly, `-broker-exe` points at a `mcp-server-mac` binary already sitting in this repo, and
+there is no VM round trip of any kind. Reach for the Windows cross-compiled path only if the
+broker itself must physically run on the VM for some other reason.
 
 Requires three additional flags (or their env-var equivalents: `MCP_SERVER_MODE`,
 `MCP_SERVER_BIND`, `MCP_SERVER_APPDATA`) matching whatever the *real*, already-running primary
@@ -62,6 +70,24 @@ up its own independent, disconnected broker instead of finding the real one, and
 SKIPs with "no Revit instance connected" rather than failing loudly. If every case is
 unexpectedly skipping, this is the first thing to check.
 
+**The harness's own `-broker-exe` process only lives for the duration of one `go test`
+invocation** (killed in cleanup the moment that process exits) — fine when a real, independently-
+running primary broker already exists for it to proxy through as a secondary, but useless as the
+thing the add-in itself should register against across separate test runs. If `register`'s
+document snapshot is stale (`documents: []` despite Revit genuinely having one open — PRD §05's
+one-shot snapshot race, [issue #30](https://github.com/eichler-ai/connectors/issues/30)) and needs
+a broker restart to force a fresh reconnect, start a genuinely long-lived STANDALONE broker first
+(same "keep stdin open" trick this project uses elsewhere for exactly this reason):
+```sh
+cd ../mcp-server
+nohup bash -c 'sleep 100000 | ./mcp-server-mac -mode remote -bind <bind-ip> -app-data-dir <dir>' &
+disown
+```
+then let the add-in reconnect to it (check its own `connection.log` for a fresh `connected:
+auth+register succeeded ... (N document(s))` line) BEFORE running `go test` against it as a
+secondary. Restarting your own Claude Code session's `revit` MCP tool's broker this way (if it's
+the same process) also drops that tool's own connection — `/mcp` reconnects it, nothing else does.
+
 ## Layout
 
 - `mcpclient/` — the MCP-over-stdio client the tests use (subprocess spawn, JSON-RPC framing,
@@ -82,17 +108,31 @@ unexpectedly skipping, this is the first thing to check.
 - `fixtures_test.go` — the fixture-system helpers PRD §13's coverage-plan corpus bundles share:
   `createBlankFixtureDocument` (creates one blank, writable document via `CreateProjectDocument`,
   returns its Title -- the only way a later `execute_script` call can find it again, since a created
-  document has no `document_id`) and `fixtureLookupPreamble` (the by-Title re-find every subtest in
-  a bundle needs). Call `createBlankFixtureDocument` ONCE per bundle, not once per subtest.
+  document has no `document_id`; registers a `t.Cleanup` that closes it via `closeFixtureDocument`
+  when the bundle finishes), `fixtureLookupPreamble` (the by-Title re-find every subtest needs), and
+  `fixtureWritePreamble` (that plus `OpenForWriting(doc)` -- use this one instead whenever a subtest
+  WRITES to the fixture document; without it every write throws "Attempt to modify the model outside
+  of transaction", since a created document's managed transaction commits and closes the moment the
+  call that created it returns). Call `createBlankFixtureDocument` ONCE per bundle, not once per
+  subtest.
 - `phase_a_test.go` — the first coverage-plan corpus bundle, `TestPhaseACoreCRUDAndQuery` (core
   CRUD + query): `CreateWall`, `QueryElementsByCategory`, `GetSetParameter`, `DeleteElement`,
-  `CreateSharedParameter`, `EditGroupPropagatesToAllInstances`. Every script here was run live via
-  `mcp__revit__execute_script` before being committed -- see the file's own comments for two real
-  API corrections (a nonexistent `Application.CreateSharedParameterFile()`, and
-  `BuiltInParameterGroup` having been removed from this API version) and a substantial finding on
-  how model-group member edits actually propagate (there is no group-edit-scope API; the real
-  mechanism is `UngroupMembers` → edit → `NewGroup` → reassign `.GroupType` on other instances).
-  Thirteen test functions across the three files in total.
+  `CreateSharedParameter`, `EditGroupPropagatesToAllInstances`, each an INDEPENDENT subtest (its own
+  `execute_script` call, re-runnable in isolation via `-run TestPhaseACoreCRUDAndQuery/CreateWall`).
+  Every script here was run live via `mcp__revit__execute_script` before being committed -- see the
+  file's own comments for two real API corrections (a nonexistent
+  `Application.CreateSharedParameterFile()`, and `BuiltInParameterGroup` having been removed from
+  this API version) and a substantial finding on how model-group member edits actually propagate
+  (there is no group-edit-scope API; the real mechanism is `UngroupMembers` → edit → `NewGroup` →
+  reassign `.GroupType` on other instances).
+- `memcheck_test.go` — throwaway diagnostics, not part of the coverage corpus:
+  `TestOpenForWritingMemoryCycles` (N true cross-call create/write/close cycles, for the memory
+  investigation logged in [issue #31](https://github.com/eichler-ai/connectors/issues/31)) and
+  `TestOpenDocumentCount` (reports `Application.Documents`' current count/titles). Kept around as
+  ready-made tools for revisiting that issue, not run as part of a normal test pass.
+
+Thirteen test functions across `harness_test.go`, `denylist_bypass_test.go`, and `phase_a_test.go`
+make up the actual coverage corpus; `memcheck_test.go`'s two are diagnostics, not corpus.
 
 `TestApplicationCreatesDocuments` is the first case whose subtests are *heterogeneous* — each
 asserting a different thing about one capability — rather than table-driven over a single shape

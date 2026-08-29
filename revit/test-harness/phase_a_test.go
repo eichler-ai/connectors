@@ -9,33 +9,39 @@ import (
 
 // TestPhaseACoreCRUDAndQuery is the first fixture-system bundle (coverage
 // plan, "Rollout order" step 4) -- one blank document created ONCE via
-// createBlankFixtureDocument, then each check below as its own t.Run subtest
-// against that same document, found again by Title per subtest (see
-// fixtureLookupPreamble). Subtests are INDEPENDENT, not chained: each creates
-// whatever elements it needs at its own elevation AND X-offset (elevation
-// alone isn't enough -- two walls sharing the same X/Y footprint at different
-// levels still overlap in 3D once default wall height is accounted for,
-// confirmed live as a harmless but noisy "walls overlap" warning) so a
-// failure in one does not cascade into another, and so re-running a single
-// subtest in isolation (`-run TestPhaseACoreCRUDAndQuery/CreateWall`) behaves
-// the same as running the whole bundle.
+// createBlankFixtureDocument, then each check below as its own INDEPENDENT
+// t.Run subtest, each its own execute_script call, against that same
+// document -- found again by Title per subtest (fixtureLookupPreamble) and
+// opened for writing per subtest (fixtureWritePreamble, ScriptGlobals.
+// OpenForWriting) since a document's managed transaction from the call that
+// created it commits and closes the moment that call returns. Subtests are
+// independent, not chained: each creates whatever elements it needs at its
+// own elevation AND X-offset (elevation alone isn't enough -- two walls
+// sharing the same X/Y footprint at different levels still overlap in 3D
+// once default wall height is accounted for, confirmed live as a harmless
+// but noisy "walls overlap" warning) so a failure in one does not cascade
+// into another, and so re-running a single subtest in isolation
+// (`-run TestPhaseACoreCRUDAndQuery/CreateWall`) behaves the same as running
+// the whole bundle.
 //
-// Every script below was executed live via mcp__revit__execute_script against
-// a real connected instance before being committed here (this project's
-// standing "no fake integration tier" rule extends to test AUTHORING, not
-// just to what ships) -- see the coverage plan and SKILL.md changelog for the
-// live-research session that shaped the CreateSharedParameter and
-// EditGroupPropagatesToAllInstances cases specifically.
+// Every script below was executed live via mcp__revit__execute_script
+// against a real connected instance before being committed here (this
+// project's standing "no fake integration tier" rule extends to test
+// AUTHORING, not just to what ships) -- see the coverage plan and SKILL.md
+// changelog for the live-research sessions that shaped the
+// CreateSharedParameter and EditGroupPropagatesToAllInstances cases, and the
+// OpenForWriting feature this bundle now depends on.
 func TestPhaseACoreCRUDAndQuery(t *testing.T) {
 	c, instanceID, documentID := targetDocument(t)
 	fixtureTitle := createBlankFixtureDocument(t, c, instanceID, documentID)
 
 	// CreateWall proves the most basic write pattern every other subtest in
 	// this bundle (and every later phase) leans on: find the fixture document,
-	// create a supporting element (a Level, to host the wall), create the
-	// element under test, and read a property back to confirm it landed.
+	// open it for writing, create a supporting element (a Level, to host the
+	// wall), create the element under test, and read a property back to
+	// confirm it landed.
 	t.Run("CreateWall", func(t *testing.T) {
-		out := runScript(t, c, instanceID, documentID, fixtureLookupPreamble(fixtureTitle)+`
+		out := runScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+`
 var level = Autodesk.Revit.DB.Level.Create(doc, 10.0);
 var line = Autodesk.Revit.DB.Line.CreateBound(
     new Autodesk.Revit.DB.XYZ(0, 0, 0), new Autodesk.Revit.DB.XYZ(20, 0, 0));
@@ -58,7 +64,7 @@ return new {
 	// QueryElementsByCategory proves the FilteredElementCollector + category
 	// filter pattern every later query-shaped case in this corpus will reuse.
 	t.Run("QueryElementsByCategory", func(t *testing.T) {
-		out := runScript(t, c, instanceID, documentID, fixtureLookupPreamble(fixtureTitle)+`
+		out := runScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+`
 var level = Autodesk.Revit.DB.Level.Create(doc, 20.0);
 var line = Autodesk.Revit.DB.Line.CreateBound(
     new Autodesk.Revit.DB.XYZ(100, 0, 0), new Autodesk.Revit.DB.XYZ(115, 0, 0));
@@ -80,9 +86,10 @@ return new { foundAtLeastOne = count >= 1, count };
 	// GetSetParameter: set a built-in instance parameter, read it back in the
 	// SAME script (the round-trip a single execute_script call can prove --
 	// whether the value survives to a LATER script is TransactionScriptExecutor's
-	// job, already covered end-to-end by TestCreatedDocumentIsWritable).
+	// job, already covered end-to-end by TestCreatedDocumentIsWritable and,
+	// now, by this whole bundle's own use of OpenForWriting across calls).
 	t.Run("GetSetParameter", func(t *testing.T) {
-		out := runScript(t, c, instanceID, documentID, fixtureLookupPreamble(fixtureTitle)+`
+		out := runScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+`
 var level = Autodesk.Revit.DB.Level.Create(doc, 30.0);
 var line = Autodesk.Revit.DB.Line.CreateBound(
     new Autodesk.Revit.DB.XYZ(200, 0, 0), new Autodesk.Revit.DB.XYZ(210, 0, 0));
@@ -103,7 +110,7 @@ return new { roundTripped = readBack == "mcp-harness-phase-a", readBack };
 	// DeleteElement: create, delete, and confirm doc.GetElement can no longer
 	// find it -- the negative-space counterpart to every creation check above.
 	t.Run("DeleteElement", func(t *testing.T) {
-		out := runScript(t, c, instanceID, documentID, fixtureLookupPreamble(fixtureTitle)+`
+		out := runScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+`
 var level = Autodesk.Revit.DB.Level.Create(doc, 40.0);
 var line = Autodesk.Revit.DB.Line.CreateBound(
     new Autodesk.Revit.DB.XYZ(300, 0, 0), new Autodesk.Revit.DB.XYZ(308, 0, 0));
@@ -142,7 +149,7 @@ return new { deleted = !stillThere };
 	//      is a ForgeTypeId, and GroupTypeId.Data is the modern replacement
 	//      for the old BuiltInParameterGroup.PG_DATA.
 	t.Run("CreateSharedParameter", func(t *testing.T) {
-		out := runScript(t, c, instanceID, documentID, fixtureLookupPreamble(fixtureTitle)+`
+		out := runScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+`
 var app = UIApplication.Application;
 var sharedParamPath = System.IO.Path.Combine(
     System.IO.Path.GetTempPath(), "mcp-harness-shared-params-" + System.Guid.NewGuid().ToString("N") + ".txt");
@@ -224,7 +231,7 @@ return new { bound, definitionName = definition == null ? "null" : definition.Na
 	//    argument alone -- compare two instances of the SAME type against
 	//    each other, never against an assumed absolute coordinate).
 	t.Run("EditGroupPropagatesToAllInstances", func(t *testing.T) {
-		out := runScript(t, c, instanceID, documentID, fixtureLookupPreamble(fixtureTitle)+`
+		out := runScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+`
 var level = Autodesk.Revit.DB.Level.Create(doc, 50.0);
 var line = Autodesk.Revit.DB.Line.CreateBound(
     new Autodesk.Revit.DB.XYZ(400, 0, 0), new Autodesk.Revit.DB.XYZ(410, 0, 0));

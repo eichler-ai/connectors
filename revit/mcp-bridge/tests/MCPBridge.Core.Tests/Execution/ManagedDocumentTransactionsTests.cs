@@ -174,6 +174,47 @@ public class ManagedDocumentTransactionsTests
     }
 
     [Fact]
+    public void Open_ThrowsWhenCalledTwiceForTheSameDocumentId()
+    {
+        // OpenForWriting (ScriptGlobals) specifically targets a document that may already be tracked --
+        // the ambient one, or one opened earlier this run -- a real, script-triggerable hazard
+        // CreateProjectDocument/CreateFamilyDocument never had (they only ever hand back a document that
+        // didn't exist until that call returned). Comparison is by DocumentId, never ReferenceEquals, per
+        // this project's own standing gotcha that Revit hands back different wrapper objects for "the
+        // same" document depending on API entry point -- JournalingDocumentAdapter's DocumentId is
+        // derived from Title ("tmp-" + Title), so two adapters sharing a Title collide exactly as two
+        // separate RevitDocumentAdapter wrappers around the same live Document would.
+        var journal = new List<string>();
+        var set = NewSet();
+        set.Open(new JournalingDocumentAdapter("ambient", journal), isAmbient: true);
+
+        var duplicate = new JournalingDocumentAdapter("ambient", journal);
+        var ex = Assert.Throws<InvalidOperationException>(() => set.Open(duplicate));
+
+        Assert.Contains("already open", ex.Message);
+        Assert.Contains("ambient", ex.Message);
+        Assert.Equal(1, set.Count); // the duplicate must not have been added alongside the original.
+        // No TransactionGroup/Transaction was started for the rejected duplicate -- the guard fires
+        // before any Revit-side allocation, not after. Journal still holds exactly the first Open's two
+        // entries; a second group.Start/tx.Start pair would mean the duplicate got through.
+        Assert.Equal(new[] { "ambient:group.Start", "ambient:tx.Start" }, journal);
+    }
+
+    [Fact]
+    public void Open_AllowsTwoDifferentDocuments_NoFalsePositiveOnTheGuard()
+    {
+        // Sanity check the new DocumentId guard doesn't reject legitimately different documents --
+        // distinct titles mean distinct DocumentIds here (JournalingDocumentAdapter's own convention).
+        var journal = new List<string>();
+        var set = NewSet();
+
+        set.Open(new JournalingDocumentAdapter("ambient", journal), isAmbient: true);
+        set.Open(new JournalingDocumentAdapter("created", journal));
+
+        Assert.Equal(2, set.Count);
+    }
+
+    [Fact]
     public void CommitAll_CommitsCreatedDocumentsFirstAndTheAmbientDocumentLast()
     {
         // The ordering is the whole partial-failure defence (see ManagedDocumentTransactions' doc

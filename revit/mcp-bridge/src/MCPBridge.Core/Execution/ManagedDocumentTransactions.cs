@@ -7,7 +7,10 @@ namespace MCPBridge.Core.Execution;
 
 /// <summary>
 /// Every document one script run may write to, each with the Transaction/TransactionGroup pair this
-/// connector opened and owns for it (issue #24).
+/// connector opened and owns for it (issue #24) -- the ambient document, any document this run creates
+/// via CreateProjectDocument/CreateFamilyDocument, and (a later addition, same mechanism) any
+/// PRE-EXISTING document this run opens via ScriptGlobals.OpenForWriting -- e.g. one a PRIOR
+/// execute_script call created and left open, addressed again by Title (PRD §14: no document_id).
 ///
 /// WHY N PAIRS AND NOT ONE. TransactionScriptExecutor used to manage exactly one pair, around the
 /// ambient (active) document. Revit's one-open-transaction rule is per-DOCUMENT, not global, so a
@@ -93,9 +96,30 @@ internal sealed class ManagedDocumentTransactions
     /// them. <paramref name="isAmbient"/> marks the run's active document -- at most one, opened by
     /// TransactionScriptExecutor before the script runs; created documents are opened lazily as the
     /// script creates them.
+    ///
+    /// Guards against opening the SAME document twice, by <see cref="IDocumentAdapter.DocumentId"/> --
+    /// never by reference equality, per this project's own standing gotcha that Revit hands back
+    /// different wrapper objects for "the same" document depending on API entry point. This was never a
+    /// real risk for CreateProjectDocument/CreateFamilyDocument (they only ever hand back a document that
+    /// didn't exist until that call returned -- nothing else could already reference it), but
+    /// OpenForWriting (ScriptGlobals) specifically targets a document that MAY already be tracked -- the
+    /// ambient one, or one opened earlier this same run -- which a second Transaction.Start() on the same
+    /// document cannot safely do (Revit allows only one open Transaction per document at a time) and
+    /// which CommitAll/RollBackAll were never written to iterate twice for one document. Fails fast,
+    /// before any TransactionGroup/Transaction is created for the duplicate -- no wasted allocation.
     /// </summary>
     public void Open(IDocumentAdapter document, bool isAmbient = false)
     {
+        var existing = _entries.FirstOrDefault(e => e.Document.DocumentId == document.DocumentId);
+        if (existing is not null)
+        {
+            throw new InvalidOperationException(
+                $"A managed transaction is already open for '{SafeDescribe(existing)}' (DocumentId=" +
+                $"{document.DocumentId}) -- Open was called twice for the same document. This happens " +
+                "when OpenForWriting is called on the ambient document, or on a document already opened " +
+                "via CreateProjectDocument/CreateFamilyDocument/OpenForWriting earlier in this same run.");
+        }
+
         var group = document.CreateTransactionGroup(_transactionName);
         group.Start();
 
@@ -141,6 +165,27 @@ internal sealed class ManagedDocumentTransactions
         var created = create(source);
         Open(created);
         return created;
+    }
+
+    /// <summary>
+    /// Opens a managed transaction on a document that already exists -- the adapter half of
+    /// ScriptGlobals.OpenForWriting. Unlike <see cref="CreateAndOpen"/>, this document is not new: Open's
+    /// own DocumentId guard is what actually protects against double-tracking it (the ambient document,
+    /// or one already opened via CreateProjectDocument/CreateFamilyDocument/OpenForWriting this run).
+    /// </summary>
+    public IDocumentAdapter OpenExisting(Autodesk.Revit.DB.Document rawDocument)
+    {
+        var source = _uiApplication as IExistingDocumentSource
+            ?? throw new NotSupportedException(
+                $"OpenForWriting needs a live Revit session, but {_uiApplication.GetType().Name} does not " +
+                $"implement {nameof(IExistingDocumentSource)}. Only the live adapter does -- " +
+                "Autodesk.Revit.DB.Document is non-constructible/non-wrappable outside a running Revit " +
+                "session, so a fake genuinely cannot supply one. A test that needs this belongs in the " +
+                "tier-2 live harness (revit/test-harness), not MCPBridge.Core.Tests.");
+
+        var adapter = source.WrapExisting(rawDocument);
+        Open(adapter);
+        return adapter;
     }
 
     /// <summary>

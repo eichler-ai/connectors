@@ -114,6 +114,30 @@ public sealed class ScriptGlobals
             nameof(CreateFamilyDocument)).RawDocument;
 
     /// <summary>
+    /// Opens a managed Transaction/TransactionGroup for a document this script did NOT create this run --
+    /// one found by iterating UIApplication.Application.Documents, e.g. a document a PRIOR execute_script
+    /// call created via CreateProjectDocument/CreateFamilyDocument and left open. Without this, such a
+    /// document is readable but not writable: it commits and closes its managed transaction the moment the
+    /// call that created it returns, and a script may never open its own Transaction (ScriptApiDenylist
+    /// check 1, unconditional) -- confirmed live as a real gap while building the test-harness coverage
+    /// corpus, whose fixture-system bundles need exactly this (one document, built up across several
+    /// separate execute_script calls).
+    ///
+    /// Same commit/rollback guarantee as CreateProjectDocument/CreateFamilyDocument and the ambient
+    /// document: writes commit when THIS script returns normally, roll back if it throws. Returns the
+    /// same Document reference passed in -- callers that already hold it don't need the return value.
+    ///
+    /// Throws if <paramref name="document"/> already has a managed transaction open this run (it's the
+    /// ambient document, was created this run, or OpenForWriting was already called on it) -- opening a
+    /// second Transaction on a document that already has one open is not a state ManagedDocumentTransactions
+    /// can safely track or Revit's own API allows.
+    /// </summary>
+    public Autodesk.Revit.DB.Document OpenForWriting(Autodesk.Revit.DB.Document document) =>
+        Raw<IRawDocumentSource>(
+            RequireDocumentTransactions(nameof(OpenForWriting)).OpenExisting(document),
+            nameof(OpenForWriting)).RawDocument;
+
+    /// <summary>
     /// The managed-transaction set for this run, or a signposted failure if none was supplied. Null
     /// only when ScriptGlobals was constructed outside TransactionScriptExecutor (tests that don't
     /// exercise document creation) -- never during a real run.
