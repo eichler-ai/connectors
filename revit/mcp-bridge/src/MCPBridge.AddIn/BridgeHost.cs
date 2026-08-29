@@ -217,7 +217,10 @@ internal sealed class BridgeHost
             scriptExecutor,
             windowInventory: new Win32WindowInventory(),
             discoveryService: discoveryService,
-            instanceId: _instanceId.ToString());
+            instanceId: _instanceId.ToString(),
+            // Audit-trail failures trace into connection.log (§01: swallowed still means visible
+            // somewhere) -- the same best-effort sink every connection-side diagnostic uses.
+            auditTrailTrace: LogConnectionDiagnostic);
 
         _stopCts = new CancellationTokenSource();
         var stopToken = _stopCts.Token;
