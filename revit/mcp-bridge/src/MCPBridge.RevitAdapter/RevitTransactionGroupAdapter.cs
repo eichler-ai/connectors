@@ -9,10 +9,30 @@ namespace MCPBridge.RevitAdapter;
 internal sealed class RevitTransactionGroupAdapter : ITransactionGroupAdapter
 {
     private readonly TransactionGroup _group;
+    private bool _disposed;
 
     public RevitTransactionGroupAdapter(TransactionGroup group)
     {
         _group = group;
+    }
+
+    /// <summary>See <see cref="RevitTransactionAdapter.Dispose"/> -- same contract and reasoning (issue #34).</summary>
+    public void Dispose()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        _disposed = true;
+        try
+        {
+            _group.Dispose();
+        }
+        catch
+        {
+            // Swallow by contract -- see RevitTransactionAdapter.Dispose.
+        }
     }
 
     public void Start() => _group.Start();

@@ -82,7 +82,7 @@ public class RequestDispatcherTests
         // assertions is the entire point of routing: before it, the transaction always landed on the
         // active document no matter what the request said.
         Assert.NotNull(routedDocument.LastTransaction);
-        Assert.Equal(new[] { "Start", "Commit" }, routedDocument.LastTransaction!.Calls);
+        Assert.Equal(new[] { "Start", "Commit", "Dispose" }, routedDocument.LastTransaction!.Calls);
         Assert.Null(activeDocument.LastTransaction);
     }
 

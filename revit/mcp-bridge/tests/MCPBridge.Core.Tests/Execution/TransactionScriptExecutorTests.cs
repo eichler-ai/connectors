@@ -36,8 +36,8 @@ public class TransactionScriptExecutorTests
         var outcome = await executor.ExecuteAsync(document, uiApp, null, "1 + 1", CancellationToken.None);
 
         Assert.True(outcome.Success);
-        Assert.Equal(new[] { "Start", "Commit" }, document.LastTransaction!.Calls);
-        Assert.Equal(new[] { "Start", "Assimilate" }, document.LastTransactionGroup!.Calls);
+        Assert.Equal(new[] { "Start", "Commit", "Dispose" }, document.LastTransaction!.Calls);
+        Assert.Equal(new[] { "Start", "Assimilate", "Dispose" }, document.LastTransactionGroup!.Calls);
     }
 
     [Fact]
@@ -51,8 +51,8 @@ public class TransactionScriptExecutorTests
             document, uiApp, null, "throw new System.InvalidOperationException(\"boom\");", CancellationToken.None);
 
         Assert.False(outcome.Success);
-        Assert.Equal(new[] { "Start", "RollBack" }, document.LastTransaction!.Calls);
-        Assert.Equal(new[] { "Start", "RollBack" }, document.LastTransactionGroup!.Calls);
+        Assert.Equal(new[] { "Start", "RollBack", "Dispose" }, document.LastTransaction!.Calls);
+        Assert.Equal(new[] { "Start", "RollBack", "Dispose" }, document.LastTransactionGroup!.Calls);
     }
 
     [Fact]
@@ -73,8 +73,8 @@ public class TransactionScriptExecutorTests
         Assert.False(outcome.Success);
         Assert.False(outcome.WasCancelled);
         Assert.IsType<ScriptApiDenylistViolationException>(outcome.Exception);
-        Assert.Equal(new[] { "Start", "RollBack" }, document.LastTransaction!.Calls);
-        Assert.Equal(new[] { "Start", "RollBack" }, document.LastTransactionGroup!.Calls);
+        Assert.Equal(new[] { "Start", "RollBack", "Dispose" }, document.LastTransaction!.Calls);
+        Assert.Equal(new[] { "Start", "RollBack", "Dispose" }, document.LastTransactionGroup!.Calls);
     }
 
     [Fact]
@@ -97,8 +97,8 @@ public class TransactionScriptExecutorTests
         Assert.False(outcome.WasCancelled);
         var ex = Assert.IsType<ScriptApiDenylistViolationException>(outcome.Exception);
         Assert.Equal(ScriptApiDenylistViolationException.ConfirmationRequiredCode, ex.Code);
-        Assert.Equal(new[] { "Start", "RollBack" }, document.LastTransaction!.Calls);
-        Assert.Equal(new[] { "Start", "RollBack" }, document.LastTransactionGroup!.Calls);
+        Assert.Equal(new[] { "Start", "RollBack", "Dispose" }, document.LastTransaction!.Calls);
+        Assert.Equal(new[] { "Start", "RollBack", "Dispose" }, document.LastTransactionGroup!.Calls);
     }
 
     [Fact]
@@ -135,8 +135,8 @@ public class TransactionScriptExecutorTests
         var outcome = await executor.ExecuteAsync(riggedDocument, uiApp, null, "1 + 1", CancellationToken.None);
 
         Assert.False(outcome.Success);
-        Assert.Equal(new[] { "Start", "Commit", "RollBack" }, transaction.Calls);
-        Assert.Equal(new[] { "Start", "RollBack" }, riggedDocument.LastTransactionGroup!.Calls);
+        Assert.Equal(new[] { "Start", "Commit", "RollBack", "Dispose" }, transaction.Calls);
+        Assert.Equal(new[] { "Start", "RollBack", "Dispose" }, riggedDocument.LastTransactionGroup!.Calls);
     }
 
     [Fact]
@@ -181,8 +181,8 @@ public class TransactionScriptExecutorTests
 
         Assert.False(outcome.Success);
         Assert.True(outcome.WasCancelled);
-        Assert.Equal(new[] { "Start", "RollBack" }, document.LastTransaction!.Calls);
-        Assert.Equal(new[] { "Start", "RollBack" }, document.LastTransactionGroup!.Calls);
+        Assert.Equal(new[] { "Start", "RollBack", "Dispose" }, document.LastTransaction!.Calls);
+        Assert.Equal(new[] { "Start", "RollBack", "Dispose" }, document.LastTransactionGroup!.Calls);
     }
 
     [Fact]
@@ -198,8 +198,8 @@ public class TransactionScriptExecutorTests
         var outcome = await executor.ExecuteAsync(riggedDocument, uiApp, null, "1 + 1", CancellationToken.None);
 
         Assert.True(outcome.Success);
-        Assert.Equal(new[] { "Start", "Commit" }, transaction.Calls);
-        Assert.Equal(new[] { "Start", "Assimilate" }, riggedDocument.LastTransactionGroup!.Calls);
+        Assert.Equal(new[] { "Start", "Commit", "Dispose" }, transaction.Calls);
+        Assert.Equal(new[] { "Start", "Assimilate", "Dispose" }, riggedDocument.LastTransactionGroup!.Calls);
         Assert.Contains(outcome.Notices, n => n.Message.Contains("off axis"));
     }
 
@@ -218,8 +218,8 @@ public class TransactionScriptExecutorTests
         Assert.False(outcome.Success);
         // Commit() already rolled the Transaction back internally (ProceedWithRollBack) -- only one
         // "Commit" call, no separate "RollBack" on the transaction itself.
-        Assert.Equal(new[] { "Start", "Commit" }, transaction.Calls);
-        Assert.Equal(new[] { "Start", "RollBack" }, riggedDocument.LastTransactionGroup!.Calls);
+        Assert.Equal(new[] { "Start", "Commit", "Dispose" }, transaction.Calls);
+        Assert.Equal(new[] { "Start", "RollBack", "Dispose" }, riggedDocument.LastTransactionGroup!.Calls);
         Assert.Contains(outcome.Notices, n => n.Message.Contains("deleted"));
     }
 
@@ -732,8 +732,8 @@ throw new System.TimeoutException(""cancellation was never observed"");";
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
             executor.ExecuteAsync(document, uiApp, null, "1 + 1", CancellationToken.None));
 
-        Assert.Equal(new[] { "Start", "RollBack" }, document.LastTransaction!.Calls);
-        Assert.Equal(new[] { "Start", "RollBack" }, document.LastTransactionGroup!.Calls);
+        Assert.Equal(new[] { "Start", "RollBack", "Dispose" }, document.LastTransaction!.Calls);
+        Assert.Equal(new[] { "Start", "RollBack", "Dispose" }, document.LastTransactionGroup!.Calls);
     }
 
     [Fact]

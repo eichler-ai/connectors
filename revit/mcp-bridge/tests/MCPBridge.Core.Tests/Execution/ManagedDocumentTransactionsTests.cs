@@ -111,6 +111,8 @@ public class ManagedDocumentTransactionsTests
                     throw new InvalidOperationException($"{_owner.Title}: simulated transaction-rollback failure");
                 }
             }
+
+            public void Dispose() => _owner.Record("tx.Dispose");
         }
 
         private sealed class JournalingGroup : ITransactionGroupAdapter
@@ -118,6 +120,8 @@ public class ManagedDocumentTransactionsTests
             private readonly JournalingDocumentAdapter _owner;
 
             public JournalingGroup(JournalingDocumentAdapter owner) => _owner = owner;
+
+            public void Dispose() => _owner.Record("group.Dispose");
 
             public void Start() => _owner.Record("group.Start");
 
@@ -169,7 +173,7 @@ public class ManagedDocumentTransactionsTests
 
         Assert.Throws<InvalidOperationException>(() => set.Open(document));
 
-        Assert.Equal(new[] { "ambient:group.Start", "ambient:tx.Start", "ambient:group.RollBack" }, journal);
+        Assert.Equal(new[] { "ambient:group.Start", "ambient:tx.Start", "ambient:group.RollBack", "ambient:tx.Dispose", "ambient:group.Dispose" }, journal);
         Assert.Equal(0, set.Count);
     }
 
@@ -332,8 +336,30 @@ public class ManagedDocumentTransactionsTests
 
         set.RollBackAll();
 
-        Assert.Equal(new[] { "adopted:tx.RollBack", "adopted:group.RollBack" }, journal);
+        Assert.Equal(new[] { "adopted:tx.RollBack", "adopted:group.RollBack", "adopted:tx.Dispose", "adopted:group.Dispose" }, journal);
         Assert.Equal(0, set.Count);
+    }
+
+    [Fact]
+    public void CommitAll_ADisposeFailure_NeverMasksTheOutcome_NorStopsLaterEntriesDisposal()
+    {
+        // Issue #34's isolation contract: disposal is post-terminal housekeeping, so a throwing
+        // Dispose must change NOTHING an agent sees -- the commit result stays successful, and the
+        // later entry's own disposal still runs (SafeDispose guards each half independently).
+        var set = NewSet();
+        var first = new FakeDocumentAdapter { DocumentId = "doc-first0000000000" };
+        var second = new FakeDocumentAdapter { DocumentId = "doc-second000000000" };
+        set.Open(first);
+        set.Open(second, isAmbient: true);
+        ((FakeTransactionAdapter)first.LastTransaction!).ThrowOnDispose = true;
+        ((FakeTransactionGroupAdapter)first.LastTransactionGroup!).ThrowOnDispose = true;
+
+        var result = set.CommitAll();
+
+        Assert.True(result.Success);
+        Assert.Contains("Dispose", ((FakeTransactionAdapter)first.LastTransaction!).Calls);
+        Assert.Contains("Dispose", ((FakeTransactionAdapter)second.LastTransaction!).Calls);
+        Assert.Contains("Dispose", ((FakeTransactionGroupAdapter)second.LastTransactionGroup!).Calls);
     }
 
     [Fact]
@@ -370,7 +396,11 @@ public class ManagedDocumentTransactionsTests
         set.RollBackAll();
 
         Assert.Equal(
-            new[] { "created:tx.RollBack", "created:group.RollBack", "ambient:tx.RollBack", "ambient:group.RollBack" },
+            new[]
+            {
+                "created:tx.RollBack", "created:group.RollBack", "created:tx.Dispose", "created:group.Dispose",
+                "ambient:tx.RollBack", "ambient:group.RollBack", "ambient:tx.Dispose", "ambient:group.Dispose",
+            },
             journal);
     }
 
@@ -430,8 +460,8 @@ public class ManagedDocumentTransactionsTests
         Assert.Equal(
             new[]
             {
-                "created:tx.Commit", "created:tx.RollBack", "created:group.RollBack",
-                "ambient:tx.RollBack", "ambient:group.RollBack",
+                "created:tx.Commit", "created:tx.RollBack", "created:group.RollBack", "created:tx.Dispose", "created:group.Dispose",
+                "ambient:tx.RollBack", "ambient:group.RollBack", "ambient:tx.Dispose", "ambient:group.Dispose",
             },
             journal);
     }
@@ -477,7 +507,7 @@ public class ManagedDocumentTransactionsTests
         var result = set.CommitAll();
 
         Assert.False(result.Success);
-        Assert.Equal(new[] { "ambient:tx.Commit", "ambient:group.RollBack" }, journal);
+        Assert.Equal(new[] { "ambient:tx.Commit", "ambient:group.RollBack", "ambient:tx.Dispose", "ambient:group.Dispose" }, journal);
         Assert.Equal("a hard failure", result.Failure!.Message);
         Assert.Single(result.CommitFailures);
     }
@@ -493,7 +523,7 @@ public class ManagedDocumentTransactionsTests
         var result = set.CommitAll();
 
         Assert.False(result.Success);
-        Assert.Equal(new[] { "ambient:tx.Commit", "ambient:group.Assimilate", "ambient:group.RollBack" }, journal);
+        Assert.Equal(new[] { "ambient:tx.Commit", "ambient:group.Assimilate", "ambient:group.RollBack", "ambient:tx.Dispose", "ambient:group.Dispose" }, journal);
         Assert.Equal(new[] { "ambient (active document)" }, result.RolledBackDocuments);
     }
 
@@ -780,6 +810,8 @@ public class ManagedDocumentTransactionsTests
             }
 
             public void RollBack() => _owner.Record("tx.RollBack");
+
+            public void Dispose() => _owner.Record("tx.Dispose");
         }
 
         private sealed class Group : ITransactionGroupAdapter
@@ -791,6 +823,8 @@ public class ManagedDocumentTransactionsTests
             public void Start() => _owner.Record("group.Start");
 
             public void Assimilate() => _owner.Record("group.Assimilate");
+
+            public void Dispose() => _owner.Record("group.Dispose");
 
             public void RollBack() => _owner.Record("group.RollBack");
         }
@@ -862,6 +896,8 @@ public class ManagedDocumentTransactionsTests
             }
 
             public void RollBack() => _owner.Record("tx.RollBack");
+
+            public void Dispose() => _owner.Record("tx.Dispose");
         }
 
         private sealed class Group : ITransactionGroupAdapter
@@ -869,6 +905,8 @@ public class ManagedDocumentTransactionsTests
             private readonly ForcedRollbackDocumentAdapter _owner;
 
             public Group(ForcedRollbackDocumentAdapter owner) => _owner = owner;
+
+            public void Dispose() => _owner.Record("group.Dispose");
 
             public void Start() => _owner.Record("group.Start");
 
