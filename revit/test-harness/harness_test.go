@@ -86,6 +86,7 @@ type listInstancesOut struct {
 		Documents  []struct {
 			DocumentID string `json:"document_id"`
 			Title      string `json:"title"`
+			Active     bool   `json:"active"`
 		} `json:"documents"`
 	} `json:"instances"`
 }
@@ -158,7 +159,20 @@ func targetDocument(t *testing.T) (*mcpclient.Client, string, string) {
 	if len(inst.Documents) == 0 {
 		t.Skip("connected instance has no open document")
 	}
-	return c, inst.InstanceID, inst.Documents[0].DocumentID
+	// Prefer the ACTIVE document, then any saved (doc-) one. Documents[0] used to be a safe
+	// default when register only ever listed the connect-time snapshot; with the live snapshot
+	// push (issue #30), leftover unsaved documents from earlier cases in a session are listed
+	// too, and blindly targeting one of those makes every case inherit unrelated state.
+	target := inst.Documents[0].DocumentID
+	for _, d := range inst.Documents {
+		if d.Active {
+			return c, inst.InstanceID, d.DocumentID
+		}
+		if strings.HasPrefix(d.DocumentID, "doc-") && !strings.HasPrefix(target, "doc-") {
+			target = d.DocumentID
+		}
+	}
+	return c, inst.InstanceID, target
 }
 
 // runScript executes one script that is expected to SUCCEED.
