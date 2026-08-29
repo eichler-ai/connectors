@@ -81,7 +81,7 @@ fully-qualify Revit types or add `using` directives):
 | `UIApplication` | `Autodesk.Revit.UI.UIApplication` (`UIApplication.Application` reaches the top-level `Application`) |
 | `UIDocument` | `Autodesk.Revit.UI.UIDocument`, may be null |
 | `CancellationToken` | check it in loops; `cancel_execution` signals it |
-| `ImportsDirectory` / `ExportsDirectory` | absolute paths of this document's file-exchange workspace (PRD §09) |
+| `ImportsDirectory` / `ExportsDirectory` | absolute paths of this document's file-exchange workspace (PRD §09). The workspace also carries a per-run audit trail beside them — `scripts/` (verbatim script per run) and `logs/` (per-run NDJSON diagnostics), aged out after 14 days |
 | `Publish(path, name?)` | copy a file into `exports/` and report it in the result's `files[]`, per-file status |
 | `DialogResultOverrides` | per-dialog auto-answer override: `DialogResultOverrides["TaskDialog_X"] = 1001;` |
 | `CreateProjectDocument(templatePath?)` | create a new, **writable** project document (connector manages its transaction) |

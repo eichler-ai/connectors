@@ -145,6 +145,39 @@ public class ExecutionAuditTrailTests : IDisposable
     }
 
     [Fact]
+    public void Sweep_TmpDirWithAnOldStampButAFreshFileInside_Survives()
+    {
+        // PR review corrected an NTFS misconception: a directory's LastWriteTime does NOT update on
+        // content writes to an existing child, so the dir stamp alone would have deleted a scratch
+        // dir whose one file is being continuously rewritten. Age must mean "nothing inside touched
+        // within the window".
+        var workspace = NewWorkspace();
+        var now = DateTimeOffset.UtcNow;
+        var tmp = workspace.Tmp();
+        var scratch = Path.Combine(tmp, "long-lived-scratch.bin");
+        File.WriteAllText(scratch, "x");
+        File.SetLastWriteTimeUtc(scratch, now.UtcDateTime.AddDays(-1)); // fresh content
+        Directory.SetLastWriteTimeUtc(tmp, now.UtcDateTime.AddDays(-30)); // stale-looking dir stamp
+
+        ExecutionAuditTrail.Sweep(workspace.ExchangeRoot, now, TimeSpan.FromDays(14), trace: null);
+
+        Assert.True(Directory.Exists(tmp), "a tmp dir with fresh content inside must survive, whatever its own stamp says");
+        Assert.True(File.Exists(scratch));
+    }
+
+    [Fact]
+    public void Record_OverlongExecutionId_StillGetsAnAuditEntry_WithABoundedName()
+    {
+        var workspace = NewWorkspace();
+        var overlong = new string('x', 500);
+
+        ExecutionAuditTrail.Record(workspace, overlong, "1;", ScriptExecutionOutcome.Completed(null, ""), CompletedAt, trace: null);
+
+        var scriptFile = Assert.Single(Directory.GetFiles(workspace.Scripts));
+        Assert.True(Path.GetFileName(scriptFile).Length < 120, "the sanitized id must be capped so the entry is writable at all");
+    }
+
+    [Fact]
     public void Record_PathSeparatorsInAnExecutionId_CannotEscapeTheWorkspace()
     {
         // The broker mints well-formed ids, but execution_id arrives over the wire, and the wire --

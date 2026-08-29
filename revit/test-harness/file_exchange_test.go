@@ -149,4 +149,22 @@ return "audit-ok";
 	if inspect.Status != "success" || inspect.Output != "audit-ok" {
 		t.Fatalf("audit trail verification failed: status=%q output=%s", inspect.Status, inspect.Output)
 	}
+
+	// Cleanup discipline (this suite's own rule): delete the probe's audit pair rather than
+	// leaving it for the 14-day sweep. Best-effort -- the cleanup run leaves its OWN pair, which
+	// is unavoidable by construction (every run is audited); one residual pair per suite run is
+	// the steady state, not growth. Registered as t.Cleanup so a mid-test failure still cleans.
+	t.Cleanup(func() {
+		cleanup := `
+var root = System.IO.Path.GetDirectoryName(ExportsDirectory);
+foreach (var dir in new[] { System.IO.Path.Combine(root, "logs"), System.IO.Path.Combine(root, "scripts") }) {
+    if (!System.IO.Directory.Exists(dir)) continue;
+    foreach (var f in System.IO.Directory.GetFiles(dir, "*` + probe.ExecutionID + `*")) {
+        try { System.IO.File.Delete(f); } catch {}
+    }
+}
+return "audit-cleaned";
+`
+		_ = callExecuteScriptWith(t, c, instanceID, documentID, cleanup, nil)
+	})
 }

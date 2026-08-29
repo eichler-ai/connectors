@@ -155,26 +155,43 @@ internal static class ExecutionAuditTrail
             var cutoffUtc = nowUtc.UtcDateTime - retention;
             foreach (var documentRoot in Directory.EnumerateDirectories(exchangeRoot))
             {
+                // Per-DIRECTORY failure isolation (PR review): each swept directory's enumeration
+                // gets its own catch, so one ACL-broken logs/ traces and moves on instead of
+                // abandoning the rest of the process's only sweep.
                 foreach (var auditDir in new[] { Path.Combine(documentRoot, "logs"), Path.Combine(documentRoot, "scripts") })
                 {
-                    if (!Directory.Exists(auditDir))
+                    try
                     {
-                        continue;
-                    }
+                        if (!Directory.Exists(auditDir))
+                        {
+                            continue;
+                        }
 
-                    foreach (var file in Directory.EnumerateFiles(auditDir))
+                        foreach (var file in Directory.EnumerateFiles(auditDir))
+                        {
+                            TryDelete(file, cutoffUtc, trace);
+                        }
+                    }
+                    catch (Exception ex)
                     {
-                        TryDelete(file, cutoffUtc, trace);
+                        trace?.Invoke($"audit retention sweep skipped '{auditDir}': {ex.GetType().Name}: {ex.Message}");
                     }
                 }
 
-                var tmpRoot = Path.Combine(documentRoot, "tmp");
-                if (Directory.Exists(tmpRoot))
+                try
                 {
-                    foreach (var instanceDir in Directory.EnumerateDirectories(tmpRoot))
+                    var tmpRoot = Path.Combine(documentRoot, "tmp");
+                    if (Directory.Exists(tmpRoot))
                     {
-                        TryDeleteDirectory(instanceDir, cutoffUtc, trace);
+                        foreach (var instanceDir in Directory.EnumerateDirectories(tmpRoot))
+                        {
+                            TryDeleteDirectory(instanceDir, cutoffUtc, trace);
+                        }
                     }
+                }
+                catch (Exception ex)
+                {
+                    trace?.Invoke($"audit retention sweep skipped tmp under '{documentRoot}': {ex.GetType().Name}: {ex.Message}");
                 }
 
                 // imports/ and exports/ are deliberately never visited -- user-owned (PRD §09).
@@ -188,15 +205,23 @@ internal static class ExecutionAuditTrail
 
     /// <summary>
     /// Replaces every character that can't appear in a file name -- path separators very much
-    /// included -- with '_'. Lossy on purpose: the stamp keeps names unique enough, and a mangled
-    /// name for a malformed id beats an audit file escaping the workspace.
+    /// included -- with '_', and caps the result at 80 characters (PR review nit: an over-long
+    /// hostile id should still get an audit entry rather than degrading to a MAX_PATH trace line;
+    /// real ids are ~41 chars, and the timestamp keeps even a truncated name unique enough).
+    /// Lossy on purpose: a mangled name for a malformed id beats an audit file escaping the
+    /// workspace or not being written at all.
     /// </summary>
     private static string SanitizeForFileName(string executionId)
     {
         var invalid = Path.GetInvalidFileNameChars();
-        var builder = new StringBuilder(executionId.Length);
+        var builder = new StringBuilder(Math.Min(executionId.Length, 80));
         foreach (var ch in executionId)
         {
+            if (builder.Length == 80)
+            {
+                break;
+            }
+
             builder.Append(Array.IndexOf(invalid, ch) >= 0 || ch == '/' || ch == '\\' ? '_' : ch);
         }
 
@@ -222,7 +247,24 @@ internal static class ExecutionAuditTrail
     {
         try
         {
-            if (Directory.GetLastWriteTimeUtc(directory) < cutoffUtc)
+            // Age = the NEWEST of the directory's own stamp and its entries' write times. The
+            // directory stamp ALONE is not enough (PR review corrected an NTFS misconception this
+            // file's first draft recorded): a directory's LastWriteTime updates on child
+            // create/delete/rename, NOT on content writes to an existing child -- so a scratch file
+            // continuously rewritten in an old tmp dir would have read as aged and been deleted
+            // mid-use. Checking the entries themselves makes "old" mean "nothing inside touched
+            // within the retention window", which is the semantics the sweep actually wants.
+            var newestUtc = Directory.GetLastWriteTimeUtc(directory);
+            foreach (var entry in Directory.EnumerateFileSystemEntries(directory, "*", SearchOption.AllDirectories))
+            {
+                var entryUtc = File.GetLastWriteTimeUtc(entry);
+                if (entryUtc > newestUtc)
+                {
+                    newestUtc = entryUtc;
+                }
+            }
+
+            if (newestUtc < cutoffUtc)
             {
                 Directory.Delete(directory, recursive: true);
             }

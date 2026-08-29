@@ -234,12 +234,13 @@ Every failure uses one shape. Read `message` for what happened, `remedy` for wha
 
 Each document gets a workspace with `exports/` and `imports/`. Both directions go through the
 filesystem, not through MCP, so size is not a constraint. **Never hard-code the paths** — read them
-from the globals; the workspace root has changed before.
+from the globals; the workspace root has changed before. Beside them, per-run audit files:
+`scripts/` (verbatim script) and `logs/` (NDJSON diagnostics), swept after 14 days.
 
 **Revit → you.** Write the file, then `Publish` it. Published files come back in `files[]`, each
 with its own `status`; publishing onto an existing name **fails that file** unless you pass
-`overwrite_output_files: true`. Paths are Windows-native — with a broker on another machine
-(remote mode), map them through the shared folder yourself; path rewriting isn't built yet.
+`overwrite_output_files: true`. Paths are Windows-native; in remote mode map them through the
+shared folder yourself (path rewriting isn't built).
 
 ```csharp
 var p = System.IO.Path.Combine(ExportsDirectory, "rooms.csv");
@@ -287,8 +288,7 @@ Pick one from `candidates` and pass its `instance_id`. Every discovery response 
 ## When something isn't working
 
 **`list_instances` reports successful connections only** — a Revit that never connected is simply
-absent. For the why, ask a human to click **MCP Bridge → Status** on the Revit ribbon (instance id,
-connection state and broker, loaded build).
+absent. For the why, a human can click **MCP Bridge → Status** on the Revit ribbon.
 
 | Symptom | Most likely cause | What to do |
 |---|---|---|

@@ -75,7 +75,12 @@ public sealed class WorkspacePaths
     /// </summary>
     public string Tmp() => EnsureDirectory(Path.Combine(DocumentRoot, "tmp", InstanceId));
 
-    /// <summary>Touches every directory this workspace currently has, so they all exist up front.</summary>
+    /// <summary>
+    /// Touches the user-facing exchange directories (imports/exports) so they exist before a script
+    /// runs. Deliberately NOT the audit directories (Logs/Scripts) or Tmp -- those are created
+    /// lazily on first actual write, so a document that never runs a script grows no empty
+    /// directories a browsing human would puzzle over.
+    /// </summary>
     public void EnsureDirectoriesExist()
     {
         _ = Imports;
