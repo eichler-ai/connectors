@@ -189,9 +189,18 @@ internal sealed class RoslynScriptRunner
             var result = await InvokeInFreshLoadContextAsync(script, globals, alc).ConfigureAwait(false);
             return ScriptExecutionOutcome.Completed(result, writer.ToString());
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             return ScriptExecutionOutcome.Cancelled(writer.ToString());
+        }
+        catch (OperationCanceledException ex)
+        {
+            // v1 integrated review: an OperationCanceledException the SCRIPT itself threw (its own
+            // code, or a Revit call surfacing one) with no cancellation ever requested is a script
+            // failure, not a cancellation -- PRD §06 defines `cancelled` as "the agent asked for
+            // this", and reporting it otherwise records a cancel nobody issued. The when-guard
+            // above keeps the genuine path (token signalled, script observed it) exactly as it was.
+            return ScriptExecutionOutcome.Failed(ex, writer.ToString());
         }
         catch (CompilationErrorException ex)
         {

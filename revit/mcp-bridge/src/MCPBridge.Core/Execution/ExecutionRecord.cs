@@ -26,7 +26,13 @@ public sealed class ExecutionRecord
     public DateTimeOffset? CompletedAt { get; private set; }
     public DateTimeOffset? CancellationRequestedAt { get; private set; }
 
-    public object? Result { get; private set; }
+    /// <summary>
+    /// The completed run's return value, pre-formatted to its display string at completion time --
+    /// deliberately a string and never the raw object, so nothing this ring-buffer-retained record
+    /// holds can root a collectible script ALC or a Revit wrapper for the retention window (v1
+    /// integrated review; see RequestDispatcher.SafeFormatReturnValue).
+    /// </summary>
+    public string? Result { get; private set; }
     public string? StdOut { get; private set; }
     public DiagnosticRecord? Error { get; private set; }
     public IReadOnlyList<DiagnosticRecord> Notices { get; private set; } = Array.Empty<DiagnosticRecord>();
@@ -53,7 +59,7 @@ public sealed class ExecutionRecord
         StartedAt = now;
     }
 
-    public void MarkCompleted(DateTimeOffset now, object? result, string? stdOut, IReadOnlyList<DiagnosticRecord> notices, IReadOnlyList<PublishedFileRecord>? files = null)
+    public void MarkCompleted(DateTimeOffset now, string? result, string? stdOut, IReadOnlyList<DiagnosticRecord> notices, IReadOnlyList<PublishedFileRecord>? files = null)
     {
         RequireNonTerminal();
         Status = ExecutionStatus.Completed;

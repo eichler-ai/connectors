@@ -360,12 +360,33 @@ public class TransactionScriptExecutorTests
             // cancellationToken.ThrowIfCancellationRequested() before the script body ever runs (see its
             // own source), so a pre-cancelled token would never let Publish() execute at all -- that would
             // test nothing about the files[]-survives-cancellation invariant this test exists to cover.
-            // Instead, the script itself calls Publish() and then throws OperationCanceledException
-            // directly, which RunAsync catches and reports as WasCancelled -- exercising the exact
-            // "published, then the run resolved to cancelled" sequence PRD §09's invariant describes,
-            // without depending on a real mid-run cooperative-cancellation race.
-            var script = $"Publish(@\"{sourcePath}\"); throw new System.OperationCanceledException();";
-            var outcome = await executor.ExecuteAsync(document, uiApp, null, script, CancellationToken.None, exportsDir, overwriteOutputFiles: false);
+            //
+            // The cancellation is GENUINE, not simulated (reworked with the v1 integrated review's OCE
+            // fix): this test used to have the script throw OperationCanceledException itself with no
+            // cancellation requested, leaning on exactly the misclassification RunAsync no longer has --
+            // a script-thrown OCE without a signalled token is now a failure, per PRD §06's "cancelled
+            // means the agent asked for this". Instead the script publishes, drops a marker file, and
+            // cooperatively waits on its CancellationToken; the test cancels the token the moment the
+            // marker appears -- deterministically after the publish, with no timing race.
+            var publishedMarker = Path.Combine(tempDir, "published.marker");
+            using var cts = new CancellationTokenSource();
+            var script = $@"Publish(@""{sourcePath}"");
+System.IO.File.WriteAllText(@""{publishedMarker}"", ""x"");
+var sw = System.Diagnostics.Stopwatch.StartNew();
+while (!CancellationToken.IsCancellationRequested && sw.ElapsedMilliseconds < 30000) System.Threading.Thread.Sleep(5);
+CancellationToken.ThrowIfCancellationRequested();
+throw new System.TimeoutException(""cancellation was never observed"");";
+            var cancelWhenPublished = Task.Run(async () =>
+            {
+                while (!File.Exists(publishedMarker))
+                {
+                    await Task.Delay(5);
+                }
+
+                cts.Cancel();
+            });
+            var outcome = await executor.ExecuteAsync(document, uiApp, null, script, cts.Token, exportsDir, overwriteOutputFiles: false);
+            await cancelWhenPublished;
 
             Assert.True(outcome.WasCancelled);
             var published = Assert.Single(outcome.Files);

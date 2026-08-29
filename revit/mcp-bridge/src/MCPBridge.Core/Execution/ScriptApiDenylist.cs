@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using System.Linq;
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 
 namespace MCPBridge.Core.Execution;
@@ -242,10 +243,95 @@ internal static class ScriptApiDenylist
                 {
                     CheckConstruction(FullName(semanticModel.GetTypeInfo(node).Type));
                 }
+
+                // COMPILER-SYNTHESIZED DISPOSE (v1 integrated review; live-exploitable before this):
+                // `using (Document) { }` and `using var d = Document;` close the ambient document when
+                // the scope ends -- Dispose is Close under another spelling, gated above -- but the
+                // Dispose call they imply never appears as a bindable node: the compiler synthesizes
+                // it, so the IMethodSymbol path above sees nothing. And `using` on an IDisposable is
+                // precisely the idiomatic, plausible-looking mistake this gate exists for -- unlike
+                // `dynamic` (the documented accepted gap), no deliberate intent is needed to write it.
+                // Judged by the RESOURCE EXPRESSION's bound type -- still the semantic model, never
+                // syntax text -- so aliases and `var` flow through identically.
+                switch (node)
+                {
+                    case UsingStatementSyntax usingStatement:
+                        if (usingStatement.Expression is not null)
+                        {
+                            RegisterSynthesizedDispose(semanticModel, usingStatement.Expression, seen, lifecycleMembers);
+                        }
+
+                        if (usingStatement.Declaration is not null)
+                        {
+                            foreach (var variable in usingStatement.Declaration.Variables)
+                            {
+                                if (variable.Initializer is not null)
+                                {
+                                    RegisterSynthesizedDispose(semanticModel, variable.Initializer.Value, seen, lifecycleMembers);
+                                }
+                            }
+                        }
+
+                        break;
+
+                    case LocalDeclarationStatementSyntax localDeclaration when localDeclaration.UsingKeyword.IsKind(SyntaxKind.UsingKeyword):
+                        foreach (var variable in localDeclaration.Declaration.Variables)
+                        {
+                            if (variable.Initializer is not null)
+                            {
+                                RegisterSynthesizedDispose(semanticModel, variable.Initializer.Value, seen, lifecycleMembers);
+                            }
+                        }
+
+                        break;
+
+                    // INTERFACE-DISPATCH LAUNDERING of the same member:
+                    // `((System.IDisposable)Document).Dispose()` binds to System.IDisposable.Dispose,
+                    // a containing type the gated table deliberately doesn't list (it would gate every
+                    // Dispose in .NET). The cast (or `as`) node is where the gated type is still
+                    // visible, so that is what's judged -- converting a gated-Dispose type to
+                    // IDisposable has essentially one use from script scope. An implicit conversion
+                    // with no cast syntax at all (`System.IDisposable x = Document;`) is NOT caught:
+                    // that is the same deliberate-laundering bucket as `dynamic`, accepted and
+                    // documented at LifecycleMembersByType.
+                    case CastExpressionSyntax cast
+                        when FullName(semanticModel.GetTypeInfo(cast.Type).Type) == "System.IDisposable":
+                        RegisterSynthesizedDispose(semanticModel, cast.Expression, seen, lifecycleMembers);
+                        break;
+
+                    case BinaryExpressionSyntax asExpression
+                        when asExpression.IsKind(SyntaxKind.AsExpression) &&
+                             FullName(semanticModel.GetTypeInfo(asExpression.Right).Type) == "System.IDisposable":
+                        RegisterSynthesizedDispose(semanticModel, asExpression.Left, seen, lifecycleMembers);
+                        break;
+                }
             }
         }
 
         return lifecycleMembers.Count == 0 ? ScriptApiAnalysis.Clean : new ScriptApiAnalysis(lifecycleMembers);
+    }
+
+    /// <summary>
+    /// Registers <c>&lt;Type&gt;.Dispose</c> as a used lifecycle member when <paramref name="resource"/>'s
+    /// bound type has a gated Dispose -- the shared tail of every compiler-synthesized/interface-laundered
+    /// Dispose shape above. A type with no gated Dispose (every ordinary IDisposable a script legitimately
+    /// uses -- StreamWriter, FileStream, ...) registers nothing.
+    /// </summary>
+    private static void RegisterSynthesizedDispose(SemanticModel semanticModel, ExpressionSyntax resource, HashSet<string> seen, List<string> lifecycleMembers)
+    {
+        var typeName = FullName(semanticModel.GetTypeInfo(resource).Type);
+        if (typeName is null
+            || !LifecycleMembersByType.TryGetValue(typeName, out var gatedMembers)
+            || !gatedMembers.Contains("Dispose"))
+        {
+            return;
+        }
+
+        var member = $"{typeName}.Dispose";
+        if (seen.Add(member))
+        {
+            lifecycleMembers.Add(member);
+        }
     }
 
     /// <summary>

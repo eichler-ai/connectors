@@ -22,7 +22,9 @@ namespace MCPBridge.Core.Dispatch;
 /// fakes (<see cref="MCPBridge.RevitAdapter.IExternalEventRaiser"/>, <see cref="IUiApplicationAdapter"/>,
 /// etc.) the rest of this codebase already uses -- no real socket needed.
 ///
-/// Encodes every hard requirement from BridgeHost.cs's TODO (second review pass):
+/// Encodes the live-wiring contract's hard requirements (originally recorded as a TODO in
+/// BridgeHost.cs, long since implemented and the TODO removed -- restated here as the requirements
+/// themselves rather than a pointer to a landmark that no longer exists):
 /// <list type="number">
 /// <item>The queued work item checks <see cref="ExecutionManager.GetCancellationToken"/> before touching
 /// the model at all, and resolves straight to Cancelled if it's already set.</item>
@@ -377,7 +379,7 @@ public sealed class RequestDispatcher
         }
         else if (outcome.Success)
         {
-            _executionManager.CompleteSuccess(executionId, _now(), outcome.ReturnValue, outcome.StdOut, outcome.Notices, outcome.Files);
+            _executionManager.CompleteSuccess(executionId, _now(), SafeFormatReturnValue(outcome.ReturnValue), outcome.StdOut, outcome.Notices, outcome.Files);
         }
         else
         {
@@ -387,12 +389,51 @@ public sealed class RequestDispatcher
                 code,
                 DiagnosticSource.Execution,
                 outcome.Exception?.Message ?? $"execution {executionId} failed with no exception detail.",
-                detail: new Dictionary<string, object?> { ["execution_id"] = executionId },
+                // exception_type: PRD §01 requires the wrapped exception's message AND type, and the
+                // type genuinely disambiguates -- §14 records that Autodesk's and System's
+                // InvalidOperationException share a short name, so a message alone can send a reader
+                // to the wrong catch clause (v1 integrated review).
+                detail: new Dictionary<string, object?>
+                {
+                    ["execution_id"] = executionId,
+                    ["exception_type"] = outcome.Exception?.GetType().FullName,
+                },
                 remedy: remedy);
             _executionManager.CompleteError(executionId, _now(), diagnostic, outcome.StdOut, outcome.Notices, outcome.Files);
         }
 
         return outcome;
+    }
+
+    /// <summary>
+    /// Formats a script's return value to its final display string HERE, on the UI thread, the moment
+    /// the run completes -- the ring buffer then stores only the string (v1 integrated review; the
+    /// in-code lead on issue #31's memory growth). Storing the raw object for the record's retention
+    /// window (last ~50 entries / 10 minutes) had three failure modes: (1) a script returning an
+    /// instance of a script-defined type -- `return new { ... }` is idiomatic agent code -- roots the
+    /// emitted submission assembly via GetType(), so RoslynScriptRunner's collectible-ALC unload
+    /// (PRD §06's memory-lifecycle design) silently could not reclaim exactly those runs until ring
+    /// eviction; (2) a returned Document/Element pins its Revit wrapper across a document close --
+    /// issue #31's create/write/close shape; (3) the old format-at-serialization call ran ToString()
+    /// on the TCP thread, a Revit API call off the API context whenever the type overrides ToString.
+    /// The try/catch is for the same reason the formatting moved: a script-defined ToString() is
+    /// arbitrary code and must not turn a completed run into an unhandled UI-thread exception.
+    /// </summary>
+    private static string? SafeFormatReturnValue(object? value)
+    {
+        if (value is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            return value as string ?? value.ToString() ?? "";
+        }
+        catch (Exception ex)
+        {
+            return $"<return value of type {value.GetType().FullName} -- ToString() threw {ex.GetType().Name}: {ex.Message}>";
+        }
     }
 
     /// <summary>

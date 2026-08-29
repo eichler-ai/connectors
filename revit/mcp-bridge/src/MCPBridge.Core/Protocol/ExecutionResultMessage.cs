@@ -22,8 +22,10 @@ namespace MCPBridge.Core.Protocol;
 /// trailing expression whose value IS the answer an agent wants (e.g. a script that's just
 /// `doc.Title`, with no Console.Write at all) -- silently dropping ReturnValue would make the single most
 /// common trivial-script shape look like it produced nothing. This class's mapping: Output = StdOut, with
-/// ReturnValue (if non-null) formatted via ToString() and appended after it, separated by a blank line for
-/// readability when both are present. This is a judgment call the wire contract itself doesn't specify;
+/// the return value's display string (formatted at completion time on the UI thread -- see
+/// RequestDispatcher.SafeFormatReturnValue; this class only ever sees the string) appended after it,
+/// separated by a blank line for readability when both are present. This is a judgment call the wire
+/// contract itself doesn't specify;
 /// if the broker/agent side later wants the return value surfaced as a separate structured field instead
 /// of folded into Output textually, that's a wire-shape change on both sides, not just this method.
 /// </para>
@@ -139,7 +141,10 @@ public static class ExecutionResultMessage
             return stdOut.Length == 0 ? null : stdOut;
         }
 
-        var formatted = FormatReturnValue(record.Result);
+        // record.Result is already the formatted display string -- formatting happens at completion
+        // time on the UI thread (RequestDispatcher.SafeFormatReturnValue), never here on the TCP
+        // thread where a Revit-object ToString() would run off the API context (v1 integrated review).
+        var formatted = record.Result;
         if (stdOut.Length == 0)
         {
             return formatted;
@@ -149,8 +154,6 @@ public static class ExecutionResultMessage
         // before inserting the blank-line separator, so the two don't compound into three-plus newlines.
         return stdOut.TrimEnd('\n', '\r') + "\n\n" + formatted;
     }
-
-    private static string FormatReturnValue(object value) => value as string ?? value.ToString() ?? "";
 
     // Deliberately a separate small mapping rather than reusing ExecutionStatus's own
     // [WireEnumName] wire values via JsonSerializer -- "busy" needs to share this same wire

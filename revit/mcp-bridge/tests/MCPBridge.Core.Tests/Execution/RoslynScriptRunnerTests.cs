@@ -442,6 +442,68 @@ public class RoslynScriptRunnerTests
         Assert.Contains(expectedNamedMember, ex.Message);
     }
 
+    [Theory]
+    // COMPILER-SYNTHESIZED DISPOSE shapes (v1 integrated review; live-exploitable before the fix):
+    // `using` on the ambient Document closes it when the scope ends -- Dispose is Close under
+    // another spelling -- but the synthesized Dispose call never appears as a bindable node, so the
+    // symbol walk alone saw nothing. These are the single most idiomatic shapes a C#-fluent agent
+    // could produce by accident, which is precisely the tier's target (unlike `dynamic`, the
+    // documented accepted gap). The last two pin the interface-dispatch variant: casting to
+    // System.IDisposable moves Dispose's containing type off the gated table, so the cast/as node
+    // itself is what must be judged.
+    [InlineData("using (Document) { }", "Dispose")]
+    // Braced: a using DECLARATION needs an enclosing block to be legal at all in script code
+    // (bare at top level it's a compile error, which would pass this test for the wrong reason).
+    [InlineData("{ using var d = Document; }", "Dispose")]
+    [InlineData("using (var d = Document) { }", "Dispose")]
+    [InlineData("((System.IDisposable)Document).Dispose();", "Dispose")]
+    [InlineData("var d = Document as System.IDisposable; d.Dispose();", "Dispose")]
+    public async Task RunAsync_SynthesizedOrLaunderedDispose_StillRequiresConfirmation(string script, string expectedNamedMember)
+    {
+        var runner = NewRunner();
+
+        var outcome = await runner.RunAsync(script, NewGlobals(), CancellationToken.None);
+
+        var ex = Assert.IsType<ScriptApiDenylistViolationException>(outcome.Exception);
+        Assert.Equal(ScriptApiDenylistViolationException.ConfirmationRequiredCode, ex.Code);
+        Assert.Contains(expectedNamedMember, ex.Message);
+    }
+
+    [Fact]
+    public async Task RunAsync_OrdinaryDisposableUsing_IsNotGated()
+    {
+        // The other half of the synthesized-Dispose contract: gating keys on the RESOURCE TYPE having
+        // a gated Dispose, so every ordinary IDisposable a script legitimately leans on (writers,
+        // streams, ...) must flow through untouched -- a gate that taxed all of `using` would teach
+        // agents to stop disposing things.
+        var runner = NewRunner();
+
+        var outcome = await runner.RunAsync(
+            "using (var w = new System.IO.StringWriter()) { w.Write(\"ok\"); return w.ToString(); }",
+            NewGlobals(),
+            CancellationToken.None);
+
+        Assert.True(outcome.Success);
+        Assert.Equal("ok", outcome.ReturnValue);
+    }
+
+    [Fact]
+    public async Task RunAsync_ScriptThrowingItsOwnOperationCanceledException_IsAFailure_NotCancelled()
+    {
+        // PRD §06: `cancelled` means "the agent asked for this". A script that throws OCE on its own
+        // (or a call that surfaces one) with no cancellation ever requested used to be misreported as
+        // cancelled -- recording a cancel nobody issued (v1 integrated review). The genuine path
+        // (token signalled, script observes it) is pinned elsewhere; this pins the distinction.
+        var runner = NewRunner();
+
+        var outcome = await runner.RunAsync(
+            "throw new System.OperationCanceledException();", NewGlobals(), CancellationToken.None);
+
+        Assert.False(outcome.WasCancelled);
+        Assert.False(outcome.Success);
+        Assert.IsType<System.OperationCanceledException>(outcome.Exception);
+    }
+
     [Fact]
     public async Task RunAsync_ScriptUsingSeveralLifecycleMembers_NamesThemAll()
     {
