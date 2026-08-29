@@ -378,7 +378,12 @@ CancellationToken.ThrowIfCancellationRequested();
 throw new System.TimeoutException(""cancellation was never observed"");";
             var cancelWhenPublished = Task.Run(async () =>
             {
-                while (!File.Exists(publishedMarker))
+                // Bounded (PR review finding): if the script faults before dropping the marker, an
+                // unbounded poll would turn a red test into an infinite hang. Cancel at the deadline
+                // regardless -- harmless on the failure path, and the assertions below report the
+                // real problem.
+                var pollDeadline = System.Diagnostics.Stopwatch.StartNew();
+                while (!File.Exists(publishedMarker) && pollDeadline.Elapsed < TimeSpan.FromSeconds(30))
                 {
                     await Task.Delay(5);
                 }

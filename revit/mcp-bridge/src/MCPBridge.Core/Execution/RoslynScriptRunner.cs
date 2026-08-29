@@ -341,7 +341,17 @@ internal sealed class RoslynScriptRunner
     private static void RejectTopLevelAwait(Script<object> script)
     {
         var tree = script.GetCompilation().SyntaxTrees.Single();
-        var hasAwait = tree.GetRoot().DescendantNodes().OfType<AwaitExpressionSyntax>().Any();
+
+        // TOKENS, not AwaitExpressionSyntax nodes (PR #45 review finding, pre-existing): `await using`
+        // and `await foreach` carry their await as a keyword TOKEN on the using/foreach/declaration
+        // statement, with no AwaitExpressionSyntax anywhere in the tree -- the same
+        // compiler-synthesized-shape class as ScriptApiDenylist's using-Dispose gap, one guard over.
+        // A node-typed walk let a script-defined IAsyncDisposable smuggle a genuine yield past this
+        // guard, resuming script code off Revit's API context with the ambient transaction open. The
+        // ordinary `await expr` form also contains an AwaitKeyword token, so this single check covers
+        // every spelling; an identifier merely NAMED await lexes as an IdentifierToken, not this kind,
+        // and stays unaffected.
+        var hasAwait = tree.GetRoot().DescendantTokens().Any(t => t.IsKind(SyntaxKind.AwaitKeyword));
         if (hasAwait)
         {
             throw new ScriptAwaitNotAllowedException();

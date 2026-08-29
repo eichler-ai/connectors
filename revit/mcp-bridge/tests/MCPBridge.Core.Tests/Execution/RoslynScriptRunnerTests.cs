@@ -458,6 +458,12 @@ public class RoslynScriptRunnerTests
     [InlineData("using (var d = Document) { }", "Dispose")]
     [InlineData("((System.IDisposable)Document).Dispose();", "Dispose")]
     [InlineData("var d = Document as System.IDisposable; d.Dispose();", "Dispose")]
+    // Second review round's additions -- laundering shapes at the same explicit-intent level as the
+    // cast: a chained cast through object, and the two pattern forms that hand out an
+    // IDisposable-typed binding.
+    [InlineData("((System.IDisposable)(object)Document).Dispose();", "Dispose")]
+    [InlineData("if (Document is System.IDisposable d) { d.Dispose(); }", "Dispose")]
+    [InlineData("switch (Document) { case System.IDisposable d: d.Dispose(); break; }", "Dispose")]
     public async Task RunAsync_SynthesizedOrLaunderedDispose_StillRequiresConfirmation(string script, string expectedNamedMember)
     {
         var runner = NewRunner();
@@ -485,6 +491,26 @@ public class RoslynScriptRunnerTests
 
         Assert.True(outcome.Success);
         Assert.Equal("ok", outcome.ReturnValue);
+    }
+
+    [Fact]
+    public async Task RunAsync_AwaitUsing_IsRejectedLikeAnyOtherAwait()
+    {
+        // PR review finding (pre-existing, same synthesized-shape class as the Dispose gate): `await
+        // using` carries its await as a keyword TOKEN with no AwaitExpressionSyntax node, so the old
+        // node-typed walk let a script-defined IAsyncDisposable smuggle a genuine yield past the
+        // top-level-await guard -- resuming script code off Revit's API context with the ambient
+        // transaction open. The token-based check must refuse it with the same distinct exception.
+        var runner = NewRunner();
+
+        var outcome = await runner.RunAsync(
+            "class A : System.IAsyncDisposable { public System.Threading.Tasks.ValueTask DisposeAsync() => default; }\n" +
+            "{ await using var a = new A(); }",
+            NewGlobals(),
+            CancellationToken.None);
+
+        Assert.False(outcome.Success);
+        Assert.IsType<ScriptAwaitNotAllowedException>(outcome.Exception);
     }
 
     [Fact]

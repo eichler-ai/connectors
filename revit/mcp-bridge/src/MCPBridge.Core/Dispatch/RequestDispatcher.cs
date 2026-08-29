@@ -392,12 +392,15 @@ public sealed class RequestDispatcher
                 // exception_type: PRD §01 requires the wrapped exception's message AND type, and the
                 // type genuinely disambiguates -- §14 records that Autodesk's and System's
                 // InvalidOperationException share a short name, so a message alone can send a reader
-                // to the wrong catch clause (v1 integrated review).
-                detail: new Dictionary<string, object?>
-                {
-                    ["execution_id"] = executionId,
-                    ["exception_type"] = outcome.Exception?.GetType().FullName,
-                },
+                // to the wrong catch clause (v1 integrated review). Omitted, not null, when there is
+                // no exception object at all.
+                detail: outcome.Exception is null
+                    ? new Dictionary<string, object?> { ["execution_id"] = executionId }
+                    : new Dictionary<string, object?>
+                    {
+                        ["execution_id"] = executionId,
+                        ["exception_type"] = outcome.Exception.GetType().FullName,
+                    },
                 remedy: remedy);
             _executionManager.CompleteError(executionId, _now(), diagnostic, outcome.StdOut, outcome.Notices, outcome.Files);
         }
@@ -432,7 +435,10 @@ public sealed class RequestDispatcher
         }
         catch (Exception ex)
         {
-            return $"<return value of type {value.GetType().FullName} -- ToString() threw {ex.GetType().Name}: {ex.Message}>";
+            // Deliberately no ex.Message here (PR review finding): Message is virtual and
+            // script-definable, so interpolating it would have the guard against arbitrary script
+            // code calling arbitrary script code. GetType().Name cannot run script code.
+            return $"<return value of type {value.GetType().FullName} -- ToString() threw {ex.GetType().Name}>";
         }
     }
 
