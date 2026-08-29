@@ -160,7 +160,14 @@ throw new System.TimeoutException("failsafe: cancellation never arrived within 6
 	// possibly-stranded id only in error.detail.execution_id, and that id must
 	// be captured for resolution before anything gets to fail the test.
 	startRun := func() (executeScriptOut, string) {
-		raw := callExecuteScriptWith(t, c, instanceID, documentID, script, map[string]any{"timeout_ms": 2000})
+		// timeout_ms 5000, not 2000 (issue #57, hit three times): the add-in's timeout answer
+		// runs the §07 window-inventory diagnostic first (~2.3s worst-case budget), and under
+		// post-relaunch churn a 2s timeout left the answer racing the broker's timeout_ms+5s
+		// wire budget at its thinnest point -- the first heavy call after a relaunch flaked
+		// with wire-call-failed while every isolated rerun passed. 5000 puts the wire budget
+		// at 10s, comfortably clear of inventory + churn, and only stretches the test when
+		// the answer is genuinely slow.
+		raw := callExecuteScriptWith(t, c, instanceID, documentID, script, map[string]any{"timeout_ms": 5000})
 		var tr toolResult
 		if err := json.Unmarshal(raw, &tr); err != nil {
 			t.Fatalf("decode tool envelope: %v\nraw: %s", err, raw)
