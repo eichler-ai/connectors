@@ -189,7 +189,17 @@ internal sealed class ManagedDocumentTransactions
         }
 
         var group = document.CreateTransactionGroup(_transactionName);
-        group.Start();
+        try
+        {
+            group.Start();
+        }
+        catch
+        {
+            // group.Start() itself threw (PR review): nothing tracks this adapter and nothing else
+            // will ever dispose it -- same only-terminal-point reasoning as the catch below.
+            SafeDispose(null, group);
+            throw;
+        }
 
         ITransactionAdapter? transaction = null;
         try

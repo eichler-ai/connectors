@@ -358,6 +358,10 @@ public class ManagedDocumentTransactionsTests
 
         Assert.True(result.Success);
         Assert.Contains("Dispose", ((FakeTransactionAdapter)first.LastTransaction!).Calls);
+        // The first entry's GROUP is still disposed even though its transaction's dispose threw --
+        // SafeDispose guards each half independently (PR review: without this line, collapsing its
+        // two try blocks into one would pass every test).
+        Assert.Contains("Dispose", ((FakeTransactionGroupAdapter)first.LastTransactionGroup!).Calls);
         Assert.Contains("Dispose", ((FakeTransactionAdapter)second.LastTransaction!).Calls);
         Assert.Contains("Dispose", ((FakeTransactionGroupAdapter)second.LastTransactionGroup!).Calls);
     }
