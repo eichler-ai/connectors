@@ -33,7 +33,7 @@ func TestNewRecordShape(t *testing.T) {
 }
 
 func TestRecordJSONShape(t *testing.T) {
-	r := New(SeverityWarning, "failure_auto_dismissed", "mcp-server.internal.execution", "warning dismissed")
+	r := New(SeverityWarning, "failure-auto-dismissed", "mcp-server.internal.execution", "warning dismissed")
 	b, err := json.Marshal(r)
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
@@ -75,7 +75,7 @@ func TestSeverityConstants(t *testing.T) {
 
 func TestWrapPreservesUnderlyingMessage(t *testing.T) {
 	underlying := "System.InvalidOperationException: document is not active"
-	r := New(SeverityError, "execution_failed", "mcp-server.internal.execution", "execute_script failed for execution_id \"exec-1\": "+underlying)
+	r := New(SeverityError, "execution-failed", "mcp-server.internal.execution", "execute_script failed for execution_id \"exec-1\": "+underlying)
 	if !strings.Contains(r.Message, underlying) {
 		t.Errorf("wrapped message must retain the original exception text, got %q", r.Message)
 	}

@@ -132,6 +132,19 @@ func executionIDFromErrorText(text string) string {
 func TestExecutionLifecycle(t *testing.T) {
 	c, instanceID, documentID := targetDocument(t)
 
+	// Warm-up (issue #57, hit three times, always on the FIRST heavy call after a Revit
+	// relaunch): a timed-out execute answer spends timeout_ms waiting and then runs the §07
+	// window-inventory diagnostic (~2.2s worst case), leaving a CONSTANT ~2.7s of the broker's
+	// fixed +5s wire buffer for scheduling churn -- raising timeout_ms changes nothing, since
+	// the add-in spends exactly that much longer before answering (a first fix attempted that;
+	// PR #59's review did the arithmetic). What the flake actually needed was the churn gone:
+	// one trivial warm call absorbs the post-relaunch cold start (Roslyn warmup races, first
+	// ExternalEvent dispatch, journal churn) before any budget-critical call runs.
+	warm := runScript(t, c, instanceID, documentID, "return 1;")
+	if warm.Status != "success" {
+		t.Fatalf("warm-up call failed: %+v", warm)
+	}
+
 	const script = `
 var sw = System.Diagnostics.Stopwatch.StartNew();
 while (!CancellationToken.IsCancellationRequested && sw.Elapsed.TotalSeconds < 60) {
@@ -160,14 +173,7 @@ throw new System.TimeoutException("failsafe: cancellation never arrived within 6
 	// possibly-stranded id only in error.detail.execution_id, and that id must
 	// be captured for resolution before anything gets to fail the test.
 	startRun := func() (executeScriptOut, string) {
-		// timeout_ms 5000, not 2000 (issue #57, hit three times): the add-in's timeout answer
-		// runs the §07 window-inventory diagnostic first (~2.3s worst-case budget), and under
-		// post-relaunch churn a 2s timeout left the answer racing the broker's timeout_ms+5s
-		// wire budget at its thinnest point -- the first heavy call after a relaunch flaked
-		// with wire-call-failed while every isolated rerun passed. 5000 puts the wire budget
-		// at 10s, comfortably clear of inventory + churn, and only stretches the test when
-		// the answer is genuinely slow.
-		raw := callExecuteScriptWith(t, c, instanceID, documentID, script, map[string]any{"timeout_ms": 5000})
+		raw := callExecuteScriptWith(t, c, instanceID, documentID, script, map[string]any{"timeout_ms": 2000})
 		var tr toolResult
 		if err := json.Unmarshal(raw, &tr); err != nil {
 			t.Fatalf("decode tool envelope: %v\nraw: %s", err, raw)
