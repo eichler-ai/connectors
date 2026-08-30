@@ -237,8 +237,11 @@ re-resolve rather than hardcoding either. `robocopy` from `cmd /c` mangles a `\\
   aside mid-task. Restarting to force a fresh registration snapshot is obsolete anyway: the add-in
   pushes one live.
 - **Run the test harness natively on the Mac** (`-broker-mode remote -broker-bind
-  -broker-app-data-dir`) rather than cross-compiling and pushing it to the VM — the same suite runs in
-  seconds instead of minutes.
+  -broker-app-data-dir`) rather than cross-compiling and pushing it to the VM — one bundle (a single
+  `-run TestX` target) runs in seconds instead of minutes this way; the FULL suite is minutes either
+  way regardless of native-vs-cross-compiled (real Revit document-lifecycle latency dominates it, see
+  `revit/test-harness/README.md`'s "Fast subset" section), but native-on-Mac is still strictly faster
+  for the round trip and is what makes iterating on one bundle at a time practical at all.
 
 ## Scripts
 
