@@ -358,7 +358,124 @@ public class DiscoveryCacheTests
     }
 
     [Fact]
-    public void Search_TierTwo_RanksByRelevanceNotAlphabeticallyByMemberName()
+    public void Search_StopWordsInTheQueryDoNotPromoteALongerAccidentalMatch()
+    {
+        // Portable cover for stopword filtering (2nd review round). This mechanism was previously pinned
+        // ONLY by a real-RevitAPI test, which self-skips to "passed" wherever MCPBRIDGE_REVITAPI_DLL is
+        // unset -- i.e. everywhere except one hand-configured VM -- so in practice it had no coverage at
+        // all. "a" and "on" are substrings of "WallFoundation" and of nothing in "Wall": unfiltered they
+        // both rank WallFoundation.Create first AND push Wall.Create below the tier-2 floor.
+        using var cache = NewCache();
+        cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+
+        var results = cache.Search("create a wall on a level", namespaceFilter: null).ToList();
+
+        var wall = results.Single(r => r.Member.Name == "Create" && r.Member.DeclaringType.EndsWith(".Wall", StringComparison.Ordinal));
+        var foundation = results.Single(r => r.Member.Name == "Create" && r.Member.DeclaringType.EndsWith("WallFoundation", StringComparison.Ordinal));
+
+        Assert.True(wall.Score > foundation.Score, $"Wall.Create ({wall.Score}) must outrank WallFoundation.Create ({foundation.Score})");
+        Assert.InRange(wall.Score, 500, 999);
+    }
+
+    [Theory]
+    // Three tokens, one unmatched: admitted, because a longer natural-language phrase routinely carries a
+    // word no API name contains -- that is the whole point of the allowance.
+    [InlineData("create sheet zzz", true)]
+    // Two tokens, one unmatched: NOT admitted. With so few tokens every one is load-bearing, and an
+    // allowance here would admit most of the corpus at a score floor tier 3 can never reach.
+    [InlineData("create zzz", false)]
+    public void Search_UnmatchedTokenAllowance_AppliesOnlyToLongerQueries(string query, bool expectedInTierTwo)
+    {
+        // Pins the 2-vs-3 token boundary itself, which nothing covered before (2nd review round). Without
+        // it the threshold could be moved either way and only the two hand-picked queries elsewhere in this
+        // file would notice.
+        using var cache = NewCache();
+        cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+
+        var matches = cache.Search(query, namespaceFilter: null)
+            .Where(r => r.Member.Name == "Create" && r.Member.DeclaringType.EndsWith("ViewSheet", StringComparison.Ordinal))
+            .ToList();
+
+        if (expectedInTierTwo)
+        {
+            var create = Assert.Single(matches);
+            Assert.InRange(create.Score, 500, 999);
+        }
+        else
+        {
+            // Either absent, or present only via the FTS5 tier -- never at the tier-2 floor.
+            Assert.True(
+                matches.Count == 0 || matches[0].Score < 500,
+                $"expected below the tier-2 floor, got {(matches.Count == 0 ? "absent" : matches[0].Score.ToString())}");
+        }
+    }
+
+    [Fact]
+    public void Search_AllowanceRequiresAMemberNameHit_SoATypeNameAloneCannotAdmitEveryMember()
+    {
+        // 2nd review round, measured on the real corpus: without this condition, any query whose DECLARING
+        // TYPE name supplies enough tokens admitted EVERY member of that type at the flat tier-2 floor --
+        // "create family instance" admitted 162 rows and buried Document.NewFamilyInstance at rank 27,
+        // "set the parameter of an element" admitted 855 with ParameterSet.Insert/Erase on page 1. Since
+        // tier 3 is capped below 500, that buries the right answer harder than the original bug did.
+        //
+        // "view sheet zzz": the type name ViewSheet supplies 2 of 3 tokens, clearing `required`, but no
+        // token touches Create or CreatePlaceholder -- so neither may ride in on the type alone.
+        //
+        // The type's CONSTRUCTOR is deliberately excluded from this assertion rather than being a hole in
+        // it: a constructor's reflected name IS the type name, so "view" and "sheet" match it directly and
+        // it clears the gate on its own merits, exactly as intended.
+        using var cache = NewCache();
+        cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+
+        var tierTwo = cache.Search("view sheet zzz", namespaceFilter: null)
+            .Where(r => r.Member.DeclaringType.EndsWith("ViewSheet", StringComparison.Ordinal)
+                && r.Member.Kind != "Constructor"
+                && r.Score >= 500)
+            .ToList();
+
+        Assert.Empty(tierTwo);
+    }
+
+    [Fact]
+    public void Search_ConstructorIsNotInflatedByScoringItsTypeNameTwice()
+    {
+        // A constructor's reflected Name IS its declaring type's name, so scoring both counts the same
+        // words at member weight AND type weight. 2nd review round, real corpus: "set the parameter of an
+        // element" returned the CONSTRUCTORS of ParameterSet and ElementSet at ranks 1-2, ahead of
+        // Parameter.Set -- which is the method the query actually describes.
+        using var cache = NewCache();
+        cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+
+        var results = cache.Search("set parameter", namespaceFilter: null).ToList();
+
+        var method = results.Single(r => r.Member.Name == "Set" && r.Member.DeclaringType.EndsWith(".Parameter", StringComparison.Ordinal));
+        var constructor = results.Single(r => r.Member.Kind == "Constructor" && r.Member.DeclaringType.EndsWith("ParameterSet", StringComparison.Ordinal));
+
+        Assert.True(
+            method.Score > constructor.Score,
+            $"Parameter.Set ({method.Score}) must outrank the ParameterSet constructor ({constructor.Score})");
+    }
+
+    [Fact]
+    public void Search_RepeatedQueryToken_DoesNotChangeTheScore()
+    {
+        // Tokens are deduped, so a repeated word neither counts twice toward the admission threshold nor
+        // gets averaged twice into recall. The old all-AND predicate was immune to this by construction (an
+        // AND of identical clauses is idempotent); counting hits is not.
+        using var cache = NewCache();
+        cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+
+        var once = cache.Search("create sheet", namespaceFilter: null)
+            .Single(r => r.Member.Name == "Create" && r.Member.DeclaringType.EndsWith("ViewSheet", StringComparison.Ordinal));
+        var twice = cache.Search("create sheet create", namespaceFilter: null)
+            .Single(r => r.Member.Name == "Create" && r.Member.DeclaringType.EndsWith("ViewSheet", StringComparison.Ordinal));
+
+        Assert.Equal(once.Score, twice.Score, precision: 9);
+    }
+
+    [Fact]
+    public void Search_TierTwo_IsNotFlatAcrossRowsMatchingTheSameTokens()
     {
         // Second defect found while confirming the first: every tier-2 row scored exactly 500 + CoreBoost,
         // so ordering fell through to DiscoveryService's .ThenBy(Member.Name) tie-break -- i.e.
@@ -370,6 +487,11 @@ public class DiscoveryCacheTests
         // the assertion below could not hold no matter which one is the better answer. Asserting
         // inequality rather than a specific winner keeps this test about the defect (a flat tier) and
         // leaves which-one-wins to the test above, so retuning the weights cannot make it vacuous.
+        //
+        // Named for exactly that, after a review round pointed out the previous name
+        // ("...RanksByRelevanceNotAlphabeticallyByMemberName") claimed more than the assertion shows:
+        // "Create" already sorts before "CreatePlaceholder", so this cannot distinguish relevance order
+        // from alphabetical order. It proves the tier is no longer flat, which is the defect it exists for.
         using var cache = NewCache();
         cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
 

@@ -107,6 +107,35 @@ public class IdentifierRelevanceTests
     }
 
     [Fact]
+    public void Score_StopWordPartsInTheNameAreFree()
+    {
+        // 2nd review round. Stopwords are dropped from the QUERY, so charging a candidate for containing
+        // one in its NAME penalizes it for material the caller actually typed. Plenty of real Revit
+        // identifiers carry them as word-parts: SynchronizeWithCentral, BuiltInParameter, AsDouble,
+        // CopyToClipboard, CreateFromCurveLoops. Measured on the real corpus, the dropped "with" cost
+        // Document.SynchronizeWithCentral 29 points -- enough to tie it with Document.IsCentralModel, a
+        // bool property, which then took rank 1 on the alphabetical tie-break.
+        var tokens = new[] { "synchronize", "central" };
+
+        var withStopWord = IdentifierRelevance.Score(tokens, "SynchronizeWithCentral", "Document");
+        var withoutStopWord = IdentifierRelevance.Score(tokens, "SynchronizeCentral", "Document");
+
+        Assert.Equal(withoutStopWord, withStopWord, precision: 9);
+    }
+
+    [Fact]
+    public void Score_NameOfOnlyStopWordParts_DoesNotDivideByZero()
+    {
+        // Skipping stopwords in the precision loop empties the denominator for a name made entirely of
+        // them. Guarded to 1.0 (fully explained) so recall alone decides, rather than producing NaN and
+        // poisoning every comparison it takes part in.
+        var score = IdentifierRelevance.Score(new[] { "the" }, "The", "It");
+
+        Assert.False(double.IsNaN(score), "score must not be NaN");
+        Assert.InRange(score, 0.0, 1.0);
+    }
+
+    [Fact]
     public void Score_IsBoundedToTheUnitInterval()
     {
         // DiscoveryCache multiplies this by its tier-2 band width and adds it to the tier floor, so a score

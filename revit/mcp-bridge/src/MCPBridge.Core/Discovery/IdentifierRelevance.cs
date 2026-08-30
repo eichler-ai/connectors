@@ -32,6 +32,29 @@ namespace MCPBridge.Core.Discovery;
 internal static class IdentifierRelevance
 {
     /// <summary>
+    /// English function words that carry no API-name signal. Dropped from a query before matching (see
+    /// <c>DiscoveryCache.TokenizeQuery</c>) because under a substring predicate short words match almost
+    /// everything: "create a wall on a level" ranked <c>WallFoundation.Create</c> above <c>Wall.Create</c>
+    /// purely because "a" and "on" occur inside "WallFound<b>a</b>ti<b>on</b>" and nowhere in "Wall".
+    ///
+    /// <para>They are ALSO skipped when measuring precision below, and that symmetry is the point.
+    /// Independent PR review finding: filtering only the query side charges a candidate for name material
+    /// the user did in fact type. Plenty of real Revit identifiers contain these as word-parts --
+    /// <c>SynchronizeWith<b>Central</b></c>, <c>Built<b>In</b>Parameter</c>, <c>AsDouble</c>,
+    /// <c>CopyToClipboard</c>, <c>CreateFromCurveLoops</c>. Measured on the real corpus, "synchronize model
+    /// with central" cost <c>Document.SynchronizeWithCentral</c> 29 points for the dropped "with" alone --
+    /// enough to tie it with <c>Document.IsCentralModel</c>, a bool property, which then won rank 1 on the
+    /// alphabetical tie-break.</para>
+    /// </summary>
+    public static readonly HashSet<string> StopWords = new(StringComparer.Ordinal)
+    {
+        "a", "an", "and", "any", "are", "as", "at", "be", "by", "can", "do", "for", "from", "how", "i",
+        "if", "in", "into", "is", "it", "its", "me", "my", "need", "of", "on", "onto", "or", "please",
+        "that", "the", "their", "them", "then", "there", "this", "to", "want", "was", "what", "when",
+        "which", "will", "with", "would",
+    };
+
+    /// <summary>
     /// Credit for a query token that equals a whole word-part of the name ("create" vs "Create").
     /// </summary>
     private const double ExactCredit = 1.0;
@@ -185,9 +208,19 @@ internal static class IdentifierRelevance
         // Precision: for each word-part of the name, its best credit from any query token. The type's parts
         // are weighted down the same way they are for recall, so a long declaring-type name is not punished
         // as hard as unasked-for material in the member's OWN name.
+        //
+        // Stopword word-parts are skipped entirely -- not scored, and not counted in the denominator. The
+        // query side already dropped them, so charging a name for containing one penalizes a candidate for
+        // material the caller actually typed. See StopWords for the measured case.
         var precisionTotal = 0.0;
+        var precisionCount = 0;
         foreach (var word in memberWords)
         {
+            if (StopWords.Contains(word))
+            {
+                continue;
+            }
+
             var best = 0.0;
             foreach (var token in queryTokens)
             {
@@ -195,10 +228,16 @@ internal static class IdentifierRelevance
             }
 
             precisionTotal += best;
+            precisionCount++;
         }
 
         foreach (var word in typeWords)
         {
+            if (StopWords.Contains(word))
+            {
+                continue;
+            }
+
             var best = 0.0;
             foreach (var token in queryTokens)
             {
@@ -206,10 +245,13 @@ internal static class IdentifierRelevance
             }
 
             precisionTotal += TypeNameWeight * best + (1.0 - TypeNameWeight);
+            precisionCount++;
         }
 
+        // A name made up ENTIRELY of stopword parts leaves nothing to measure precision against; treat it
+        // as fully explained rather than dividing by zero, so recall alone decides.
         var recall = recallTotal / queryTokens.Count;
-        var precision = precisionTotal / (memberWords.Count + typeWords.Count);
+        var precision = precisionCount == 0 ? 1.0 : precisionTotal / precisionCount;
         return recall * precision;
     }
 }

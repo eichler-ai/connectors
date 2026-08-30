@@ -34,20 +34,32 @@ internal static class RealRevitApiLoader
     public static (MetadataLoadContext Context, Assembly Assembly)? TryLoad()
     {
         var dllPath = Environment.GetEnvironmentVariable("MCPBRIDGE_REVITAPI_DLL");
-        if (string.IsNullOrEmpty(dllPath) || !File.Exists(dllPath))
+        if (string.IsNullOrEmpty(dllPath))
         {
             return null;
         }
 
+        // Setting the variable is an explicit opt-in, so a bad path is a misconfiguration, not a reason to
+        // skip. Returning null here would report a typo as a PASS -- the exact failure mode that let this
+        // whole file sit dead since it was written.
+        if (!File.Exists(dllPath))
+        {
+            throw new FileNotFoundException(
+                $"MCPBRIDGE_REVITAPI_DLL is set to '{dllPath}', which does not exist. Unset it to skip these tests.",
+                dllPath);
+        }
+
         // The resolver needs every assembly the target references, which means Revit's own folder (RevitAPI
         // references its siblings) plus the running .NET runtime's reference assemblies for the BCL.
+        // BCL paths go FIRST: Revit ships its own copies of some System.*.dll, and with Revit's folder
+        // ahead of the runtime's those would shadow the real BCL for every colliding simple name, quietly
+        // resolving metadata against Revit's older framework instead of the one the add-in runs on
+        // (independent PR review finding).
         var paths = new List<string>();
-        var revitDir = Path.GetDirectoryName(dllPath)!;
-        paths.AddRange(Directory.GetFiles(revitDir, "*.dll"));
         paths.AddRange(Directory.GetFiles(Path.GetDirectoryName(typeof(object).Assembly.Location)!, "*.dll"));
+        paths.AddRange(Directory.GetFiles(Path.GetDirectoryName(dllPath)!, "*.dll"));
 
-        // A duplicate simple name makes PathAssemblyResolver throw; Revit's folder and the BCL can both
-        // ship one (System.*.dll in particular). First path wins, which is the Revit-local copy.
+        // A duplicate simple name makes PathAssemblyResolver throw; first path wins, i.e. the BCL copy.
         var deduped = paths
             .GroupBy(Path.GetFileNameWithoutExtension, StringComparer.OrdinalIgnoreCase)
             .Select(g => g.First())
