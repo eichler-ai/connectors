@@ -198,7 +198,7 @@ broker_is_healthy() {
 }
 
 # The VM's UNC alias for this repo's share can FLIP between \\psf\connectors and \\Mac\connectors
-# across VM restarts (documented SKILL.md gotcha; PR #33 review finding when this was hardcoded).
+# across VM restarts (documented dev-environment.md gotcha; PR #33 review finding when this was hardcoded).
 # Resolve it fresh each run -- costs well under a second and removes the single most likely
 # environment-drift failure. tr strips the CR that Windows output carries.
 say "resolving the VM's UNC alias for the '$SHARE_NAME' share"

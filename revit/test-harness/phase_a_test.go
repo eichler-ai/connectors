@@ -27,10 +27,10 @@ import (
 // Every script below was executed live via mcp__revit__execute_script
 // against a real connected instance before being committed here (this
 // project's standing "no fake integration tier" rule extends to test
-// AUTHORING, not just to what ships) -- see the coverage plan and SKILL.md
-// changelog for the live-research sessions that shaped the
-// CreateSharedParameter and EditGroupPropagatesToAllInstances cases, and the
-// OpenForWriting feature this bundle now depends on.
+// AUTHORING, not just to what ships) -- see PRD §13's corpus plan for the
+// live-research sessions that shaped the CreateSharedParameter and
+// EditGroupPropagatesToAllInstances cases, and the OpenForWriting feature
+// this bundle now depends on.
 func TestPhaseACoreCRUDAndQuery(t *testing.T) {
 	c, instanceID, documentID := targetDocument(t)
 	fixtureTitle := createBlankFixtureDocument(t, c, instanceID, documentID)
@@ -206,8 +206,8 @@ return new { bound, definitionName };
 	// problem here, and this connector's own ambient-transaction-per-script
 	// wrapping was a plausible new source of interaction bugs. Live research
 	// (this session, execute_script calls run interactively before this file
-	// was written, plus corroborating web research -- see SKILL.md's
-	// changelog for citations) found the true shape of the problem, which is
+	// was written, plus corroborating web research) found the true shape of
+	// the problem, which is
 	// NOT what the original plan assumed:
 	//
 	//  - There is no group-edit-SCOPE API (no Document.EditGroup, nothing

@@ -42,7 +42,7 @@ param(
     [switch]$SkipRelaunch,     # skip close/relaunch/wait -- deploy DLLs only, no verification
     # The interactive user Revit/the add-in/the launcher agent actually run as. Deliberately NOT
     # $env:APPDATA/$env:LOCALAPPDATA (or $env:USERNAME) -- this whole script runs via `prlctl exec`,
-    # which executes as NT AUTHORITY\SYSTEM (SKILL.md's own documented gotcha), so those environment
+    # which executes as NT AUTHORITY\SYSTEM (dev-environment.md's own documented gotcha), so those environment
     # variables resolve to SYSTEM's own profile, not the interactive user's -- confirmed live the
     # first time this script ran: it silently deployed DLLs into SYSTEM's Addins folder and polled
     # SYSTEM's own (nonexistent) connection.log, timing out with zero explanation. Default '' means
@@ -96,7 +96,7 @@ function Copy-WithRetry([string]$Src, [string]$Dst, [int]$MaxAttempts = 8) {
         } catch {
             if ($i -eq $MaxAttempts) { throw }
             # RevitWorker.exe/RevitAccelerator.exe can hold a lock on a just-closed session's DLLs
-            # for a moment after the main Revit.exe process itself is gone (SKILL.md's own
+            # for a moment after the main Revit.exe process itself is gone (dev-environment.md's own
             # documented gotcha) -- retry with backoff rather than failing the whole run on a
             # transient lock.
             Start-Sleep -Milliseconds (500 * $i)
