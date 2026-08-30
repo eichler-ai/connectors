@@ -110,7 +110,8 @@ These are the rules that generalize. Each one exists because violating it cost r
 
 - **Use absolute paths in every command**, and chain `cd <dir> && <cmd>` inside a single invocation —
   the shell's cwd resets between calls, and a wrong-directory failure reads exactly like a
-  wrong-branch one.
+  wrong-branch one. `git worktree add` is the sharpest case: given a relative `../name` with a
+  drifted cwd, it fails silently — the worktree lands nested inside the repo instead of erroring.
 - **Never put a destructive command after `;`** in a chain whose earlier `&&` parts can fail; the `;`
   part runs anyway. In `zsh`, an unmatched glob is a hard error that breaks `&&` chains.
 - **Commit or stash before any mutation-test or restore dance** — a reflexive `git checkout <file>`

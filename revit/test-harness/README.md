@@ -88,6 +88,32 @@ auth+register succeeded ... (N document(s))` line) BEFORE running `go test` agai
 secondary. Restarting your own Claude Code session's `revit` MCP tool's broker this way (if it's
 the same process) also drops that tool's own connection — `/mcp` reconnects it, nothing else does.
 
+## Fast subset for local sanity checks
+
+The full suite (all `Test*` functions in this package, `memcheck_test.go`'s two diagnostics
+excluded by their own `MCP_HARNESS_MEMCHECK` gate) takes 10-12+ minutes end to end against a real
+Revit session — confirmed live, `751.3s` for a full run. `TestApplicationCreatesDocuments` and
+`TestCreatedDocumentIsWritable` alone account for roughly 40% of that (206s and 90-104s
+respectively): both are dominated by genuine Revit document create/write/close latency (15-30s+ per
+document is normal), not artificial waiting -- there's nothing to trim there without weakening what
+they verify (behavior *at document-creation time itself*: ambient transaction boundaries,
+writability, rollback). Investigated live rather than assumed; see the `revit-connector-development`
+skill's changelog for the methodology.
+
+For a quick local sanity check while iterating -- NOT a substitute for the full suite before a PR
+that touches document lifecycle/transaction code -- skip those two:
+
+```sh
+go test -tags harness ./... -v -skip 'TestApplicationCreatesDocuments|TestCreatedDocumentIsWritable' \
+  -broker-exe /path/to/mcp-server-mac -broker-mode remote -broker-bind <ip> -broker-app-data-dir <dir>
+```
+
+This is a LOCAL dev-loop convenience only, not a CI concern: `.github/workflows/ci.yml` never runs
+any tier-2 test here at all (type-check only, `go vet -tags harness`, per CONTRIBUTING.md's
+testing-tiers section) -- there is no CI pipeline to tier by test speed. `-run <pattern>` remains
+the way to target one bundle/subtest during focused iteration, same as always; `-skip` is for
+"everything except these two" during a broader but still time-boxed sanity pass.
+
 ## Layout
 
 - `mcpclient/` — the MCP-over-stdio client the tests use (subprocess spawn, JSON-RPC framing,

@@ -769,8 +769,12 @@ return app.NewProjectDocument(app.DefaultProjectTemplate).Title;
 		// terminated string: an unterminated "matches = 1" is a prefix of
 		// "matches = 10", "matches = 11" and so on, so a substring check on it
 		// could not tell one from several -- the exact distinction this subtest
-		// exists to make, and a live one, since this case deliberately leaves its
-		// documents open and repeated runs in one session accumulate them.
+		// exists to make, and a live one: this case's own document is closed by a
+		// registered t.Cleanup at the end of THIS subtest (see the SESSION HYGIENE
+		// note above TestCreatedDocumentIsWritable), but a stray survivor from an
+		// earlier failed/interrupted run in the same Revit session -- or another
+		// subtest's own same-titled document, if titles were ever reused -- is a
+		// real possibility this assertion is written to catch, not a hypothetical.
 		found := runScript(t, c, instanceID, documentID, `
 int matches = 0;
 foreach (Autodesk.Revit.DB.Document d in UIApplication.Application.Documents) {
@@ -896,10 +900,15 @@ func TestCreatedDocumentIsWritable(t *testing.T) {
 	c, instanceID, documentID := targetDocument(t)
 
 	// Two subtests below COUNT levels at a given elevation across every open
-	// document, and this case deliberately leaves its documents open (nothing
-	// closes them -- see the note above). A hardcoded elevation therefore makes
-	// them pass once and fail on the second run in the same Revit session, with
-	// a count of 2 -- observed live, and it reads exactly like a double-commit
+	// document. Each subtest's own document IS closed by its registered
+	// t.Cleanup (see the SESSION HYGIENE note above) -- but this suite is
+	// routinely re-run several times against one long-lived Revit session in
+	// this project's own dev loop (see the revit-connector-development skill),
+	// and a document from an earlier invocation whose cleanup itself failed, or
+	// whose own subtest panicked before cleanup was ever registered, can still
+	// be sitting open. A hardcoded elevation would then pass on a clean session
+	// once and fail on a re-run with a count of 2 -- observed live, and it reads
+	// exactly like a double-commit
 	// bug rather than a stale fixture. Unique-per-run elevations keep "exactly
 	// one" a real assertion instead of a run-order artifact.
 	base := 1000 + float64(time.Now().UnixNano()/1e6%500000)/100.0
@@ -1128,8 +1137,13 @@ return a.Title + "|" + b.Title;
 		}
 
 		// Scoped to the two documents by title rather than scanning every open one.
-		// This case deliberately leaves documents open and the wider suite accumulates
-		// dozens of them, so an all-documents scan grows until it blows the harness's
+		// Both documents ARE closed by the t.Cleanup calls just above once this
+		// subtest ends -- but a live Revit session this suite runs against
+		// routinely accumulates OTHER documents regardless (this project's own
+		// dev loop re-runs the suite repeatedly against one long-lived instance;
+		// other subtests' own in-flight documents may also still be open at the
+		// moment this particular script runs). An all-documents scan grows with
+		// however many happen to be open right now until it blows the harness's
 		// tool deadline (45s, see callExecuteScriptWith) -- which then leaves the
 		// instance busy and fails every later subtest for an unrelated reason.
 		// Observed live at the older, shorter deadline; keep queries scoped.
