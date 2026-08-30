@@ -122,4 +122,54 @@ public class RealRevitApiTests
         // words dropped this method a whole tier again and no better match could ever be outranked.
         Assert.InRange(hit!.Score, 500, 999);
     }
+
+    /// <summary>
+    /// Issue #76, at the scale it actually occurs. The fixture test in DiscoveryCacheTests pins the
+    /// mechanism portably by shrinking the cap to 2; only the real corpus has the thousands of candidates
+    /// that make the shipped cap of 500 bite at all.
+    ///
+    /// <para>A SHORT query on a common word is the shape that reaches it -- not the long natural-language
+    /// phrasing the issue was filed against, which turned out never to come close (455 and 592 candidates
+    /// against a 500 cap, where the issue claimed ~795 and ~802; those figures came from a proxy corpus
+    /// built from RevitAPI.xml, not from this code path). With one token, admission needs a single hit and
+    /// a declaring-type name supplies it, so "id" admits 4,768 rows and "get" 2,413.</para>
+    ///
+    /// <para>Both members below were measured ABSENT from the entire ranked result under the old
+    /// scan-order cut, despite being among the highest-scoring rows in the corpus for their query:
+    /// Entity.Get scores 637.5 while the old rank 1 scored 600.1, and five rows tied with Element.Id at
+    /// 637.5 were dropped while Element.Id itself survived. That is the issue's first consequence -- a
+    /// correct answer vanishing, with no cursor walk able to reach it -- so presence is what is asserted,
+    /// not a position that a later retune could legitimately move.</para>
+    /// </summary>
+    [Theory]
+    [InlineData("get", "Autodesk.Revit.DB.ExtensibleStorage.Entity", "Get")]
+    [InlineData("id", "Autodesk.Revit.DB.Category", "Id")]
+    public void SearchFunctions_WideSingleTokenQuery_StillReachesTheHighestScoringMembers(string query, string expectedType, string expectedMember)
+    {
+        var loaded = RealRevitApiLoader.TryLoad();
+        if (loaded is null)
+        {
+            return; // Not configured in this environment -- skip rather than fail.
+        }
+
+        using var context = loaded.Value.Context;
+        using var cache = new DiscoveryCache(":memory:");
+        cache.Sync(new[] { ("core", loaded.Value.Assembly) });
+        var service = new DiscoveryService(cache);
+
+        var result = service.SearchFunctions(query, namespaceFilter: null, cursor: null, topN: 20);
+
+        var hit = result.Results.FirstOrDefault(r =>
+            r.Member.DeclaringType == expectedType && r.Member.Name == expectedMember);
+
+        Assert.True(
+            hit is not null,
+            $"'{expectedType}.{expectedMember}' is absent from the top 20 for \"{query}\"; got: "
+                + string.Join(", ", result.Results.Take(5).Select(r => $"{r.Member.DeclaringType}.{r.Member.Name} ({r.Score:F1})")));
+
+        // Nothing on the page may outscore it: the defect was not that it ranked low but that better-scoring
+        // rows were being cut before ranking, which shows up here as a survivor scoring above the best row
+        // the cap let through.
+        Assert.Equal(result.Results.Max(r => r.Score), hit!.Score, precision: 9);
+    }
 }

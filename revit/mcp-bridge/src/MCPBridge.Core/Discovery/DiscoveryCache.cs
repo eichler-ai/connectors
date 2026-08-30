@@ -66,10 +66,18 @@ public sealed class DiscoveryCache : IDisposable
     // review pass flagged, since disposal now waits for any in-flight Sync/query on another thread to finish
     // rather than pulling the connection out from under it.
     private readonly object _lock = new();
+    private readonly int _rankedDepth;
     private bool _disposed;
 
-    public DiscoveryCache(string databasePath)
+    /// <summary>
+    /// <paramref name="rankedDepth"/> overrides <see cref="TierCandidateLimit"/>, and exists so the
+    /// cap-after-scoring behaviour is testable at all: proving it needs MORE candidates than the cap, and
+    /// no hand-written fixture assembly is going to produce 500 members. Production never passes it.
+    /// </summary>
+    public DiscoveryCache(string databasePath, int? rankedDepth = null)
     {
+        _rankedDepth = rankedDepth ?? TierCandidateLimit;
+
         // Independent PR review finding (2nd round, M1): the caller's self-heal (delete-and-recreate a
         // corrupted database) only works if a failure here doesn't leave a live, locked connection handle
         // behind -- the dominant real corruption failure ("database disk image is malformed") is thrown by
@@ -685,7 +693,25 @@ public sealed class DiscoveryCache : IDisposable
     // search_functions
     // -------------------------------------------------------------------------------------------------
 
-    /// <summary>How many raw candidates each of the token-match/FTS5 tiers below pulls before ranking/pagination -- bounded so a broad query against a huge corpus stays a cheap indexed query, not a full scan; well above any realistic topN+cursor walk.</summary>
+    /// <summary>
+    /// How deep each of the token-match/FTS5 tiers below keeps results -- a cap on how far a caller can
+    /// page, well above any realistic topN+cursor walk, NOT a cost control. Both tiers now apply it to a
+    /// set already ordered by that tier's own ranking (relevance for tier 2, bm25 for tier 3), so what it
+    /// discards is genuinely the tail.
+    ///
+    /// <para>Issue #76 -- and the reason this comment now states measurements instead of asserting a cost
+    /// model. The claim it used to make, that the limit kept a broad query "a cheap indexed query, not a
+    /// full scan", was never true of tier 2: its predicate is <c>LIKE '%token%'</c> against two name
+    /// columns, which cannot use an index at all, so the full scan of the join is paid whether or not rows
+    /// are then discarded. Measured against the real RevitAPI 2027 corpus (25,933 documented members),
+    /// reading every matching row costs the same as reading 500 of them to within noise -- 46ms vs 36ms on
+    /// the widest query found ("id", 4,768 candidates), and indistinguishable on every natural-language
+    /// query tried. End-to-end <c>search_functions</c> stayed between 37 and 130ms across 27 queries,
+    /// against the ~700ms full-corpus scan that motivated this cache in the first place.</para>
+    ///
+    /// <para>The corpus size is what decides whether that headroom holds, and it is bounded by Revit's own
+    /// API surface plus whatever add-ins are loaded, not by anything a caller controls.</para>
+    /// </summary>
     private const int TierCandidateLimit = 500;
 
     /// <summary>
@@ -706,7 +732,7 @@ public sealed class DiscoveryCache : IDisposable
     /// within the tier. Mirrors the same "core wins ties" policy <see cref="FindTypeRow"/>/
     /// <see cref="FindTypeRowByFullName"/> already apply to type lookups.
     /// </summary>
-    private static double CoreBoost(DiscoveryMemberRow row) => row.IsCoreAssembly ? 0.5 : 0.0;
+    private static double CoreBoost(bool isCoreAssembly) => isCoreAssembly ? 0.5 : 0.0;
 
     /// <summary>
     /// Width of the score band tier 2 spreads its graded relevance across, above its floor of 500 and well
@@ -807,7 +833,7 @@ public sealed class DiscoveryCache : IDisposable
                 {
                     if (seenMemberIds.Add(row.MemberId))
                     {
-                        results.Add((row, 1000 + CoreBoost(row)));
+                        results.Add((row, 1000 + CoreBoost(row.IsCoreAssembly)));
                     }
                 }
             }
@@ -822,23 +848,11 @@ public sealed class DiscoveryCache : IDisposable
             // DiscoveryService's alphabetical-by-name tie-break.
             if (tokens.Length > 0)
             {
-                foreach (var row in QueryTokenMatch(tokens, namespaceFilter))
+                foreach (var (row, score) in QueryTokenMatch(tokens, namespaceFilter))
                 {
                     if (seenMemberIds.Add(row.MemberId))
                     {
-                        // A constructor's Name IS its declaring type's name (DiscoveryReflector sets it
-                        // that way), so scoring both would count the same words twice -- once at full
-                        // member weight, once at type weight -- systematically inflating every constructor
-                        // whose type the query mentions. Measured on the real corpus (2nd review round):
-                        // "set the parameter of an element" returned ParameterSet's and ElementSet's
-                        // CONSTRUCTORS at ranks 1-2, above Parameter.Set. Scoring the type name alone is
-                        // the honest reading -- a constructor contributes no name material of its own.
-                        var isConstructor = string.Equals(row.Kind, "Constructor", StringComparison.Ordinal);
-                        var relevance = IdentifierRelevance.Score(
-                            tokens,
-                            isConstructor ? string.Empty : row.Name,
-                            ShortTypeName(row.DeclaringType));
-                        results.Add((row, 500 + (TierTwoBand * relevance) + CoreBoost(row)));
+                        results.Add((row, score));
                     }
                 }
             }
@@ -856,7 +870,7 @@ public sealed class DiscoveryCache : IDisposable
                     // direction while preserving the same bounded-below-500 contract.
                     var betterness = Math.Max(0, -rank);
                     var normalized = 499.0 * betterness / (1.0 + betterness);
-                    results.Add((row, normalized + CoreBoost(row)));
+                    results.Add((row, normalized + CoreBoost(row.IsCoreAssembly)));
                 }
             }
 
@@ -928,15 +942,55 @@ public sealed class DiscoveryCache : IDisposable
     /// row that would have scored is filtered out here -- SQL decides membership, C# decides rank.</para>
     ///
     /// <para><b>The unmatched-token allowance requires a hit on the MEMBER name.</b> Independent PR review
-    /// finding, measured on the real corpus: without that condition, any query whose DECLARING TYPE name
-    /// alone supplies enough tokens admits every member of that type at the flat tier-2 floor. "create
-    /// family instance" admitted 162 rows and pushed <c>Document.NewFamilyInstance</c> to rank 27, behind
-    /// properties and collection methods; "set the parameter of an element" admitted 855, page 1 being
-    /// <c>ParameterSet.Insert/Erase/Contains</c>. Since tier 3 is bounded below 500, that buries the right
-    /// answer HARDER than the bug this fix was for. A row still matching every token is admitted
-    /// regardless, so an exact all-token match never needs to justify itself.</para>
+    /// finding: without that condition, any query whose DECLARING TYPE name alone supplies enough tokens
+    /// admits every member of that type at the tier-2 floor, which pushed
+    /// <c>Document.NewFamilyInstance</c> to rank 27 behind properties and collection methods, and made
+    /// page 1 of "set the parameter of an element" read <c>ParameterSet.Insert/Erase/Contains</c>. Since
+    /// tier 3 is bounded below 500, that buries the right answer HARDER than the bug the gate was added
+    /// alongside. A row still matching every token is admitted regardless, so an exact all-token match
+    /// never needs to justify itself.</para>
+    ///
+    /// <para>Re-measured through this code path against RevitAPI 2027 (issue #76): the gate takes "create
+    /// family instance" from 151 candidates to 71, and "set the parameter of an element" from 522 to 455.
+    /// An earlier version of this comment said 162 and 855. Those came from a corpus reconstructed out of
+    /// RevitAPI.xml during review rather than from the reflected corpus this class actually indexes -- it
+    /// carries ~30,449 entries against this one's 25,933, and the discrepancy is worth naming because the
+    /// same borrowed figures were what made issue #76 look like a problem with natural-language queries
+    /// when it is really a problem with short ones.</para>
     /// </summary>
-    private IEnumerable<DiscoveryMemberRow> QueryTokenMatch(string[] tokens, string? namespaceFilter)
+    private IReadOnlyList<(DiscoveryMemberRow Row, double Score)> QueryTokenMatch(string[] tokens, string? namespaceFilter)
+    {
+        var scored = ScoreTokenMatchCandidates(tokens, namespaceFilter);
+        if (scored.Count == 0)
+        {
+            return Array.Empty<(DiscoveryMemberRow, double)>();
+        }
+
+        // Cap AFTER scoring, so what survives is the genuine top of the ranking rather than whatever the
+        // join happened to walk first (issue #76). Sorted by score here only to pick the window; the
+        // caller's own ordering (DiscoveryService, which owns the tie-breaks) still decides final rank.
+        var window = scored
+            .OrderByDescending(c => c.Score)
+            .Take(_rankedDepth)
+            .ToList();
+
+        // Keyed on members.id, the primary key, NOT on member_id: nothing constrains member_id to be
+        // unique (two assemblies can each declare the same fully-qualified type -- an add-in bundling a
+        // copy of a core type is the realistic case), and a duplicate key here would throw out of an
+        // ordinary search query. Search's own seenMemberIds dedup still collapses such a pair afterwards;
+        // that is a pre-existing policy and deliberately left alone.
+        var scoreById = window.ToDictionary(c => c.Id, c => c.Score);
+        return MaterializeMembers(scoreById.Keys)
+            .Select(m => (Row: m.Row, Score: scoreById[m.Id]))
+            .ToList();
+    }
+
+    /// <summary>
+    /// Pass 1 of <see cref="QueryTokenMatch"/>: every matching row, scored, reading only the five columns
+    /// <see cref="IdentifierRelevance"/> and <see cref="CoreBoost"/> actually need. Deliberately unbounded
+    /// -- see <see cref="TierCandidateLimit"/> for the measurements that say this is affordable.
+    /// </summary>
+    private List<(long Id, double Score)> ScoreTokenMatchCandidates(string[] tokens, string? namespaceFilter)
     {
         using var cmd = _connection.CreateCommand();
         var hitTerms = new List<string>();
@@ -960,39 +1014,84 @@ public sealed class DiscoveryCache : IDisposable
         cmd.Parameters.AddWithValue("@ns", (object?)namespaceFilter ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@required", required);
         cmd.Parameters.AddWithValue("@all", tokens.Length);
-        // Independent PR review finding: this had NO ORDER BY at all before LIMIT, so on a broad query
-        // returning more than TierCandidateLimit rows, SQLite truncated in whatever order the query
-        // planner happened to walk the join in -- BEFORE Search() ever gets a chance to apply CoreBoost.
-        // A genuinely core-Revit match could be cut from the candidate set entirely while a third-party
-        // add-in match with the same tier score survived, defeating the whole point of CoreBoost for
-        // exactly the broad queries it exists to help most. Ordering core rows first here means a core
-        // match is never the one that gets truncated away in favor of a non-core one.
-        //
-        // Member hits lead that ordering, NOT total hits (2nd review round). Total hits is precisely the
-        // signal this feature exists to overrule -- CreatePlaceholder out-hits Create and must still lose
-        // -- so truncating by it preserves the rows the scorer will rank lowest. Member hits at least
-        // correlate with the final score, since a member-name match outweighs a type-name one there too.
-        //
-        // The LIMIT IS still reached on ordinary queries, and saying otherwise was measurably wrong (3rd
-        // review round -- an earlier version of this comment claimed the member-hit gate kept the set small
-        // enough that it was not). Measured against the real corpus: "set the parameter of an element"
-        // admits ~795 rows and "get the element type of an element" ~802, so a few hundred are dropped in
-        // SQLite's unspecified scan order, and TotalMatched reports the truncated count. Ordering by member
-        // hits is what keeps the rows most likely to score well on the surviving side of that cut; it is a
-        // damage-limiting heuristic, not a guarantee. Raising the limit for this tier is the real fix and
-        // wants its own measurement pass -- see the follow-up issue.
+        // No ORDER BY and no LIMIT, deliberately. Every previous attempt to pick survivors in SQL was
+        // picking them by a proxy for the score rather than the score, and each proxy was wrong in its own
+        // way: no ordering at all (SQLite's scan order, so CoreBoost was decided before Search ever ran);
+        // then total hits, which is precisely the signal this tier exists to OVERRULE -- CreatePlaceholder
+        // out-hits Create and must still lose, so truncating by it preserves the rows the scorer will rank
+        // lowest; then member hits, which at least correlates with the final score but still cut ties
+        // arbitrarily once the tied band alone overflowed the limit. Scoring first and cutting afterwards
+        // (see QueryTokenMatch) removes the proxy entirely.
         cmd.CommandText = $"""
-            SELECT m.kind, m.name, m.signature, m.summary, m.member_id, m.returns, m.params_json, t.namespace, t.full_name, a.kind,
-                   ({hits}) AS hits, ({memberHits}) AS member_hits
+            SELECT m.id, m.kind, m.name, t.full_name, a.kind
             FROM members m JOIN types t ON m.type_id = t.id JOIN assemblies a ON t.assembly_id = a.id
             WHERE t.documented = 1 AND (@ns IS NULL OR t.namespace = @ns)
               AND ({hits}) >= @required
               AND (({hits}) >= @all OR ({memberHits}) >= 1)
-            ORDER BY member_hits DESC, hits DESC, (a.kind != 'core')
-            LIMIT {TierCandidateLimit}
             """;
+
+        var scored = new List<(long, double)>();
         using var reader = cmd.ExecuteReader();
-        return ReadMemberRows(reader);
+        while (reader.Read())
+        {
+            var id = reader.GetInt64(0);
+            var kind = reader.GetString(1);
+            var name = reader.GetString(2);
+            var declaringType = reader.GetString(3);
+            var isCore = reader.GetString(4) == "core";
+
+            // A constructor's Name IS its declaring type's name (DiscoveryReflector sets it that way), so
+            // scoring both would count the same words twice -- once at full member weight, once at type
+            // weight -- systematically inflating every constructor whose type the query mentions. Measured
+            // on the real corpus (2nd review round): "set the parameter of an element" returned
+            // ParameterSet's and ElementSet's CONSTRUCTORS at ranks 1-2, above Parameter.Set. Scoring the
+            // type name alone is the honest reading -- a constructor contributes no name material of its
+            // own.
+            var isConstructor = string.Equals(kind, "Constructor", StringComparison.Ordinal);
+            var relevance = IdentifierRelevance.Score(
+                tokens,
+                isConstructor ? string.Empty : name,
+                ShortTypeName(declaringType));
+
+            scored.Add((id, 500 + (TierTwoBand * relevance) + CoreBoost(isCore)));
+        }
+
+        return scored;
+    }
+
+    /// <summary>
+    /// Pass 2 of <see cref="QueryTokenMatch"/>: the full row for each id that survived scoring. Split from
+    /// pass 1 so the expensive columns -- <c>signature</c>, <c>summary</c>, and <c>params_json</c>, which
+    /// <see cref="ReadMemberRows"/> deserializes per row -- are read only for rows a caller can actually
+    /// reach, rather than for every candidate the predicate admits.
+    /// </summary>
+    private List<(long Id, DiscoveryMemberRow Row)> MaterializeMembers(IEnumerable<long> ids)
+    {
+        using var cmd = _connection.CreateCommand();
+        var placeholders = new List<string>();
+        var index = 0;
+        foreach (var id in ids)
+        {
+            placeholders.Add($"@id{index}");
+            cmd.Parameters.AddWithValue($"@id{index}", id);
+            index++;
+        }
+
+        // m.id trails the ten columns ReadMemberRow reads by ordinal, so it can stay unaware of it.
+        cmd.CommandText = $"""
+            SELECT m.kind, m.name, m.signature, m.summary, m.member_id, m.returns, m.params_json, t.namespace, t.full_name, a.kind, m.id
+            FROM members m JOIN types t ON m.type_id = t.id JOIN assemblies a ON t.assembly_id = a.id
+            WHERE m.id IN ({string.Join(", ", placeholders)})
+            """;
+
+        var rows = new List<(long, DiscoveryMemberRow)>();
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            rows.Add((reader.GetInt64(10), ReadMemberRow(reader)));
+        }
+
+        return rows;
     }
 
     private IEnumerable<(DiscoveryMemberRow Row, double Rank)> QueryFts(string query, string? namespaceFilter)
@@ -1022,7 +1121,7 @@ public sealed class DiscoveryCache : IDisposable
             """;
         cmd.Parameters.AddWithValue("@match", matchExpression);
         cmd.Parameters.AddWithValue("@ns", (object?)namespaceFilter ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("@limit", TierCandidateLimit);
+        cmd.Parameters.AddWithValue("@limit", _rankedDepth);
 
         var results = new List<(DiscoveryMemberRow, double)>();
         using var reader = cmd.ExecuteReader();

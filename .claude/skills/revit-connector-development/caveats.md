@@ -60,6 +60,7 @@ reports zero.
 | Both TFM legs ran on the same runtime | `RollForward` prefers the highest major even when the requested one is present. Assert the runtime, don't assume it |
 | An opt-in test self-skips on an unset env var, so it has never once run | `return`-on-missing-config reports as **passed**, not skipped. Set the var and watch it fail before trusting it — `RealRevitApiTests` was dead from the day it was written |
 | The assertion cannot fail | Revert the fix and confirm the test fails. If it still passes, it was never coverage |
+| The fixture makes the test pass for the wrong reason | A ranking test passed under a mutation that removed the sort entirely, because SQLite's scan order happened to agree with the score order. Reversing two fixture declarations killed it. Mutating the mechanism is not enough — check the fixture actually *opposes* the mutation |
 
 ## Symptom: a live run stalls with no error
 
@@ -111,8 +112,17 @@ and belongs in git, not here.
 | A stale add-in defeating an env var fix | `prlctl exec` answering the env query as SYSTEM, not the interactive user | The add-in's own log said `Mode=Local` while the query said `remote` — two accounts, read as one |
 | Types failing to load because they were new/malformed | An orphaned DLL in Revit's install directory shadowing every redeploy | Logging loaded assemblies' `.Location` |
 | A trial-splash dialog wedging the idle loop and stalling the harness | Not that — the dialog does not block execution | Being told. The symptom fit a freshly-written rule, and the fit was taken as confirmation |
+| `search_functions` dropping answers on long natural-language queries (issue #76) | Wrong shape entirely — those admit 455-592 candidates against a 500 cap. It is SHORT queries on common words that overflow it ("id": 4,768) | Re-running the counts through the real code path instead of the review's XML-derived corpus |
 
-**The pattern across all six**: each was a *plausible* match to something already known. The cost came
-from treating "this resembles a documented failure" as a diagnosis rather than a hypothesis, and
+**The pattern across the first six**: each was a *plausible* match to something already known. The cost
+came from treating "this resembles a documented failure" as a diagnosis rather than a hypothesis, and
 skipping the check that would have separated them. When a symptom matches a known pattern, that's the
 moment to run the cheap distinguishing check — not the moment to stop checking.
+
+**The seventh is the same failure one step earlier**, and worth stating separately because it is easier
+to commit: the evidence itself was borrowed. A review had measured the ranking against a corpus rebuilt
+from `RevitAPI.xml`, which is a fine way to review a scorer and a bad way to count what a SQL predicate
+admits. Those counts were then written into a code comment and a filed issue as though they had come
+from the code, and everything downstream inherited the error. **A number describing this system's
+behaviour has to have been produced by running this system** — if it came from a model, a port, or
+another agent's harness, say so where it is recorded, or measure it again before relying on it.

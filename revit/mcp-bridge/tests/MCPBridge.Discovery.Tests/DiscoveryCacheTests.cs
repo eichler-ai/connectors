@@ -527,4 +527,74 @@ public class DiscoveryCacheTests
         Assert.InRange(placeholder.Score, 500, 999);
         Assert.NotEqual(create.Score, placeholder.Score);
     }
+
+    // ---------------------------------------------------------------------------------------------
+    // search_functions -- tier-2 candidate cap (issue #76)
+    // ---------------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// Establishes the ranking this fixture produces when nothing is capped, so the capped test below is
+    /// asserting against a measured order rather than against my arithmetic on the scorer's weights.
+    /// </summary>
+    [Fact]
+    public void Search_Uncapped_RanksTheTypeNameMatchesAboveTheLongerMemberNameMatches()
+    {
+        using var cache = NewCache();
+        cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+
+        var tierTwo = cache.Search("flange", namespaceFilter: null)
+            .Where(r => r.Score >= 500)
+            .OrderByDescending(r => r.Score)
+            .ToList();
+
+        Assert.Equal(5, tierTwo.Count);
+        Assert.All(tierTwo.Take(2), r => Assert.EndsWith("Flange", r.Member.DeclaringType, StringComparison.Ordinal));
+        Assert.All(tierTwo.Skip(2), r => Assert.EndsWith("Bracket", r.Member.DeclaringType, StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// Issue #76. The cap must fall on the scored ranking, not on an SQL-side stand-in for it.
+    ///
+    /// <para>Depth 2 against 5 candidates, on a fixture built so the two rules disagree completely (see
+    /// <see cref="Fixtures.Flange"/>): every row the OLD <c>ORDER BY member_hits DESC</c> kept is a row the
+    /// scorer ranks last, and vice versa. So this fails loudly rather than marginally if the cap ever moves
+    /// back ahead of scoring -- it does not depend on which of the two Flange members wins, only on the cut
+    /// landing between the groups.</para>
+    ///
+    /// <para>The depth override exists solely for this: the real cap is 500 and no hand-written fixture
+    /// assembly is going to produce enough members to reach it. Verified against the real 25,933-member
+    /// corpus separately (<see cref="RealRevitApiTests"/>), where the widest query found admits 4,768.</para>
+    /// </summary>
+    [Fact]
+    public void Search_CandidateCap_KeepsTheHighestScoringRowsNotTheOnesSqlWalkedFirst()
+    {
+        using var cache = new DiscoveryCache(":memory:", rankedDepth: 2);
+        cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+
+        var tierTwo = cache.Search("flange", namespaceFilter: null)
+            .Where(r => r.Score >= 500)
+            .ToList();
+
+        Assert.Equal(2, tierTwo.Count);
+        Assert.All(
+            tierTwo,
+            r => Assert.True(
+                r.Member.DeclaringType.EndsWith("Flange", StringComparison.Ordinal),
+                $"the cap kept '{r.Member.DeclaringType}.{r.Member.Name}' ({r.Score:F1}), which the scorer ranks below both Flange members"));
+    }
+
+    /// <summary>
+    /// The companion property, and the one that makes the cap a cap rather than a filter: below the depth,
+    /// nothing is dropped at all. Guards against "fixing" the truncation by tightening admission.
+    /// </summary>
+    [Fact]
+    public void Search_CandidateCap_AboveTheCandidateCount_DropsNothing()
+    {
+        using var cache = new DiscoveryCache(":memory:", rankedDepth: 50);
+        cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+
+        var tierTwo = cache.Search("flange", namespaceFilter: null).Where(r => r.Score >= 500).ToList();
+
+        Assert.Equal(5, tierTwo.Count);
+    }
 }
