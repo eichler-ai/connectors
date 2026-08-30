@@ -50,8 +50,8 @@ Status: `todo` / `in progress` / `pass` / `fail (see issue #N)`.
 | # | Task | Source | Status |
 |---|------|--------|--------|
 | 1 | Export the active view to DWG | Autodesk Revit API sample ("DWG Export") | pass |
-| 2 | Model a closed rectangular building footprint (4 walls forming a loop) and confirm they join at corners | Building Coder, "Creating a Simple House" pattern | todo |
-| 3 | Load a family from a library path and place an instance of it | Autodesk Revit API sample ("Family Placement") | todo |
+| 2 | Model a closed rectangular building footprint (4 walls forming a loop) and confirm they join at corners | Building Coder, "Creating a Simple House" pattern | pass |
+| 3 | Load a family from a library path and place an instance of it | Autodesk Revit API sample ("Family Placement") | pass |
 | 4 | Compute total wall area on a given level (aggregate across many elements, not read one parameter) | Building Coder, area-reporting pattern | todo |
 | 5 | Create a door schedule (counts by type), distinct from Phase B's wall schedule | Autodesk Revit API sample ("Schedule Creation") | todo |
 | 6 | Filter all elements of a category visible in the active view and hide them | Building Coder, "Temporary Hide/Isolate" pattern | todo |
@@ -66,11 +66,13 @@ Status: `todo` / `in progress` / `pass` / `fail (see issue #N)`.
 | 15 | Compute room areas for a level and report them (aggregate, distinct from #4's element-count style aggregate) | Building Coder, room-area-reporting pattern | todo |
 
 Fifteen cases sized to PRD §13's "15-20" floor; extend past 15 only if a gap surfaces that isn't
-already covered above. Deliberately excludes anything requiring `confirm_lifecycle_actions` (Save/
-SynchronizeWithCentral/Print) or a genuinely workshared central model -- those are real workflows but
-regression-replaying them destructively isn't worth the risk for this corpus; PRD §14's lifecycle-gate
-tests already cover that those actions are correctly gated, which is the property this corpus doesn't
-need to re-prove.
+already covered above. Deliberately excludes anything acting on a genuinely workshared central model
+(Save/SynchronizeWithCentral/Print against the corpus's own target document) -- those are real
+workflows but regression-replaying them destructively isn't worth the risk for this corpus; PRD §14's
+lifecycle-gate tests already cover that those actions are correctly gated, which is the property this
+corpus doesn't need to re-prove. `confirm_lifecycle_actions` itself is fine when the gated call is
+throwaway housekeeping the corpus created and controls entirely -- case #3 closes its own scratch
+family document this way, nothing external.
 
 ## Case notes
 
@@ -83,3 +85,27 @@ the RevitAPI corpus, never `ScriptGlobals` itself -- so a script only discovers 
 global (not `doc`, which is a fixture-local alias, not a global) via a compile error, not via search.
 See issue #84. Regression replay: `revit/test-harness/validation_corpus_test.go`,
 `TestValidationCorpus_ExportViewToDwg`.
+
+**#2 (pass).** First query (`search_functions("join walls at corner")`) found nothing usable --
+`JoinGeometryUtils`/`WallUtils` were absent from the first page, buried under
+`BuiltInParameter`/`BuiltInFailures` noise. A second, more specific query
+(`"AreElementsJoined geometry"`) found `JoinGeometryUtils.AreElementsJoined` at rank 1 -- filed as
+issue #87, a real reformulation-needed gap even though the case passed. Separately, and NOT a
+discovery-tool gap -- a genuine Revit API distinction this case's initial instinct got wrong:
+`JoinGeometryUtils.AreElementsJoined` measures solid BOOLEAN union, not the wall END-JOIN miter a
+closed footprint's corners actually need; four walls with coincident corner endpoints tested FALSE for
+it at every corner, live. `WallUtils.IsWallJoinAllowedAtEnd` is the correct check (True by default at
+every end, confirmed live). Regression replay: `TestValidationCorpus_ClosedRectangularFootprint`.
+
+**#3 (pass).** This dev machine's installed content library turned out to be a stub (446 `.rfa` files,
+mostly localized placeholder/redirect content, no real furniture families) -- discovered live via
+`Directory.GetFiles`, not assumed. Rather than depend on an optional content-library install a corpus
+case shouldn't be fragile against, this case builds and loads its own minimal Generic Model family
+instead -- still a genuine, complete exercise of `Document.LoadFamily` + `FamilySymbol` activation +
+`NewFamilyInstance`. Two real findings about this connector's ambient-transaction model colliding with
+`Document.LoadFamily` specifically (not generic Revit API behavior), both now documented in
+`caveats.md`'s new "must not be modifiable" section: the call's source document needs its managed
+transaction already closed (a second `execute_script` call, same shape as `OpenForWriting`'s own
+two-call precedent), and separately, the TARGET document must also have no open transaction at the
+moment of the call -- `OpenForWriting(doc)` has to come AFTER `LoadFamily`, not before. Regression
+replay: `TestValidationCorpus_LoadFamilyAndPlaceInstance`.

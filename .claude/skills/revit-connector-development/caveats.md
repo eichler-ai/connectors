@@ -51,6 +51,24 @@ reports zero.
 | A modal dialog has stopped the idle loop | Screenshot. `list_instances` still answers, `execute_script` doesn't |
 | Genuinely long work | Revit slows as a session accumulates documents; creating documents is slow |
 
+## Symptom: a script throws "The document must not be modifiable" (or similar) calling a Document-level API
+
+Some Revit API calls that take a `Document` argument — `Document.LoadFamily(Document)` is the one found
+live, building the validation corpus's family-placement case — internally manage their own transaction
+on **both** the document the call is on and the document passed as an argument, and refuse to run if
+either already has one open. This connector's ambient-transaction model (`OpenForWriting`,
+`CreateProjectDocument`/`CreateFamilyDocument`) keeps a document's transaction open for the rest of the
+`execute_script` call that touched it, which collides with exactly this.
+
+| Cause | Definitive check |
+|---|---|
+| The call's own document was created earlier in the SAME script call, so its managed transaction is still open | Split into two calls: create/edit in one, let it return (commits the transaction), call the API from a separate call that finds the document fresh |
+| `OpenForWriting` was called on the TARGET document before the API call, not after | Reorder: make the call first, `OpenForWriting` afterward, if the call's own result is what you need to keep editing |
+
+Not specific to `LoadFamily` — treat this as the general shape for any Document-argument API that
+throws a transaction/modifiability error, and check both documents' transaction state before assuming
+the API itself is broken.
+
 ## Symptom: tests are green but prove nothing
 
 | Cause | Definitive check |
