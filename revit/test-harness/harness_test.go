@@ -771,7 +771,7 @@ return app.NewProjectDocument(app.DefaultProjectTemplate).Title;
 		// could not tell one from several -- the exact distinction this subtest
 		// exists to make, and a live one: this case's own document is closed by a
 		// registered t.Cleanup at the end of THIS subtest (see the SESSION HYGIENE
-		// note above TestCreatedDocumentIsWritable), but a stray survivor from an
+		// note above this test function), but a stray survivor from an
 		// earlier failed/interrupted run in the same Revit session -- or another
 		// subtest's own same-titled document, if titles were ever reused -- is a
 		// real possibility this assertion is written to catch, not a hypothetical.
@@ -1139,11 +1139,12 @@ return a.Title + "|" + b.Title;
 		// Scoped to the two documents by title rather than scanning every open one.
 		// Both documents ARE closed by the t.Cleanup calls just above once this
 		// subtest ends -- but a live Revit session this suite runs against
-		// routinely accumulates OTHER documents regardless (this project's own
-		// dev loop re-runs the suite repeatedly against one long-lived instance;
-		// other subtests' own in-flight documents may also still be open at the
-		// moment this particular script runs). An all-documents scan grows with
-		// however many happen to be open right now until it blows the harness's
+		// routinely accumulates OTHER documents regardless: this project's own
+		// dev loop re-runs the suite repeatedly against one long-lived instance,
+		// so a stray survivor from an earlier run's failed/interrupted cleanup is
+		// real, and so is whatever the OPERATOR happens to have open in that same
+		// interactive session. An all-documents scan grows with however many
+		// happen to be open right now until it blows the harness's
 		// tool deadline (45s, see callExecuteScriptWith) -- which then leaves the
 		// instance busy and fails every later subtest for an unrelated reason.
 		// Observed live at the older, shorter deadline; keep queries scoped.

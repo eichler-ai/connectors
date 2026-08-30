@@ -9,6 +9,11 @@
 # live Revit + broker stack no CI runner has, so CI only type-checks them, and so does this script.
 # This is not a substitute for live verification before a PR that touches the Revit seam --
 # CONTRIBUTING.md's own PR expectations still apply on top of this passing.
+#
+# One unmodelled difference from real CI, worth knowing rather than fixing: ci.yml pins the Go
+# toolchain via actions/setup-go's go-version-file (each module's own go.mod); this script uses
+# whatever `go` is already on PATH. A local Go version drifted far enough from what CI actually
+# runs is the one way this script's "PASS" and CI's own result could still disagree.
 
 set -uo pipefail
 

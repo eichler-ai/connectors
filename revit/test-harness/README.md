@@ -97,8 +97,9 @@ Revit session — confirmed live, `751.3s` for a full run. `TestApplicationCreat
 respectively): both are dominated by genuine Revit document create/write/close latency (15-30s+ per
 document is normal), not artificial waiting -- there's nothing to trim there without weakening what
 they verify (behavior *at document-creation time itself*: ambient transaction boundaries,
-writability, rollback). Investigated live rather than assumed; see the `revit-connector-development`
-skill's changelog for the methodology.
+writability, rollback). Investigated live rather than assumed: only three 500ms polling sleeps exist
+in the whole harness, and timeout constants are budget ceilings rather than sources of delay --
+confirmed by re-running the full suite with a longer `-timeout` and comparing per-test durations.
 
 For a quick local sanity check while iterating -- NOT a substitute for the full suite before a PR
 that touches document lifecycle/transaction code -- skip those two:
