@@ -143,21 +143,62 @@ public sealed class DiscoveryService
     // describe_function
     // -------------------------------------------------------------------------------------------------
 
-    public DescribeFunctionResult DescribeFunction(string member, int? overloadIndex, string? memberId)
+    /// <summary>
+    /// PRD §08 disambiguation contract. DECISION (issue #64): <c>overload_index</c> is gone -- it indexed an
+    /// ordinal signature sort unrelated to search_functions' relevance ranking, so an agent that trusted
+    /// search's own ordering could silently get the wrong overload. <c>member_id</c> is the only remaining
+    /// disambiguator, and it is a reliable one: taken alone, it resolves a specific overload deterministically,
+    /// with <paramref name="member"/> entirely optional in that case -- see <see cref="ParseMemberId"/> for how
+    /// the type/member scope is derived from it.
+    /// <para>
+    /// <paramref name="member"/> alone (member_id absent) returns the ambiguous-overload list (<see
+    /// cref="DescribeFunctionResult.Overloads"/>) whenever more than one candidate matches -- this is the sole
+    /// remaining disambiguation mechanism, and every entry it returns carries its own member_id for a
+    /// follow-up call.
+    /// </para>
+    /// <para>
+    /// When BOTH are given, this method deliberately performs NO cross-check that they agree -- that is not an
+    /// oversight. For an INHERITED member, <paramref name="member"/> names the type the caller actually
+    /// queried (e.g. <c>Autodesk.Revit.DB.Wall.Dispose</c>) while <paramref name="memberId"/> names the type
+    /// that DECLARES the member (e.g. <c>M:Autodesk.Revit.DB.Element.Dispose</c>) -- both legitimately describe
+    /// the same resolved member, because candidates come from
+    /// <see cref="DiscoveryCache.GetMembersIncludingInheritedByFullName"/>'s inherited-member union, not from
+    /// an exact declaring-type match. Adding a "do these agree" check would break that legitimate case. A
+    /// genuine mismatch is already loud without one: if member_id names something that isn't among member's
+    /// own candidates, resolution falls straight through to <see cref="DiscoveryMemberNotFoundException"/>
+    /// below -- there is no silent-retargeting hole here to close.
+    /// </para>
+    /// </summary>
+    public DescribeFunctionResult DescribeFunction(string? member, string? memberId)
     {
-        var lastDot = member.LastIndexOf('.');
-        if (lastDot <= 0 || lastDot == member.Length - 1)
-        {
-            throw new DiscoveryMemberNotFoundException(
-                $"'{member}' is not a valid dotted Namespace.Type.MemberName member reference.");
-        }
+        string typeName;
+        string memberName;
 
-        var typeName = member[..lastDot];
-        var memberName = member[(lastDot + 1)..];
+        if (!string.IsNullOrEmpty(member))
+        {
+            var lastDot = member.LastIndexOf('.');
+            if (lastDot <= 0 || lastDot == member.Length - 1)
+            {
+                throw new DiscoveryMemberNotFoundException(
+                    $"'{member}' is not a valid dotted Namespace.Type.MemberName member reference.");
+            }
+
+            typeName = member[..lastDot];
+            memberName = member[(lastDot + 1)..];
+        }
+        else if (!string.IsNullOrEmpty(memberId))
+        {
+            (typeName, memberName) = ParseMemberId(memberId);
+        }
+        else
+        {
+            throw new JsonRpcParamException(
+                "params.member and params.member_id are both missing -- at least one is required to identify the member to describe.");
+        }
 
         if (!_cache.TypeExistsByFullName(typeName))
         {
-            throw new DiscoveryMemberNotFoundException($"no type '{typeName}' found (from member reference '{member}').");
+            throw new DiscoveryMemberNotFoundException($"no type '{typeName}' found (from member reference '{member ?? memberId}').");
         }
 
         var allMembers = _cache.GetMembersIncludingInheritedByFullName(typeName);
@@ -170,11 +211,6 @@ public sealed class DiscoveryService
             throw new DiscoveryMemberNotFoundException($"no public member named '{memberName}' found on type '{typeName}'.");
         }
 
-        if (!string.IsNullOrEmpty(memberId) && overloadIndex is not null)
-        {
-            throw new JsonRpcParamException("params.member_id and params.overload_index are mutually exclusive -- pick one way to disambiguate, not both.");
-        }
-
         DiscoveryMemberRow? resolved;
 
         if (!string.IsNullOrEmpty(memberId))
@@ -184,17 +220,6 @@ public sealed class DiscoveryService
             {
                 throw new DiscoveryMemberNotFoundException($"member_id '{memberId}' does not resolve to any overload of '{memberName}' on type '{typeName}'.");
             }
-        }
-        else if (overloadIndex is { } idx)
-        {
-            var ordered = candidates.OrderBy(m => m.Signature, StringComparer.Ordinal).ToList();
-            if (idx < 0 || idx >= ordered.Count)
-            {
-                throw new DiscoveryMemberNotFoundException(
-                    $"overload_index {idx} is out of range for '{member}' (has {ordered.Count} overload(s)).");
-            }
-
-            resolved = ordered[idx];
         }
         else if (candidates.Count == 1)
         {
@@ -207,7 +232,9 @@ public sealed class DiscoveryService
                 .Select(m => new DescribeOverloadEntry { MemberId = m.MemberId, Signature = m.Signature })
                 .ToList();
 
-            return DescribeFunctionResult.FromOverloads(new DescribeFunctionOverloadList { Member = member, Overloads = overloads });
+            // member is non-null here: this branch is only reachable with memberId empty (a non-empty one
+            // either resolves or throws above), and an empty member with an empty memberId threw earlier.
+            return DescribeFunctionResult.FromOverloads(new DescribeFunctionOverloadList { Member = member!, Overloads = overloads });
         }
 
         var resolvedRow = resolved!;
@@ -230,6 +257,52 @@ public sealed class DiscoveryService
         };
 
         return DescribeFunctionResult.FromSingle(single);
+    }
+
+    /// <summary>
+    /// Derives (typeName, memberName) from a member_id alone, for the member-optional path (issue #64).
+    /// XML-doc ids look like <c>M:Namespace.Type.Member</c>, <c>M:Namespace.Type.#ctor</c>,
+    /// <c>P:Namespace.Type.Member</c>, or with a parameter-list suffix, <c>M:Namespace.Type.Member(ParamType)</c>
+    /// (see <see cref="XmlDocId"/> for the id format this must invert). The parameter list is stripped from
+    /// the FIRST '(' onward -- XML-doc ids use '{}' for generic arguments, never '()', so '(' is an
+    /// unambiguous boundary here -- then the remainder is split on the LAST '.' into type and member.
+    /// </summary>
+    private static (string TypeName, string MemberName) ParseMemberId(string memberId)
+    {
+        var body = memberId;
+        if (body.Length >= 2 && char.IsLetter(body[0]) && body[1] == ':')
+        {
+            body = body[2..];
+        }
+
+        var parenIndex = body.IndexOf('(');
+        if (parenIndex >= 0)
+        {
+            body = body[..parenIndex];
+        }
+
+        var lastDot = body.LastIndexOf('.');
+        if (lastDot <= 0 || lastDot == body.Length - 1)
+        {
+            throw new DiscoveryMemberNotFoundException(
+                $"member_id '{memberId}' is not a resolvable XML-doc id -- expected a shape like 'M:Namespace.Type.Member' or 'P:Namespace.Type.Member', optionally with a parameter-list suffix.");
+        }
+
+        var memberName = body[(lastDot + 1)..];
+
+        // A GENERIC METHOD's id carries a "``N" arity suffix (XmlDocId appends it), but the reflected
+        // member's Name never does -- so "Get``1" would match no candidate and member_id-only resolution
+        // would fail for every generic method. Strip it. Note this is the double-backtick METHOD arity;
+        // TypeNameFormatting.StripArity handles the single-backtick TYPE arity and would leave a stray
+        // backtick here, so it is deliberately not reused. The declaring-type half keeps its own single
+        // backtick arity ("List`1"), which is exactly what the reflector stores as FullName.
+        var methodArity = memberName.IndexOf("``", StringComparison.Ordinal);
+        if (methodArity > 0)
+        {
+            memberName = memberName[..methodArity];
+        }
+
+        return (body[..lastDot], memberName);
     }
 
     // -------------------------------------------------------------------------------------------------

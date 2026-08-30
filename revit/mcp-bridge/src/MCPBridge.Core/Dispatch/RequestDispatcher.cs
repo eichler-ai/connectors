@@ -716,11 +716,17 @@ public sealed class RequestDispatcher
 
         try
         {
-            var member = request.GetRequiredString("member");
-            var overloadIndex = request.GetOptionalInt32("overload_index", int.MinValue);
+            // member is optional when member_id is supplied (issue #64) -- member_id alone is a reliable
+            // disambiguator (see DiscoveryService.DescribeFunction's own doc comment for the full contract),
+            // so at least one of the two, not necessarily member, is required here.
+            var member = request.GetOptionalString("member");
             var memberId = request.GetOptionalString("member_id");
+            if (string.IsNullOrEmpty(member) && string.IsNullOrEmpty(memberId))
+            {
+                throw new JsonRpcParamException("params.member and params.member_id are both missing -- at least one is required.");
+            }
 
-            var result = _discoveryService.DescribeFunction(member, overloadIndex == int.MinValue ? null : overloadIndex, memberId);
+            var result = _discoveryService.DescribeFunction(member, memberId);
             return DiscoveryResultMessage.DescribeFunction(request.Id, result);
         }
         catch (JsonRpcParamException ex)
@@ -734,7 +740,11 @@ public sealed class RequestDispatcher
                 "discovery-member-not-found",
                 DiagnosticSource.Discovery,
                 ex.Message,
-                detail: new Dictionary<string, object?> { ["member"] = request.GetOptionalString("member") },
+                detail: new Dictionary<string, object?>
+                {
+                    ["member"] = request.GetOptionalString("member"),
+                    ["member_id"] = request.GetOptionalString("member_id"),
+                },
                 remedy: new[] { "Use list_functions or search_functions to find the correct namespace/type/member name." });
             return JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InvalidParams, ex.Message, diagnostic);
         }

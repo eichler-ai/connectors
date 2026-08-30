@@ -260,16 +260,16 @@ Don't know the path yet? Run `return ImportsDirectory;` first, then write your f
 ## Discovering the API
 
 Reflect over Revit's real installed assemblies rather than guessing names. What you find here is
-directly callable from a script against the `Document` global — use it to look up exact signatures
-and overloads before writing one, which is far cheaper than a round trip through a `CS1503`.
+directly callable from a script against the `Document` global — look up exact signatures and
+overloads before writing one, cheaper than a round trip through a `CS1503`.
 
 - **`search_functions`** — start here when you know *what* you want, not the name.
   `{"query": "create wall"}` → ranked matches with summaries.
 - **`list_functions`** — drill down. Omit `namespace` for the namespace list; pass `namespace` for its
   types; pass `namespace` + `type_name` for that type's members.
 - **`describe_function`** — full signature, parameters and docs for one member.
-  `{"member": "Autodesk.Revit.DB.Wall.Create"}`. If the member is overloaded you get the overload
-  list back instead — re-call with a `member_id` from it.
+  `{"member": "Autodesk.Revit.DB.Wall.Create"}`. Overloaded? You get an overload list back —
+  re-call with just its `member_id` (or one from `search_functions`) to disambiguate.
 
 `list_functions` and `search_functions` both paginate: pass the `cursor` from the previous response.
 

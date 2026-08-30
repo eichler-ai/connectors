@@ -100,7 +100,7 @@ public sealed class JsonRpcRequest
         };
     }
 
-    /// <summary>Reads an optional 32-bit numeric param (PRD §08's page_size/top_n/overload_index), returning <paramref name="defaultValue"/> if absent/null. Throws if present with a non-numeric shape.</summary>
+    /// <summary>Reads an optional 32-bit numeric param (PRD §08's page_size/top_n), returning <paramref name="defaultValue"/> if absent/null. Throws if present with a non-numeric shape.</summary>
     public int GetOptionalInt32(string name, int defaultValue) => (int)GetOptionalInt64(name, defaultValue);
 
     /// <summary>Reads an optional boolean param (PRD §09's overwrite_output_files), returning <paramref name="defaultValue"/> if absent/null. Throws if present with a non-boolean shape.</summary>

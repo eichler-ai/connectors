@@ -164,6 +164,56 @@ public class DiscoveryDispatchTests
     }
 
     [Fact]
+    public async Task DescribeFunction_MemberIdOnly_ReturnsFullDocShape()
+    {
+        // member is optional when member_id is supplied (issue #64) -- resolve Sample.DoThing purely by
+        // its member_id, with no "member" param at all.
+        var dispatcher = NewDispatcher();
+        var describeByMember = Parse(new
+        {
+            jsonrpc = "2.0",
+            id = 9,
+            method = "describe_function",
+            @params = new { instance_id = "inst-1", member = "MCPBridge.Core.Tests.Dispatch.DiscoveryDispatchTests.Sample.DoThing" },
+        });
+        var byMemberJson = await dispatcher.DispatchAsync(describeByMember);
+        using var byMemberDoc = JsonDocument.Parse(byMemberJson);
+        var memberId = byMemberDoc.RootElement.GetProperty("result").GetProperty("member_id").GetString();
+
+        var describeByMemberId = Parse(new
+        {
+            jsonrpc = "2.0",
+            id = 10,
+            method = "describe_function",
+            @params = new { instance_id = "inst-1", member_id = memberId },
+        });
+        var json = await dispatcher.DispatchAsync(describeByMemberId);
+
+        Assert.Contains("\"overload_count\":1", json);
+        Assert.Contains("\"parameters\":[]", json);
+    }
+
+    [Fact]
+    public async Task DescribeFunction_NeitherMemberNorMemberId_ReturnsInvalidParamsError()
+    {
+        var dispatcher = NewDispatcher();
+        var request = Parse(new
+        {
+            jsonrpc = "2.0",
+            id = 11,
+            method = "describe_function",
+            @params = new { instance_id = "inst-1" },
+        });
+
+        var json = await dispatcher.DispatchAsync(request);
+
+        Assert.Contains("\"error\":", json);
+        Assert.Contains("-32602", json); // InvalidParams
+        Assert.Contains("params.member", json);
+        Assert.Contains("params.member_id", json);
+    }
+
+    [Fact]
     public async Task ListFunctions_InvalidCursor_ReturnsInvalidParamsError()
     {
         var dispatcher = NewDispatcher();

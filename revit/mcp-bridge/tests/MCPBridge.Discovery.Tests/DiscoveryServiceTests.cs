@@ -165,7 +165,7 @@ public class DiscoveryServiceTests
         Assert.Equal(0, byType.TotalScoped);
 
         Assert.Throws<DiscoveryMemberNotFoundException>(() =>
-            service.DescribeFunction(nestedFullName + ".NestedPublicWork", null, null));
+            service.DescribeFunction(nestedFullName + ".NestedPublicWork", null));
     }
 
     [Fact]
@@ -184,7 +184,7 @@ public class DiscoveryServiceTests
         var byType = service.ListFunctions(FixturesNamespace, undocumented, null, pageSize: 100);
         Assert.Contains("UndocumentedWork", byType.Names);
 
-        var described = service.DescribeFunction(undocumentedFullName + ".UndocumentedWork", null, null);
+        var described = service.DescribeFunction(undocumentedFullName + ".UndocumentedWork", null);
         Assert.NotNull(described.Single);
         Assert.Equal("UndocumentedWork", described.Single!.Name);
     }
@@ -286,7 +286,7 @@ public class DiscoveryServiceTests
     {
         var service = NewService();
 
-        var result = service.DescribeFunction("MCPBridge.Discovery.Tests.Fixtures.Gadget.Run", overloadIndex: null, memberId: null);
+        var result = service.DescribeFunction("MCPBridge.Discovery.Tests.Fixtures.Gadget.Run", memberId: null);
 
         Assert.NotNull(result.Single);
         Assert.Null(result.Overloads);
@@ -298,9 +298,11 @@ public class DiscoveryServiceTests
     [Fact]
     public void DescribeFunction_MultipleOverloads_NoDisambiguation_ReturnsCompactList()
     {
+        // Ambiguous member, neither disambiguator supplied -- the overloads[] list is now the SOLE
+        // disambiguation mechanism (overload_index removed, issue #64).
         var service = NewService();
 
-        var result = service.DescribeFunction("MCPBridge.Discovery.Tests.Fixtures.Widget.Describe", overloadIndex: null, memberId: null);
+        var result = service.DescribeFunction("MCPBridge.Discovery.Tests.Fixtures.Widget.Describe", memberId: null);
 
         Assert.Null(result.Single);
         Assert.NotNull(result.Overloads);
@@ -310,34 +312,152 @@ public class DiscoveryServiceTests
     }
 
     [Fact]
-    public void DescribeFunction_DisambiguatedByOverloadIndex_ReturnsFullDocShape()
+    public void DescribeFunction_MemberIdOnly_ResolvesMethodOverload_MatchesMemberPlusMemberIdResult()
     {
+        // member_id alone (M: prefix, method) resolves exactly the overload it names, with no "member" at
+        // all -- must match the result of passing member+member_id together for the same member_id.
         var service = NewService();
+        const string fullName = FixturesNamespace + ".Widget.Describe";
 
-        var result = service.DescribeFunction("MCPBridge.Discovery.Tests.Fixtures.Widget.Describe", overloadIndex: 0, memberId: null);
+        var overloads = service.DescribeFunction(fullName, memberId: null).Overloads!.Overloads;
+        var target = overloads[0];
+        Assert.StartsWith("M:", target.MemberId);
 
-        Assert.NotNull(result.Single);
-        Assert.Equal(2, result.Single!.OverloadCount);
+        var byMemberAndId = service.DescribeFunction(fullName, memberId: target.MemberId);
+        var byIdOnly = service.DescribeFunction(member: null, memberId: target.MemberId);
+
+        Assert.NotNull(byIdOnly.Single);
+        Assert.Equal(byMemberAndId.Single!.MemberId, byIdOnly.Single!.MemberId);
+        Assert.Equal(byMemberAndId.Single.Signature, byIdOnly.Single.Signature);
     }
 
     [Fact]
-    public void DescribeFunction_DisambiguatedByMemberId_MatchesOverloadIndexResolution()
+    public void DescribeFunction_MemberIdOnly_ResolvesProperty()
+    {
+        // member_id alone (P: prefix) -- Widget.Id has no overloads, so the member-based lookup itself
+        // already returns Single; this just confirms the same member_id resolves with member entirely
+        // absent.
+        var service = NewService();
+
+        var byMember = service.DescribeFunction(FixturesNamespace + ".Widget.Id", memberId: null);
+        Assert.NotNull(byMember.Single);
+        var propertyMemberId = byMember.Single!.MemberId;
+        Assert.StartsWith("P:", propertyMemberId);
+
+        var byIdOnly = service.DescribeFunction(member: null, memberId: propertyMemberId);
+
+        Assert.NotNull(byIdOnly.Single);
+        Assert.Equal("Id", byIdOnly.Single!.Name);
+        Assert.Equal("Property", byIdOnly.Single.Kind);
+    }
+
+    [Fact]
+    public void DescribeFunction_MemberIdOnly_ResolvesConstructor()
+    {
+        // member_id alone, a "#ctor" member_id -- exercises isCtorRequest's memberName match, derived
+        // purely from the member_id (ParseMemberId), with member entirely absent.
+        var service = NewService();
+        const string fullName = FixturesNamespace + ".Widget.ctor";
+
+        var overloads = service.DescribeFunction(fullName, memberId: null).Overloads!.Overloads;
+        var target = overloads[0];
+        Assert.Contains("#ctor", target.MemberId);
+
+        var byIdOnly = service.DescribeFunction(member: null, memberId: target.MemberId);
+
+        Assert.NotNull(byIdOnly.Single);
+        Assert.Equal("Constructor", byIdOnly.Single!.Kind);
+    }
+
+    [Fact]
+    public void DescribeFunction_MemberIdOnly_ResolvesGenericMethod()
+    {
+        // A generic method's member_id carries a "``N" arity suffix that the reflected member's Name
+        // does not have, so member_id-only resolution must strip it -- otherwise no candidate matches and
+        // every generic method is unreachable by member_id alone. GenericHolder.Read has a generic and a
+        // non-generic member sharing the arity-stripped name, so the member_id has to pick between them.
+        var service = NewService();
+        const string fullName = FixturesNamespace + ".GenericHolder.Read";
+
+        var overloads = service.DescribeFunction(fullName, memberId: null).Overloads!.Overloads;
+        var generic = overloads.Single(o => o.MemberId.Contains("``1"));
+        var nonGeneric = overloads.Single(o => !o.MemberId.Contains("``1"));
+
+        var byGenericId = service.DescribeFunction(member: null, memberId: generic.MemberId);
+        var byNonGenericId = service.DescribeFunction(member: null, memberId: nonGeneric.MemberId);
+
+        Assert.NotNull(byGenericId.Single);
+        Assert.Equal(generic.MemberId, byGenericId.Single!.MemberId);
+        Assert.Equal("Read", byGenericId.Single.Name);
+
+        // The member_id selects a specific one of the two, rather than always yielding the same member.
+        Assert.NotNull(byNonGenericId.Single);
+        Assert.Equal(nonGeneric.MemberId, byNonGenericId.Single!.MemberId);
+        Assert.NotEqual(byGenericId.Single.MemberId, byNonGenericId.Single.MemberId);
+    }
+
+    [Fact]
+    public void DescribeFunction_InheritedMember_MemberAndMemberIdNameDifferentTypes_StillResolves()
+    {
+        // Pins the deliberate absence of a member/member_id cross-check (issue #64). Bolt inherits
+        // Tighten from Fastener without overriding it, so the two arguments legitimately name DIFFERENT
+        // types: member is the type the caller queried, member_id the type that DECLARES the member. A
+        // "do these agree" check would reject this, which is why DescribeFunction deliberately has none.
+        var service = NewService();
+
+        var byDeclaringType = service.DescribeFunction(FixturesNamespace + ".Fastener.Tighten", memberId: null);
+        var declaredMemberId = byDeclaringType.Single!.MemberId;
+        Assert.Contains(".Fastener.Tighten", declaredMemberId);
+
+        // The queried type (Bolt) disagrees with the declaring type named in the member_id (Fastener).
+        var viaDerivedType = service.DescribeFunction(FixturesNamespace + ".Bolt.Tighten", memberId: declaredMemberId);
+
+        Assert.NotNull(viaDerivedType.Single);
+        Assert.Equal(declaredMemberId, viaDerivedType.Single!.MemberId);
+        Assert.Equal("Tighten", viaDerivedType.Single.Name);
+    }
+
+    [Fact]
+    public void DescribeFunction_MemberIdOnly_Malformed_ThrowsNotFound()
+    {
+        // No resolvable "Type.Member" shape once the (absent) kind prefix and (absent) parameter list are
+        // stripped -- no '.' left to split on.
+        var service = NewService();
+
+        Assert.Throws<DiscoveryMemberNotFoundException>(() =>
+            service.DescribeFunction(member: null, memberId: "not-a-valid-member-id"));
+    }
+
+    [Fact]
+    public void DescribeFunction_MemberIdOnly_UnknownType_ThrowsNotFound()
     {
         var service = NewService();
 
-        var byIndex = service.DescribeFunction("MCPBridge.Discovery.Tests.Fixtures.Widget.Describe", overloadIndex: 1, memberId: null);
-        var byId = service.DescribeFunction("MCPBridge.Discovery.Tests.Fixtures.Widget.Describe", overloadIndex: null, memberId: byIndex.Single!.MemberId);
+        Assert.Throws<DiscoveryMemberNotFoundException>(() =>
+            service.DescribeFunction(member: null, memberId: "M:" + FixturesNamespace + ".NoSuchType.Foo"));
+    }
 
-        Assert.Equal(byIndex.Single.MemberId, byId.Single!.MemberId);
-        Assert.Equal(byIndex.Single.Signature, byId.Single.Signature);
+    [Fact]
+    public void DescribeFunction_MemberIdOnly_DoesNotMatchAnyCandidate_ThrowsNotFound()
+    {
+        // The type and member name both resolve (Widget.Describe exists), but no candidate's own
+        // member_id equals this exact string (wrong parameter list) -- the member_id-era equivalent of the
+        // old out-of-range overload_index case.
+        var service = NewService();
+
+        Assert.Throws<DiscoveryMemberNotFoundException>(() =>
+            service.DescribeFunction(member: null, memberId: "M:" + FixturesNamespace + ".Widget.Describe(System.String)"));
     }
 
     [Fact]
     public void DescribeFunction_ParameterDescriptionsJoinedFromXmlDoc()
     {
         var service = NewService();
+        const string fullName = FixturesNamespace + ".Widget.Describe";
 
-        var result = service.DescribeFunction("MCPBridge.Discovery.Tests.Fixtures.Widget.Describe", overloadIndex: 1, memberId: null);
+        var overloads = service.DescribeFunction(fullName, memberId: null).Overloads!.Overloads;
+        var withParam = overloads.First(o => o.MemberId.Contains('('));
+        var result = service.DescribeFunction(fullName, memberId: withParam.MemberId);
 
         var param = Assert.Single(result.Single!.Parameters);
         Assert.Equal("detailLevel", param.Name);
@@ -350,7 +470,7 @@ public class DiscoveryServiceTests
         var service = NewService();
 
         Assert.Throws<DiscoveryMemberNotFoundException>(() =>
-            service.DescribeFunction("MCPBridge.Discovery.Tests.Fixtures.Widget.NoSuchMethod", null, null));
+            service.DescribeFunction("MCPBridge.Discovery.Tests.Fixtures.Widget.NoSuchMethod", null));
     }
 
     [Fact]
@@ -359,16 +479,16 @@ public class DiscoveryServiceTests
         var service = NewService();
 
         Assert.Throws<DiscoveryMemberNotFoundException>(() =>
-            service.DescribeFunction("MCPBridge.Discovery.Tests.Fixtures.NoSuchType.Foo", null, null));
+            service.DescribeFunction("MCPBridge.Discovery.Tests.Fixtures.NoSuchType.Foo", null));
     }
 
     [Fact]
-    public void DescribeFunction_OutOfRangeOverloadIndex_ThrowsNotFound()
+    public void DescribeFunction_NeitherMemberNorMemberId_ThrowsJsonRpcParamException()
     {
         var service = NewService();
 
-        Assert.Throws<DiscoveryMemberNotFoundException>(() =>
-            service.DescribeFunction("MCPBridge.Discovery.Tests.Fixtures.Widget.Describe", overloadIndex: 99, memberId: null));
+        Assert.Throws<JsonRpcParamException>(() =>
+            service.DescribeFunction(member: null, memberId: null));
     }
 
     [Fact]
@@ -376,7 +496,7 @@ public class DiscoveryServiceTests
     {
         var service = NewService();
 
-        var result = service.DescribeFunction("MCPBridge.Discovery.Tests.Fixtures.Widget.ctor", overloadIndex: null, memberId: null);
+        var result = service.DescribeFunction("MCPBridge.Discovery.Tests.Fixtures.Widget.ctor", memberId: null);
 
         // Widget has two constructors -> ambiguous without disambiguation.
         Assert.NotNull(result.Overloads);

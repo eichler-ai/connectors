@@ -385,6 +385,127 @@ func TestDiscoveryToolsMalformedWireResponseIsToolError(t *testing.T) {
 	}
 }
 
+func TestDescribeFunctionToolNeitherMemberNorMemberIDIsToolError(t *testing.T) {
+	r := discovery.NewRouter(registry.New())
+	cs := connectDiscoveryClient(t, r)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	res, err := cs.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "describe_function",
+		Arguments: map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !res.IsError {
+		t.Fatalf("expected IsError=true when neither member nor member_id is given")
+	}
+	text, ok := res.Content[0].(*mcp.TextContent)
+	if !ok {
+		t.Fatalf("expected TextContent, got %T", res.Content[0])
+	}
+	var out DescribeFunctionOut
+	if err := json.Unmarshal([]byte(text.Text), &out); err != nil {
+		t.Fatalf("decoding error content: %v", err)
+	}
+	if out.Error == nil || out.Error.Code != "missing-required-param" {
+		t.Errorf("out.Error = %+v, want missing-required-param", out.Error)
+	}
+}
+
+func TestDescribeFunctionToolMemberIDOnlyIsAcceptedAndForwarded(t *testing.T) {
+	r := discovery.NewRouter(registry.New())
+	var gotParams map[string]any
+	attachFakeDiscoveryInstance(t, r, "inst-1", func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
+		if method != "describe_function" {
+			t.Errorf("method = %q, want describe_function", method)
+		}
+		if err := json.Unmarshal(params, &gotParams); err != nil {
+			t.Fatalf("unmarshalling forwarded params: %v", err)
+		}
+		return map[string]any{
+			"member_id":      "M:Autodesk.Revit.DB.Document.Delete(Autodesk.Revit.DB.ElementId)",
+			"kind":           "Method",
+			"name":           "Delete",
+			"signature":      "ICollection<ElementId> Delete(ElementId elementId)",
+			"overload_count": 3,
+		}, nil
+	})
+	cs := connectDiscoveryClient(t, r)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	res, err := cs.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "describe_function",
+		Arguments: map[string]any{"member_id": "M:Autodesk.Revit.DB.Document.Delete(Autodesk.Revit.DB.ElementId)"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected tool error: %+v", res.Content)
+	}
+	if _, hasMember := gotParams["member"]; hasMember {
+		t.Errorf("forwarded params should omit member when empty, got %+v", gotParams)
+	}
+	if gotParams["member_id"] != "M:Autodesk.Revit.DB.Document.Delete(Autodesk.Revit.DB.ElementId)" {
+		t.Errorf("forwarded params[member_id] = %v, want the given member_id", gotParams["member_id"])
+	}
+	var out DescribeFunctionOut
+	sc, _ := json.Marshal(res.StructuredContent)
+	json.Unmarshal(sc, &out)
+	if out.Result["name"] != "Delete" {
+		t.Errorf("out.Result = %+v", out.Result)
+	}
+}
+
+func TestDescribeFunctionInputSchemaMemberOptionalAndNoOverloadIndex(t *testing.T) {
+	r := discovery.NewRouter(registry.New())
+	cs := connectDiscoveryClient(t, r)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	list, err := cs.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatalf("ListTools: %v", err)
+	}
+	var schema map[string]any
+	for _, tool := range list.Tools {
+		if tool.Name == "describe_function" {
+			b, _ := json.Marshal(tool.InputSchema)
+			if err := json.Unmarshal(b, &schema); err != nil {
+				t.Fatalf("decoding describe_function InputSchema: %v", err)
+			}
+		}
+	}
+	if schema == nil {
+		t.Fatalf("describe_function tool not found")
+	}
+
+	if required, ok := schema["required"].([]any); ok {
+		for _, r := range required {
+			if r == "member" {
+				t.Errorf("member should no longer be required, schema required = %+v", required)
+			}
+		}
+	}
+
+	props, ok := schema["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("schema properties = %+v, want a map", schema["properties"])
+	}
+	if _, ok := props["overload_index"]; ok {
+		t.Errorf("overload_index should be removed from the schema, got properties = %+v", props)
+	}
+	if _, ok := props["member_id"]; !ok {
+		t.Errorf("member_id should still be present in the schema, got properties = %+v", props)
+	}
+	if _, ok := props["member"]; !ok {
+		t.Errorf("member should still be present in the schema (just optional), got properties = %+v", props)
+	}
+}
+
 func TestDiscoveryToolsAreRegisteredWithExpectedNames(t *testing.T) {
 	r := discovery.NewRouter(registry.New())
 	cs := connectDiscoveryClient(t, r)

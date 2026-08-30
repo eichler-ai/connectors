@@ -66,9 +66,11 @@ carries the `revit_version` that answered.
 - `search_functions(query, namespace?, cursor?, top_n?)` — ranked (exact `Type.Member`
   match, then name+declaring-type token match, then FTS5 BM25 over names+summaries); core
   Revit API results rank ahead of other loaded add-ins' at equal relevance.
-- `describe_function(member, overload_index? | member_id?)` — one member's full signature,
-  parameters, returns, and XML docs; an overloaded member returns its overload list to pick
-  from.
+- `describe_function(member?, member_id?)` — one member's full signature, parameters, returns,
+  and XML docs; requires at least one of `member`/`member_id`. An overloaded `member` with no
+  `member_id` returns its overload list to pick from instead — `member_id` (from that list or
+  from a `search_functions` result) is the reliable way to pick exactly one overload, and can be
+  passed on its own.
 
 ## Script globals
 

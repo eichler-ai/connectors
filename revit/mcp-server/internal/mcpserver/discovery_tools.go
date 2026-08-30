@@ -36,10 +36,9 @@ type SearchFunctionsIn struct {
 
 // DescribeFunctionIn is the input schema for the describe_function tool.
 type DescribeFunctionIn struct {
-	InstanceID    string `json:"instance_id,omitempty" jsonschema:"instance_id of the target Revit instance; if omitted, any connected instance is used as long as all connected instances share one Revit version -- otherwise this errors and lists the candidates, since results would silently be version-specific"`
-	Member        string `json:"member" jsonschema:"fully-qualified Type.Member, e.g. Autodesk.Revit.DB.Document.Delete"`
-	OverloadIndex *int   `json:"overload_index,omitempty" jsonschema:"pick one specific overload by index, when member has more than one"`
-	MemberID      string `json:"member_id,omitempty" jsonschema:"an exact XML-doc-id, e.g. M:Autodesk.Revit.DB.Document.Delete(Autodesk.Revit.DB.ElementId), to pick one specific overload"`
+	InstanceID string `json:"instance_id,omitempty" jsonschema:"instance_id of the target Revit instance; if omitted, any connected instance is used as long as all connected instances share one Revit version -- otherwise this errors and lists the candidates, since results would silently be version-specific"`
+	Member     string `json:"member,omitempty" jsonschema:"fully-qualified Type.Member, e.g. Autodesk.Revit.DB.Document.Delete. Optional when member_id is given."`
+	MemberID   string `json:"member_id,omitempty" jsonschema:"an exact XML-doc-id, e.g. M:Autodesk.Revit.DB.Document.Delete(Autodesk.Revit.DB.ElementId), to pick one specific overload -- the reliable way to disambiguate; returned by search_functions results and by this tool's own overloads[] list when member is ambiguous"`
 }
 
 // Member is one reflected API member, the shape shared by list_functions'
@@ -183,11 +182,19 @@ func RegisterDiscovery(s *mcp.Server, r *discovery.Router) {
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "describe_function",
-		Description: "Full XML-doc entry (summary, params, returns) for one fully-qualified Revit API member. If the member has multiple overloads and neither overload_index nor member_id disambiguates, returns the list of overloads instead.",
+		Description: "Full XML-doc entry (summary, params, returns) for one fully-qualified Revit API member. Requires member and/or member_id. An overloaded member with no member_id returns its overload list to pick from -- re-call with one of those overloads' member_id to get its full detail.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in DescribeFunctionIn) (*mcp.CallToolResult, DescribeFunctionOut, error) {
-		params := map[string]any{"member": in.Member}
-		if in.OverloadIndex != nil {
-			params["overload_index"] = *in.OverloadIndex
+		if in.Member == "" && in.MemberID == "" {
+			drec := diag.New(diag.SeverityError, "missing-required-param", discoverySource,
+				"describe_function requires member and/or member_id, but both were empty").
+				WithDetail(map[string]any{"params": []string{"member", "member_id"}}).
+				WithRemedy("pass member (a fully-qualified Type.Member) or member_id (an exact XML-doc-id from search_functions or a prior describe_function's overloads[] list)")
+			out := DescribeFunctionOut{Error: drec}
+			return errorCallToolResultFor(out), out, nil
+		}
+		params := map[string]any{}
+		if in.Member != "" {
+			params["member"] = in.Member
 		}
 		if in.MemberID != "" {
 			params["member_id"] = in.MemberID

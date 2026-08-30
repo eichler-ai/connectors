@@ -3,7 +3,7 @@ using System.Collections.Generic;
 
 namespace MCPBridge.Core.Discovery;
 
-/// <summary>Thrown by <see cref="DiscoveryService.DescribeFunction"/> when `member`/`member_id`/`overload_index` doesn't resolve to a real member -- a caller (RequestDispatcher) is expected to catch this and turn it into a JSON-RPC error with a remedy, same posture as <see cref="MCPBridge.Core.Protocol.JsonRpcParamException"/> for malformed params.</summary>
+/// <summary>Thrown by <see cref="DiscoveryService.DescribeFunction"/> when `member`/`member_id` doesn't resolve to a real member -- a caller (RequestDispatcher) is expected to catch this and turn it into a JSON-RPC error with a remedy, same posture as <see cref="MCPBridge.Core.Protocol.JsonRpcParamException"/> for malformed params.</summary>
 public sealed class DiscoveryMemberNotFoundException : Exception
 {
     public DiscoveryMemberNotFoundException(string message) : base(message)
@@ -93,7 +93,7 @@ public sealed class DescribeOverloadEntry
     public required string Signature { get; init; }
 }
 
-/// <summary>describe_function's "compact overload list" wire shape -- returned when `member` is ambiguous and neither member_id nor overload_index was given to disambiguate.</summary>
+/// <summary>describe_function's "compact overload list" wire shape -- returned when `member` is ambiguous and member_id was not given to disambiguate.</summary>
 public sealed class DescribeFunctionOverloadList
 {
     public required string Member { get; init; }
