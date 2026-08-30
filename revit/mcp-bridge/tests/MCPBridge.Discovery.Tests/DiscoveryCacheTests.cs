@@ -686,4 +686,68 @@ public class DiscoveryCacheTests
         Assert.DoesNotContain(twice, r => r.Member.Name == "CreateDoohickey" && r.Score >= 500);
         Assert.DoesNotContain(once, r => r.Member.Name == "CreateDoohickey" && r.Score >= 500);
     }
+
+    /// <summary>
+    /// The FTS tier must NOT expand a query to synonym forms (issue #75, found by independent review).
+    /// Tier 3 has no re-scoring pass -- bm25 is the score -- so an extra MATCH term changes the ranking
+    /// directly rather than adding a harmless candidate.
+    ///
+    /// <para><see cref="Fixtures.Ledger"/> mentions "new" in its SUMMARY only, which is precisely
+    /// Autodesk's house style ("Creates a new X") and therefore describes a large fraction of the real
+    /// corpus. If "create" ORs "new" into the MATCH, a query that never mentioned ledgers or owners pulls
+    /// this row in on a word the caller did not type.</para>
+    /// </summary>
+    [Fact]
+    public void Search_FtsTier_DoesNotExpandTheQueryToSynonymForms()
+    {
+        using var cache = NewCache();
+        cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+
+        var results = cache.Search("create", namespaceFilter: null).ToList();
+
+        Assert.DoesNotContain(results, r => r.Member.Name == "AssignOwner");
+    }
+
+    /// <summary>
+    /// The FTS tier must still match the word the caller actually TYPED. Canonicalizing before building the
+    /// MATCH expression would leave a caller who typed "new" holding only "create", making tier 3 blind to
+    /// their own word -- the opposite failure from the test above, and the reason the fix is "use raw
+    /// tokens here" rather than "delete the expansion".
+    /// </summary>
+    [Fact]
+    public void Search_FtsTier_StillMatchesTheWordTheCallerTyped()
+    {
+        using var cache = NewCache();
+        cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+
+        // Bare "new", deliberately: any second token would give FTS another way to find this row and the
+        // test would pass even with the tokens canonicalized. "New" appears in Ledger's SUMMARY only, and
+        // in no name, so tier 2 cannot reach it -- FTS matching the caller's own word is the only path.
+        var results = cache.Search("new", namespaceFilter: null).ToList();
+
+        Assert.Contains(results, r => r.Member.Name == "AssignOwner");
+    }
+
+    /// <summary>
+    /// Synonyms canonicalize the LEADING word-part only, and this is the case that actually distinguishes
+    /// that from canonicalizing every part: a failure-message property must not overtake the method that
+    /// genuinely creates the thing. See <see cref="Fixtures.GizmoFailures"/> for why the fixture is shaped
+    /// the way it is -- the obvious arrangement lets the mutation survive.
+    /// </summary>
+    [Fact]
+    public void Search_NonLeadingSynonymWordPart_DoesNotOutrankTheRealFactory()
+    {
+        using var cache = NewCache();
+        cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+
+        var results = cache.Search("create gizmo parts", namespaceFilter: null).ToList();
+
+        var factory = results.Single(r => r.Member.DeclaringType.EndsWith("GizmoInstance", StringComparison.Ordinal) && r.Member.Name == "Create");
+        var failureMessage = results.Single(r => r.Member.Name == "NoPartsAddedtoNewGizmo");
+
+        Assert.True(
+            factory.Score > failureMessage.Score,
+            $"GizmoInstance.Create ({factory.Score:F1}) must outrank GizmoFailures.NoPartsAddedtoNewGizmo "
+                + $"({failureMessage.Score:F1}) -- a non-leading \"new\" is not the factory convention");
+    }
 }

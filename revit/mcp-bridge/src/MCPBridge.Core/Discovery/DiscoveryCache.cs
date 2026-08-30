@@ -957,10 +957,10 @@ public sealed class DiscoveryCache : IDisposable
     /// otherwise carry the same request twice, inflating the denominator recall averages over and the count
     /// the admission test compares against.</para>
     /// </summary>
-    private static string[] TokenizeQuery(string queryLower)
+    private static string[] TokenizeQuery(string queryLower, bool canonicalize = true)
     {
-        var raw = queryLower.Split(new[] { ' ', '.', '_', '-' }, StringSplitOptions.RemoveEmptyEntries)
-            .Select(IdentifierRelevance.Canonical)
+        var split = queryLower.Split(new[] { ' ', '.', '_', '-' }, StringSplitOptions.RemoveEmptyEntries);
+        var raw = (canonicalize ? split.Select(IdentifierRelevance.Canonical) : split)
             .Distinct(StringComparer.Ordinal)
             .ToArray();
         var filtered = raw.Where(t => t.Length > 1 && !IdentifierRelevance.StopWords.Contains(t)).ToArray();
@@ -1155,21 +1155,29 @@ public sealed class DiscoveryCache : IDisposable
         // token stream everywhere else in this class, so build a simple OR-of-tokens match expression rather
         // than passing the raw query straight through. Stopwords are dropped here for the same reason as in
         // the name-match tier: OR-ing in "a" or "the" matches most of the corpus on no real signal.
-        var tokens = TokenizeQuery(query);
+        // RAW tokens, deliberately -- no canonicalizing and no synonym expansion (issue #75, corrected by
+        // independent review). Both were tried here and both are wrong for this tier, for the same reason:
+        // tier 3 has no re-scoring pass, so bm25 IS the score and every extra MATCH term changes the
+        // ranking directly. #76's "an extra candidate that scores nothing cannot displace a real answer"
+        // buys tier 2 that safety and buys tier 3 nothing.
+        //
+        // Measured: ORing "new" into every "create" query matched essentially every Create member's
+        // SUMMARY, because Autodesk's house doc style is "Creates a new X". The tier-3 tail of "create a
+        // level", "create a material", "create a railing" and "create a topography" converged on the SAME
+        // rows at the SAME 448.55 regardless of the query, and "create a topography" lost
+        // TopographySurface.AddPoints/DeletePoints -- the actual follow-up API -- to Wire.Create and
+        // FillPatternElement.Create.
+        //
+        // Canonicalizing without expanding is worse still: a caller who typed "new" would arrive holding
+        // only "create", and this tier would be blind to the word they actually used. Raw is what a loose
+        // exploratory fallback should match.
+        var tokens = TokenizeQuery(query, canonicalize: false);
         if (tokens.Length == 0)
         {
             return Array.Empty<(DiscoveryMemberRow, double)>();
         }
 
-        // Expanded to synonym groups for the same reason as the tier-2 predicate, and NOT optional here:
-        // TokenizeQuery canonicalizes, so a caller who typed "new" arrives holding only "create". Matching
-        // on that alone would make tier 3 blind to the very word the caller used (issue #75).
-        var matchExpression = string.Join(
-            " OR ",
-            tokens
-                .SelectMany(IdentifierRelevance.SearchForms)
-                .Distinct(StringComparer.Ordinal)
-                .Select(t => "\"" + t.Replace("\"", "\"\"") + "\""));
+        var matchExpression = string.Join(" OR ", tokens.Select(t => "\"" + t.Replace("\"", "\"\"") + "\""));
 
         using var cmd = _connection.CreateCommand();
         cmd.CommandText = """

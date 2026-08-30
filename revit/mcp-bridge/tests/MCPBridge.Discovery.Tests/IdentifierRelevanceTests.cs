@@ -154,8 +154,13 @@ public class IdentifierRelevanceTests
     }
 
     /// <summary>
-    /// The precision half of the same property, isolated. If "New" were left unexplained, a name carrying
-    /// it would be charged for a word the caller effectively did type.
+    /// A synonym word-part must count as explained material, not just earn recall.
+    ///
+    /// <para>Review finding, recorded rather than quietly reworded: an earlier comment here claimed to
+    /// isolate "the precision half". It does not -- NewLevel and ZapLevel differ on recall (1.0 vs 0.5) as
+    /// well as precision, so a failure cannot be attributed to either. The exact-equality assertion in the
+    /// test above is the stronger guard for the same mutation; this one is kept for the reachability it
+    /// states plainly and for nothing more.</para>
     /// </summary>
     [Fact]
     public void Score_ASynonymWordPartInTheNameCountsAsExplained()
@@ -183,6 +188,41 @@ public class IdentifierRelevanceTests
         var coincidence = IdentifierRelevance.Score(tokens, "Renewal", "Document");
 
         Assert.True(real > coincidence, $"New ({real}) must outrank Renewal ({coincidence})");
+        // Zero, not merely less: "Renewal" must earn NO credit from "create". Asserting only the
+        // inequality left a substitute-within-the-word mutation alive (review finding).
+        Assert.Equal(0.0, coincidence);
+    }
+
+    /// <summary>
+    /// Position, not just spelling: Revit puts the verb first, and 41 of the 217 corpus members carrying
+    /// "new" as a word-part do not lead with it. Those are failure messages and predicates, not factories.
+    /// </summary>
+    [Fact]
+    public void Score_SynonymAppliesToTheLeadingWordPartOnly()
+    {
+        // Three tokens, and the failure message matches more of them than the factory does -- that is what
+        // makes canonicalizing its non-leading "new" enough to overtake a method that genuinely creates the
+        // thing. A two-token version does not discriminate: the factory wins under both rules.
+        var tokens = new[] { "create", "assembly", "elements" };
+
+        var factory = IdentifierRelevance.Score(tokens, "Create", "AssemblyInstance");
+        var failureMessage = IdentifierRelevance.Score(tokens, "NoElementsAddedtoNewAssembly", "AssemblyFailures");
+
+        Assert.True(factory > failureMessage, $"AssemblyInstance.Create ({factory}) must outrank NoElementsAddedtoNewAssembly ({failureMessage})");
+    }
+
+    /// <summary>
+    /// Scoring the canonical form must not COST a row credit it earned before the group existed. "ne" is a
+    /// prefix of the stored word "New" and of nothing in "create"; the row is still admitted by
+    /// LIKE '%new%', so dropping its credit would break the SQL-is-a-superset invariant in the other
+    /// direction (review finding M1).
+    /// </summary>
+    [Fact]
+    public void Score_PartialMatchAgainstTheStoredSpellingStillCounts()
+    {
+        var score = IdentifierRelevance.Score(new[] { "ne" }, "NewLevel", "Document");
+
+        Assert.True(score > 0, "a prefix of the stored word must still earn credit after canonicalization");
     }
 
     [Fact]

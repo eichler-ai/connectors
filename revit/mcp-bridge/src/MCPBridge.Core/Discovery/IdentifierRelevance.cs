@@ -76,21 +76,58 @@ internal static class IdentifierRelevance
     /// vendor's API with a consistent house style, and the failure is a specific vocabulary mismatch rather
     /// than general morphology.</para>
     ///
-    /// <para><b>It is ONE group, where issue #75 proposed four, and that is a measured result rather than a
-    /// staged rollout.</b> <c>delete</c>/<c>remove</c>/<c>erase</c>, <c>get</c>/<c>find</c>/<c>lookup</c>
-    /// and <c>set</c>/<c>modify</c>/<c>change</c> were added together and run over 23 natural-language
-    /// queries against the real corpus. Not one query gained a better answer; two lost one.
-    /// <c>set</c>/<c>change</c> pushed <c>CompoundStructure.ChangeRegionWidth</c> off page 1 of "change the
-    /// width of a wall" in favour of <c>Wall.SetHostWallId</c> and <c>Wall.CanSetHostWall</c>, and
-    /// <c>get</c>/<c>lookup</c> put <c>BuiltInParameter.RBS_LOOKUP_TABLE_NAME</c> on page 1 of "get all
-    /// doors on a level". The asymmetry is the point: "create" and "new" are the SAME operation under two
-    /// naming conventions, whereas <c>Set</c>, <c>Change</c> and <c>Modify</c> are three DIFFERENT
-    /// operations in this API that English happens to blur. Adding a group needs the same measurement, not
-    /// an argument from plausibility.</para>
+    /// <para><b>It is ONE group, where issue #75 proposed four.</b> <c>delete</c>/<c>remove</c>/<c>erase</c>,
+    /// <c>get</c>/<c>find</c>/<c>lookup</c> and <c>set</c>/<c>modify</c>/<c>change</c> were added together
+    /// and measured against the real corpus. The result was MIXED, not uniformly bad, and the honest
+    /// summary is that the wins did not pay for the losses. Losses: <c>set</c>/<c>change</c> pushed
+    /// <c>CompoundStructure.ChangeRegionWidth</c> down page 1 of "change the width of a wall" for
+    /// <c>Wall.SetHostWallId</c>; <c>get</c>/<c>lookup</c> put
+    /// <c>BuiltInParameter.RBS_LOOKUP_TABLE_NAME</c> on page 1 of "get all doors on a level". Wins,
+    /// recorded because an earlier draft of this comment claimed there were none and independent review
+    /// found otherwise: "lookup parameter by name" replaced six junk <c>BuiltInParameter.*_NAME</c> rows
+    /// with <c>IFCParameterTemplate.FindByName</c>, <c>ParameterAccess.GetParameter</c> and
+    /// <c>ParameterUtils.GetBuiltInParameter</c>, and "change the width of a wall" also gained
+    /// <c>CompoundStructure.SetLayerWidth</c>. Only 7 of 71 queries moved at all.</para>
+    ///
+    /// <para>What justifies the asymmetry is not the tally but the semantics: "create" and "new" are the
+    /// SAME operation under two naming conventions, whereas <c>Set</c>, <c>Change</c> and <c>Modify</c> are
+    /// three DIFFERENT operations this API distinguishes and English blurs. Adding a group needs its own
+    /// measurement, not an argument from plausibility -- and the measurement has to be reported whichever
+    /// way it comes out.</para>
     ///
     /// <para>Matching is whole-word only. "Renewal" and "Newton" split to word-parts that are not the word
-    /// "new", so they are untouched; they can still be ADMITTED by the SQL predicate, which expands tokens
-    /// to their group and matches substrings, but they earn no credit and rank accordingly.</para>
+    /// "new", so they are untouched. They can still be ADMITTED by the SQL predicate, which expands tokens
+    /// to their group and matches substrings -- measured: "create kilonewton" pulls
+    /// <c>UnitTypeId.Kilonewtons</c> into the tier at 507.6, and <c>LineWeight</c> ("li<b>new</b>eight")
+    /// the same way -- but they earn zero relevance, so they sit at the tier-2 FLOOR. That floor is still
+    /// above tier 3, which is the sharp edge: a zero-relevance admitted row outranks a genuine bm25 match.
+    /// The shape predates this group (<c>Visual.StoneBumpType.Stonewall</c> ranked 1 for "new wall" on
+    /// main, via "sto<b>new</b>all"), and the group widens it. Left as-is rather than special-cased --
+    /// narrowing it means teaching the SQL predicate about word boundaries, which LIKE cannot do.</para>
+    ///
+    /// <para><b>On the name side, only the LEADING word-part is canonicalized.</b> Revit's convention puts
+    /// the verb first -- <c>NewFamilyInstance</c>, <c>NewLevel</c>, <c>NewGroup</c> -- and 176 of the 217
+    /// corpus members carrying "new" as a word-part have it leading. The other 41 are not factories, and
+    /// canonicalizing them made failure-message properties outrank the methods they describe: independent
+    /// review measured <c>BuiltInFailures.AssemblyFailures.NoElementsAddedtoNewAssembly</c> taking rank 1
+    /// of "create an assembly from elements" from <c>AssemblyInstance.Create</c>, and
+    /// <c>CannotCreateNewDesignOption</c>, <c>IsValidHostForNewRailing</c> and <c>SaveAsNewCentral</c>
+    /// doing the same to their queries. Position is the cheap signal that separates the two.</para>
+    ///
+    /// <para><b>Known residual cost, accepted deliberately.</b> "New" as a STATE rather than a verb is
+    /// still rewritten, because it leads its own name. Measured: <c>ElementOnPhaseStatus.New</c> ranked 3
+    /// for "is the element new" before this group and now falls OUT of the top 20 entirely, and "new
+    /// transaction group" surfaces <c>LightGroupManager.CreateGroup</c> and three <c>GroupFailures</c>
+    /// messages above <c>TransactionGroup</c>'s own <c>Start</c>/<c>Commit</c>, which drop to 9 and 10.
+    ///
+    /// <para>Two narrower rules were considered and rejected. Exempting a name that is ONLY the synonym
+    /// word (so <c>New</c> stays <c>New</c>) makes that case WORSE, not better, because the query side
+    /// canonicalizes too and "new" arrives as "create" -- it would stop matching at all. Repairing that
+    /// needs credit taken as a max over both forms on BOTH sides, which is a real complication for one
+    /// unusual query shape and would want its own measurement pass. The trade is taken as it stands: the
+    /// win is much larger than the loss -- on main, "new wall" ranked <c>Visual.StoneBumpType.Stonewall</c>
+    /// first, via "sto<b>new</b>all", and now ranks <c>Wall.Create</c> -- and the loss is confined to "new"
+    /// used adjectivally, which the Revit API expresses as an enum member rather than a verb.</para></para>
     /// </summary>
     private static readonly string[][] SynonymGroups =
     {
@@ -212,16 +249,45 @@ internal static class IdentifierRelevance
         return words;
     }
 
-    private static IReadOnlyList<string> CanonicalizeAll(IReadOnlyList<string> words)
+    /// <summary>
+    /// The name's word-parts paired with their canonical forms, canonicalizing the LEADING part only -- see
+    /// <see cref="SynonymGroups"/> for why position is the signal that separates a factory from a failure
+    /// message. Entries where the two differ are the only ones a synonym can act on.
+    /// </summary>
+    private static (string Raw, string Canonical)[] NameWords(string identifier)
     {
-        var canonical = new List<string>(words.Count);
-        foreach (var word in words)
+        var words = SplitWords(identifier);
+        var paired = new (string, string)[words.Count];
+        for (var i = 0; i < words.Count; i++)
         {
-            canonical.Add(Canonical(word));
+            paired[i] = (words[i], i == 0 ? Canonical(words[i]) : words[i]);
         }
 
-        return canonical;
+        return paired;
     }
+
+    /// <summary>
+    /// Best credit a token earns against a word-part, considering both its stored spelling and its
+    /// canonical one.
+    ///
+    /// <para>Taking the MAX rather than scoring the canonical form alone is what keeps the SQL predicate a
+    /// true superset of this function (see <c>DiscoveryCache.QueryTokenMatch</c>). Independent review
+    /// finding: scoring only the canonical form silently dropped partial matches against the raw word --
+    /// the token "ne" earned <see cref="PrefixCredit"/> against "New" before this group existed, and would
+    /// have earned nothing once the word became "create", even though the row is still admitted by
+    /// <c>LIKE '%new%'</c>. With the max, no row loses credit it previously had.</para>
+    ///
+    /// <para>The converse gap is real and NOT closed here: a token that is a partial match of the CANONICAL
+    /// form only -- "creat" against "New" -- scores above zero but is never admitted, because the SQL side
+    /// searches raw spellings and cannot know that "creat" is a prefix of a synonym of "new". So
+    /// <c>search_functions("create level")</c> reaches <c>Document.NewLevel</c> and
+    /// <c>search_functions("creat level")</c> does not. Closing it would need prefix-aware expansion in
+    /// SQL, which <c>LIKE</c> cannot express; it is recorded rather than papered over.</para>
+    /// </summary>
+    private static double Credit(string token, (string Raw, string Canonical) word) =>
+        ReferenceEquals(word.Raw, word.Canonical) || word.Raw == word.Canonical
+            ? Credit(token, word.Raw)
+            : Math.Max(Credit(token, word.Raw), Credit(token, word.Canonical));
 
     /// <summary>Best credit <paramref name="token"/> can earn against a single word-part.</summary>
     private static double Credit(string token, string word)
@@ -269,18 +335,17 @@ internal static class IdentifierRelevance
         // the name each happen to use (issue #75). Idempotent, so a caller that has already canonicalized
         // its tokens -- DiscoveryCache does, since its SQL predicate needs the group anyway -- loses
         // nothing by passing them through again.
-        var memberWords = CanonicalizeAll(SplitWords(memberName));
-        var typeWords = CanonicalizeAll(SplitWords(typeShortName));
-        if (memberWords.Count + typeWords.Count == 0)
+        var memberWords = NameWords(memberName);
+        var typeWords = NameWords(typeShortName);
+        if (memberWords.Length + typeWords.Length == 0)
         {
             return 0.0;
         }
 
-        var tokens = CanonicalizeAll(queryTokens);
 
         // Recall: for each query token, its best credit anywhere in the name.
         var recallTotal = 0.0;
-        foreach (var token in tokens)
+        foreach (var token in queryTokens)
         {
             var best = 0.0;
             foreach (var word in memberWords)
@@ -307,13 +372,13 @@ internal static class IdentifierRelevance
         var precisionCount = 0;
         foreach (var word in memberWords)
         {
-            if (StopWords.Contains(word))
+            if (StopWords.Contains(word.Raw))
             {
                 continue;
             }
 
             var best = 0.0;
-            foreach (var token in tokens)
+            foreach (var token in queryTokens)
             {
                 best = Math.Max(best, Credit(token, word));
             }
@@ -324,13 +389,13 @@ internal static class IdentifierRelevance
 
         foreach (var word in typeWords)
         {
-            if (StopWords.Contains(word))
+            if (StopWords.Contains(word.Raw))
             {
                 continue;
             }
 
             var best = 0.0;
-            foreach (var token in tokens)
+            foreach (var token in queryTokens)
             {
                 best = Math.Max(best, Credit(token, word));
             }
@@ -341,7 +406,7 @@ internal static class IdentifierRelevance
 
         // A name made up ENTIRELY of stopword parts leaves nothing to measure precision against; treat it
         // as fully explained rather than dividing by zero, so recall alone decides.
-        var recall = recallTotal / tokens.Count;
+        var recall = recallTotal / queryTokens.Count;
         var precision = precisionCount == 0 ? 1.0 : precisionTotal / precisionCount;
         return recall * precision;
     }

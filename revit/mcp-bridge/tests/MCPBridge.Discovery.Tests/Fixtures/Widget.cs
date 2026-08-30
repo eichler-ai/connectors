@@ -77,3 +77,14 @@ public class Widget
     {
     }
 }
+
+/// <summary>
+/// Carries the word "new" in its SUMMARY only, never in a name -- the shape of Autodesk's house doc style,
+/// "Creates a new X". Exists so a test can prove the FTS tier does NOT expand "create" to "new": if it
+/// did, this member would surface for a query that never mentioned it (issue #75, R1).
+/// </summary>
+public static class Ledger
+{
+    /// <summary>Assigns a new owner to the ledger.</summary>
+    public static void AssignOwner() { }
+}

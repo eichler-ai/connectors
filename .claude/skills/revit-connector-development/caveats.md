@@ -60,7 +60,7 @@ reports zero.
 | Both TFM legs ran on the same runtime | `RollForward` prefers the highest major even when the requested one is present. Assert the runtime, don't assume it |
 | An opt-in test self-skips on an unset env var, so it has never once run | `return`-on-missing-config reports as **passed**, not skipped. Set the var and watch it fail before trusting it — `RealRevitApiTests` was dead from the day it was written |
 | The assertion cannot fail | Revert the fix and confirm the test fails. If it still passes, it was never coverage |
-| The fixture makes the test pass for the wrong reason | A ranking test passed under a mutation that removed the sort entirely, because SQLite's scan order happened to agree with the score order. Reversing two fixture declarations killed it. Mutating the mechanism is not enough — check the fixture actually *opposes* the mutation |
+| The fixture makes the test pass for the wrong reason | Four separate ranking tests survived a mutation of the very rule they were written for, because the fixture did not oppose it: scan order happened to agree with score order; a duplicated token cancelled out of both halves of recall; a two-token query let the right answer win under both rules; a second query token gave FTS another way to find the row. Mutating the mechanism is not enough — **the fixture has to be built so the two rules give different answers**, and the only way to know is to run the mutation |
 
 ## Symptom: a live run stalls with no error
 
