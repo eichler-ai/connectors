@@ -188,8 +188,14 @@ re-resolve rather than hardcoding either. `robocopy` from `cmd /c` mangles a `\\
   is a snapshot that drifts — say so out loud when you reach for it, and prefer restoring real access.
 - An intermittent mid-build write failure on the share (`CS0016 ... unexpected network error`) can
   leave one TFM leg with no output while the other reports clean. `Test-Path` the per-TFM test DLL.
-- To use a worktree for Bridge work, share it in:
-  `prlctl set <vm> --shf-host-add <name> --path <worktree-path>`.
+- To use a worktree for Bridge work, share it in, then tell the deploy script which share to use:
+  `prlctl set <vm> --shf-host-add <name> --path <worktree-path>`, then
+  `redeploy-and-verify.sh --share-name <name>`. Without the flag it resolves the *main* checkout's
+  share and deploys that, which the script now refuses rather than reporting a PASS for a tree you
+  did not change.
+- **A share name containing a backslash-escape sequence corrupts an inline `-Command`** — a share
+  called `redeploy-fix` makes `\\psf\redeploy-fix`, whose `\r` is eaten, giving `\psfedeploy-fix`.
+  Use `-EncodedCommand` for any path built from a variable.
 
 ## Brokers for dev
 
