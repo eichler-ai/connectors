@@ -76,6 +76,16 @@
     <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
       <_Parameter1>MCPBridge.AddIn</_Parameter1>
     </AssemblyAttribute>
+    <!--
+      IdentifierRelevance (search_functions' tier-2 ranking, issue #65) is a pure scoring function with no
+      capability attached, but it stays internal under this assembly's default-to-internal rule rather than
+      being made public just to be testable. Its behaviour is a set of weighted numeric judgments, which is
+      exactly the kind of thing that wants direct unit tests over the scorer itself rather than only
+      end-to-end assertions through DiscoveryCache.Search.
+    -->
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
+      <_Parameter1>MCPBridge.Discovery.Tests</_Parameter1>
+    </AssemblyAttribute>
   </ItemGroup>
 
 </Project>

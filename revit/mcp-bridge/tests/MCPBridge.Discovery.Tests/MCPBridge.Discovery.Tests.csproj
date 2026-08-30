@@ -29,6 +29,9 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <!-- Reflect over the real RevitAPI.dll for metadata only ; it is a native x64 mixed-mode assembly that
+         cannot be loaded for execution by this ARM64 test host at all (see RealRevitApiLoader). Test-only. -->
+    <PackageReference Include="System.Reflection.MetadataLoadContext" Version="8.0.1" />
     <PackageReference Include="xunit" Version="2.9.2" />
     <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
   </ItemGroup>

@@ -209,8 +209,25 @@ public static class DiscoveryReflector
         return true;
     }
 
+    /// <summary>
+    /// Deliberately reads attribute METADATA by name rather than calling
+    /// <c>GetCustomAttribute(typeof(CompilerGeneratedAttribute))</c>. The typeof form needs to instantiate
+    /// the attribute and compare Type identity against the running context, which throws outright under a
+    /// <c>MetadataLoadContext</c> -- and a MetadataLoadContext is the only way to reflect over the real
+    /// RevitAPI.dll off a live Revit process, since it is a native x64 mixed-mode assembly that a test host
+    /// on this ARM64 dev VM cannot load for execution at all.
+    ///
+    /// <para>Not an exact equivalence, and worth stating precisely (independent PR review finding): the
+    /// <c>GetCustomAttribute(MemberInfo, Type)</c> extension resolves to <c>Attribute.GetCustomAttribute</c>,
+    /// which searches with <c>inherit: true</c>, whereas <c>GetCustomAttributesData()</c> is declared-only
+    /// and has no inherit overload. <c>CompilerGeneratedAttribute</c> is <c>Inherited = true</c>, so an
+    /// override of a compiler-generated base member would now be kept where it was previously filtered.
+    /// Unreachable in practice for the assemblies this reflects over, but "unchanged" would be too strong
+    /// a claim.</para>
+    /// </summary>
     private static bool IsCompilerGenerated(MemberInfo m) =>
-        m.GetCustomAttribute(typeof(System.Runtime.CompilerServices.CompilerGeneratedAttribute)) is not null;
+        m.GetCustomAttributesData().Any(a =>
+            a.AttributeType.FullName == "System.Runtime.CompilerServices.CompilerGeneratedAttribute");
 
     private static List<ReflectedMember> ReflectMembers(Type type, XmlDocIndex docIndex)
     {

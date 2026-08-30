@@ -103,11 +103,34 @@ public sealed class DiscoveryService
     // search_functions
     // -------------------------------------------------------------------------------------------------
 
+    /// <summary>
+    /// Tie-break rank: things you CALL ahead of things you read. Exact score ties are common -- several
+    /// members of one type can explain a query equally well -- and until this existed those ties fell
+    /// straight through to alphabetical-by-member-name, which is arbitrary and was deciding real outcomes.
+    /// Measured on the real corpus (3rd review round): "set the parameter of an element" put the properties
+    /// <c>Parameter.Element</c> and <c>Element.Parameter</c> at ranks 2-5, ahead of the method
+    /// <c>Parameter.Set</c> at rank 6, all tied at 658.2, purely because "E" sorts before "S".
+    ///
+    /// <para>Defensible on its own terms rather than as a patch for that one query: a natural-language task
+    /// phrasing ("set the parameter…", "create a sheet…") is asking for something to invoke, so when the
+    /// relevance score genuinely cannot separate two members, the callable one is the better guess. It
+    /// only ever breaks EXACT ties, so it can never override a relevance difference.</para>
+    /// </summary>
+    private static int CallableFirst(string kind) => kind switch
+    {
+        "Method" => 0,
+        "Constructor" => 1,
+        "Property" => 2,
+        "Event" => 3,
+        _ => 4, // Field (enum members land here), Type, and anything added later.
+    };
+
     public SearchFunctionsResult SearchFunctions(string query, string? namespaceFilter, string? cursor, int topN)
     {
         var scored = _cache.Search(query, namespaceFilter);
         var ranked = scored
             .OrderByDescending(s => s.Score)
+            .ThenBy(s => CallableFirst(s.Member.Kind))
             .ThenBy(s => s.Member.Name, StringComparer.Ordinal)
             .ThenBy(s => s.Member.MemberId, StringComparer.Ordinal)
             .ToList();

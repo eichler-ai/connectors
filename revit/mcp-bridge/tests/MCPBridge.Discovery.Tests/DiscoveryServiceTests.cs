@@ -502,4 +502,31 @@ public class DiscoveryServiceTests
         Assert.NotNull(result.Overloads);
         Assert.Equal(2, result.Overloads!.Overloads.Count);
     }
+
+    [Fact]
+    public void SearchFunctions_ExactScoreTie_PutsTheCallableMemberFirst()
+    {
+        // 3rd review round, measured on the real corpus: "set the parameter of an element" tied
+        // Parameter.Element and Element.Parameter (properties) with Parameter.Set (a method) at 658.2 and
+        // ordered them by name, so the properties took ranks 2-5 and the method the query actually
+        // describes landed at 6. Ties this exact are common -- several members of one type routinely
+        // explain a query equally well -- so the fallback ordering matters.
+        //
+        // Fixtures.Tie exists for this: the query matches only its TYPE name, so both members score
+        // identically by construction and the tie-break is the only thing that can separate them. The
+        // property is named to sort first alphabetically, so a pass here cannot be alphabetical ordering
+        // getting lucky.
+        var service = NewService();
+
+        var result = service.SearchFunctions("tie", namespaceFilter: null, cursor: null, topN: 10);
+        var ordered = result.Results.ToList();
+        var methodAt = ordered.FindIndex(r => r.Member.Kind == "Method" && r.Member.DeclaringType.EndsWith(".Tie", StringComparison.Ordinal));
+        var propertyAt = ordered.FindIndex(r => r.Member.Kind == "Property" && r.Member.DeclaringType.EndsWith(".Tie", StringComparison.Ordinal));
+
+        Assert.True(methodAt >= 0 && propertyAt >= 0, "both Tie members must be in the results");
+        Assert.Equal(ordered[methodAt].Score, ordered[propertyAt].Score, precision: 9);
+        Assert.True(
+            methodAt < propertyAt,
+            $"the method must outrank the property on an exact tie; got method at {methodAt}, property at {propertyAt}");
+    }
 }

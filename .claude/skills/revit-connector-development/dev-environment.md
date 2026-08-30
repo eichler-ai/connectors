@@ -7,6 +7,16 @@ diagnosing "my change didn't take". Process guidance lives in `SKILL.md`.
 The shape: source and the Go broker build on the Mac; the C# add-in builds and Revit runs inside a
 Parallels Windows VM, which sees the repo through a shared folder.
 
+**The VM is Windows on ARM64, and only an ARM64 .NET is installed** (`C:\dotnet10`; no
+`C:\Program Files\dotnet`). Revit and `RevitAPI.dll` are x64, running under emulation. So a .NET test
+host here **cannot `Assembly.LoadFrom` any Revit assembly** — it throws "The assembly architecture is
+not compatible with the current process architecture", and no TFM or `RollForward` setting changes
+that. To reflect over the real `RevitAPI.dll` outside Revit, load it for *metadata only* via
+`MetadataLoadContext` (see `RealRevitApiLoader` in `MCPBridge.Discovery.Tests`); discovery never
+executes Revit code, so metadata is all it ever needed. Note this also rules out
+`GetCustomAttribute(typeof(T))` on the reflected members — use `GetCustomAttributesData()` and match
+the attribute by name.
+
 ## When something looks wrong
 
 Environment failures here nearly all present as the same symptom — **"I changed something and nothing
