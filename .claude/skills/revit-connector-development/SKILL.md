@@ -8,8 +8,10 @@ description: Development process, tooling, testing strategy, and PR review check
 How to build, test, and review this connector. Update this file when the process changes — see
 "Keeping this skill current".
 
-**Dev-environment specifics** (Mac + Parallels, `prlctl`, the launcher agent, VM toolchain, deploy
-paths) live in `dev-environment.md` beside this file. Read it before touching the VM.
+Two companion files sit beside this one. **`caveats.md`** is indexed by symptom — read it when
+something is behaving strangely and you need to know what it's likely to be, before theorising.
+**`dev-environment.md`** covers the Mac + Parallels specifics (`prlctl`, the launcher agent, VM
+toolchain, deploy paths); read it before touching the VM.
 
 ## Orientation
 

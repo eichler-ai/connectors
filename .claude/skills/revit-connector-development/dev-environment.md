@@ -7,33 +7,16 @@ diagnosing "my change didn't take". Process guidance lives in `SKILL.md`.
 The shape: source and the Go broker build on the Mac; the C# add-in builds and Revit runs inside a
 Parallels Windows VM, which sees the repo through a shared folder.
 
-## The one diagnosis that matters
+## When something looks wrong
 
-Almost every environment failure here presents as the same symptom — **"I changed something and
-nothing changed"** — with a different cause each time. Work the preflight list in order rather than
-guessing; each check is cheap and definitive.
+Environment failures here nearly all present as the same symptom — **"I changed something and nothing
+changed"** — with a different cause each time. The ordered checks that separate them, along with the
+other overloaded symptoms (`documents: []`, a `busy` instance, a stalled live run) live in
+`caveats.md`. Go there first; the mechanics below explain *why* each cause exists.
 
-1. **Is the source the VM sees actually your edit?** Live via the shared folder, yes. Via a local
-   copy (`C:\dev\revit`), no — that is a snapshot, and a build against it succeeds silently.
-2. **Did it recompile?** Build `--no-incremental`, or byte-grep the output for a string unique to
-   your change.
-3. **Did the deploy land, unlocked?** Kill `Revit.exe`, `RevitWorker.exe`, `RevitAccelerator.exe`
-   first; `del /F` the target before copying so a lock fails loudly instead of silently no-opping.
-   Byte-grep the *deployed* DLL, at both byte alignments, in *every* Revit version's Addins folder —
-   they drift independently.
-4. **Is an env var involved?** The process reading it must be fresh. For Revit that means relaunching
-   it — but if it launches via the launcher agent, that agent must restart too (below).
-5. **Read the log's own unconditional first line** rather than inferring from silence.
-   `connection.log` opens with `RunConnectionLoop starting. Mode=... ConnectorRoot=...`; if that
-   still shows the old values, the launcher agent is stale, not your code.
-
-**And take a screenshot early: `prlctl capture "<vm>" --file screen.png`, then read the PNG.** You
-cannot drive the VM's UI (below), but you can see it, and treating "can't drive" as "must work blind"
-costs hours. Two blockers invisible in every log — a "File Opened By Another User" prompt and a
-link-reload warning dialog — were obvious in one capture. Escalate as: capture → identify the exact
-control → ask the user for that one click. A modal can hide *behind* another window, so if the
-journal shows `ADialog::doModal start` with no dismissal, believe the journal over a clean-looking
-screenshot.
+**Take a screenshot early: `prlctl capture "<vm>" --file screen.png`, then read the PNG.** You cannot
+drive this VM's UI (see below), but you can see it, and treating "can't drive" as "must work blind"
+has cost hours here.
 
 ## `prlctl`
 
