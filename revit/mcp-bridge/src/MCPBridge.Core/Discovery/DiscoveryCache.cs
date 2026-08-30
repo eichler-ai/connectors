@@ -943,15 +943,32 @@ public sealed class DiscoveryCache : IDisposable
         var memberHitTerms = new List<string>();
         for (var i = 0; i < tokens.Length; i++)
         {
-            hitTerms.Add($"(CASE WHEN (LOWER(t.name) LIKE @tok{i} ESCAPE '\\' OR LOWER(m.name) LIKE @tok{i} ESCAPE '\\') THEN 1 ELSE 0 END)");
+            // Issue #75: a query token is admitted through any of its IdentifierRelevance.Expand synonyms
+            // ("create" through "new"), not just its literal spelling -- otherwise a short query relying
+            // entirely on the synonym word (e.g. "create wall" against a fixture named "NewWall") never
+            // reaches IdentifierRelevance.Score in the first place, since this predicate decides candidate
+            // MEMBERSHIP and Score only decides rank among admitted rows. Each variant gets its own LIKE
+            // parameter (SQLite has no array binding), OR'd together per token so the token still counts as
+            // exactly one hit -- required/hits/member_hits below stay in terms of the ORIGINAL token count.
+            var variants = IdentifierRelevance.Expand(tokens[i]);
+            var typeOrMemberClauses = new List<string>();
+            var memberOnlyClauses = new List<string>();
+            for (var v = 0; v < variants.Count; v++)
+            {
+                var pname = $"@tok{i}_{v}";
+                cmd.Parameters.AddWithValue(pname, "%" + EscapeLike(variants[v]) + "%");
+                typeOrMemberClauses.Add($"LOWER(t.name) LIKE {pname} ESCAPE '\\' OR LOWER(m.name) LIKE {pname} ESCAPE '\\'");
+                memberOnlyClauses.Add($"LOWER(m.name) LIKE {pname} ESCAPE '\\'");
+            }
+
+            hitTerms.Add($"(CASE WHEN ({string.Join(" OR ", typeOrMemberClauses)}) THEN 1 ELSE 0 END)");
             // A constructor's m.name IS its declaring type's name (DiscoveryReflector), so counting it here
             // would hand every constructor of a name-matching type the very type-name-only admission this
             // gate exists to refuse -- and, through ORDER BY member_hits, a guaranteed seat inside the LIMIT
             // ahead of genuine member matches. 2nd review round: 14 constructors were admitted for "set the
             // parameter of an element" that way, displacing Element.LookupParameter. Excluding them here is
             // the same premise the scoring path already applies (see the Constructor branch in Search).
-            memberHitTerms.Add($"(CASE WHEN m.kind <> 'Constructor' AND LOWER(m.name) LIKE @tok{i} ESCAPE '\\' THEN 1 ELSE 0 END)");
-            cmd.Parameters.AddWithValue($"@tok{i}", "%" + EscapeLike(tokens[i]) + "%");
+            memberHitTerms.Add($"(CASE WHEN m.kind <> 'Constructor' AND ({string.Join(" OR ", memberOnlyClauses)}) THEN 1 ELSE 0 END)");
         }
 
         var hits = string.Join(" + ", hitTerms);

@@ -527,4 +527,51 @@ public class DiscoveryCacheTests
         Assert.InRange(placeholder.Score, 500, 999);
         Assert.NotEqual(create.Score, placeholder.Score);
     }
+
+    // ---------------------------------------------------------------------------------------------
+    // search_functions -- synonym expansion (issue #75)
+    // ---------------------------------------------------------------------------------------------
+
+    [Fact]
+    public void Search_CreateQuery_ReachesRevitsNewFactoryConvention()
+    {
+        // Issue #75, reported live from the PRD §13 corpus work: "create family instance" ranked
+        // Document.NewFamilyInstance at #16 -- present, but well below ImportInstance.Create and its
+        // siblings, which match "create" and "instance" head-on with nothing to do with family instances.
+        // Revit's own factory convention is NewXxx, not CreateXxx, and no amount of tuning tier-2's
+        // exact/prefix/substring weights closes a gap that is really "create" and "new" not being
+        // recognized as the same request.
+        using var cache = NewCache();
+        cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+
+        var results = cache.Search("create family instance", namespaceFilter: null)
+            .OrderByDescending(r => r.Score)
+            .ToList();
+
+        var newFamilyInstance = results.Single(r => r.Member.Name == "NewFamilyInstance");
+        var importCreate = results.Single(r => r.Member.Name == "Create" && r.Member.DeclaringType.EndsWith("ImportInstance", StringComparison.Ordinal));
+
+        Assert.InRange(newFamilyInstance.Score, 500, 999);
+        Assert.True(
+            newFamilyInstance.Score > importCreate.Score,
+            $"Document.NewFamilyInstance ({newFamilyInstance.Score}) must outrank ImportInstance.Create ({importCreate.Score})");
+    }
+
+    [Fact]
+    public void Search_SynonymAloneIsEnoughToAdmitAShortQuery_NotOnlyToRankAmongAlreadyAdmittedRows()
+    {
+        // A 2-token query gives the unmatched-token allowance zero slack (UnmatchedTokenAllowance), so
+        // "create level" against Level.NewLevel needs BOTH tokens to hit -- "level" matches the type name
+        // literally, but "create" only matches at all through its synonym "new". Without synonym expansion
+        // at the SQL admission predicate itself (not just in IdentifierRelevance's scoring), this row would
+        // never become a tier-2 candidate in the first place: hits would be 1 of a required 2, and
+        // Score would never run on a row QueryTokenMatch never returned.
+        using var cache = NewCache();
+        cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+
+        var results = cache.Search("create level", namespaceFilter: null).ToList();
+
+        var newLevel = results.Single(r => r.Member.Name == "NewLevel");
+        Assert.InRange(newLevel.Score, 500, 999);
+    }
 }

@@ -153,4 +153,69 @@ public class IdentifierRelevanceTests
             Assert.InRange(score, 0.0, 1.0);
         }
     }
+
+    // ---------------------------------------------------------------------------------------------
+    // Synonyms (issue #75)
+    // ---------------------------------------------------------------------------------------------
+
+    [Fact]
+    public void Score_QueryTokenMatchesItsSynonymAsWellAsTheItselfLiterally()
+    {
+        // The reported case: "create" must reach "New" exactly as it would reach "Create" -- Revit's own
+        // factory convention is NewXxx, and no amount of retuning the exact/prefix/substring weights closes
+        // that gap on their own.
+        var tokens = new[] { "create", "family", "instance" };
+
+        var viaCreate = IdentifierRelevance.Score(tokens, "NewFamilyInstance", "Document");
+        var viaLiteral = IdentifierRelevance.Score(new[] { "new", "family", "instance" }, "NewFamilyInstance", "Document");
+
+        Assert.Equal(viaLiteral, viaCreate);
+        Assert.True(viaCreate > 0.0, "a synonym match must earn some credit, not zero");
+    }
+
+    [Fact]
+    public void Score_SynonymCreditIsSymmetric_SoTheMatchedWordIsNotPenalizedOnPrecision()
+    {
+        // Independent-review trap this project already hit once with stopwords (issue #65): expanding only
+        // the query side would let "create" reach "New" for RECALL while still charging "New" as
+        // unexplained name material for PRECISION -- giving with one hand and taking with the other. Proven
+        // here by comparing against the fully-literal query, which must score identically.
+        var expanded = IdentifierRelevance.Score(new[] { "create" }, "New", "Widget");
+        var literal = IdentifierRelevance.Score(new[] { "new" }, "New", "Widget");
+
+        Assert.Equal(literal, expanded);
+    }
+
+    [Fact]
+    public void Score_UnrelatedWordEarnsNoSynonymCredit()
+    {
+        // A synonym class must not become a general fuzzy-match escape hatch -- "create" reaching "Delete"
+        // would defeat the whole point of precision scoring.
+        var score = IdentifierRelevance.Score(new[] { "create" }, "Delete", "Widget");
+
+        Assert.Equal(0.0, score);
+    }
+
+    [Theory]
+    [InlineData("create", "new")]
+    [InlineData("new", "create")]
+    [InlineData("delete", "remove")]
+    [InlineData("delete", "erase")]
+    [InlineData("get", "find")]
+    [InlineData("get", "lookup")]
+    [InlineData("modify", "set")]
+    [InlineData("modify", "change")]
+    public void Expand_IncludesTheTokenItselfAndItsDeclaredSynonym(string token, string expectedSynonym)
+    {
+        var expanded = IdentifierRelevance.Expand(token);
+
+        Assert.Contains(token, expanded);
+        Assert.Contains(expectedSynonym, expanded);
+    }
+
+    [Fact]
+    public void Expand_WordWithNoSynonymClass_ReturnsOnlyItself()
+    {
+        Assert.Equal(new[] { "widget" }, IdentifierRelevance.Expand("widget"));
+    }
 }
