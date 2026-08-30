@@ -370,6 +370,33 @@ public class DiscoveryServiceTests
     }
 
     [Fact]
+    public void DescribeFunction_MemberIdOnly_ResolvesGenericMethod()
+    {
+        // A generic method's member_id carries a "``N" arity suffix that the reflected member's Name
+        // does not have, so member_id-only resolution must strip it -- otherwise no candidate matches and
+        // every generic method is unreachable by member_id alone. GenericHolder.Read has a generic and a
+        // non-generic member sharing the arity-stripped name, so the member_id has to pick between them.
+        var service = NewService();
+        const string fullName = FixturesNamespace + ".GenericHolder.Read";
+
+        var overloads = service.DescribeFunction(fullName, memberId: null).Overloads!.Overloads;
+        var generic = overloads.Single(o => o.MemberId.Contains("``1"));
+        var nonGeneric = overloads.Single(o => !o.MemberId.Contains("``1"));
+
+        var byGenericId = service.DescribeFunction(member: null, memberId: generic.MemberId);
+        var byNonGenericId = service.DescribeFunction(member: null, memberId: nonGeneric.MemberId);
+
+        Assert.NotNull(byGenericId.Single);
+        Assert.Equal(generic.MemberId, byGenericId.Single!.MemberId);
+        Assert.Equal("Read", byGenericId.Single.Name);
+
+        // The member_id selects a specific one of the two, rather than always yielding the same member.
+        Assert.NotNull(byNonGenericId.Single);
+        Assert.Equal(nonGeneric.MemberId, byNonGenericId.Single!.MemberId);
+        Assert.NotEqual(byGenericId.Single.MemberId, byNonGenericId.Single.MemberId);
+    }
+
+    [Fact]
     public void DescribeFunction_InheritedMember_MemberAndMemberIdNameDifferentTypes_StillResolves()
     {
         // Pins the deliberate absence of a member/member_id cross-check (issue #64). Bolt inherits

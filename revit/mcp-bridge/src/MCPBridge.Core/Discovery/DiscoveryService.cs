@@ -288,7 +288,21 @@ public sealed class DiscoveryService
                 $"member_id '{memberId}' is not a resolvable XML-doc id -- expected a shape like 'M:Namespace.Type.Member' or 'P:Namespace.Type.Member', optionally with a parameter-list suffix.");
         }
 
-        return (body[..lastDot], body[(lastDot + 1)..]);
+        var memberName = body[(lastDot + 1)..];
+
+        // A GENERIC METHOD's id carries a "``N" arity suffix (XmlDocId appends it), but the reflected
+        // member's Name never does -- so "Get``1" would match no candidate and member_id-only resolution
+        // would fail for every generic method. Strip it. Note this is the double-backtick METHOD arity;
+        // TypeNameFormatting.StripArity handles the single-backtick TYPE arity and would leave a stray
+        // backtick here, so it is deliberately not reused. The declaring-type half keeps its own single
+        // backtick arity ("List`1"), which is exactly what the reflector stores as FullName.
+        var methodArity = memberName.IndexOf("``", StringComparison.Ordinal);
+        if (methodArity > 0)
+        {
+            memberName = memberName[..methodArity];
+        }
+
+        return (body[..lastDot], memberName);
     }
 
     // -------------------------------------------------------------------------------------------------
