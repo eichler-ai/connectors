@@ -120,9 +120,11 @@ These are the rules that generalize. Each one exists because violating it cost r
   whether a *different* component encodes assumptions about the one you changed — the Go broker's
   structs once silently dropped every field of the add-in's new response shape, with each side
   correct in isolation.
-- **A live test that COUNTS across all open documents is not re-runnable in one Revit session.** It
-  passes once, then fails with a higher count, which reads exactly like a double-commit bug. Derive
-  expected values per run and scope live checks to specific documents by `Title`.
+- **A live test that COUNTS across all open documents can still fail on a re-run in one Revit
+  session**, even with cleanup in place: a stray survivor from an earlier interrupted run, or the
+  operator's own documents in that same interactive session, both count too. Reads exactly like a
+  double-commit bug. Derive expected values per run and scope live checks to specific documents by
+  `Title`.
 - **Forked subagents cannot spawn their own reviewers** — the coordinator spawns the independent
   review. A fork's self-review misses what an independent pass catches.
 - **Run the fast test nearest the file you just edited, immediately** — the token-budget test for
