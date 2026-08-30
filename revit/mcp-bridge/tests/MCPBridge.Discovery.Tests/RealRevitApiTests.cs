@@ -44,6 +44,15 @@ public class RealRevitApiTests
     [Theory]
     // The reported case. "place" belongs to "place a view", but is also a prefix of "Placeholder".
     [InlineData("create sheet place view", "Autodesk.Revit.DB.ViewSheet", "Create")]
+    // Issue #75. Revit's factory convention is NewXxx, so nothing in this member's name or declaring type
+    // says "create"; it ranked 16th, behind Document.FamilyCreate and a run of ImportInstance.Create /
+    // ImageInstance.Create overloads that matched two of three tokens with shorter, fully-explained names.
+    // The ranker was right about the words it had -- the missing knowledge was that "create" and "new" are
+    // one request.
+    [InlineData("create family instance", "Autodesk.Revit.Creation.Document", "NewFamilyInstance")]
+    // The same query in the other vocabulary. Canonicalizing both sides means these are not two behaviours
+    // to keep in step, but one; this case exists to catch a future change that makes them diverge.
+    [InlineData("new family instance", "Autodesk.Revit.Creation.Document", "NewFamilyInstance")]
     public void SearchFunctions_NaturalLanguageQuery_SurfacesTheGeneralMethodAtTheTop(string query, string expectedType, string expectedMember)
     {
         var loaded = RealRevitApiLoader.TryLoad();

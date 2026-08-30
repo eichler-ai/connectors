@@ -950,10 +950,17 @@ public sealed class DiscoveryCache : IDisposable
     /// <para>Falls back to the unfiltered tokens when filtering would leave nothing, so a query that is
     /// ALL stopwords still searches for what the caller literally typed rather than silently matching
     /// everything.</para>
+    ///
+    /// <para>Tokens are canonicalized through <see cref="IdentifierRelevance.Canonical"/> (issue #75), so
+    /// "new" and "create" produce the identical token stream and every tier below sees one request rather
+    /// than two vocabularies. Canonicalizing BEFORE the distinct pass matters: "create a new sheet" would
+    /// otherwise carry the same request twice, inflating the denominator recall averages over and the count
+    /// the admission test compares against.</para>
     /// </summary>
     private static string[] TokenizeQuery(string queryLower)
     {
         var raw = queryLower.Split(new[] { ' ', '.', '_', '-' }, StringSplitOptions.RemoveEmptyEntries)
+            .Select(IdentifierRelevance.Canonical)
             .Distinct(StringComparer.Ordinal)
             .ToArray();
         var filtered = raw.Where(t => t.Length > 1 && !IdentifierRelevance.StopWords.Contains(t)).ToArray();
@@ -1031,15 +1038,29 @@ public sealed class DiscoveryCache : IDisposable
         var memberHitTerms = new List<string>();
         for (var i = 0; i < tokens.Length; i++)
         {
-            hitTerms.Add($"(CASE WHEN (LOWER(t.name) LIKE @tok{i} ESCAPE '\\' OR LOWER(m.name) LIKE @tok{i} ESCAPE '\\') THEN 1 ELSE 0 END)");
+            // Each token is searched under every spelling in its synonym group (issue #75). The token is
+            // already canonical by the time it arrives, but the stored names are raw, so "create" has to
+            // look for "new" as well to admit Document.NewFamilyInstance at all. Widening admission is safe
+            // in a way it would not have been before issue #76: the cap now falls on the scored ranking, so
+            // an extra row that scores nothing costs a scan and cannot displace a real answer.
+            var forms = IdentifierRelevance.SearchForms(tokens[i]);
+            var anyForm = new List<string>();
+            var anyFormOnMember = new List<string>();
+            for (var f = 0; f < forms.Count; f++)
+            {
+                var p = $"@tok{i}_{f}";
+                anyForm.Add($"LOWER(t.name) LIKE {p} ESCAPE '\\' OR LOWER(m.name) LIKE {p} ESCAPE '\\'");
+                anyFormOnMember.Add($"LOWER(m.name) LIKE {p} ESCAPE '\\'");
+                cmd.Parameters.AddWithValue(p, "%" + EscapeLike(forms[f]) + "%");
+            }
+
+            hitTerms.Add($"(CASE WHEN ({string.Join(" OR ", anyForm)}) THEN 1 ELSE 0 END)");
             // A constructor's m.name IS its declaring type's name (DiscoveryReflector), so counting it here
             // would hand every constructor of a name-matching type the very type-name-only admission this
-            // gate exists to refuse -- and, through ORDER BY member_hits, a guaranteed seat inside the LIMIT
-            // ahead of genuine member matches. 2nd review round: 14 constructors were admitted for "set the
-            // parameter of an element" that way, displacing Element.LookupParameter. Excluding them here is
-            // the same premise the scoring path already applies (see the Constructor branch in Search).
-            memberHitTerms.Add($"(CASE WHEN m.kind <> 'Constructor' AND LOWER(m.name) LIKE @tok{i} ESCAPE '\\' THEN 1 ELSE 0 END)");
-            cmd.Parameters.AddWithValue($"@tok{i}", "%" + EscapeLike(tokens[i]) + "%");
+            // gate exists to refuse. 2nd review round: 14 constructors were admitted for "set the parameter
+            // of an element" that way, displacing Element.LookupParameter. Excluding them here is the same
+            // premise the scoring path already applies (see the Constructor branch above).
+            memberHitTerms.Add($"(CASE WHEN m.kind <> 'Constructor' AND ({string.Join(" OR ", anyFormOnMember)}) THEN 1 ELSE 0 END)");
         }
 
         var hits = string.Join(" + ", hitTerms);
@@ -1140,7 +1161,15 @@ public sealed class DiscoveryCache : IDisposable
             return Array.Empty<(DiscoveryMemberRow, double)>();
         }
 
-        var matchExpression = string.Join(" OR ", tokens.Select(t => "\"" + t.Replace("\"", "\"\"") + "\""));
+        // Expanded to synonym groups for the same reason as the tier-2 predicate, and NOT optional here:
+        // TokenizeQuery canonicalizes, so a caller who typed "new" arrives holding only "create". Matching
+        // on that alone would make tier 3 blind to the very word the caller used (issue #75).
+        var matchExpression = string.Join(
+            " OR ",
+            tokens
+                .SelectMany(IdentifierRelevance.SearchForms)
+                .Distinct(StringComparer.Ordinal)
+                .Select(t => "\"" + t.Replace("\"", "\"\"") + "\""));
 
         using var cmd = _connection.CreateCommand();
         cmd.CommandText = """

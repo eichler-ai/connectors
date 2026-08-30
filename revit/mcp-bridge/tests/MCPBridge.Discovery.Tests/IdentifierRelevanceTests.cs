@@ -135,6 +135,56 @@ public class IdentifierRelevanceTests
         Assert.InRange(score, 0.0, 1.0);
     }
 
+    /// <summary>
+    /// Issue #75. Revit's factory convention is <c>NewXxx</c>, so "create" has to reach a name that says
+    /// "New" and nothing else. Asserting exact equality with the <c>Create</c>-spelled name, rather than
+    /// merely "better than before", is what pins the CANONICALIZING design: an expansion applied to the
+    /// query alone would raise recall on NewFamilyInstance while leaving "New" as unexplained material on
+    /// the precision side, so the two spellings would still score differently.
+    /// </summary>
+    [Fact]
+    public void Score_SynonymSpellingsOfTheSameRequestScoreIdentically()
+    {
+        var viaCreate = IdentifierRelevance.Score(new[] { "create", "family", "instance" }, "NewFamilyInstance", "Document");
+        var viaNew = IdentifierRelevance.Score(new[] { "new", "family", "instance" }, "NewFamilyInstance", "Document");
+        var spelledCreate = IdentifierRelevance.Score(new[] { "create", "family", "instance" }, "CreateFamilyInstance", "Document");
+
+        Assert.Equal(viaCreate, viaNew, precision: 9);
+        Assert.Equal(spelledCreate, viaCreate, precision: 9);
+    }
+
+    /// <summary>
+    /// The precision half of the same property, isolated. If "New" were left unexplained, a name carrying
+    /// it would be charged for a word the caller effectively did type.
+    /// </summary>
+    [Fact]
+    public void Score_ASynonymWordPartInTheNameCountsAsExplained()
+    {
+        var tokens = new[] { "create", "level" };
+
+        var factory = IdentifierRelevance.Score(tokens, "NewLevel", "Document");
+        var unrelated = IdentifierRelevance.Score(tokens, "ZapLevel", "Document");
+
+        Assert.True(factory > unrelated, $"NewLevel ({factory}) must outrank ZapLevel ({unrelated})");
+    }
+
+    /// <summary>
+    /// Synonyms are whole-word, not substring. "Renewal" merely contains the letters of "new"; treating it
+    /// as the word would make every such name a false factory method. The SQL predicate can still admit it
+    /// -- it expands tokens to the group and matches substrings -- so the scorer is the only thing standing
+    /// between that row and a top-of-tier score.
+    /// </summary>
+    [Fact]
+    public void Score_SynonymMatchingIsWholeWordOnly()
+    {
+        var tokens = new[] { "create" };
+
+        var real = IdentifierRelevance.Score(tokens, "New", "Document");
+        var coincidence = IdentifierRelevance.Score(tokens, "Renewal", "Document");
+
+        Assert.True(real > coincidence, $"New ({real}) must outrank Renewal ({coincidence})");
+    }
+
     [Fact]
     public void Score_IsBoundedToTheUnitInterval()
     {

@@ -55,6 +55,80 @@ internal static class IdentifierRelevance
     };
 
     /// <summary>
+    /// Words that name the same request in different vocabularies, grouped so that matching any member of a
+    /// group is matching all of them. Issue #75.
+    ///
+    /// <para><b>Revit's factory convention is <c>NewXxx</c>, not <c>Create</c>.</b>
+    /// <c>Document.NewFamilyInstance</c>, <c>NewLevel</c> and friends carry "create" nowhere in the member
+    /// name or the declaring type, so for the natural phrasing "create family instance" the scorer was doing
+    /// the right thing with the words it had and still ranked <c>NewFamilyInstance</c> 16th: it matches two
+    /// of three tokens and is additionally charged for the unexplained word-part "New", while
+    /// <c>ImportInstance.Create</c> matches two of three with a shorter, fully-explained name. No weight
+    /// tuning reaches that; the missing knowledge is that the two words are one request.</para>
+    ///
+    /// <para>Applied by CANONICALIZING both sides -- query tokens and name word-parts alike -- rather than
+    /// by expanding the query alone. That symmetry is deliberate and is the trap the stopword fix already
+    /// walked into once (see <see cref="StopWords"/>): expanding only the query would let "create" earn
+    /// recall against "New" while "New" stayed unexplained material on the precision side, giving with one
+    /// hand and taking with the other. Canonicalizing makes the two sides agree by construction.</para>
+    ///
+    /// <para>Deliberately a small hand-maintained list, not stemming and not embeddings. The corpus is one
+    /// vendor's API with a consistent house style, and the failure is a specific vocabulary mismatch rather
+    /// than general morphology.</para>
+    ///
+    /// <para><b>It is ONE group, where issue #75 proposed four, and that is a measured result rather than a
+    /// staged rollout.</b> <c>delete</c>/<c>remove</c>/<c>erase</c>, <c>get</c>/<c>find</c>/<c>lookup</c>
+    /// and <c>set</c>/<c>modify</c>/<c>change</c> were added together and run over 23 natural-language
+    /// queries against the real corpus. Not one query gained a better answer; two lost one.
+    /// <c>set</c>/<c>change</c> pushed <c>CompoundStructure.ChangeRegionWidth</c> off page 1 of "change the
+    /// width of a wall" in favour of <c>Wall.SetHostWallId</c> and <c>Wall.CanSetHostWall</c>, and
+    /// <c>get</c>/<c>lookup</c> put <c>BuiltInParameter.RBS_LOOKUP_TABLE_NAME</c> on page 1 of "get all
+    /// doors on a level". The asymmetry is the point: "create" and "new" are the SAME operation under two
+    /// naming conventions, whereas <c>Set</c>, <c>Change</c> and <c>Modify</c> are three DIFFERENT
+    /// operations in this API that English happens to blur. Adding a group needs the same measurement, not
+    /// an argument from plausibility.</para>
+    ///
+    /// <para>Matching is whole-word only. "Renewal" and "Newton" split to word-parts that are not the word
+    /// "new", so they are untouched; they can still be ADMITTED by the SQL predicate, which expands tokens
+    /// to their group and matches substrings, but they earn no credit and rank accordingly.</para>
+    /// </summary>
+    private static readonly string[][] SynonymGroups =
+    {
+        new[] { "create", "new" },
+    };
+
+    private static readonly Dictionary<string, string[]> GroupsByWord = BuildGroupIndex();
+
+    private static Dictionary<string, string[]> BuildGroupIndex()
+    {
+        var index = new Dictionary<string, string[]>(StringComparer.Ordinal);
+        foreach (var group in SynonymGroups)
+        {
+            foreach (var word in group)
+            {
+                index[word] = group;
+            }
+        }
+
+        return index;
+    }
+
+    /// <summary>
+    /// The word every member of <paramref name="word"/>'s synonym group is scored as. Whole-word only, and
+    /// the identity for anything not in a group.
+    /// </summary>
+    public static string Canonical(string word) =>
+        GroupsByWord.TryGetValue(word, out var group) ? group[0] : word;
+
+    /// <summary>
+    /// Every spelling <paramref name="token"/> should be searched under -- for the SQL admission predicate,
+    /// which sees raw stored names and so cannot rely on <see cref="Canonical"/>. A superset of what will
+    /// score, exactly like the rest of that predicate.
+    /// </summary>
+    public static IReadOnlyList<string> SearchForms(string token) =>
+        GroupsByWord.TryGetValue(token, out var group) ? group : new[] { token };
+
+    /// <summary>
     /// Credit for a query token that equals a whole word-part of the name ("create" vs "Create").
     /// </summary>
     private const double ExactCredit = 1.0;
@@ -138,6 +212,17 @@ internal static class IdentifierRelevance
         return words;
     }
 
+    private static IReadOnlyList<string> CanonicalizeAll(IReadOnlyList<string> words)
+    {
+        var canonical = new List<string>(words.Count);
+        foreach (var word in words)
+        {
+            canonical.Add(Canonical(word));
+        }
+
+        return canonical;
+    }
+
     /// <summary>Best credit <paramref name="token"/> can earn against a single word-part.</summary>
     private static double Credit(string token, string word)
     {
@@ -180,16 +265,22 @@ internal static class IdentifierRelevance
             return 0.0;
         }
 
-        var memberWords = SplitWords(memberName);
-        var typeWords = SplitWords(typeShortName);
+        // Both sides canonicalized, so a synonym group scores identically whichever spelling the query and
+        // the name each happen to use (issue #75). Idempotent, so a caller that has already canonicalized
+        // its tokens -- DiscoveryCache does, since its SQL predicate needs the group anyway -- loses
+        // nothing by passing them through again.
+        var memberWords = CanonicalizeAll(SplitWords(memberName));
+        var typeWords = CanonicalizeAll(SplitWords(typeShortName));
         if (memberWords.Count + typeWords.Count == 0)
         {
             return 0.0;
         }
 
+        var tokens = CanonicalizeAll(queryTokens);
+
         // Recall: for each query token, its best credit anywhere in the name.
         var recallTotal = 0.0;
-        foreach (var token in queryTokens)
+        foreach (var token in tokens)
         {
             var best = 0.0;
             foreach (var word in memberWords)
@@ -222,7 +313,7 @@ internal static class IdentifierRelevance
             }
 
             var best = 0.0;
-            foreach (var token in queryTokens)
+            foreach (var token in tokens)
             {
                 best = Math.Max(best, Credit(token, word));
             }
@@ -239,7 +330,7 @@ internal static class IdentifierRelevance
             }
 
             var best = 0.0;
-            foreach (var token in queryTokens)
+            foreach (var token in tokens)
             {
                 best = Math.Max(best, Credit(token, word));
             }
@@ -250,7 +341,7 @@ internal static class IdentifierRelevance
 
         // A name made up ENTIRELY of stopword parts leaves nothing to measure precision against; treat it
         // as fully explained rather than dividing by zero, so recall alone decides.
-        var recall = recallTotal / queryTokens.Count;
+        var recall = recallTotal / tokens.Count;
         var precision = precisionCount == 0 ? 1.0 : precisionTotal / precisionCount;
         return recall * precision;
     }

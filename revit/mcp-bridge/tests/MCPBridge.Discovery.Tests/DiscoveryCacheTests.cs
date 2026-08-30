@@ -616,4 +616,74 @@ public class DiscoveryCacheTests
     {
         Assert.Throws<System.ArgumentOutOfRangeException>(() => new DiscoveryCache(":memory:", depth));
     }
+
+    // ---------------------------------------------------------------------------------------------
+    // search_functions -- create/new synonym (issue #75)
+    // ---------------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// Issue #75, at the SQL-admission layer that IdentifierRelevanceTests cannot reach. The scorer can
+    /// only rank rows the predicate admitted, and <c>NewGizmo</c> contains no substring of "create", so
+    /// without expanding the token to its synonym group this row never becomes a candidate at all and the
+    /// score is irrelevant.
+    /// </summary>
+    [Fact]
+    public void Search_FactoryNamedNewXxx_IsReachableFromACreateQuery()
+    {
+        using var cache = NewCache();
+        cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+
+        var results = cache.Search("create gizmo", namespaceFilter: null).ToList();
+
+        var factory = results.Where(r => r.Member.Name == "NewGizmo").ToList();
+        Assert.Single(factory);
+        Assert.InRange(factory[0].Score, 500, 999);
+    }
+
+    /// <summary>
+    /// The two naming conventions must be indistinguishable end to end, not merely both present -- see
+    /// <see cref="Fixtures.Factory"/>. A query-side-only expansion passes the test above and fails this one.
+    /// </summary>
+    [Fact]
+    public void Search_TheTwoNamingConventionsScoreTheSame()
+    {
+        using var cache = NewCache();
+        cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+
+        var viaNew = cache.Search("create gizmo", namespaceFilter: null).Single(r => r.Member.Name == "NewGizmo");
+        var viaCreate = cache.Search("create doohickey", namespaceFilter: null).Single(r => r.Member.Name == "CreateDoohickey");
+
+        Assert.Equal(viaCreate.Score, viaNew.Score, precision: 9);
+    }
+
+    /// <summary>
+    /// Canonicalization has to happen BEFORE the distinct pass in TokenizeQuery. "create a new gizmo" names
+    /// ONE request; if "create" and "new" both survive, the query carries three tokens where it should
+    /// carry two -- the same duplicate-token defect a review already caught once for repeated plain words.
+    ///
+    /// <para>The score assertion alone does NOT catch this, which is worth stating because that is what the
+    /// first version of this test asserted and a mutation walked straight through it: when every token
+    /// matches, a duplicated token adds 1.0 to both the numerator and the denominator of recall and the
+    /// score is unchanged. The damage is to ADMISSION. Token count drives
+    /// <c>UnmatchedTokenAllowance</c>, so a phantom third token buys a query an allowance it did not earn,
+    /// and rows supplying only one of the two real tokens are let into the tier. <c>CreateDoohickey</c>
+    /// supplies "create" and nothing else, and must stay out.</para>
+    /// </summary>
+    [Fact]
+    public void Search_ASynonymRepeatedInTheQuery_BuysNoExtraUnmatchedTokenAllowance()
+    {
+        using var cache = NewCache();
+        cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+
+        var once = cache.Search("create gizmo", namespaceFilter: null).ToList();
+        var twice = cache.Search("create a new gizmo", namespaceFilter: null).ToList();
+
+        Assert.Equal(
+            once.Single(r => r.Member.Name == "NewGizmo").Score,
+            twice.Single(r => r.Member.Name == "NewGizmo").Score,
+            precision: 9);
+
+        Assert.DoesNotContain(twice, r => r.Member.Name == "CreateDoohickey" && r.Score >= 500);
+        Assert.DoesNotContain(once, r => r.Member.Name == "CreateDoohickey" && r.Score >= 500);
+    }
 }
