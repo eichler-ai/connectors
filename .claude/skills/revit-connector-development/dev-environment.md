@@ -211,6 +211,17 @@ re-resolve rather than hardcoding either. `robocopy` from `cmd /c` mangles a `\\
 - **Only the process that WINS the singleton lock writes `broker.json`.** A stray secondary from an
   earlier backgrounded harness run can beat a fresh primary to it, so confirm the pid in
   `broker.json` belongs to the process you started, and kill strays first.
+- **Never restart or kill ANY broker process while your own session's `revit` MCP tool is connected
+  — including one you believe belongs to someone else.** Two separate hazards, and the second is the
+  surprising one: killing the process your tool depends on breaks it directly, but killing *any
+  other* primary can break it too, because your tool runs a background secondary continuously
+  retrying lock acquisition — kill a different primary and your own secondary may win the race and
+  become primary, breaking the client session (`method "tools/call" is invalid during session
+  initialization`) even though its process never died. The race is inherent; there is no careful way
+  to do it. If a restart is genuinely necessary, treat it as a deliberate step that includes
+  reconnecting afterwards (`/mcp`, user-issued — Claude Code does not auto-recover this), not a quick
+  aside mid-task. Restarting to force a fresh registration snapshot is obsolete anyway: the add-in
+  pushes one live.
 - **Run the test harness natively on the Mac** (`-broker-mode remote -broker-bind
   -broker-app-data-dir`) rather than cross-compiling and pushing it to the VM — the same suite runs in
   seconds instead of minutes.

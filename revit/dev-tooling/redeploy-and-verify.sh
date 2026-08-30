@@ -48,6 +48,11 @@
 #                             manually instead, beware: prlctl exec mangles \\psf\... paths in
 #                             double-quoted bash strings -- single-quote them.)
 #   --vm NAME                Parallels VM name (default: "Windows 11")
+#   --share-name NAME        Parallels share holding THIS checkout (default: the basename of
+#                             the repo root, which is what the main checkout's share is named).
+#                             Set this when running from a git worktree shared in under a
+#                             different name, e.g. --share-name describe-fn. The alias
+#                             (\\psf\ vs \\Mac\) is still resolved automatically either way.
 #   --mac-bind IP            This Mac's address the VM can reach (default: auto-detected, first
 #                             10.211.55.x address from ifconfig -- override if that ever changes)
 #   --app-data-dir PATH      Shared broker app-data dir (default: <repo>/Connectors/Revit)
@@ -76,6 +81,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 VM_NAME="Windows 11"
+SHARE_NAME="$(basename "$REPO_ROOT")"
 MAC_BIND=""
 APP_DATA_DIR="$REPO_ROOT/Connectors/Revit"
 BROKER_EXE="$REPO_ROOT/revit/mcp-server/mcp-server-mac"
@@ -100,6 +106,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --build) BUILD=true; shift ;;
     --vm) VM_NAME="$2"; shift 2 ;;
+    --share-name) SHARE_NAME="$2"; shift 2 ;;
     --mac-bind) MAC_BIND="$2"; shift 2 ;;
     --app-data-dir) APP_DATA_DIR="$2"; shift 2 ;;
     --broker-exe) BROKER_EXE="$2"; shift 2 ;;
@@ -194,19 +201,52 @@ broker_is_healthy() {
 # across VM restarts (documented SKILL.md gotcha; PR #33 review finding when this was hardcoded).
 # Resolve it fresh each run -- costs well under a second and removes the single most likely
 # environment-drift failure. tr strips the CR that Windows output carries.
-say "resolving the VM's UNC alias for the connectors share"
-# Deliberately NO double quotes inside the -Command string: prlctl exec STRIPS them (confirmed
-# live -- a quoted "\\psf\connectors" arrived as a bare token and PowerShell tried to run it as a
-# command; a new variant of the documented inline--Command corruption class). Every token here is
-# spaceless, so unquoted parses fine on the PowerShell side. `|| true` because under set -e a
-# prlctl failure would otherwise kill the script before the actionable error below can print.
-UNC_ROOT="$(prlctl exec "$VM_NAME" powershell -Command 'if (Test-Path \\psf\connectors\revit) { Write-Output \\psf\connectors } elseif (Test-Path \\Mac\connectors\revit) { Write-Output \\Mac\connectors }' | tr -d '\r' || true)"
+say "resolving the VM's UNC alias for the '$SHARE_NAME' share"
+# -EncodedCommand, NOT an inline -Command string. prlctl exec corrupts backslash sequences in
+# inline commands (documented gotcha), and with an arbitrary share name that is not theoretical:
+# a share called "redeploy-fix" makes the path \\psf\redeploy-fix, whose \r was eaten live during
+# this flag's own development, yielding "\psfedeploy-fix". Base64/UTF-16LE sidesteps quoting and
+# escaping entirely. Output is sentinel-prefixed so a CLIXML/progress preamble can't be mistaken
+# for the value. `|| true` because under set -e a prlctl failure would kill the script before the
+# actionable error below can print.
+ps_encode() { printf '%s' "$1" | iconv -f UTF-8 -t UTF-16LE | base64 | tr -d '\n'; }
+
+resolve_cmd="foreach (\$a in @('\\\\psf\\$SHARE_NAME','\\\\Mac\\$SHARE_NAME')) { if (Test-Path (Join-Path \$a 'revit')) { Write-Output ('UNCROOT=' + \$a); break } }"
+UNC_ROOT="$(prlctl exec "$VM_NAME" powershell -EncodedCommand "$(ps_encode "$resolve_cmd")" 2>/dev/null | tr -d '\r' | sed -n 's/^UNCROOT=//p' | head -1 || true)"
 if [[ -z "$UNC_ROOT" ]]; then
-  echo "the VM resolves neither \\\\psf\\connectors nor \\\\Mac\\connectors -- check the share mapping:" >&2
+  echo "the VM resolves neither \\\\psf\\$SHARE_NAME nor \\\\Mac\\$SHARE_NAME -- check the share mapping:" >&2
   echo "  prlctl list \"$VM_NAME\" --info | grep -A2 'Host Shared Folders'" >&2
+  echo "if this checkout is a git worktree, share it in and name it with --share-name:" >&2
+  echo "  prlctl set \"$VM_NAME\" --shf-host-add <name> --path $REPO_ROOT --mode rw" >&2
   exit 1
 fi
 say "share resolves as $UNC_ROOT"
+
+# IDENTITY GUARD. Everything downstream -- the build, -SrcRoot, the DLLs that get deployed -- is
+# read from $UNC_ROOT, NOT from the $REPO_ROOT this script was invoked out of. If those are two
+# different checkouts, the run builds, deploys, relaunches and reports PASS having verified an
+# entirely different tree: the silent wrong-source failure that --marker exists to catch, and
+# which only helps if you already suspected it. Prove they are the same tree rather than trusting
+# the names to line up -- drop a uniquely-named probe file here, look for it there.
+PROBE=".redeploy-probe-$$-${RANDOM}"
+: > "$REPO_ROOT/$PROBE"
+# EXIT trap as well as the explicit rm below: a Ctrl-C between the two would otherwise leave
+# an untracked probe file sitting in the repo root.
+trap 'rm -f "$REPO_ROOT/$PROBE"' EXIT
+probe_cmd="if (Test-Path '$UNC_ROOT\\$PROBE') { Write-Output PROBE=MATCH }"
+PROBE_SEEN="$(prlctl exec "$VM_NAME" powershell -EncodedCommand "$(ps_encode "$probe_cmd")" 2>/dev/null | tr -d '\r' || true)"
+rm -f "$REPO_ROOT/$PROBE"
+if [[ "$PROBE_SEEN" != *PROBE=MATCH* ]]; then
+  echo "REFUSING TO RUN: $UNC_ROOT is not this checkout." >&2
+  echo "  invoked from: $REPO_ROOT" >&2
+  echo "  resolved to:  $UNC_ROOT  (share '$SHARE_NAME')" >&2
+  echo "Continuing would have built and deployed a different tree and reported PASS. Share this" >&2
+  echo "checkout in, then name it:" >&2
+  echo "  prlctl set \"$VM_NAME\" --shf-host-add <name> --path $REPO_ROOT --mode rw" >&2
+  echo "  $0 --share-name <name> ..." >&2
+  exit 1
+fi
+say "share identity confirmed: $UNC_ROOT is this checkout"
 
 if $BUILD; then
   say "building MCPBridge.sln on the VM (--no-incremental)"
