@@ -944,7 +944,13 @@ public sealed class DiscoveryCache : IDisposable
         for (var i = 0; i < tokens.Length; i++)
         {
             hitTerms.Add($"(CASE WHEN (LOWER(t.name) LIKE @tok{i} ESCAPE '\\' OR LOWER(m.name) LIKE @tok{i} ESCAPE '\\') THEN 1 ELSE 0 END)");
-            memberHitTerms.Add($"(CASE WHEN LOWER(m.name) LIKE @tok{i} ESCAPE '\\' THEN 1 ELSE 0 END)");
+            // A constructor's m.name IS its declaring type's name (DiscoveryReflector), so counting it here
+            // would hand every constructor of a name-matching type the very type-name-only admission this
+            // gate exists to refuse -- and, through ORDER BY member_hits, a guaranteed seat inside the LIMIT
+            // ahead of genuine member matches. 2nd review round: 14 constructors were admitted for "set the
+            // parameter of an element" that way, displacing Element.LookupParameter. Excluding them here is
+            // the same premise the scoring path already applies (see the Constructor branch in Search).
+            memberHitTerms.Add($"(CASE WHEN m.kind <> 'Constructor' AND LOWER(m.name) LIKE @tok{i} ESCAPE '\\' THEN 1 ELSE 0 END)");
             cmd.Parameters.AddWithValue($"@tok{i}", "%" + EscapeLike(tokens[i]) + "%");
         }
 
@@ -966,8 +972,15 @@ public sealed class DiscoveryCache : IDisposable
         // signal this feature exists to overrule -- CreatePlaceholder out-hits Create and must still lose
         // -- so truncating by it preserves the rows the scorer will rank lowest. Member hits at least
         // correlate with the final score, since a member-name match outweighs a type-name one there too.
-        // Truncation is a safety valve against a pathological query, not a ranking: the member-hit
-        // requirement above is what actually keeps this set small enough that the LIMIT is not reached.
+        //
+        // The LIMIT IS still reached on ordinary queries, and saying otherwise was measurably wrong (3rd
+        // review round -- an earlier version of this comment claimed the member-hit gate kept the set small
+        // enough that it was not). Measured against the real corpus: "set the parameter of an element"
+        // admits ~795 rows and "get the element type of an element" ~802, so a few hundred are dropped in
+        // SQLite's unspecified scan order, and TotalMatched reports the truncated count. Ordering by member
+        // hits is what keeps the rows most likely to score well on the surviving side of that cut; it is a
+        // damage-limiting heuristic, not a guarantee. Raising the limit for this tier is the real fix and
+        // wants its own measurement pass -- see the follow-up issue.
         cmd.CommandText = $"""
             SELECT m.kind, m.name, m.signature, m.summary, m.member_id, m.returns, m.params_json, t.namespace, t.full_name, a.kind,
                    ({hits}) AS hits, ({memberHits}) AS member_hits

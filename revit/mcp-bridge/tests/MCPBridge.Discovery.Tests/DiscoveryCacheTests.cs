@@ -420,21 +420,44 @@ public class DiscoveryCacheTests
         // tier 3 is capped below 500, that buries the right answer harder than the original bug did.
         //
         // "view sheet zzz": the type name ViewSheet supplies 2 of 3 tokens, clearing `required`, but no
-        // token touches Create or CreatePlaceholder -- so neither may ride in on the type alone.
+        // token touches any member name -- so nothing on the type may ride in on the type name alone.
         //
-        // The type's CONSTRUCTOR is deliberately excluded from this assertion rather than being a hole in
-        // it: a constructor's reflected name IS the type name, so "view" and "sheet" match it directly and
-        // it clears the gate on its own merits, exactly as intended.
+        // CONSTRUCTORS ARE INCLUDED, deliberately. An earlier version of this test filtered them out and
+        // its comment rationalized the hole ("it clears the gate on its own merits"), which contradicted
+        // the scoring path's own premise that a constructor contributes no name material of its own. The
+        // next review round found the seam that rationalization was hiding: a constructor's m.name IS the
+        // type name, so the SQL gate handed every constructor a phantom member-hit -- readmitting exactly
+        // the type-name-only rows this gate exists to refuse, and seating them inside the LIMIT ahead of
+        // real member matches.
         using var cache = NewCache();
         cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
 
         var tierTwo = cache.Search("view sheet zzz", namespaceFilter: null)
-            .Where(r => r.Member.DeclaringType.EndsWith("ViewSheet", StringComparison.Ordinal)
-                && r.Member.Kind != "Constructor"
-                && r.Score >= 500)
+            .Where(r => r.Member.DeclaringType.EndsWith("ViewSheet", StringComparison.Ordinal) && r.Score >= 500)
             .ToList();
 
         Assert.Empty(tierTwo);
+    }
+
+    [Fact]
+    public void Search_TypeNameMatchingEveryToken_IsStillAdmittedWithNoMemberHit()
+    {
+        // The other side of the member-hit gate: it applies only to the ALLOWANCE. A row still matching
+        // every token is admitted regardless, so a query that names a type exactly keeps finding that
+        // type's members even when no member word matches.
+        //
+        // 3rd review round found this branch had no test at all -- deleting `hits >= @all OR` left all 96
+        // tests green, because every other case happened to have a member hit too. It is load-bearing, not
+        // dead: on the real corpus, "external definition creation options" reaches
+        // ExternalDefinitionCreationOptions' members only through this branch.
+        using var cache = NewCache();
+        cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+
+        var results = cache.Search("view sheet", namespaceFilter: null)
+            .Where(r => r.Member.Name == "CreatePlaceholder" && r.Score >= 500)
+            .ToList();
+
+        Assert.Single(results);
     }
 
     [Fact]
