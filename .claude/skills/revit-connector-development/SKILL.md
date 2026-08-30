@@ -281,17 +281,39 @@ on the PR, not in a running report.
 ## Milestone retrospectives
 
 After any major milestone — a PR series, a roadmap phase, a multi-PR feature — spend a few minutes on
-three questions, and act on the answers immediately as a rule here, a tooling change, or a filed
-issue. Never just a mental note.
+three questions, and act on the answers immediately. Never just a mental note.
 
 1. What broke or hung in the **process** (not the product)?
 2. Where did wall-clock go that wasn't thinking or building?
 3. What did a reviewer or test catch that the process should have caught earlier or cheaper?
 
-## Keeping this skill current
+Every answer lands somewhere concrete: a rule, a tooling change, a filed issue, or a `caveats.md`
+entry. Question 2 is the one that most often produces a caveat rather than a rule — time lost to a
+symptom you misread is a diagnosis worth recording, not a discipline problem to resolve by trying
+harder.
 
-Update this file as part of the work that taught you something, rather than leaving it wrong for the
-next session. State the rule directly; put the environment-specific version in `dev-environment.md`.
-Prefer generalizing an existing rule over appending a new anecdote — if a new lesson is a third
-instance of a rule already here, sharpen that rule instead of adding to the list. Git history holds
-the narrative; this file holds the guidance.
+## Keeping these files current
+
+Record what a piece of work taught you as part of that work, rather than leaving the docs wrong for
+the next session. Three files, and which one depends on the shape of the lesson:
+
+| The lesson is… | Goes to | As |
+|---|---|---|
+| something to always do, or never do | `SKILL.md` | a rule, stated directly |
+| a property of this machine or its tooling | `dev-environment.md` | a mechanism, with the check that reveals it |
+| what a symptom turned out to mean | `caveats.md` | a row in that symptom's table |
+
+Each file explains its own format; follow it there rather than inventing a shape.
+
+**Two triggers are easy to miss, because neither produces a diff:**
+
+- **You spent a long time on a symptom that turned out to mean something else.** Record it in
+  `caveats.md`'s misdiagnosis table even though — especially though — nothing shipped. A wrong
+  hypothesis leaves no commit and no issue, so if you don't write it down, nothing anywhere does. The
+  entry that matters is *what finally distinguished the two*, not the story.
+- **You found a dead end.** "We tried X, it does not work here" only exists if someone records it;
+  otherwise the next session pays for it again.
+
+**Prefer sharpening over appending.** If a new lesson is a third instance of a rule already present,
+tighten that rule rather than adding a fourth bullet beside it. These files are read in full, so
+length has a real cost — git history holds the narrative, they hold the guidance.
