@@ -11,7 +11,7 @@ launcher agent) that only hold in a topology like this repo's own.
 
 If you are reproducing a similar Mac + Parallels setup, the full operational lore — gotchas
 included, and there are many — lives in the `revit-connector-development` skill
-(`.claude/skills/revit-connector-development/SKILL.md`).
+(`.claude/skills/revit-connector-development/dev-environment.md`).
 
 | Script | Runs on | Purpose |
 |---|---|---|

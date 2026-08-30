@@ -11,9 +11,11 @@ are what keep it reviewable.
 - **Naming conventions:** [`CONVENTIONS.md`](CONVENTIONS.md) — in particular the MCP
   Bridge (the Revit add-in) vs. MCP Server (the agent-facing broker) split.
 - **Getting a working setup:** [`revit/docs/quickstart.md`](revit/docs/quickstart.md).
-- **Day-to-day process detail** (dev loop, live-verification tooling, review checklist):
+- **Day-to-day process detail** (engineering rules, testing tiers, review checklist):
   `.claude/skills/revit-connector-development/SKILL.md`. It is written for agent-driven
-  development but the process applies to human contributors identically.
+  development but the process applies to human contributors identically. The Mac + Parallels
+  dev-environment specifics live beside it in `dev-environment.md`; you only need that file if you
+  are reproducing this repo's own VM setup.
 
 ## Testing — two tiers, deliberately
 
