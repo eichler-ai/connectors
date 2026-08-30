@@ -44,6 +44,12 @@ public class RealRevitApiTests
     [Theory]
     // The reported case. "place" belongs to "place a view", but is also a prefix of "Placeholder".
     [InlineData("create sheet place view", "Autodesk.Revit.DB.ViewSheet", "Create")]
+    // Issue #75's reported query: Revit's factory convention is NewXxx, not CreateXxx, so this needed
+    // synonym expansion rather than any amount of retuning IdentifierRelevance's weights. Measured live
+    // (independent review of the first cut of this fix, after fixing the double-counting defect it found):
+    // rank 1 at 663.1, ahead of Document.FamilyCreate (616.7) and every ItemFactoryBase.NewFamilyInstance
+    // overload (616.5).
+    [InlineData("create family instance", "Autodesk.Revit.Creation.Document", "NewFamilyInstance")]
     public void SearchFunctions_NaturalLanguageQuery_SurfacesTheGeneralMethodAtTheTop(string query, string expectedType, string expectedMember)
     {
         var loaded = RealRevitApiLoader.TryLoad();

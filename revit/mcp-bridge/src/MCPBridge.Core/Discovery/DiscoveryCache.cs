@@ -909,6 +909,17 @@ public sealed class DiscoveryCache : IDisposable
     /// <para>Falls back to the unfiltered tokens when filtering would leave nothing, so a query that is
     /// ALL stopwords still searches for what the caller literally typed rather than silently matching
     /// everything.</para>
+    ///
+    /// <para><b>De-duplicates by synonym CLASS, not by literal spelling</b> (issue #75 follow-up,
+    /// independent review finding). "create" and "new" are the same <see cref="IdentifierRelevance.Synonyms"/>
+    /// class; keeping them as two separate token slots meant each slot's own
+    /// <see cref="IdentifierRelevance.Expand"/> included the other, so a single name word-part like "Create"
+    /// satisfied BOTH slots at once and silently bought the row a free <c>UnmatchedTokenAllowance</c> seat
+    /// no query actually earned. Measured live against the real corpus: "create a new transaction" admitted
+    /// <c>Arc.Create</c> (sharing only "create"/"new", nothing else) into tier 2, while
+    /// <c>Transaction.Transaction</c> fell out of the top 12 entirely. Collapsing to one slot per class
+    /// keeps whichever literal spelling appeared FIRST -- which spelling wins does not change ranking,
+    /// since <see cref="IdentifierRelevance.Credit"/> discounts synonym-derived credit either way.</para>
     /// </summary>
     private static string[] TokenizeQuery(string queryLower)
     {
@@ -916,7 +927,22 @@ public sealed class DiscoveryCache : IDisposable
             .Distinct(StringComparer.Ordinal)
             .ToArray();
         var filtered = raw.Where(t => t.Length > 1 && !IdentifierRelevance.StopWords.Contains(t)).ToArray();
-        return filtered.Length > 0 ? filtered : raw;
+        return DedupeBySynonymClass(filtered.Length > 0 ? filtered : raw);
+    }
+
+    private static string[] DedupeBySynonymClass(string[] tokens)
+    {
+        var seenClasses = new HashSet<string>(StringComparer.Ordinal);
+        var result = new List<string>(tokens.Length);
+        foreach (var token in tokens)
+        {
+            if (seenClasses.Add(IdentifierRelevance.SynonymClassKey(token)))
+            {
+                result.Add(token);
+            }
+        }
+
+        return result.ToArray();
     }
 
     /// <summary>
@@ -943,15 +969,32 @@ public sealed class DiscoveryCache : IDisposable
         var memberHitTerms = new List<string>();
         for (var i = 0; i < tokens.Length; i++)
         {
-            hitTerms.Add($"(CASE WHEN (LOWER(t.name) LIKE @tok{i} ESCAPE '\\' OR LOWER(m.name) LIKE @tok{i} ESCAPE '\\') THEN 1 ELSE 0 END)");
+            // Issue #75: a query token is admitted through any of its IdentifierRelevance.Expand synonyms
+            // ("create" through "new"), not just its literal spelling -- otherwise a short query relying
+            // entirely on the synonym word (e.g. "create wall" against a fixture named "NewWall") never
+            // reaches IdentifierRelevance.Score in the first place, since this predicate decides candidate
+            // MEMBERSHIP and Score only decides rank among admitted rows. Each variant gets its own LIKE
+            // parameter (SQLite has no array binding), OR'd together per token so the token still counts as
+            // exactly one hit -- required/hits/member_hits below stay in terms of the ORIGINAL token count.
+            var variants = IdentifierRelevance.Expand(tokens[i]);
+            var typeOrMemberClauses = new List<string>();
+            var memberOnlyClauses = new List<string>();
+            for (var v = 0; v < variants.Count; v++)
+            {
+                var pname = $"@tok{i}_{v}";
+                cmd.Parameters.AddWithValue(pname, "%" + EscapeLike(variants[v]) + "%");
+                typeOrMemberClauses.Add($"LOWER(t.name) LIKE {pname} ESCAPE '\\' OR LOWER(m.name) LIKE {pname} ESCAPE '\\'");
+                memberOnlyClauses.Add($"LOWER(m.name) LIKE {pname} ESCAPE '\\'");
+            }
+
+            hitTerms.Add($"(CASE WHEN ({string.Join(" OR ", typeOrMemberClauses)}) THEN 1 ELSE 0 END)");
             // A constructor's m.name IS its declaring type's name (DiscoveryReflector), so counting it here
             // would hand every constructor of a name-matching type the very type-name-only admission this
             // gate exists to refuse -- and, through ORDER BY member_hits, a guaranteed seat inside the LIMIT
             // ahead of genuine member matches. 2nd review round: 14 constructors were admitted for "set the
             // parameter of an element" that way, displacing Element.LookupParameter. Excluding them here is
             // the same premise the scoring path already applies (see the Constructor branch in Search).
-            memberHitTerms.Add($"(CASE WHEN m.kind <> 'Constructor' AND LOWER(m.name) LIKE @tok{i} ESCAPE '\\' THEN 1 ELSE 0 END)");
-            cmd.Parameters.AddWithValue($"@tok{i}", "%" + EscapeLike(tokens[i]) + "%");
+            memberHitTerms.Add($"(CASE WHEN m.kind <> 'Constructor' AND ({string.Join(" OR ", memberOnlyClauses)}) THEN 1 ELSE 0 END)");
         }
 
         var hits = string.Join(" + ", hitTerms);

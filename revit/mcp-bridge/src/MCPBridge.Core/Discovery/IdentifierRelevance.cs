@@ -82,6 +82,91 @@ internal static class IdentifierRelevance
     private const double TypeNameWeight = 0.9;
 
     /// <summary>
+    /// Small, hand-maintained equivalence classes for Revit's own vocabulary mismatches (issue #75) --
+    /// deliberately NOT stemming or an embedding: the corpus is one vendor's API with a consistent house
+    /// style, and the failure this fixes is a specific vocabulary mismatch, not general morphology.
+    ///
+    /// <para>The defining case: Revit's factory convention is <c>NewXxx</c>, not <c>CreateXxx</c>
+    /// (<c>Document.NewFamilyInstance</c>, <c>NewLevel</c>, ...), so <c>search_functions("create family
+    /// instance")</c> ranked it at #16 -- behind several <c>Xxx.Create</c> overloads with nothing to do
+    /// with family instances -- because no amount of retuning the tier-2 weights makes "create" and "new"
+    /// the same word. The rest mirror the same shape for Revit's other common verb pairs.</para>
+    ///
+    /// <para>Each entry lists only the OTHER members of its class, not itself; go through
+    /// <see cref="Expand"/> rather than indexing this directly.</para>
+    /// </summary>
+    public static readonly IReadOnlyDictionary<string, string[]> Synonyms = new Dictionary<string, string[]>(StringComparer.Ordinal)
+    {
+        ["create"] = new[] { "new" },
+        ["new"] = new[] { "create" },
+        ["delete"] = new[] { "remove", "erase" },
+        ["remove"] = new[] { "delete", "erase" },
+        ["erase"] = new[] { "delete", "remove" },
+        ["get"] = new[] { "find", "lookup" },
+        ["find"] = new[] { "get", "lookup" },
+        ["lookup"] = new[] { "get", "find" },
+        ["modify"] = new[] { "set", "change" },
+        ["set"] = new[] { "modify", "change" },
+        ["change"] = new[] { "modify", "set" },
+    };
+
+    /// <summary>
+    /// Every word that earns the same credit as <paramref name="token"/> when matched against a name's
+    /// word-parts: itself, plus its <see cref="Synonyms"/> if it has any.
+    /// </summary>
+    public static IReadOnlyList<string> Expand(string token)
+    {
+        if (!Synonyms.TryGetValue(token, out var synonyms))
+        {
+            return new[] { token };
+        }
+
+        var expanded = new string[synonyms.Length + 1];
+        expanded[0] = token;
+        Array.Copy(synonyms, 0, expanded, 1, synonyms.Length);
+        return expanded;
+    }
+
+    /// <summary>
+    /// Stable identifier for the synonym class <paramref name="token"/> belongs to: the lexicographically
+    /// smallest member of <see cref="Expand"/>'s result. A word with no synonym class is its own key.
+    ///
+    /// <para>Independent-review finding on the first cut of #75: <c>DiscoveryCache.TokenizeQuery</c> kept
+    /// "create" and "new" as two SEPARATE query-token slots even though they are the same class, and each
+    /// slot's <see cref="Expand"/> included the other -- so a single name word-part like "Create" satisfied
+    /// both slots at once. That silently bought the row a free <c>UnmatchedTokenAllowance</c> seat no query
+    /// actually earned: measured live, "create a new transaction" admitted <c>Arc.Create</c> (matching only
+    /// "create"/"new", nothing else) into tier 2 while <c>Transaction.Transaction</c> fell out of the top
+    /// 12 entirely. This key exists so <c>TokenizeQuery</c> can de-duplicate query tokens BY CLASS, not by
+    /// literal spelling, collapsing "create ... new" into one slot before admission/scoring ever run.</para>
+    /// </summary>
+    public static string SynonymClassKey(string token)
+    {
+        var key = token;
+        foreach (var member in Expand(token))
+        {
+            if (string.CompareOrdinal(member, key) < 0)
+            {
+                key = member;
+            }
+        }
+
+        return key;
+    }
+
+    /// <summary>
+    /// Multiplier applied to credit earned ONLY through a <see cref="Synonyms"/> expansion, never to a
+    /// literal exact/prefix/substring match. Independent-review finding: without this, a purely
+    /// synonym-derived hit was worth exactly as much as the user's own literal word, which could rank a
+    /// method the query never named above the one it did -- measured live, <c>"lookup parameter"</c> put
+    /// <c>ParameterAccess.GetParameter</c> (matching only via "lookup"-&gt;"get") ahead of
+    /// <c>Element.LookupParameter</c> (matching "lookup" head-on). Below 1.0 so the literal spelling always
+    /// wins a fair fight; well above 0 so the #75 fix -- "create" reaching Revit's own "New" convention --
+    /// still works, since that case has no literal competitor for the row it needs to promote.
+    /// </summary>
+    private const double SynonymCreditWeight = 0.75;
+
+    /// <summary>
     /// Splits a CLR identifier into lowercase word-parts on camelCase/PascalCase boundaries, underscores,
     /// and letter/digit transitions: "CreatePlaceholder" -&gt; ["create", "placeholder"], "ViewSheet" -&gt;
     /// ["view", "sheet"], "ElementId" -&gt; ["element", "id"]. Consecutive capitals are held together as one
@@ -138,8 +223,39 @@ internal static class IdentifierRelevance
         return words;
     }
 
-    /// <summary>Best credit <paramref name="token"/> can earn against a single word-part.</summary>
+    /// <summary>
+    /// Best credit <paramref name="token"/> can earn against a single word-part: the literal
+    /// exact/prefix/substring credit at full weight, or -- if that finds nothing, or finds less than a
+    /// synonym would -- credit through one of its <see cref="Expand"/>ed synonyms, discounted by
+    /// <see cref="SynonymCreditWeight"/> (independent-review finding; see that constant's own comment for
+    /// why an undiscounted synonym hit is a real defect, not just a conservative choice).
+    ///
+    /// <para>Deliberately the ONE place synonym expansion happens, shared by both the recall loop (query
+    /// token vs. name word) and the precision loop (name word vs. query token) in <see cref="Score"/>
+    /// below. That symmetry is load-bearing, not incidental -- expanding only on the query side would
+    /// repeat issue #65's stopword trap one review round found: "New" in <c>NewFamilyInstance</c> must
+    /// count as material the query "create family instance" DID explain, or the fix gives with one hand
+    /// (recall: "create" now reaches "New") and takes with the other (precision: "New" still counts as
+    /// unexplained). Routing both loops through this one function is what keeps them in lockstep -- the
+    /// discount below applies equally to both, for the same reason.</para>
+    /// </summary>
     private static double Credit(string token, string word)
+    {
+        var best = CreditDirect(token, word);
+        if (Synonyms.TryGetValue(token, out var synonyms))
+        {
+            foreach (var synonym in synonyms)
+            {
+                best = Math.Max(best, SynonymCreditWeight * CreditDirect(synonym, word));
+            }
+        }
+
+        return best;
+    }
+
+    /// <summary>Exact/prefix/substring credit for the literal <paramref name="token"/> against a single
+    /// word-part, with no synonym expansion -- see <see cref="Credit"/> for that.</summary>
+    private static double CreditDirect(string token, string word)
     {
         if (word.Equals(token, StringComparison.Ordinal))
         {
