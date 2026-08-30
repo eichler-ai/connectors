@@ -69,14 +69,39 @@ public sealed class DiscoveryCache : IDisposable
     private readonly int _rankedDepth;
     private bool _disposed;
 
-    /// <summary>
-    /// <paramref name="rankedDepth"/> overrides <see cref="TierCandidateLimit"/>, and exists so the
-    /// cap-after-scoring behaviour is testable at all: proving it needs MORE candidates than the cap, and
-    /// no hand-written fixture assembly is going to produce 500 members. Production never passes it.
-    /// </summary>
-    public DiscoveryCache(string databasePath, int? rankedDepth = null)
+    public DiscoveryCache(string databasePath)
+        : this(databasePath, TierCandidateLimit)
     {
-        _rankedDepth = rankedDepth ?? TierCandidateLimit;
+    }
+
+    /// <summary>
+    /// Overrides <see cref="TierCandidateLimit"/> so the cap-after-scoring behaviour is testable at all:
+    /// proving it needs MORE candidates than the cap, and no hand-written fixture assembly is going to
+    /// produce 500 members.
+    ///
+    /// <para><b>Internal, not a public optional parameter.</b> Independent PR review finding: this shipped
+    /// as `public DiscoveryCache(string, int?)` on the first draft, which is exactly what this assembly's
+    /// own InternalsVisibleTo comment warns against -- "it stays internal under this assembly's
+    /// default-to-internal rule rather than being made public just to be testable". The grant that comment
+    /// sits on was already configured for this test assembly, so the internal seam cost nothing. No new
+    /// capability was ever exposed (DiscoveryCache is public either way and holds no adapter), but the rule
+    /// is there so that judgment call does not have to be re-made per type.</para>
+    ///
+    /// <para>Caps BOTH tiers -- tier 2's post-scoring window and tier 3's FTS <c>LIMIT</c> -- since they
+    /// share the one constant. A test that sets it small and then asserts on tier-3 rows will be truncated
+    /// there too.</para>
+    /// </summary>
+    internal DiscoveryCache(string databasePath, int rankedDepth)
+    {
+        // A zero or negative depth is not a degenerate-but-harmless setting: Take(0) empties the window and
+        // MaterializeMembers would emit "IN ()", a SQLite parse error, while LIMIT -1 means UNLIMITED in
+        // SQLite and would silently uncap tier 3 at the same time.
+        if (rankedDepth <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(rankedDepth), rankedDepth, "rankedDepth must be positive.");
+        }
+
+        _rankedDepth = rankedDepth;
 
         // Independent PR review finding (2nd round, M1): the caller's self-heal (delete-and-recreate a
         // corrupted database) only works if a failure here doesn't leave a live, locked connection handle
@@ -704,10 +729,12 @@ public sealed class DiscoveryCache : IDisposable
     /// full scan", was never true of tier 2: its predicate is <c>LIKE '%token%'</c> against two name
     /// columns, which cannot use an index at all, so the full scan of the join is paid whether or not rows
     /// are then discarded. Measured against the real RevitAPI 2027 corpus (25,933 documented members),
-    /// reading every matching row costs the same as reading 500 of them to within noise -- 46ms vs 36ms on
-    /// the widest query found ("id", 4,768 candidates), and indistinguishable on every natural-language
-    /// query tried. End-to-end <c>search_functions</c> stayed between 37 and 130ms across 27 queries,
-    /// against the ~700ms full-corpus scan that motivated this cache in the first place.</para>
+    /// reading every matching row rather than 500 costs about 10ms on the widest query found ("id", 4,768
+    /// candidates) and is indistinguishable on every natural-language query tried. End-to-end
+    /// <c>search_functions</c> stayed between 37 and 137ms across 71 queries, against the ~700ms
+    /// full-corpus scan that motivated this cache in the first place -- so the cost is real but the
+    /// headroom absorbs it. (An earlier draft of this comment called 46ms vs 36ms "noise". It is a 28%
+    /// increase, and the end-to-end figure moved 45ms to 65ms. Affordable is the claim that holds.)</para>
     ///
     /// <para>The corpus size is what decides whether that headroom holds, and it is bounded by Revit's own
     /// API surface plus whatever add-ins are loaded, not by anything a caller controls.</para>
@@ -969,8 +996,15 @@ public sealed class DiscoveryCache : IDisposable
         // Cap AFTER scoring, so what survives is the genuine top of the ranking rather than whatever the
         // join happened to walk first (issue #76). Sorted by score here only to pick the window; the
         // caller's own ordering (DiscoveryService, which owns the tie-breaks) still decides final rank.
+        // ThenBy(Id) makes the CUT a total order, not just the display order. Independent PR review
+        // finding: OrderByDescending is a stable sort over a result set pass 1 deliberately leaves
+        // unordered, so among rows tied at the boundary score the survivors would be whichever SQLite
+        // scanned first -- and ties at the boundary are not hypothetical, six rows share 637.5 for "id".
+        // Measured to be stable in practice for a fixed database file, but it is unspecified by contract,
+        // and search_functions cursors are stateless offsets that re-run the query for every page.
         var window = scored
             .OrderByDescending(c => c.Score)
+            .ThenBy(c => c.Id)
             .Take(_rankedDepth)
             .ToList();
 

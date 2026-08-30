@@ -568,7 +568,7 @@ public class DiscoveryCacheTests
     [Fact]
     public void Search_CandidateCap_KeepsTheHighestScoringRowsNotTheOnesSqlWalkedFirst()
     {
-        using var cache = new DiscoveryCache(":memory:", rankedDepth: 2);
+        using var cache = new DiscoveryCache(":memory:", 2);
         cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
 
         var tierTwo = cache.Search("flange", namespaceFilter: null)
@@ -586,15 +586,34 @@ public class DiscoveryCacheTests
     /// <summary>
     /// The companion property, and the one that makes the cap a cap rather than a filter: below the depth,
     /// nothing is dropped at all. Guards against "fixing" the truncation by tightening admission.
+    ///
+    /// <para>Review finding, recorded rather than hidden: this is a WEAK test on its own. At depth 50 over
+    /// 5 candidates, removing the Take, keeping the lowest scores instead of the highest, or dropping the
+    /// sort all still yield 5. Its sibling above already asserts 5 at the default depth with an ordering
+    /// assertion on top. What it uniquely pins is that the depth parameter is a cap and not a quota -- a
+    /// depth ABOVE the candidate count must not pad, truncate, or throw.</para>
     /// </summary>
     [Fact]
     public void Search_CandidateCap_AboveTheCandidateCount_DropsNothing()
     {
-        using var cache = new DiscoveryCache(":memory:", rankedDepth: 50);
+        using var cache = new DiscoveryCache(":memory:", 50);
         cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
 
         var tierTwo = cache.Search("flange", namespaceFilter: null).Where(r => r.Score >= 500).ToList();
 
         Assert.Equal(5, tierTwo.Count);
+    }
+
+    /// <summary>
+    /// The depth is a positive count, and a non-positive one fails loudly at construction rather than as a
+    /// SQLite parse error ("IN ()") on the first query that finds candidates -- with tier 3 silently
+    /// UNCAPPED at the same time, since LIMIT -1 means unlimited in SQLite.
+    /// </summary>
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public void Cache_NonPositiveRankedDepth_IsRejectedAtConstruction(int depth)
+    {
+        Assert.Throws<System.ArgumentOutOfRangeException>(() => new DiscoveryCache(":memory:", depth));
     }
 }
