@@ -19,10 +19,12 @@ import (
 // checked) and executed live via mcp__revit__execute_script -- including deliberately probing corner
 // cases, not just the happy path -- before being committed here. Two real discovery-tool gaps found
 // during that research were filed rather than worked around silently: issue #64 (describe_function's
-// overload_index doesn't match search_functions' own ranking, and member_id alone is rejected) and
-// issue #65 (search_functions("create sheet place view") never surfaces ViewSheet.Create at all,
-// ranking the much-less-common CreatePlaceholder first instead). Both have simple workarounds, used
-// throughout this file's own research and noted at their point of use below.
+// overload_index didn't match search_functions' own ranking, and member_id alone was rejected --
+// FIXED by PR #66, which dropped overload_index from the tool entirely and made member_id alone
+// sufficient; the workaround this comment used to describe no longer applies) and issue #65 (still
+// open: search_functions("create sheet place view") never surfaces ViewSheet.Create at all, ranking
+// the much-less-common CreatePlaceholder first instead -- worked around below by querying the exact
+// method name once the right one is known, same as before).
 func TestPhaseCFloorsGridsSheetsAndText(t *testing.T) {
 	c, instanceID, documentID := targetDocument(t)
 	fixtureTitle := createBlankFixtureDocument(t, c, instanceID, documentID)

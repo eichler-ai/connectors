@@ -141,7 +141,15 @@ the way to target one bundle/subtest during focused iteration, same as always; `
   `poll_execution`, cooperative `cancel_execution` resolving to `cancelled`, instance freed after).
 - `file_exchange_test.go` — `TestPublishFileExchange`: PRD §09's `Publish`/`files[]` contract
   (per-file `published`; collision without `overwrite_output_files` fails THAT FILE, naming the
-  flag, without failing the run; the flag makes the identical publish succeed).
+  flag, without failing the run; the flag makes the identical publish succeed). Also
+  `TestExecutionAuditTrail` (issue #13): every run that reaches the executor leaves a verbatim
+  script copy and an NDJSON log in the routed document's workspace, asserted as a follow-up script
+  reading the directories from inside Revit (the workspace lives on the machine running Revit, not
+  wherever the harness itself runs).
+- `discovery_test.go` — `TestDescribeFunctionDisambiguation`: tier-2 coverage for `describe_function`
+  (previously none at this tier), pinning issue #64's contract change -- `overload_index` is gone,
+  `member` is optional when `member_id` is given, and `member_id` alone must resolve the EXACT
+  overload it names, not just the first one in the list.
 - `zz_cleanup_check_test.go` — `TestZZDocumentCleanupRoundTrip`: runs last by file-name order and
   verifies the cleanup discipline itself, baseline-relative (create → appears in `list_instances`
   via the snapshot push → `closeDocumentByTitle` → disappears).
@@ -171,16 +179,30 @@ the way to target one bundle/subtest during focused iteration, same as always; `
   this API version) and a substantial finding on how model-group member edits actually propagate
   (there is no group-edit-scope API; the real mechanism is `UngroupMembers` → edit → `NewGroup` →
   reassign `.GroupType` on other instances).
+- `phase_b_test.go` — the second coverage-plan corpus bundle, `TestPhaseBAnnotationAndScheduling`
+  (annotation + scheduling): `CreateRoomAndTagIt`, `PlaceDoorInWall`, `DimensionBetweenWalls`,
+  `CreateWallSchedule`, each an independent subtest, same live-first-then-encoded discipline as
+  Phase A. Real API corrections found live and documented in the file's own comments: `NewRoomTag`
+  needs a `LinkElementId`, not a bare `ElementId`; and `FilteredElementCollector.OfClass(typeof(Room))`
+  throws (`Room` has no matching native element type -- use `OfCategory` instead).
+- `phase_c_test.go` — the third coverage-plan corpus bundle, `TestPhaseCFloorsGridsSheetsAndText`
+  (floors, grids, sheets/view-placement, text annotation): `CreateFloor`, `CreateGrid`,
+  `CreateSheetAndPlaceView`, `CreateTextNote`. Findings documented in the file's own comments: the
+  default project template ships 22 pre-existing sheets with several views already placed, so this
+  bundle creates its own fresh `ViewPlan` rather than risking a collision; `TextNote.Text` returns a
+  trailing `\r` appended to whatever text was passed, undocumented in Autodesk's own shipped XML
+  doc; and a `Level` created via `Level.Create` gets no associated floor plan view for free.
 - `memcheck_test.go` — throwaway diagnostics, not part of the coverage corpus:
   `TestOpenForWritingMemoryCycles` (N true cross-call create/write/close cycles, for the memory
   investigation logged in [issue #31](https://github.com/eichler-ai/connectors/issues/31)) and
   `TestOpenDocumentCount` (reports `Application.Documents`' current count/titles). Kept around as
   ready-made tools for revisiting that issue, not run as part of a normal test pass.
 
-Eighteen test functions across `harness_test.go`, `denylist_bypass_test.go`,
-`document_routing_test.go`, `execution_lifecycle_test.go`, `file_exchange_test.go`,
-`open_for_writing_test.go`, `phase_a_test.go`, and `zz_cleanup_check_test.go` make up the actual
-coverage corpus; `memcheck_test.go`'s two are diagnostics, not corpus. The remaining gaps issue
+Twenty-two test functions across `harness_test.go`, `denylist_bypass_test.go`,
+`document_routing_test.go`, `discovery_test.go`, `execution_lifecycle_test.go`,
+`file_exchange_test.go`, `open_for_writing_test.go`, `phase_a_test.go`, `phase_b_test.go`,
+`phase_c_test.go`, and `zz_cleanup_check_test.go` make up the actual coverage corpus;
+`memcheck_test.go`'s two are diagnostics, not corpus. The remaining gaps issue
 #36 tracked — broker-restart replay and a live heartbeat→`unresponsive` transition — stay
 deferred with reasons on record there (disruptive to the shared dev broker; not practically
 scriptable without killing Revit).
@@ -210,7 +232,6 @@ buildable, just not built. What the suite actually covers today — registration
 the sanctioned script globals, the denylist/lifecycle-gate rejections, core CRUD + query, and
 the `OpenForWriting` safety cases — is a genuine regression suite in its own right and doesn't
 need that structure; a data-driven corpus format is worth introducing once there are enough
-cases for one to earn its keep, not before. Known end-to-end coverage gaps — `poll_execution`
-/ `cancel_execution` lifecycle transitions and the `Publish`/`files[]` file-exchange path have
-no harness cases yet — are tracked in
-[issue #36](https://github.com/eichler-ai/connectors/issues/36).
+cases for one to earn its keep, not before. `poll_execution`/`cancel_execution` and the
+`Publish`/`files[]` path are covered end to end (`execution_lifecycle_test.go`,
+`file_exchange_test.go`) — see the summary above for what issue #36 still tracks.
