@@ -209,8 +209,18 @@ public static class DiscoveryReflector
         return true;
     }
 
+    /// <summary>
+    /// Deliberately reads attribute METADATA by name rather than calling
+    /// <c>GetCustomAttribute(typeof(CompilerGeneratedAttribute))</c>. The typeof form needs to instantiate
+    /// the attribute and compare Type identity against the running context, which throws outright under a
+    /// <c>MetadataLoadContext</c> -- and a MetadataLoadContext is the only way to reflect over the real
+    /// RevitAPI.dll off a live Revit process, since it is a native x64 mixed-mode assembly that a test host
+    /// on this ARM64 dev VM cannot load for execution at all. Reading CustomAttributesData works
+    /// identically in both, so the production path (live assemblies, inside Revit) is unchanged.
+    /// </summary>
     private static bool IsCompilerGenerated(MemberInfo m) =>
-        m.GetCustomAttribute(typeof(System.Runtime.CompilerServices.CompilerGeneratedAttribute)) is not null;
+        m.GetCustomAttributesData().Any(a =>
+            a.AttributeType.FullName == "System.Runtime.CompilerServices.CompilerGeneratedAttribute");
 
     private static List<ReflectedMember> ReflectMembers(Type type, XmlDocIndex docIndex)
     {

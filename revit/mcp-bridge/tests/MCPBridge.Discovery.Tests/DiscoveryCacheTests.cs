@@ -309,4 +309,77 @@ public class DiscoveryCacheTests
         // a weak core match must never leapfrog a genuinely stronger add-in match in a lower-numbered tier.
         Assert.True(coreScore - addinScore < 1.0, $"boost ({coreScore - addinScore}) is large enough to risk crossing a tier boundary");
     }
+
+    // ---------------------------------------------------------------------------------------------
+    // search_functions ranking -- issue #65
+    // ---------------------------------------------------------------------------------------------
+
+    [Fact]
+    public void Search_NaturalLanguageQuery_PrefersTheGeneralMethodOverALongerAccidentalTokenMatch()
+    {
+        // Issue #65, reported live from the PRD §13 corpus work: "create sheet place view" returned
+        // ViewSheet.CreatePlaceholder as the #1 result and did not surface ViewSheet.Create at ALL. Tier 2
+        // required every token to be a raw LIKE '%token%' substring of the member or type name, so "place"
+        // matched CreatePlaceholder mid-word (inside "Placeholder") while nothing in Create supplied it --
+        // one accidental substring promoted the wrong method a full tier and demoted the right one below
+        // the 500-point band tier 3 can never cross.
+        using var cache = NewCache();
+        cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+
+        var results = cache.Search("create sheet place view", namespaceFilter: null)
+            .OrderByDescending(r => r.Score)
+            .ToList();
+
+        var create = results.Single(r => r.Member.Name == "Create" && r.Member.DeclaringType.EndsWith("ViewSheet", StringComparison.Ordinal));
+        var placeholder = results.Single(r => r.Member.Name == "CreatePlaceholder");
+
+        Assert.True(
+            create.Score > placeholder.Score,
+            $"ViewSheet.Create ({create.Score}) must outrank ViewSheet.CreatePlaceholder ({placeholder.Score})");
+        Assert.Equal("Create", results[0].Member.Name);
+    }
+
+    [Fact]
+    public void Search_PartialTokenMatch_StaysInTierTwoRatherThanDroppingBelowFts5()
+    {
+        // The half of issue #65 that made the wrong result unrecoverable: it is not enough for Create to
+        // merely outrank CreatePlaceholder, it must stay in tier 2 at all. "place" matches nothing in
+        // ViewSheet.Create, and under the old all-or-nothing rule that single unmatched token dropped it
+        // into tier 3, whose scores are bounded below 500 -- so it could never outrank ANY tier-2 row
+        // however good a match it was. Pinning the floor is what stops a future retune from silently
+        // reintroducing the tier drop while leaving the relative-order assertion above still passing.
+        using var cache = NewCache();
+        cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+
+        var results = cache.Search("create sheet place view", namespaceFilter: null);
+        var create = results.Single(r => r.Member.Name == "Create" && r.Member.DeclaringType.EndsWith("ViewSheet", StringComparison.Ordinal));
+
+        Assert.InRange(create.Score, 500, 999);
+    }
+
+    [Fact]
+    public void Search_TierTwo_RanksByRelevanceNotAlphabeticallyByMemberName()
+    {
+        // Second defect found while confirming the first: every tier-2 row scored exactly 500 + CoreBoost,
+        // so ordering fell through to DiscoveryService's .ThenBy(Member.Name) tie-break -- i.e.
+        // alphabetical. Whenever tier 2 returned more rows than top_n, page 1 was decided by member name
+        // rather than by relevance.
+        //
+        // "view sheet create" matches both ViewSheet members fully, so it is a clean probe for the tier
+        // carrying ANY relevance signal of its own: before the fix these two rows were exactly equal and
+        // the assertion below could not hold no matter which one is the better answer. Asserting
+        // inequality rather than a specific winner keeps this test about the defect (a flat tier) and
+        // leaves which-one-wins to the test above, so retuning the weights cannot make it vacuous.
+        using var cache = NewCache();
+        cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+
+        var results = cache.Search("view sheet create", namespaceFilter: null).ToList();
+
+        var create = results.Single(r => r.Member.Name == "Create" && r.Member.DeclaringType.EndsWith("ViewSheet", StringComparison.Ordinal));
+        var placeholder = results.Single(r => r.Member.Name == "CreatePlaceholder");
+
+        Assert.InRange(create.Score, 500, 999);
+        Assert.InRange(placeholder.Score, 500, 999);
+        Assert.NotEqual(create.Score, placeholder.Score);
+    }
 }

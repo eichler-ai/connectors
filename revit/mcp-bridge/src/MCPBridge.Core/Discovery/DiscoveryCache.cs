@@ -700,12 +700,33 @@ public sealed class DiscoveryCache : IDisposable
     /// softer guarantee than "a genuinely stronger add-in match always outranks a weaker core one" might
     /// suggest -- the bm25-derived <c>normalized</c> score below is asymptotically bounded by 499 and
     /// saturates quickly for a strong match, so two close-but-unequal tier-3 matches can legitimately
-    /// land within 0.5 of each other, which this boost can then flip. Tiers 1 and 2 give every row in a
-    /// tier the SAME base score (1000 / 500), so there this boost is the only ranking signal within the
-    /// tier and no such flip is possible. Mirrors the same "core wins ties" policy <see cref="FindTypeRow"/>/
+    /// land within 0.5 of each other, which this boost can then flip. Since issue #65 the same caveat
+    /// applies to tier 2, which is now graded across a 249-point band rather than flat. Tier 1 alone still
+    /// gives every row the same base score (1000), so there this boost remains the only ranking signal
+    /// within the tier. Mirrors the same "core wins ties" policy <see cref="FindTypeRow"/>/
     /// <see cref="FindTypeRowByFullName"/> already apply to type lookups.
     /// </summary>
     private static double CoreBoost(DiscoveryMemberRow row) => row.IsCoreAssembly ? 0.5 : 0.0;
+
+    /// <summary>
+    /// Width of the score band tier 2 spreads its graded relevance across, above its floor of 500 and well
+    /// clear of tier 1's flat 1000 (issue #65). Tier 3 stays bounded below 500, so the tier ordering the
+    /// rest of this class documents is unchanged -- only the ordering WITHIN tier 2, which previously did
+    /// not exist at all.
+    /// </summary>
+    private const double TierTwoBand = 249.0;
+
+    /// <summary>
+    /// <see cref="DiscoveryMemberRow.DeclaringType"/> holds the namespace-qualified name; relevance scoring
+    /// wants the short name, since the namespace is not something a caller is phrasing a natural-language
+    /// query against. Generic arity ("ViewSheet`1") is stripped for the same reason.
+    /// </summary>
+    private static string ShortTypeName(string declaringTypeFullName)
+    {
+        var lastDot = declaringTypeFullName.LastIndexOf('.');
+        var shortName = lastDot < 0 ? declaringTypeFullName : declaringTypeFullName[(lastDot + 1)..];
+        return TypeNameFormatting.StripArity(shortName);
+    }
 
     /// <summary>
     /// FTS5-backed ranked search, per the design decision in this feature's task brief: three tiers,
@@ -717,10 +738,12 @@ public sealed class DiscoveryCache : IDisposable
     /// <item><b>Exact Type.Member.</b> The query cleanly parses as "TypeToken.MemberToken" (or
     /// "TypeToken MemberToken", the last whitespace-separated pair) and both halves resolve to a real,
     /// case-insensitive type-name + member-name pair in the corpus.</item>
-    /// <item><b>All tokens matched across {type name, member name}.</b> Every whitespace/punctuation-split
-    /// query token is a case-insensitive substring of the member's own name or its declaring type's short
-    /// name (not the summary) -- what makes "wall create" reliably surface Wall.Create even when neither
-    /// word alone is a great match against a huge summary corpus.</item>
+    /// <item><b>Query tokens matched across {type name, member name}</b> (not the summary) -- what makes
+    /// "wall create" reliably surface Wall.Create even when neither word alone is a great match against a
+    /// huge summary corpus. Admits rows leaving at most <see cref="UnmatchedTokenAllowance"/> tokens
+    /// unmatched, and grades them by <see cref="IdentifierRelevance"/> across a band above 500; see issue
+    /// #65 for why this tier being all-or-nothing, and flat for everything that cleared the bar, produced
+    /// both a wrong top result and an alphabetical page 1.</item>
     /// <item><b>FTS5 BM25 fallback</b> against name+summary+type_name combined -- the loose/exploratory
     /// case, ranked by SQLite's own <c>rank</c> column.</item>
     /// </list>
@@ -733,7 +756,7 @@ public sealed class DiscoveryCache : IDisposable
         {
             ThrowIfDisposed();
             var queryLower = query.Trim().ToLowerInvariant();
-            var tokens = queryLower.Split(new[] { ' ', '.', '_', '-' }, StringSplitOptions.RemoveEmptyEntries);
+            var tokens = TokenizeQuery(queryLower);
 
             var results = new List<(DiscoveryMemberRow Member, double Score)>();
             var seenMemberIds = new HashSet<string>(StringComparer.Ordinal);
@@ -789,14 +812,22 @@ public sealed class DiscoveryCache : IDisposable
                 }
             }
 
-            // Tier 2: all tokens matched across {type name, member name}.
+            // Tier 2: query tokens matched across {type name, member name}, graded by IdentifierRelevance.
+            //
+            // Issue #65: this tier used to be binary -- all tokens or nothing, every survivor scoring a flat
+            // 500. Both halves of that were defects. Rows are now admitted with a small unmatched-token
+            // allowance (UnmatchedTokenAllowance) and scored across the band below, so a strong match that
+            // a stray natural-language word would previously have dropped into tier 3 stays in contention,
+            // and rows within the tier are ordered by relevance instead of falling through to
+            // DiscoveryService's alphabetical-by-name tie-break.
             if (tokens.Length > 0)
             {
                 foreach (var row in QueryTokenMatch(tokens, namespaceFilter))
                 {
                     if (seenMemberIds.Add(row.MemberId))
                     {
-                        results.Add((row, 500 + CoreBoost(row)));
+                        var relevance = IdentifierRelevance.Score(tokens, row.Name, ShortTypeName(row.DeclaringType));
+                        results.Add((row, 500 + (TierTwoBand * relevance) + CoreBoost(row)));
                     }
                 }
             }
@@ -846,16 +877,66 @@ public sealed class DiscoveryCache : IDisposable
         return ReadMemberRows(reader);
     }
 
+    /// <summary>
+    /// How many query tokens a row may leave unmatched and still be admitted to tier 2 (issue #65). Zero
+    /// for a one- or two-token query, where every token is load-bearing and dropping one would admit
+    /// almost anything; one for a longer query, where natural-language phrasing routinely carries a word
+    /// no API name contains -- "create sheet place view" is the reported case, in which "place" appears in
+    /// no part of <c>ViewSheet.Create</c> and cost it the whole tier.
+    /// </summary>
+    private static int UnmatchedTokenAllowance(int tokenCount) => tokenCount >= 3 ? 1 : 0;
+
+    /// <summary>
+    /// English function words carried by natural-language task phrasings that no API name ever contains as
+    /// a word. Confirmed against the real RevitAPI corpus: "create a wall on a level" ranked
+    /// <c>WallFoundation.Create</c> above <c>Wall.Create</c> -- and pushed Wall.Create out of tier 2
+    /// entirely -- purely because "a" and "on" are substrings of "WallFound<b>a</b>ti<b>on</b>" and of
+    /// nothing in "Wall". Short stopwords match almost everything under a substring predicate, so they
+    /// contribute pure noise to matching while actively crowding out the tokens that carry meaning.
+    /// </summary>
+    private static readonly HashSet<string> QueryStopWords = new(StringComparer.Ordinal)
+    {
+        "a", "an", "and", "any", "are", "as", "at", "be", "by", "can", "do", "for", "from", "how", "i",
+        "if", "in", "into", "is", "it", "its", "me", "my", "need", "of", "on", "onto", "or", "please",
+        "that", "the", "their", "them", "then", "there", "this", "to", "want", "was", "what", "when",
+        "which", "will", "with", "would",
+    };
+
+    /// <summary>
+    /// Splits a lowercased query into the tokens the name-match and FTS tiers rank against, dropping
+    /// <see cref="QueryStopWords"/> and bare single characters.
+    ///
+    /// <para>Falls back to the unfiltered tokens when filtering would leave nothing, so a query that is
+    /// ALL stopwords still searches for what the caller literally typed rather than silently matching
+    /// everything.</para>
+    /// </summary>
+    private static string[] TokenizeQuery(string queryLower)
+    {
+        var raw = queryLower.Split(new[] { ' ', '.', '_', '-' }, StringSplitOptions.RemoveEmptyEntries);
+        var filtered = raw.Where(t => t.Length > 1 && !QueryStopWords.Contains(t)).ToArray();
+        return filtered.Length > 0 ? filtered : raw;
+    }
+
+    /// <summary>
+    /// Tier-2 candidates: rows whose member or declaring-type name matches enough of the query's tokens.
+    ///
+    /// <para>Note the deliberate asymmetry with <see cref="IdentifierRelevance"/>, which does the actual
+    /// scoring: this predicate is a cheap SQL-side SUPERSET of it. A raw <c>LIKE '%token%'</c> is exactly
+    /// the condition under which <c>IdentifierRelevance</c> can award a token any credit above zero, so no
+    /// row that would have scored is filtered out here -- SQL decides membership, C# decides rank.</para>
+    /// </summary>
     private IEnumerable<DiscoveryMemberRow> QueryTokenMatch(string[] tokens, string? namespaceFilter)
     {
         using var cmd = _connection.CreateCommand();
-        var whereClauses = new List<string> { "t.documented = 1", "(@ns IS NULL OR t.namespace = @ns)" };
+        var hitTerms = new List<string>();
         for (var i = 0; i < tokens.Length; i++)
         {
-            whereClauses.Add($"(LOWER(t.name) LIKE @tok{i} ESCAPE '\\' OR LOWER(m.name) LIKE @tok{i} ESCAPE '\\')");
+            hitTerms.Add($"(CASE WHEN (LOWER(t.name) LIKE @tok{i} ESCAPE '\\' OR LOWER(m.name) LIKE @tok{i} ESCAPE '\\') THEN 1 ELSE 0 END)");
             cmd.Parameters.AddWithValue($"@tok{i}", "%" + EscapeLike(tokens[i]) + "%");
         }
 
+        var hits = string.Join(" + ", hitTerms);
+        var required = tokens.Length - UnmatchedTokenAllowance(tokens.Length);
         cmd.Parameters.AddWithValue("@ns", (object?)namespaceFilter ?? DBNull.Value);
         // Independent PR review finding: this had NO ORDER BY at all before LIMIT, so on a broad query
         // returning more than TierCandidateLimit rows, SQLite truncated in whatever order the query
@@ -864,13 +945,18 @@ public sealed class DiscoveryCache : IDisposable
         // add-in match with the same tier score survived, defeating the whole point of CoreBoost for
         // exactly the broad queries it exists to help most. Ordering core rows first here means a core
         // match is never the one that gets truncated away in favor of a non-core one.
+        //
+        // Hit count leads that ordering now (issue #65): admitting partial matches widens this candidate
+        // set, so without it the LIMIT could truncate away full-token matches in favour of partial ones
+        // -- the same truncation bug the CoreBoost fix above closed, re-opened one column to the left.
         cmd.CommandText = $"""
-            SELECT m.kind, m.name, m.signature, m.summary, m.member_id, m.returns, m.params_json, t.namespace, t.full_name, a.kind
+            SELECT m.kind, m.name, m.signature, m.summary, m.member_id, m.returns, m.params_json, t.namespace, t.full_name, a.kind, ({hits}) AS hits
             FROM members m JOIN types t ON m.type_id = t.id JOIN assemblies a ON t.assembly_id = a.id
-            WHERE {string.Join(" AND ", whereClauses)}
-            ORDER BY (a.kind != 'core')
+            WHERE t.documented = 1 AND (@ns IS NULL OR t.namespace = @ns) AND ({hits}) >= @required
+            ORDER BY hits DESC, (a.kind != 'core')
             LIMIT {TierCandidateLimit}
             """;
+        cmd.Parameters.AddWithValue("@required", required);
         using var reader = cmd.ExecuteReader();
         return ReadMemberRows(reader);
     }
@@ -879,8 +965,9 @@ public sealed class DiscoveryCache : IDisposable
     {
         // FTS5's MATCH operand syntax treats bare punctuation specially; the query is already reduced to a
         // token stream everywhere else in this class, so build a simple OR-of-tokens match expression rather
-        // than passing the raw query straight through.
-        var tokens = query.Split(new[] { ' ', '.', '_', '-' }, StringSplitOptions.RemoveEmptyEntries);
+        // than passing the raw query straight through. Stopwords are dropped here for the same reason as in
+        // the name-match tier: OR-ing in "a" or "the" matches most of the corpus on no real signal.
+        var tokens = TokenizeQuery(query);
         if (tokens.Length == 0)
         {
             return Array.Empty<(DiscoveryMemberRow, double)>();
