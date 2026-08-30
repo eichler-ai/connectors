@@ -62,6 +62,25 @@ public sealed class SearchFunctionsResult
 {
     public required IReadOnlyList<ScoredMember> Results { get; init; }
     public string? NextCursor { get; init; }
+
+    /// <summary>
+    /// Size of the ranked, PAGEABLE set -- not the number of members in the corpus that matched.
+    ///
+    /// <para>Each tier caps how deep it keeps results (see <c>DiscoveryCache.TierCandidateLimit</c>), so on
+    /// a broad query the true match count is far larger: "id" matches 4,768 members in the name-match tier
+    /// alone and reports a few hundred here. This is deliberate and self-consistent -- the cursor walks
+    /// exactly this many rows and no more -- but it is NOT the "how many things did you find" a caller
+    /// might read it as.</para>
+    ///
+    /// <para>Issue #76 filed this as a defect ("total_matched lies"), on the theory that rows were being
+    /// dropped in scan order and were therefore unreachable. The scan-order half is fixed: what each tier
+    /// keeps is now its own top-by-score. The count remains a capped count, which is why the number MOVED
+    /// when that fix landed (measured: "id" 926 to 881, "get" 843 to 827, "element" 869 to 843) without
+    /// anything being lost -- tier 2's top-500-by-score simply overlaps tier 3's top-500-by-bm25 more than
+    /// the old scan-order 500 did, so more rows dedup away. Raising the caps to make this an exact corpus
+    /// count would mean materializing and ranking thousands of rows nobody pages to; documenting the
+    /// meaning is the cheaper honest answer.</para>
+    /// </summary>
     public required int TotalMatched { get; init; }
 }
 
