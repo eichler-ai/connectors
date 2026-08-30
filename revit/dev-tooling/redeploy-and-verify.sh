@@ -230,6 +230,9 @@ say "share resolves as $UNC_ROOT"
 # the names to line up -- drop a uniquely-named probe file here, look for it there.
 PROBE=".redeploy-probe-$$-${RANDOM}"
 : > "$REPO_ROOT/$PROBE"
+# EXIT trap as well as the explicit rm below: a Ctrl-C between the two would otherwise leave
+# an untracked probe file sitting in the repo root.
+trap 'rm -f "$REPO_ROOT/$PROBE"' EXIT
 probe_cmd="if (Test-Path '$UNC_ROOT\\$PROBE') { Write-Output PROBE=MATCH }"
 PROBE_SEEN="$(prlctl exec "$VM_NAME" powershell -EncodedCommand "$(ps_encode "$probe_cmd")" 2>/dev/null | tr -d '\r' || true)"
 rm -f "$REPO_ROOT/$PROBE"
