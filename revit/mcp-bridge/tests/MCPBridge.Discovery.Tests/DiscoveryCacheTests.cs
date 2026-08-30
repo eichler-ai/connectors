@@ -574,4 +574,43 @@ public class DiscoveryCacheTests
         var newLevel = results.Single(r => r.Member.Name == "NewLevel");
         Assert.InRange(newLevel.Score, 500, 999);
     }
+
+    [Fact]
+    public void Search_SynonymClassAppearingTwiceInTheQuery_DoesNotBuyAFreeUnmatchedTokenSlot()
+    {
+        // Independent review finding on the first cut of #75, measured live against the real corpus:
+        // "create" and "new" are the same synonym class, but tokenization used to keep them as two
+        // SEPARATE token slots, each expanding to include the other -- so Arc.Create's single "Create"
+        // word-part satisfied both slots and bought a free UnmatchedTokenAllowance seat no query earned.
+        // "create a new wire" collapses to two tokens (create-class, wire) once "a" is dropped as a
+        // stopword and "create"/"new" collapse to one class -- Arc shares only the class word, not "wire",
+        // so with the allowance correctly at zero for a 2-token query, it must not reach tier 2 at all.
+        using var cache = NewCache();
+        cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+
+        var results = cache.Search("create a new wire", namespaceFilter: null).ToList();
+
+        Assert.DoesNotContain(
+            results,
+            r => r.Member.Name == "Create" && r.Member.DeclaringType.EndsWith("Arc", StringComparison.Ordinal) && r.Score >= 500);
+    }
+
+    [Fact]
+    public void Search_LiteralTokenOutranksASynonymOnlyMatch()
+    {
+        // Independent review finding: an undiscounted synonym hit let a purely synonym-derived match
+        // outrank the literally-named method the user actually typed. Level.NewLevel matches "level"
+        // head-on AND "new" via the literal token "new"; Arc.Create matches nothing of "level" and only
+        // reaches this query via "create"-as-a-synonym-of-"new" at all, so it must not merely be admitted
+        // (the previous test) but must not outscore a genuinely well-matched sibling either.
+        using var cache = NewCache();
+        cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+
+        var results = cache.Search("new level", namespaceFilter: null).ToList();
+
+        var newLevel = results.Single(r => r.Member.Name == "NewLevel");
+        var arcCreate = results.SingleOrDefault(r => r.Member.Name == "Create" && r.Member.DeclaringType.EndsWith("Arc", StringComparison.Ordinal));
+
+        Assert.True(newLevel.Score > arcCreate.Score, $"Level.NewLevel ({newLevel.Score}) must outrank Arc.Create ({arcCreate.Score})");
+    }
 }

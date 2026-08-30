@@ -159,31 +159,42 @@ public class IdentifierRelevanceTests
     // ---------------------------------------------------------------------------------------------
 
     [Fact]
-    public void Score_QueryTokenMatchesItsSynonymAsWellAsTheItselfLiterally()
+    public void Score_QueryTokenReachesItsSynonym_AtADiscountFromTheLiteralMatch()
     {
-        // The reported case: "create" must reach "New" exactly as it would reach "Create" -- Revit's own
-        // factory convention is NewXxx, and no amount of retuning the exact/prefix/substring weights closes
-        // that gap on their own.
+        // The reported case: "create" must reach "New" -- Revit's own factory convention is NewXxx, and no
+        // amount of retuning the exact/prefix/substring weights closes that gap on their own. It must NOT
+        // score identically to the literal query, though (independent-review finding on the first cut of
+        // this fix): an undiscounted synonym hit let a purely synonym-derived match outrank a method the
+        // query named head-on. See SynonymCreditWeight's own comment for the measured real-corpus case.
         var tokens = new[] { "create", "family", "instance" };
 
         var viaCreate = IdentifierRelevance.Score(tokens, "NewFamilyInstance", "Document");
         var viaLiteral = IdentifierRelevance.Score(new[] { "new", "family", "instance" }, "NewFamilyInstance", "Document");
 
-        Assert.Equal(viaLiteral, viaCreate);
         Assert.True(viaCreate > 0.0, "a synonym match must earn some credit, not zero");
+        Assert.True(viaCreate < viaLiteral, $"a synonym-only match ({viaCreate}) must not score as well as the literal one ({viaLiteral})");
     }
 
     [Fact]
-    public void Score_SynonymCreditIsSymmetric_SoTheMatchedWordIsNotPenalizedOnPrecision()
+    public void Score_SynonymCreditIsSymmetric_SoTheMatchedWordIsNotPenalizedTwiceOnPrecision()
     {
         // Independent-review trap this project already hit once with stopwords (issue #65): expanding only
-        // the query side would let "create" reach "New" for RECALL while still charging "New" as
-        // unexplained name material for PRECISION -- giving with one hand and taking with the other. Proven
-        // here by comparing against the fully-literal query, which must score identically.
+        // the query side would let "create" reach "New" for RECALL while still charging "New" as fully
+        // unexplained name material for PRECISION -- giving with one hand and taking with the other. That
+        // would show up as a score far BELOW what a single, consistently-applied discount predicts; pinned
+        // here against the closed-form value so a future change to either loop alone breaks this test.
         var expanded = IdentifierRelevance.Score(new[] { "create" }, "New", "Widget");
         var literal = IdentifierRelevance.Score(new[] { "new" }, "New", "Widget");
 
-        Assert.Equal(literal, expanded);
+        Assert.True(expanded > 0.0, "a synonym match must earn some credit, not zero");
+        Assert.True(expanded < literal, $"a synonym-only match ({expanded}) must not score as well as the literal one ({literal})");
+        // Pinned to the closed-form value: with one query token and one member word-part, recall is exactly
+        // SynonymCreditWeight (0.75) instead of ExactCredit (1.0), and precision's member-word term is
+        // discounted the SAME way -- (0.75+0.1)/2 rather than (1.0+0.1)/2, where 0.1 is the constant
+        // TypeNameWeight-derived floor from the unrelated "Widget" type word. An asymmetric bug (discount
+        // applied to recall only, or precision only) would land on a different number than either of these.
+        Assert.Equal(0.75 * 0.425, expanded, precision: 9);
+        Assert.Equal(1.0 * 0.55, literal, precision: 9);
     }
 
     [Fact]
@@ -217,5 +228,43 @@ public class IdentifierRelevanceTests
     public void Expand_WordWithNoSynonymClass_ReturnsOnlyItself()
     {
         Assert.Equal(new[] { "widget" }, IdentifierRelevance.Expand("widget"));
+    }
+
+    [Fact]
+    public void Score_LiteralTokenOutranksASynonymOnlyMatch_WhenNameMaterialIsOtherwiseComparable()
+    {
+        // Independent review finding: an undiscounted synonym hit let a purely synonym-derived match
+        // outrank the method the user actually named. "lookup" reaches Element.LookupParameter's own word
+        // "lookup" head-on; it only reaches ParameterAccess.GetParameter through the "lookup"->"get"
+        // synonym, and the discount in Credit's synonym branch exists so the literal spelling still wins.
+        var literal = IdentifierRelevance.Score(new[] { "lookup" }, "LookupParameter", "Element");
+        var synonymOnly = IdentifierRelevance.Score(new[] { "lookup" }, "GetParameter", "ParameterAccess");
+
+        Assert.True(literal > synonymOnly, $"literal ({literal}) must outrank synonym-only ({synonymOnly})");
+    }
+
+    [Theory]
+    [InlineData("create", "new")]
+    [InlineData("new", "create")]
+    [InlineData("delete", "remove")]
+    [InlineData("get", "lookup")]
+    [InlineData("modify", "set")]
+    public void SynonymClassKey_IsTheSameForEveryMemberOfAClass(string a, string b)
+    {
+        // The de-duplication in DiscoveryCache.TokenizeQuery relies on this: two members of one class must
+        // map to the identical key so a query containing both collapses to one token slot.
+        Assert.Equal(IdentifierRelevance.SynonymClassKey(a), IdentifierRelevance.SynonymClassKey(b));
+    }
+
+    [Fact]
+    public void SynonymClassKey_WordWithNoSynonymClass_IsItsOwnKey()
+    {
+        Assert.Equal("widget", IdentifierRelevance.SynonymClassKey("widget"));
+    }
+
+    [Fact]
+    public void SynonymClassKey_DifferentClasses_HaveDifferentKeys()
+    {
+        Assert.NotEqual(IdentifierRelevance.SynonymClassKey("create"), IdentifierRelevance.SynonymClassKey("delete"));
     }
 }
