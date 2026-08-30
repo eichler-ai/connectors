@@ -44,7 +44,12 @@ These are the rules that generalize. Each one exists because violating it cost r
   accepted here as coverage while proving nothing.
 - **Never let the only copy of a result pass through a lossy filter.** Tee the complete output to a
   file and filter the file. A `tail`/`grep` chain has repeatedly destroyed the one line that
-  mattered, and an empty filter result reads identically to a pass.
+  mattered, and an empty filter result reads identically to a pass. In a background pipeline `grep`
+  also needs `--line-buffered`, or the output file stays empty until the process exits.
+- **Prove identity, don't compare names.** To check that two paths are the same tree, drop a
+  uniquely-named probe file on one side and look for it from the other. Names legitimately differ
+  (a worktree's share name need not match its directory), so a name comparison both false-positives
+  and false-negatives.
 - **Confirm you are running the artifact you just built.** Byte-grep the *deployed* binary for a
   string unique to your change, decoding at both byte alignments (the `#US` heap stores UTF-16
   literals at arbitrary offsets, so a single-alignment decode gives false negatives). Timestamps
@@ -72,14 +77,21 @@ These are the rules that generalize. Each one exists because violating it cost r
 - **A test pinning one exploit's syntax is not coverage of the hole.** Name the *shape* being
   blocked (target-typed construction, method groups, callbacks, aliases), and when adding a case,
   say which shape it adds.
+- **When a fix makes a feature's own plumbing `internal`, pin the FEATURE too, not just the exploit.**
+  A test proving the tampering stopped compiling cannot fail if an `InternalsVisibleTo` grant is wrong
+  in a way the compiler tolerates; only a test exercising the feature across that seam can.
 
 ### Correctness
 
 - **Never compare Revit API objects with `ReferenceEquals`.** Revit mints a fresh managed wrapper per
   call site; `Application.Documents` and `ActiveUIDocument.Document` return different wrappers for
-  one document. Compare PRD §09 identities (`DocumentIdentity.ResolveCached`).
-- **Assume `BuiltIn*` enums have `ForgeTypeId` replacements** in Revit 2025+ (`ParameterType` →
-  `SpecTypeId`, `BuiltInParameterGroup` → `GroupTypeId`). Don't assume the old enum still compiles.
+  one document. Compare PRD §09 identities (`DocumentIdentity.ResolveCached`). One limit: a document
+  mid-transition whose `Title` accessor throws falls back to a per-wrapper GUID, so an id comparison
+  against such a document is best-effort.
+- **Assume a `BuiltIn*` enum used for parameter TYPING or GROUPING has a `ForgeTypeId` replacement**
+  in Revit 2025+ (`ParameterType` → `SpecTypeId`, `BuiltInParameterGroup` → `GroupTypeId`); don't
+  assume it still compiles. The qualifier matters: `BuiltInCategory` and `BuiltInParameter` are
+  unaffected and still work, so don't go hunting for a `CategoryTypeId` that doesn't exist.
 - **The acting connection's identity travels with the action** — no broker mutation keyed by a
   logical id alone; guard at the point of mutation (`CONVENTIONS.md`).
 - **Every retained record or buffer has a stated bound** at its declaration, mirrored on both ends of
@@ -104,10 +116,18 @@ These are the rules that generalize. Each one exists because violating it cost r
 - **Commit or stash before any mutation-test or restore dance** — a reflexive `git checkout <file>`
   destroys uncommitted work. Fetch before branching: a stale local `main` silently reverts merged
   work. Delete a PR branch only after `gh pr view` says MERGED.
+- **A brief scoped to one component doesn't bound the change.** Before calling a feature done, check
+  whether a *different* component encodes assumptions about the one you changed — the Go broker's
+  structs once silently dropped every field of the add-in's new response shape, with each side
+  correct in isolation.
+- **A live test that COUNTS across all open documents is not re-runnable in one Revit session.** It
+  passes once, then fails with a higher count, which reads exactly like a double-commit bug. Derive
+  expected values per run and scope live checks to specific documents by `Title`.
 - **Forked subagents cannot spawn their own reviewers** — the coordinator spawns the independent
   review. A fork's self-review misses what an independent pass catches.
-- **Run the fast test nearest the file you just edited, immediately** (the skill-file token-budget
-  test is sub-second and local).
+- **Run the fast test nearest the file you just edited, immediately** — the token-budget test for
+  `internal/mcpserver`'s embedded `skill.md` is sub-second and local, so an overage should never be
+  found two steps later.
 - **Parallel PRs**: work from `gh pr diff` or a dedicated worktree; never switch the main checkout's
   branch, which is bound to the VM share. Two PRs both appending to a shared file will conflict —
   resolve keep-both.
@@ -139,6 +159,11 @@ assembly only Revit's own host can load, and referencing it makes the runner ski
 silently. Keep raw-object accessors on separate capability interfaces that only real adapters
 implement; where a test needs Revit types bindable from script scope, pass them to Roslyn as
 metadata references by path.
+
+**A static field can drag `RevitAPI` in by itself.** If a type's *other* statics reference Revit types
+(e.g. a `ConditionalWeakTable<Document,...>`), the whole type initializer loads `RevitAPI.dll`, which a
+tier-1 host cannot do — so anything meant to be tier-1-reachable must not share a type initializer with
+Revit-typed statics. Put new static state in a nested holder type (see `DocumentIdentity`'s).
 
 ### Tier 2 — live harness
 
@@ -252,6 +277,9 @@ on the PR, not in a running report.
       claims verified against the running connector? (Adding a tool fails
       `TestSkillFileDocumentsEveryRegisteredTool`; changing *behaviour* fails nothing, so it's on you.)
 - [ ] If the change refines a PRD decision, is `revit/docs/PRD.md` updated in the same PR?
+- [ ] Temporary debugging scaffolding stripped — ad-hoc `File.AppendAllText` logging, hardcoded
+      machine-specific paths. **Exception:** logging that closes a real observability gap (a silently
+      swallowed exception, per §01) stays; if unsure which it is, ask.
 - [ ] New corpus cases filed under the right category (PRD §13).
 
 ## Keeping key documents updated
@@ -312,8 +340,11 @@ Each file explains its own format; follow it there rather than inventing a shape
   hypothesis leaves no commit and no issue, so if you don't write it down, nothing anywhere does. The
   entry that matters is *what finally distinguished the two*, not the story.
 - **You found a dead end.** "We tried X, it does not work here" only exists if someone records it;
-  otherwise the next session pays for it again.
+  otherwise the next session pays for it again. A dead end is none of the three rows above — put it in
+  `dev-environment.md` beside the mechanism it defeats, as the existing ones are (UI automation,
+  `CloseMainWindow`).
 
 **Prefer sharpening over appending.** If a new lesson is a third instance of a rule already present,
-tighten that rule rather than adding a fourth bullet beside it. These files are read in full, so
-length has a real cost — git history holds the narrative, they hold the guidance.
+tighten that rule rather than adding a fourth bullet beside it. `SKILL.md` is read in full every
+session, so length here has a direct cost; the companions are read on demand, which is what the split
+buys. Git history holds the narrative, these files hold the guidance.

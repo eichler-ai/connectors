@@ -57,10 +57,17 @@ the interactive user's own logon session (an `AtLogOn` task, no impersonation) a
 `C:\dev\.launcher-signals\` every 2s. Because it runs natively in that session, `Start-Process` from
 inside it reaches the real desktop. `register-launcher-agent.ps1` recreates the task.
 
-Signals: `*.close` (graceful `CloseMainWindow`, then force-kill stragglers), `*.launch` (optional
-document path; a 3-line form copies a pristine source to a working copy per launch and aborts rather
-than opening a possibly-tainted file), `*.startbroker`, `*.runexe`. `*.close` is handled before
-`*.launch` each tick.
+Signals, by file extension; content is the payload:
+
+| Signal | Content | Effect |
+|---|---|---|
+| `*.close` | ignored | graceful `CloseMainWindow`, then force-kills whatever is still up |
+| `*.launch` | empty, or 1–3 lines | line 1 = alternate Revit exe (optional), line 2 = pristine source `.rvt`, line 3 = working copy actually opened. With all three it re-copies 2 → 3 every launch, and **aborts** rather than opening a possibly-tainted working copy. Empty means "launch with no document" |
+| `*.startbroker` | optional exe path | starts the broker inside the agent's own session |
+| `*.runexe` | exe path | runs it **blocking** (`Start-Process -Wait`), draining any pending reconnect first |
+
+`*.close` is handled before `*.launch` each tick, so a launch-then-close pair dropped moments apart
+can't land in the wrong order.
 
 - **Drop every signal file atomically** — write under a non-matching name, then rename into place. A
   create-then-write drop can be read empty, and an empty `*.launch` legitimately means "launch with
@@ -69,8 +76,18 @@ than opening a possibly-tainted file), `*.startbroker`, `*.runexe`. `*.close` is
   to settle it.
 - **It holds a stale environment snapshot.** It was started once and never re-reads the registry, so
   any env var changed afterwards is invisible to every Revit it launches. Restart the agent after any
-  `MCPBRIDGE_*` change. Then **verify it loaded the code you deployed** — a new pid proves nothing;
-  drive a probe signal through and check `C:\dev\launcher-agent.log`.
+  `MCPBRIDGE_*` change — and after changing the agent script itself, which means copying the repo's
+  `launcher-agent.ps1` over `C:\dev\launcher-agent.ps1` first.
+  - **How:** kill the old process, then `Start-ScheduledTask -TaskName 'MCPBridgeDevLauncherAgent'`.
+    Try this first — it works cleanly most of the time — but it can leave the task sitting in
+    `Queued` instead of running, so confirm the task reports `Running` **and** that a NEW pid exists.
+    Task state alone is not evidence.
+  - **If it doesn't take**, a foreign-context trigger into an `AtLogOn` task hasn't attached. The
+    fallback is a genuine interactive trigger: ask the user to click **Run** on the task in Task
+    Scheduler, or to run `powershell -File C:\dev\launcher-agent.ps1` from an already-open shell.
+  - **Then verify it loaded the code you deployed** — a new pid proves nothing about which version it
+    read. Drive a probe signal through (a `*.launch` naming a deliberately nonexistent exe exercises
+    the parse-and-log path without starting anything) and check `C:\dev\launcher-agent.log`.
 - **Start the broker through `*.startbroker`, not a bare `prlctl exec`** — otherwise `broker.json`
   writes to SYSTEM's profile, invisible to the add-in, producing a connection-refused loop that looks
   exactly like a dead broker.
@@ -82,6 +99,10 @@ than opening a possibly-tainted file), `*.startbroker`, `*.runexe`. `*.close` is
 - **Never clean up scheduled tasks with a wildcard.** A `*MCPBridge*` sweep once destroyed 13 tasks
   including the agent's own registration; the running process survived, so nothing failed visibly.
   Delete by exact name, only what you created.
+- **In PowerShell, anything a function writes to the output stream IS part of its return value.**
+  A `Write-Output` used for progress inside a value-returning function both fails to stream and
+  pollutes the returned value — live, that turned a timeout into a spurious PASS. Use
+  `[Console]::Out.WriteLine` for progress from inside such a function.
 - **Assume Windows PowerShell 5.1** on this VM — PowerShell 7+ cmdlets (`Join-String`) fail as
   *non-terminating* errors, silently producing empty output rather than erroring.
 - **UI automation is a dead end here.** `EnumWindows`/`SendKeys` find zero top-level windows anywhere,
@@ -94,12 +115,22 @@ than opening a possibly-tainted file), `*.startbroker`, `*.runexe`. `*.close` is
 no error, no dialog, `OnStartup` never runs:**
 
 - All-users: `C:\Program Files\Autodesk\Revit\Addins\<version>\`
-- Per-user: `%AppData%\Roaming\Autodesk\Revit\Addins\<version>\` (spell out the real user's path)
+- Per-user: `%APPDATA%\Autodesk\Revit\Addins\<version>\` — i.e.
+  `C:\Users\<user>\AppData\Roaming\Autodesk\Revit\Addins\<version>\`. Spell the real user's
+  path out in full; `%APPDATA%` already includes `AppData\Roaming`, and under `prlctl exec` it
+  resolves to SYSTEM's profile anyway.
 
 `C:\ProgramData\Autodesk\Revit\Addins\<version>\` is **not** valid, despite looking plausible and
 accepting copies happily. **Pick one location and always deploy there** — a stale copy in the other
 wins silently. Confirm which Revit accepted via its journal, which logs a
 `won't be loaded. All-users Add-in manifest files must be installed to: ...` line.
+
+**Revit's journal is the definitive record of what Revit itself was asked to do**, and several checks
+in these files depend on reading it. It lives at
+`%LocalAppData%\Autodesk\Revit\Autodesk Revit <version>\Journals\journal.NNNN.txt`. Search it with
+`Select-String -Pattern '<YourDoc>' journal.NNNN.txt`, and pair it with
+`(Get-CimInstance Win32_Process -Filter 'ProcessId=<pid>').CommandLine` — if a document path is on
+neither, Revit was never asked to open it, and no add-in debugging will explain it.
 
 **Never copy a DLL directly into `C:\Program Files\Autodesk\Revit <version>\`.** A same-named assembly
 there shadows the real Addins-folder copy for every subsequent launch, with no indication — an

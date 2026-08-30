@@ -62,39 +62,45 @@ reports zero.
 
 ## Symptom: a live run stalls with no error
 
-Screenshot first — `prlctl capture "<vm>" --file screen.png`, then read the PNG. You cannot drive the
-VM's UI, but you can see it, and treating "can't drive" as "must work blind" has cost hours. A modal
-can hide *behind* another window, so if the journal shows `ADialog::doModal start` with no dismissal,
-believe the journal over a clean-looking screenshot.
+Screenshot first (`dev-environment.md` → When something looks wrong). A modal can hide *behind*
+another window, so if the journal shows `ADialog::doModal start` with no dismissal, believe the
+journal over a clean-looking screenshot.
 
 **But a visible dialog is not automatically the cause.** See the misdiagnosis below — matching a
 symptom to a known pattern is a hypothesis, not a diagnosis.
 
-## Techniques worth reaching for
+## Techniques index
 
-- **Byte-grep a deployed binary at both alignments.** The `#US` heap stores UTF-16 literals at
-  arbitrary offsets, so a single-alignment decode gives false negatives. Confirmed: of two literals
-  added in one edit, only one was found by a single-alignment scan.
-- **Mutation-test your own new test.** Revert the fix, confirm the test fails, restore. Commit first
-  so the restore can't lose work. This is the only evidence that a test covers what you think.
-- **Prove identity, don't compare names.** To check two paths are the same tree, drop a
-  uniquely-named probe file on one side and look for it from the other. Names can legitimately differ.
-- **Isolate a `TypeLoadException` by decomposition.** The JIT resolves every type a method references
-  before executing any of it, so the failure surfaces at the *caller*. Split into small
-  `[MethodImpl(MethodImplOptions.NoInlining)]` methods, each wrapped individually at its call site.
-- **Log loaded assemblies' `.Location` early.** Instantly reveals a shadow copy that no amount of
-  redeploying will fix.
-- **Tee complete output, filter the file afterwards.** A filter's empty output must never be the only
-  record of a run.
-- **Use the connector's own MCP tools for API research.** One `search_functions`/`execute_script`
-  call beats a build/deploy/launch cycle when the open question is a script's correctness rather than
-  the connector's behaviour.
+Where the recurring diagnostic techniques are actually written down. This is an index, not a second
+copy — a technique is stated once, in the file that owns it, and listed here so you can find it while
+stuck. **Add a bullet only when the technique is not already a rule in `SKILL.md` or a mechanism in
+`dev-environment.md`; if it is, add the pointer instead.**
+
+| Technique | Stated in |
+|---|---|
+| Byte-grep the deployed binary, at **both** byte alignments | `SKILL.md` → Verification |
+| Mutation-test your own new test (revert the fix, confirm it fails) | `SKILL.md` → Verification |
+| Prove two paths are one tree with a probe file, not by name | `SKILL.md` → Verification |
+| Tee complete output, filter the file afterwards | `SKILL.md` → Verification |
+| Confirm the test **count**, not the exit code | `SKILL.md` → Verification |
+| Log loaded assemblies' `.Location` to catch a shadow copy | `dev-environment.md` → Deployment |
+| Isolate a `TypeLoadException` by decomposing into `NoInlining` methods | `dev-environment.md` → Assembly loading |
+| Screenshot the VM (`prlctl capture`) before theorising | `dev-environment.md` → When something looks wrong |
+| Read Revit's journal to learn what Revit was actually asked to do | `dev-environment.md` → Deployment |
+| Use the connector's own MCP tools for API research | `dev-environment.md` → Scripts |
 
 ## Misdiagnoses
 
 The most expensive category, and the one with no other record: work that ships leaves a PR, work
 that's filed leaves an issue, but a wrong hypothesis leaves nothing. Each of these cost roughly a
 session.
+
+**Bounded at 8 rows** — this table is the one part of this file that cannot merge on its own, so it
+needs an explicit bound or it becomes the changelog this file replaced. At the bound, adding a row
+means removing one: either fold it into the row whose *distinguishing check* it shares, or promote
+that check into a rule in `SKILL.md` or a row in a symptom table above and drop it. A row's value is
+the check that separated the two hypotheses; once that check is stated as a rule, the row is history
+and belongs in git, not here.
 
 | Looked like | Actually was | What settled it |
 |---|---|---|

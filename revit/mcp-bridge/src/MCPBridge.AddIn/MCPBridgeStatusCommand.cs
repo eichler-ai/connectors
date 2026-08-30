@@ -58,8 +58,8 @@ public sealed class MCPBridgeStatusCommand : IExternalCommand
     /// <summary>
     /// Build identity for "am I running the build I think I'm running" -- the same question that took
     /// deliberate diagnostic logging to answer during this add-in's own live-wiring debugging (see the
-    /// revit-connector-development skill's "Verifying you're actually debugging the binary you just
-    /// built" section); surfacing it in the UI means answering it never again needs a log file or a
+    /// revit-connector-development skill's "Confirm you are running the artifact you just built"
+    /// rule); surfacing it in the UI means answering it never again needs a log file or a
     /// screen-sharing session.
     /// </summary>
     private static (string BuildTimestamp, string GitCommit) ReadBuildIdentity()

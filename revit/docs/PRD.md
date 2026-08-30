@@ -10,7 +10,7 @@ Two components — the Revit MCP Bridge, a Revit add-in that executes dynamic C#
 - **MCP Server:** Go, single-binary distribution
 - **Status:** phases 1–3 shipped (core loop, dialog suppression + multi-instance, API discovery + file exchange), phase 6 partial (Revit 2025 support), plus the Aug 2026 v1 remediation series (per-document routing, live document snapshots, execution audit trail, and the defect/hardening sweep from a four-partition integrated review) — see §15 for per-phase status
 
-> Canonical shareable copy: this document is also published as a designed artifact. When updating this file, republish the artifact from the same session/source so the two don't drift — see the `revit-connector-development` skill for the process.
+> This document is the single source of truth. A designed artifact of it was published earlier in the project; as of 2026-08-28 that artifact is frozen and deliberately NOT kept in sync — don't republish it when this file changes, and don't treat its staleness as a gap to close.
 
 ## Contents
 

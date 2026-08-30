@@ -27,7 +27,7 @@ import (
 // Every script below was executed live via mcp__revit__execute_script
 // against a real connected instance before being committed here (this
 // project's standing "no fake integration tier" rule extends to test
-// AUTHORING, not just to what ships) -- see the coverage plan for the
+// AUTHORING, not just to what ships) -- see PRD §13's corpus plan for the
 // live-research sessions that shaped the CreateSharedParameter and
 // EditGroupPropagatesToAllInstances cases, and the OpenForWriting feature
 // this bundle now depends on.
