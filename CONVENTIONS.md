@@ -34,6 +34,20 @@ Every connector's local state lives under a per-connector namespaced root, never
 
 (macOS/Linux equivalents follow the platform's own app-data convention, same `Connectors/<App>/` suffix.) This exists specifically so future connectors don't collide with each other's state.
 
+## Agent-facing namespace for connector-provided APIs
+
+A connector that adds its own callable functions on top of the host app's API exposes them under a **vendor-rooted namespace**, one segment per app:
+
+```
+Eichler.Connectors.<App>        e.g. Eichler.Connectors.Revit
+```
+
+Same `Connectors/<App>` shape as the app-data root above and as the Go module path (`github.com/eichler-ai/connectors`), for the same reason: it generalizes to the next connector without renaming anything.
+
+**Why a vendor root, given "there is no umbrella product name" above.** That rule is about product naming; a company segment is orthogonal and is simply how .NET signals provenance. The signal is the whole point: an agent reading `Eichler.Connectors.Revit.Connector.Publish` beside `Autodesk.Revit.DB.Document.Export` can tell at a glance which one is ours, with no extra wire field and no special-casing in the discovery tools. Deliberately **not** `MCPBridge.*` — that name is reserved above for the add-in specifically, and "Bridge" is internal architecture vocabulary that means nothing from script scope.
+
+Expose these through the host app's own discovery/reflection mechanism rather than a bespoke channel, so they rank and page alongside everything else the agent already searches. Treat the namespace as **effectively permanent once released**: it ships inside signed artifacts we no longer control.
+
 ## Testing philosophy
 
 - **MCP Server: unit-test everything, always.** It's pure logic (protocol, routing, state) with no host-app dependency, so there's no excuse not to.

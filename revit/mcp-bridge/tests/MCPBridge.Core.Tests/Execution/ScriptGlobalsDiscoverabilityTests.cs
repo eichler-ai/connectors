@@ -20,6 +20,13 @@ public class ScriptGlobalsDiscoverabilityTests
     /// different language and a different binary, and nothing in the compiler relates them to this type.
     /// So the moment someone adds or removes a global, this test fails and says what else to update.</para>
     ///
+    /// <para>Issue #91 cut this from eleven names to five, and the four it did NOT cut are the point: the
+    /// Revit entry points stay bare globals because they are Autodesk's objects, not the connector's
+    /// functions. The seven connector members moved behind <c>Connector</c> and are documented by XML doc
+    /// comment beside the facade, which is why the three places above no longer enumerate them at all.
+    /// Adding a bare global here now means claiming it is Revit's, not ours -- if it is ours, it belongs
+    /// on Connector, and <c>ConnectorApiSurfaceTests</c> is the test that will notice.</para>
+    ///
     /// <para>Writing the expected set out by hand is exactly right here: a test that recomputed it by
     /// reflection would pass for any list at all, which is the one thing this must not do.</para>
     /// </summary>
@@ -29,14 +36,8 @@ public class ScriptGlobalsDiscoverabilityTests
         var expected = new[]
         {
             "CancellationToken",
-            "CreateFamilyDocument",
-            "CreateProjectDocument",
-            "DialogResultOverrides",
+            "Connector",
             "Document",
-            "ExportsDirectory",
-            "ImportsDirectory",
-            "OpenForWriting",
-            "Publish",
             "UIApplication",
             "UIDocument",
         };

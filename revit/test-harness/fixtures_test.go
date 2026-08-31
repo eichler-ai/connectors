@@ -38,7 +38,7 @@ import (
 // swallowed by a teardown problem.
 func createBlankFixtureDocument(t *testing.T, c *mcpclient.Client, instanceID, documentID string) string {
 	t.Helper()
-	out := runScript(t, c, instanceID, documentID, `return CreateProjectDocument().Title;`)
+	out := runScript(t, c, instanceID, documentID, `return Connector.CreateProjectDocument().Title;`)
 	if out.Status != "success" {
 		t.Fatalf("failed to create blank fixture document: status=%q output=%s", out.Status, out.Output)
 	}
@@ -199,7 +199,7 @@ if (matchCount > 1) { throw new System.Exception("fixture document title is ambi
 func fixtureWritePreamble(title string) string {
 	return fixtureLookupPreamble(title) + fmt.Sprintf(`
 if (!string.IsNullOrEmpty(doc.PathName)) { throw new System.Exception("fixture document " + %s + " is unexpectedly saved to disk (PathName=" + doc.PathName + "); refusing to write to what may not be the throwaway fixture document"); }
-OpenForWriting(doc);
+Connector.OpenForWriting(doc);
 `, strconv.Quote(title))
 }
 

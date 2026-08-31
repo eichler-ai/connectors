@@ -31,11 +31,12 @@ const (
 )
 
 // executeScriptDescription is a named constant so tools_test.go can assert on it without constructing a
-// server. See the comment at its use site in Register for why the globals are enumerated here.
+// server. See the comment at its use site in Register for why the globals are named here.
 const executeScriptDescription = "Compile and run a C# script against an open Revit document. " +
 	"Returns the completed result if it finishes within timeout_ms, otherwise a pending/running/busy status with an execution_id to pass to poll_execution. " +
-	"The script's scope carries these connector-provided globals, case-sensitively: CancellationToken, CreateFamilyDocument, CreateProjectDocument, DialogResultOverrides, Document, ExportsDirectory, ImportsDirectory, OpenForWriting, Publish, UIApplication, UIDocument. " +
-	"Call get_skills for what each does and for the rules on transactions, document creation and file exchange; search_functions indexes Revit's own API and will never return these."
+	"The script's scope carries exactly five globals, case-sensitively: Document, UIApplication, UIDocument and CancellationToken -- Revit's own objects, used as Autodesk documents them -- plus Connector, this connector's own additions to the Revit API. " +
+	"Reach those as Connector.Publish(path) and so on; search_functions and describe_function index them under the Eichler.Connectors.Revit namespace, alongside Revit's API. " +
+	"Call get_skills for the rules on transactions, document creation and file exchange."
 
 // ExecuteScriptIn is the input schema for the execute_script tool.
 type ExecuteScriptIn struct {
@@ -89,14 +90,21 @@ func Register(s *mcp.Server, mgr *execution.Manager) {
 		Name: "execute_script",
 		// The globals are named here, in the tool description itself, because this is the only place an
 		// agent is guaranteed to read before writing its first script (issue #84). They are documented
-		// properly in get_skills -- with types, nullability and worked examples -- but get_skills has to be
-		// CALLED, and an agent that goes straight from "I need to export a view" to execute_script never
-		// calls it. Found live building validation-corpus case #1: a first script wrote `doc.Export(...)`
-		// and failed on CS0103, with no path from the error back to the real name. search_functions cannot
-		// close this gap either -- it indexes Revit's API, never the connector's own globals.
+		// properly elsewhere -- with types, nullability and worked examples -- but that has to be CALLED,
+		// and an agent that goes straight from "I need to export a view" to execute_script never calls it.
+		// Found live building validation-corpus case #1: a first script wrote `doc.Export(...)` and failed
+		// on CS0103, with no path from the error back to the real name.
 		//
 		// Deliberately names them WITHOUT explaining them: a tool description competes for context with
 		// every other tool, so this is the index, and get_skills is the content.
+		//
+		// Issue #91 made this list FIVE names instead of eleven, and made the connector half of it
+		// undriftable. The seven connector-provided functions now live behind Connector and are documented
+		// by XML doc comment beside their own code, reaching an agent through describe_function -- so this
+		// string names the ENTRY POINT and never its members, and adding a connector function no longer
+		// requires editing Go prose that nothing relates to the C#. The claim that search_functions "will
+		// never return these" was true when written and is now false by design: the connector's API is
+		// indexed as an add-in API, which is the whole point of #91.
 		Description: executeScriptDescription,
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in ExecuteScriptIn) (*mcp.CallToolResult, ExecutionOut, error) {
 		timeoutMs := in.TimeoutMs

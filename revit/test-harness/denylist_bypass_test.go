@@ -207,6 +207,17 @@ return "captured an adapter through a callback";`
 // nested-run entry point is unnameable from script scope and this fails to
 // COMPILE. The Target trick still works and is still harmless on its own --
 // what mattered was that it reached a capability, not that it reached an object.
+//
+// ISSUE #91 changed the FIRST line of the script below but not what this test
+// pins, and the distinction matters because the test could otherwise start
+// passing for the wrong reason. Publish moved behind Connector, so the delegate's
+// Target is now the Connector facade rather than the live ScriptGlobals, and the
+// cast on that line would throw AT RUNTIME. It never gets there: compilation
+// still fails on RoslynScriptRunner, which is what the assertions below check
+// for by name. Delegate.Target is object, so the cast compiles regardless -- the
+// rejection this test reads is unchanged and still comes from the internal
+// runner. If that assertion is ever relaxed to "the script was rejected", this
+// test stops being coverage.
 func TestConfirmationTierCannotBeSelfGranted(t *testing.T) {
 	c, instanceID, documentID := targetDocument(t)
 
@@ -217,7 +228,7 @@ func TestConfirmationTierCannotBeSelfGranted(t *testing.T) {
 	// reports Success=True here has demonstrably been granted the gated tier
 	// without saving anything.
 	script := `
-var g = (MCPBridge.Core.Execution.ScriptGlobals)((System.Action<string, string>)Publish).Target;
+var g = (MCPBridge.Core.Execution.ScriptGlobals)((System.Action<string, string>)Connector.Publish).Target;
 var runner = new MCPBridge.Core.Execution.RoslynScriptRunner();
 var outcome = runner.RunAsync(
     "System.Action f = Document.Save; return f != null ? \"gated member bound\" : \"null\";",

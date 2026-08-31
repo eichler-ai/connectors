@@ -5,6 +5,7 @@ using System.Linq;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Microsoft.CodeAnalysis.Scripting;
+using Eichler.Connectors.Revit;
 using MCPBridge.Core.Diagnostics;
 using MCPBridge.Core.Discovery;
 using MCPBridge.Core.Execution;
@@ -601,11 +602,16 @@ public sealed class RequestDispatcher
 
         return new[]
         {
-            opening + " A script's scope carries exactly these connector-provided globals: " +
+            opening + " A script's scope carries exactly these globals: " +
             string.Join(", ", ScriptGlobals.GlobalNames) + ".",
             "Names are case-sensitive -- the document global is 'Document', not 'doc'.",
-            "Call get_skills for what each global does, with examples; search_functions only indexes " +
-            "Revit's own API and will never return these.",
+            // Both the namespace and the entry-point name are read from the type rather than spelled out,
+            // so a rename cannot leave this line telling an agent to look somewhere that no longer exists.
+            $"The connector's own functions are reached through '{nameof(ScriptGlobals.Connector)}' " +
+            $"(e.g. {nameof(ScriptGlobals.Connector)}.Publish(path)); search_functions and " +
+            $"describe_function index them under the {typeof(Connector).Namespace} namespace, alongside " +
+            "Revit's own API.",
+            "Call get_skills for the transaction, document-creation and file-exchange rules.",
         };
     }
 

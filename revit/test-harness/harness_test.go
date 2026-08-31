@@ -922,7 +922,7 @@ func TestCreatedDocumentIsWritable(t *testing.T) {
 	// document, chosen so the only variable here is WHICH document it lands in.
 	t.Run("CreateProjectDocumentThenWriteToIt", func(t *testing.T) {
 		out := runScript(t, c, instanceID, documentID, `
-var doc = CreateProjectDocument();
+var doc = Connector.CreateProjectDocument();
 System.Console.WriteLine("cleanup-title=" + doc.Title + ";");
 var before = new Autodesk.Revit.DB.FilteredElementCollector(doc)
     .OfClass(typeof(Autodesk.Revit.DB.Level)).GetElementCount();
@@ -964,7 +964,7 @@ return new {
 		// A distinctive elevation so the follow-up query cannot match a level
 		// from the template or from another subtest's document.
 		created := runScript(t, c, instanceID, documentID, `
-var doc = CreateProjectDocument();
+var doc = Connector.CreateProjectDocument();
 Autodesk.Revit.DB.Level.Create(doc, 4343.0);
 return doc.Title;
 `)
@@ -1008,7 +1008,7 @@ return "matches = " + matches + ";";
 		// value dies with the script and the follow-up check needs to look at exactly
 		// one document.
 		thrown := runRejectedScript(t, c, instanceID, documentID, `
-var doc = CreateProjectDocument();
+var doc = Connector.CreateProjectDocument();
 Autodesk.Revit.DB.Level.Create(doc, `+elevRolledBack+`);
 System.Console.WriteLine(doc.Title);
 throw new System.InvalidOperationException("deliberate");
@@ -1057,7 +1057,7 @@ if (System.IO.Directory.Exists(app.FamilyTemplatePath)) {
   }
 }
 if (template.Length == 0) { return "no-template"; }
-var doc = CreateFamilyDocument(template);
+var doc = Connector.CreateFamilyDocument(template);
 System.Console.WriteLine("cleanup-title=" + doc.Title + ";");
 var before = doc.FamilyManager.Types.Size;
 doc.FamilyManager.NewType("MCPBridgeIssue24Type");
@@ -1086,7 +1086,7 @@ return new {
 	// against a document it created itself, because it no longer needs to.
 	t.Run("ConstructingATransactionIsStillRefusedAgainstACreatedDocument", func(t *testing.T) {
 		rejected := runRejectedScript(t, c, instanceID, documentID, `
-var doc = CreateProjectDocument();
+var doc = Connector.CreateProjectDocument();
 using (var tx = new Autodesk.Revit.DB.Transaction(doc, "mine")) { tx.Start(); tx.Commit(); }
 return "opened";
 `)
@@ -1100,7 +1100,7 @@ return "opened";
 	// show it against the real, fully-bound Revit metadata Revit itself loads.
 	t.Run("CallingTheCreationHelperIsNotADenylistViolation", func(t *testing.T) {
 		out := runScript(t, c, instanceID, documentID, `
-var doc = CreateProjectDocument();
+var doc = Connector.CreateProjectDocument();
 System.Console.WriteLine("cleanup-title=" + doc.Title + ";");
 return "ok:" + (doc != null);
 `)
@@ -1118,8 +1118,8 @@ return "ok:" + (doc != null);
 	// above would all pass against an implementation that only ever tracked one.
 	t.Run("TwoCreatedDocumentsBothCommit", func(t *testing.T) {
 		created := runScript(t, c, instanceID, documentID, `
-var a = CreateProjectDocument();
-var b = CreateProjectDocument();
+var a = Connector.CreateProjectDocument();
+var b = Connector.CreateProjectDocument();
 Autodesk.Revit.DB.Level.Create(a, `+elevA+`);
 Autodesk.Revit.DB.Level.Create(b, `+elevB+`);
 return a.Title + "|" + b.Title;
@@ -1189,7 +1189,7 @@ return "a = " + a + "; b = " + b + ";";
 	// Close still works there (and it is read-only, which is the trade).
 	t.Run("ACreatedDocumentCannotBeClosedWhileItsTransactionIsOpen", func(t *testing.T) {
 		out := decodeToolResult[executeScriptOut](t, callExecuteScriptWith(t, c, instanceID, documentID, `
-var doc = CreateProjectDocument();
+var doc = Connector.CreateProjectDocument();
 System.Console.WriteLine("cleanup-title=" + doc.Title + ";");
 Autodesk.Revit.DB.Level.Create(doc, 5050.0);
 try { doc.Close(false); return "closed"; }
@@ -1212,7 +1212,7 @@ catch (Autodesk.Revit.Exceptions.InvalidOperationException ex) { return "refused
 	// matters that the plumbing demonstrably reaches created documents at all.
 	t.Run("FailuresInACreatedDocumentAreReportedAsNotices", func(t *testing.T) {
 		out := runScript(t, c, instanceID, documentID, `
-var doc = CreateProjectDocument();
+var doc = Connector.CreateProjectDocument();
 System.Console.WriteLine("cleanup-title=" + doc.Title + ";");
 var lvl = Autodesk.Revit.DB.Level.Create(doc, 0.0);
 doc.Create.NewRoom(lvl, new Autodesk.Revit.DB.UV(5, 5));
@@ -1239,7 +1239,7 @@ return "room-created";
 	// ManagedDocumentTransactions), which is exactly why it needs its own check.
 	t.Run("TheAmbientDocumentStillCommitsAlongsideCreatedOnes", func(t *testing.T) {
 		out := runScript(t, c, instanceID, documentID, `
-var created = CreateProjectDocument();
+var created = Connector.CreateProjectDocument();
 System.Console.WriteLine("cleanup-title=" + created.Title + ";");
 Autodesk.Revit.DB.Level.Create(created, `+elevA+`);
 Autodesk.Revit.DB.Level.Create(Document, `+elevAmbient+`);

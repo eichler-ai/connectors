@@ -41,8 +41,8 @@ doc.Regenerate();
 var options = new Autodesk.Revit.DB.DWGExportOptions();
 var views = new System.Collections.Generic.List<Autodesk.Revit.DB.ElementId> { view.Id };
 var exportName = "validation-case01-" + System.Guid.NewGuid().ToString("N");
-var ok = doc.Export(ExportsDirectory, exportName, views, options);
-var dwgPath = System.IO.Path.Combine(ExportsDirectory, exportName + ".dwg");
+var ok = doc.Export(Connector.ExportsDirectory, exportName, views, options);
+var dwgPath = System.IO.Path.Combine(Connector.ExportsDirectory, exportName + ".dwg");
 var exists = System.IO.File.Exists(dwgPath);
 long size = exists ? new System.IO.FileInfo(dwgPath).Length : 0;
 
@@ -65,7 +65,7 @@ return new { exported = ok, dwgExists = exists, dwgSize = size, exportName };
 	// exports directory, but their presence/absence has already been checked above.
 	t.Cleanup(func() {
 		cleanup := `
-var dir = ExportsDirectory;
+var dir = Connector.ExportsDirectory;
 foreach (var f in System.IO.Directory.GetFiles(dir, "validation-case01-*")) {
   try { System.IO.File.Delete(f); } catch {}
 }
@@ -176,7 +176,7 @@ foreach (var f in System.IO.Directory.EnumerateFiles(app.FamilyTemplatePath, "Ge
 }
 if (template.Length == 0) return "no-template";
 
-var famDoc = CreateFamilyDocument(template);
+var famDoc = Connector.CreateFamilyDocument(template);
 var plane = Autodesk.Revit.DB.Plane.CreateByNormalAndOrigin(Autodesk.Revit.DB.XYZ.BasisZ, Autodesk.Revit.DB.XYZ.Zero);
 var sketchPlane = Autodesk.Revit.DB.SketchPlane.Create(famDoc, plane);
 
@@ -226,7 +226,7 @@ if (famDoc == null) { throw new System.Exception("family document not found by t
 var family = famDoc.LoadFamily(doc);
 famDoc.Close(false);
 
-OpenForWriting(doc);
+Connector.OpenForWriting(doc);
 
 Autodesk.Revit.DB.FamilySymbol symbol = null;
 foreach (Autodesk.Revit.DB.ElementId symId in family.GetFamilySymbolIds()) {

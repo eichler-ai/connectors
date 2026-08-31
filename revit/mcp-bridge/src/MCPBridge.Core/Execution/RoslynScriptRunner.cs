@@ -80,6 +80,16 @@ namespace MCPBridge.Core.Execution;
 /// this closes is the gated tier specifically. Pinned by
 /// revit/test-harness/denylist_bypass_test.go (TestConfirmationTierCannotBeSelfGranted); the
 /// only production caller is TransactionScriptExecutor, itself internal for the same reason.
+///
+/// The exact snippet above no longer compiles as written, because issue #91 moved Publish behind the
+/// Connector facade -- but do not read that as the hole having a second lock on it. The SHAPE is
+/// undiminished: Document is still a bare global over the live ScriptGlobals, so a method-group
+/// delegate over it hands back the same object by the same public Delegate.Target route. This type
+/// being internal is still the only thing closing it. What #91 did change is what the FACADE's own
+/// members yield: `((System.Action&lt;string, string&gt;)Connector.Publish).Target` is the Connector
+/// instance, which holds one private IConnectorRuntime reference and nothing else -- strictly less
+/// than before, and worth noting only so a future reader does not mistake the narrower leak for a
+/// closed one.
 /// </summary>
 internal sealed class RoslynScriptRunner
 {
@@ -139,7 +149,17 @@ internal sealed class RoslynScriptRunner
 
     private static Assembly[] LoadableReferences() =>
         AppDomain.CurrentDomain.GetAssemblies()
+            // Eichler.Connectors.Revit is appended EXPLICITLY, not left to the scan, and this is
+            // load-bearing rather than defensive. GetAssemblies() reports what the CLR has actually
+            // loaded, and the CLR loads lazily: a referenced assembly appears only once something
+            // touches a type in it. This runner is constructed at add-in startup, before any
+            // ScriptGlobals exists, so at that moment nothing has touched Connector and the scan would
+            // not list it -- leaving every script that writes `Connector.Publish(...)` to fail
+            // compilation with the assembly simply absent from its references. The typeof() below is
+            // what forces the load, so the reference is present rather than merely likely.
+            .Append(typeof(Eichler.Connectors.Revit.Connector).Assembly)
             .Where(a => !a.IsDynamic && !string.IsNullOrEmpty(a.Location))
+            .Distinct()
             .ToArray();
 
     /// <param name="confirmLifecycleActions">
