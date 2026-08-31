@@ -1,0 +1,125 @@
+# search_functions ranking regression corpus (issue #82).
+#
+# Columns, tab-separated:
+#   query            the phrasing sent to search_functions
+#   expected         a fully-qualified Type.Member that MUST appear, or empty for snapshot-only
+#   max_rank         the rank `expected` must appear within (1 = must be top hit)
+#   note             why this row is here
+#
+# A row with no `expected` is not an assertion. It is here to be SNAPSHOTTED, so that a ranking change
+# shows up as a git diff on Fixtures/ranking-snapshot-<version>.txt and someone has to look at what moved
+# before re-blessing it. Most ranking questions have no single right answer, and pinning one would make
+# every legitimate retune read as a regression -- see issue #82.
+#
+# Expectations are therefore reserved for cases with a DEFENSIBLE right answer: the query a past defect
+# was reported against, plus the answer that defect's fix established. Do not add an expectation just
+# because a query currently ranks something plausibly; that enshrines the status quo and makes the file
+# an obstacle rather than an instrument.
+#
+# ---------------------------------------------------------------------------------------------------
+# Regression rows: each of these is a defect that was reported, fixed, and must not come back.
+# ---------------------------------------------------------------------------------------------------
+create sheet place view	Autodesk.Revit.DB.ViewSheet.Create	3	#65 -- reported query; "place" is also a prefix of "Placeholder"
+create family instance	Autodesk.Revit.Creation.Document.NewFamilyInstance	3	#75 -- Revit's factory convention is NewXxx, not CreateXxx
+is the element new	Autodesk.Revit.DB.ElementOnPhaseStatus.New	5	#86 -- must survive any change to the create/new synonym group
+#
+# ---------------------------------------------------------------------------------------------------
+# Open-defect rows: reported, NOT yet fixed. Snapshot-only on purpose -- an expectation here would be a
+# red suite pinned to a known bug. The expectation is added by the PR that fixes it.
+# ---------------------------------------------------------------------------------------------------
+create lineweight		#80 -- 16 rows tie at the tier-2 floor above every tier-3 match
+create an assembly from elements		#86 -- a BuiltInFailures string outranks AssemblyInstance.Create
+create a design option		#86 -- same shape
+create a railing		#86 -- IsValidHostForNewRailing outranks Railing members
+join walls at corner		#87 -- neither JoinGeometryUtils nor WallUtils appears on page 1
+change the width of a wall		#86 secondary -- ChangeRegionWidth demoted by the set/change group
+new wall		pre-#75 this ranked Visual.StoneBumpType.Stonewall first, via "sto(new)all"
+id		#76 -- shortest common token; overflowed the candidate cap
+#
+# ---------------------------------------------------------------------------------------------------
+# Coverage rows. Snapshot-only. The point is breadth: the reviewer's 71-query set found four regression
+# classes precisely by running queries nobody had thought to try (#82).
+# ---------------------------------------------------------------------------------------------------
+# -- creation / factories
+create a level
+create a topography		reviewer find: TopographySurface.AddPoints was lost by a locally-correct change
+create a wall
+create a floor
+create a room
+create a grid
+create a dimension
+create a text note
+create a group
+create a view filter
+new sheet
+new schedule view
+# -- geometry
+intersect two solids
+compute the volume of a solid
+transform a point
+get the bounding box of an element
+create a line between two points
+offset a curve
+# -- parameters
+read a parameter value
+set a parameter on an element
+find a shared parameter
+list the parameters of a type
+built in parameter for comments
+# -- views
+change the view scale
+set a view template
+hide an element in a view
+create a section view
+duplicate a view
+crop a view
+# -- sheets and titleblocks
+add a viewport to a sheet
+find the titleblock of a sheet
+renumber sheets
+# -- families
+load a family from a file
+place a family symbol
+activate a family symbol
+edit a family type parameter
+# -- worksharing
+synchronise with central
+check out an element
+relinquish ownership
+find the worksets in a model
+# -- schedules
+create a schedule
+add a field to a schedule
+export a schedule to csv
+# -- links
+find linked documents
+get the transform of a link instance
+reload a linked model
+# -- export and import
+export to dwg
+export to ifc
+export an image of a view
+import a cad file
+# -- elements and collections
+filter elements by category
+get all walls in the document
+delete an element
+copy elements between documents
+move an element
+rotate an element
+# -- materials and appearance
+find a material by name
+set the material of an element
+override graphics for an element
+# -- phases and design options
+find the phase of an element
+list the design options
+# -- levels, rooms, areas
+find the level of an element
+compute the area of a room
+place a room separator
+# -- long, conversational phrasings (the shape PRD §13's corpus uses)
+how do I find every door hosted in a particular wall
+what is the correct way to change an element's type
+i want to know whether two elements are joined
+give me the elevation of a level
