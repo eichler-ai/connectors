@@ -144,6 +144,21 @@ public class ReturnValueFormatterTests
         Assert.Contains("no display form", formatted);
     }
 
+    /// <summary>
+    /// JSON has no literal for either, and System.Text.Json's default is to THROW on them -- which would
+    /// lose every other value in the graph to one degenerate number. Revit geometry produces both
+    /// routinely, so this is a live shape rather than a theoretical one.
+    /// </summary>
+    [Fact]
+    public void NaNAndInfinity_RenderAsNamedLiterals_RatherThanFailingTheWholeValue()
+    {
+        var formatted = ReturnValueFormatter.Format(new { ok = 1.5, bad = double.NaN, worse = double.PositiveInfinity });
+
+        Assert.Contains("\"ok\":1.5", formatted);
+        Assert.Contains("NaN", formatted);
+        Assert.Contains("Infinity", formatted);
+    }
+
     [Fact]
     public void NullElementsInsideACollection_SerializeAsJsonNull()
     {

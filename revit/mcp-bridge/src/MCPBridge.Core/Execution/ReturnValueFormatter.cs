@@ -5,6 +5,7 @@ using System.Globalization;
 using System.Reflection;
 using System.Text.Encodings.Web;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace MCPBridge.Core.Execution;
 
@@ -79,6 +80,13 @@ internal static class ReturnValueFormatter
         // outer decode as the literal text "<" in every marker an agent reads. There is no injection
         // surface to protect here -- the envelope's own encoder is what makes the wire message well-formed.
         Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+        // Without this, a single NaN or Infinity anywhere in the graph makes Serialize THROW, and the
+        // caller's last-resort catch then reports the whole return value as "formatting threw" -- every
+        // other value in it lost to one bad number. Revit geometry produces both routinely (a degenerate
+        // curve's parameter, a division by a zero-length vector), and JSON has no literal for either, so
+        // they render as the strings "NaN"/"Infinity" instead. Losing the exact JSON number type for
+        // those two cases is a much smaller loss than losing the result.
+        NumberHandling = JsonNumberHandling.AllowNamedFloatingPointLiterals,
     };
 
     /// <summary>
