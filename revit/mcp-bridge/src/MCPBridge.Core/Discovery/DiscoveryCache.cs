@@ -1193,7 +1193,19 @@ public sealed class DiscoveryCache : IDisposable
             JOIN types t ON m.type_id = t.id
             JOIN assemblies a ON t.assembly_id = a.id
             WHERE members_fts MATCH @match AND t.documented = 1 AND (@ns IS NULL OR t.namespace = @ns)
-            ORDER BY (a.kind != 'core'), bm25(members_fts)
+            -- ORDER BY relevance ALONE, deliberately (issue #81). This clause used to lead with
+            -- (a.kind != 'core'), which made assembly kind the primary sort of a LIMITed query -- that is
+            -- a filter on candidate SELECTION, not a preference applied to ranking. Once core alone
+            -- supplied @limit candidates, no add-in row was considered at all, however much better its
+            -- bm25. Measured on the real corpus: for the token "parameter", zero add-in rows appeared in
+            -- the first 200 results, while "element" and "view" were unaffected -- it bites exactly when
+            -- core fills the budget, which is why it went unnoticed.
+            --
+            -- PRD §08 promises add-in APIs are "ranked below core, never suppressed"; that promise lives
+            -- in CoreBoost, which adds +0.5 to a core row's SCORE after selection and expresses the
+            -- preference without excluding anything. Since issue #91 the connector's own script API is
+            -- indexed as an add-in, so an agent searching it by description takes exactly this path.
+            ORDER BY bm25(members_fts)
             LIMIT @limit
             """;
         cmd.Parameters.AddWithValue("@match", matchExpression);

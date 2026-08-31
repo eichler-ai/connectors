@@ -38,6 +38,13 @@ namespace MCPBridge.Discovery.Tests;
 /// <para>Snapshots are per Revit version, because the corpora genuinely differ (2027 has 32,977
 /// documented summaries against 2025's 31,216) and this project multi-targets precisely so both are
 /// exercised. A single shared snapshot would be wrong for one of them.</para>
+///
+/// <para><b>Scope: this corpus is CORE-ONLY, matching a stock Revit session</b> -- RevitAPI and
+/// RevitAPIUI, both synced as <c>"core"</c>, exactly as <c>BridgeHost.CollectAssembliesToSync</c> does.
+/// It therefore says nothing about add-in ranking, and a change that only affects add-in rows will show
+/// zero movement here. That is a useful signal in its own right (it means a stock session is unaffected),
+/// but it is not coverage: <see cref="AddInVisibilityTests"/> owns the add-in path, because reproducing
+/// it needs a second assembly synced under a different kind.</para>
 /// </summary>
 public class RankingCorpusTests
 {
