@@ -29,7 +29,13 @@ internal static class RealRevitApiLoader
     /// runtime; if a TFM is added to the project, this fails to compile until it is handled here.
     /// </summary>
     internal const string RevitVersionForThisTargetFramework =
-#if NET8_0_WINDOWS
+        // NET8_0, not NET8_0_WINDOWS. The SDK's implicit defines for a net8.0-windows TFM are NET8_0 (plus
+        // NET8_0_OR_GREATER, NETCOREAPP, ...) and, separately, the platform symbols WINDOWS / WINDOWS7_0.
+        // There is no combined NET8_0_WINDOWS, so the first version of this #if was never true and BOTH
+        // legs compiled to "2027" -- silently reintroducing the exact defect the constant replaced. Caught
+        // only by RealRevitApiLoaderTests asserting the running runtime against this value; every other
+        // test passed either way, because they pass against both corpora.
+#if NET8_0
         "2025";
 #else
         "2027";

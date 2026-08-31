@@ -43,6 +43,47 @@ public class RealRevitApiLoaderTests
             "every test in the RealRevitApi family is silently skipping and reporting PASSED on a machine " +
             "that can actually run them. This has happened twice before; see caveats.md.");
 
-        loaded!.Value.Context.Dispose();
+        using var context = loaded!.Value.Context;
+
+        // Assert WHICH corpus was loaded, not merely that one was. This is the second half of the same
+        // defect: before the TFM-derived version, the loader probed {2027, 2025} first-hit-wins, so on a
+        // machine with both installed BOTH multi-target legs loaded 2027 and the net8.0 leg reported
+        // results about an API it never touched. Everything was green and the suite even took longer,
+        // which reads as more coverage rather than duplicated coverage.
+        //
+        // Checking the loaded assembly's own identity rather than the path it came from, because the path
+        // is what the (previously wrong) selection logic produces -- asserting on it would just restate
+        // the code's choice back to itself. RevitAPI.dll's major version is the release year minus 2000:
+        // measured 25.4.60.0 for Revit 2025 and 27.0.4.0 for 2027.
+        // Anchored to the RUNNING RUNTIME, not to the constant, and that distinction is the whole value of
+        // this assertion. Deriving the expectation from RevitVersionForThisTargetFramework would be
+        // circular -- the loader picks its path from that same constant, so the two agree by construction
+        // and flipping the constant would keep the test green. Environment.Version is an independent fact
+        // about which TFM leg is actually executing, so this pins the project-wide mapping itself:
+        // net8.0-windows -> Revit 2025, net10.0-windows -> Revit 2027.
+        //
+        // It also covers the "both TFM legs ran on the same runtime" row in caveats.md, which warns that
+        // RollForward can silently put both legs on one runtime: if that happened, one leg's expectation
+        // would no longer match the constant it was compiled with, and the first assert below fires.
+        var runtimeMajor = Environment.Version.Major;
+        var expectedRevitVersion = runtimeMajor == 8 ? "2025" : "2027";
+
+        Assert.True(
+            expectedRevitVersion == RealRevitApiLoader.RevitVersionForThisTargetFramework,
+            $"This leg is running on .NET {runtimeMajor}, which the project maps to Revit " +
+            $"{expectedRevitVersion}, but it was compiled with RevitVersionForThisTargetFramework = " +
+            $"'{RealRevitApiLoader.RevitVersionForThisTargetFramework}'. Either the mapping in " +
+            "RealRevitApiLoader disagrees with the .csproj RevitVersion properties, or both TFM legs are " +
+            "executing on the same runtime (see caveats.md).");
+
+        var expectedMajor = int.Parse(expectedRevitVersion) - 2000;
+        var actualMajor = loaded.Value.Assembly.GetName().Version?.Major;
+
+        Assert.True(
+            actualMajor == expectedMajor,
+            $"This test assembly targets Revit {RealRevitApiLoader.RevitVersionForThisTargetFramework} " +
+            $"(expecting RevitAPI major version {expectedMajor}), but the loaded RevitAPI.dll reports " +
+            $"major version {actualMajor}. Both TFM legs are reflecting the same corpus, so one of them " +
+            "is asserting against an API it does not target -- which looks like extra coverage and is not.");
     }
 }
