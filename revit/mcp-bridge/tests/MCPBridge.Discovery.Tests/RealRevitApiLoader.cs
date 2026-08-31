@@ -34,15 +34,34 @@ internal static class RealRevitApiLoader
     public static (MetadataLoadContext Context, Assembly Assembly)? TryLoad()
     {
         var dllPath = Environment.GetEnvironmentVariable("MCPBRIDGE_REVITAPI_DLL");
+        var fromEnvironment = !string.IsNullOrEmpty(dllPath);
+        if (!fromEnvironment)
+        {
+            // Fall back to the standard install locations before giving up. The env var was the ONLY route
+            // until this was found, and the effect was that every test in this family was silently dead in
+            // the one environment that can actually run them: `prlctl exec` runs as NT AUTHORITY\\SYSTEM
+            // (dev-environment.md), which does not see the interactive user's variables, and that is how
+            // every agent session invokes dotnet test. They reported PASSED throughout -- caveats.md's
+            // "return-on-missing-config reports as passed, not skipped" trap, caught here only because a
+            // mutation of a NEW test in this family passed when it should have failed.
+            //
+            // These paths mirror $(RevitInstallDir) in every .csproj here, so they are already the
+            // project's assumption about where Revit lives rather than a new one. The env var stays as an
+            // override for a non-standard install.
+            dllPath = new[] { "2027", "2025" }
+                .Select(version => $@"C:\Program Files\Autodesk\Revit {version}\RevitAPI.dll")
+                .FirstOrDefault(File.Exists);
+        }
+
         if (string.IsNullOrEmpty(dllPath))
         {
-            return null;
+            return null; // No Revit install and no override -- genuinely nothing to load (e.g. a Mac worktree).
         }
 
         // Setting the variable is an explicit opt-in, so a bad path is a misconfiguration, not a reason to
         // skip. Returning null here would report a typo as a PASS -- the exact failure mode that let this
         // whole file sit dead since it was written.
-        if (!File.Exists(dllPath))
+        if (fromEnvironment && !File.Exists(dllPath))
         {
             throw new FileNotFoundException(
                 $"MCPBRIDGE_REVITAPI_DLL is set to '{dllPath}', which does not exist. Unset it to skip these tests.",

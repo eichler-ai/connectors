@@ -225,6 +225,54 @@ document. The point of every fix here is closing the *plausible-looking, one-lin
 Bypasses are pinned by `revit/test-harness/denylist_bypass_test.go`, tier 2 by construction —
 `internal` only means anything against the real assemblies as Revit loads them.
 
+## Adding a function to the connector's own script API
+
+The connector's script-facing functions live on **one public type**, `Connector`, in
+`src/Eichler.Connectors.Revit/` (issue #91). A script reaches them as `Connector.Publish(path)`;
+discovery indexes the assembly as an add-in, so `list_functions`/`search_functions`/
+`describe_function` return them beside Autodesk's own API under `Eichler.Connectors.Revit`. That
+namespace is a released identifier — see `CONVENTIONS.md`, and treat renaming it as a decision, not a
+refactor.
+
+To add one:
+
+1. **Implement it in `MCPBridge.Core`**, next to the existing implementations on `ScriptGlobals`, and
+   keep it `internal`. Maintainer rationale goes here.
+2. **Add it to `IConnectorRuntime` and `Connector`.** The facade member carries the agent-facing XML
+   doc comment.
+3. **Nothing else enumerates it.** Not `execute_script`'s description, not `skill.md`, not
+   `ScriptGlobals.GlobalNames` — those name the `Connector` entry point only, which is what stopped
+   the five-way drift #91 was filed for. Do not add it back to any of them.
+4. **Migrate call sites** if you are renaming: `revit/test-harness/*.go` script text and the
+   validation corpus. One spelling, never two.
+
+Three constraints that are not obvious, each found by violating it:
+
+- **No Revit type may appear in `IConnectorRuntime`.** The CLR resolves every interface signature
+  when it loads an implementing type, so a `Document` there makes `ScriptGlobals` unloadable wherever
+  RevitAPI.dll cannot load — the entire tier-1 host (114 of 423 tests failed). Type them `object` and
+  cast in `Connector`, whose method bodies JIT only inside Revit. A class's own members are resolved
+  lazily, per member, which is why `ScriptGlobals` can carry `Document` properties and this interface
+  cannot.
+- **The XML doc comment is shipped product, not commentary.** `describe_function` returns it verbatim
+  to an agent. CS1591 is an **error** in that project alone, so an undocumented public member fails
+  the build; `ConnectorApiSurfaceTests` reads the generated sidecar and fails on a summary over 130
+  words or one citing PRD sections, issue numbers, or internal type names. Put rationale in
+  `<remarks>` — `XmlDocIndex` reads only `<summary>`, `<param>` and `<returns>`.
+- **Keep `Connector` the only public type in that assembly.** `DiscoveryReflector` indexes publicly
+  visible types, so anything else made public there lands in the agent-facing corpus. That is the
+  whole reason the assembly exists rather than syncing `MCPBridge.Core`, which has 71 public types.
+
+Deploying it needs the **`.xml` sidecar beside the `.dll`**, and this is load-bearing rather than
+tidy: `DiscoveryReflector` treats a *missing* sidecar as "everything is documented", so a DLL-only
+deploy yields discovery with empty summaries — which looks like working discovery. `install.ps1`
+copies the whole build output and is fine; `redeploy-and-verify.ps1` copies files **by name** and has
+to be extended when a project is added.
+
+**Verify the rendered text live, not the source.** Reading `describe_function`'s actual output is what
+caught two defects a source review would have passed: paragraphs concatenating without a separator,
+and the deploy list missing the new assembly.
+
 ## Revit behaviours that mislead
 
 - **A modal dialog wedges Revit's idle loop**, so any `ExternalEvent` (including the document

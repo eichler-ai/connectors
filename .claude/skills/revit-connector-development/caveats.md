@@ -76,7 +76,7 @@ the API itself is broken.
 | The test assembly failed to load and was skipped entirely | Confirm the test **count**, never the exit code — a skipped assembly still exits 0 |
 | The test DLL for that TFM doesn't exist | `dotnet test` exiting 1 with **no summary line** means missing DLL, not failures. `Test-Path` the per-TFM DLL |
 | Both TFM legs ran on the same runtime | `RollForward` prefers the highest major even when the requested one is present. Assert the runtime, don't assume it |
-| An opt-in test self-skips on an unset env var, so it has never once run | `return`-on-missing-config reports as **passed**, not skipped. Set the var and watch it fail before trusting it — `RealRevitApiTests` was dead from the day it was written |
+| An opt-in test self-skips on an unset env var, so it has never once run | `return`-on-missing-config reports as **passed**, not skipped. Set the var and watch it fail before trusting it — `RealRevitApiTests` was dead from the day it was written, and **dead again later for a different reason**: the var was set for the interactive user, but `prlctl exec` runs as SYSTEM, which is how every agent session invokes `dotnet test`. Prefer probing a known path over requiring a variable; a suite whose duration jumps (0.7s → 10s) when you fix it was not running before |
 | The assertion cannot fail | Revert the fix and confirm the test fails. If it still passes, it was never coverage |
 | The fixture makes the test pass for the wrong reason | A ranking test passed under a mutation that removed the sort entirely, because SQLite's scan order happened to agree with the score order. Reversing two fixture declarations killed it. Mutating the mechanism is not enough — check the fixture actually *opposes* the mutation |
 
