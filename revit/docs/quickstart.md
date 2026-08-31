@@ -93,8 +93,9 @@ guide (`get_skills`) covers the same ground for the agent automatically.
 
 If nothing shows up in `list_instances`: check **Add-Ins → MCP Bridge → Status** inside
 Revit (shows connection state and which broker it's dialing), and the add-in's
-`connection.log` under `%LOCALAPPDATA%\Connectors\Revit\` (capped at 5MB; the previous
-generation is kept alongside it as `connection.log.old`).
+`connection.log` under `%LOCALAPPDATA%\Connectors\Revit\`. It rotates at roughly 5MB, keeping
+one previous generation as `connection.log.old` — so if the live file starts mid-stream, the
+earlier history is in that file rather than lost.
 
 ## Mac + Parallels variant (this project's own dev topology)
 

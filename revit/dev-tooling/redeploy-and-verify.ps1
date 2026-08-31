@@ -165,6 +165,13 @@ function Wait-ForFreshConnection([string]$LogPath, [int]$MinDocuments, [int]$Tim
                 continue
             }
             $currentLength = (Get-Item $LogPath).Length
+            # connection.log ROTATES at 5MB (issue #11), so it is no longer monotonically growing --
+            # the byte-offset scheme this function is built on assumed it was. A shrink means the log
+            # was renamed to .old and a fresh one started, so every byte in the current file is new:
+            # restart from the top rather than waiting forever for it to grow past a length it will
+            # never reach again. Without this the loop skips every iteration and the script reports
+            # FAIL on a deploy that worked -- the exact opaque failure its comments exist to prevent.
+            if ($currentLength -lt $startLength) { $startLength = 0 }
             if ($currentLength -le $startLength) {
                 if ($timedOut) { return $null }
                 continue

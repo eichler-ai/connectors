@@ -671,7 +671,7 @@ internal sealed class BridgeHost
     /// for as long as an outage lasts.
     /// </summary>
     private static void LogConnectionDiagnostic(string message)
-        => RollingDiagnosticLog.Append(BrokerDiscoveryOptions.Local().ConnectorRoot, "connection.log", message);
+        => RollingDiagnosticLog.Append(() => BrokerDiscoveryOptions.Local().ConnectorRoot, "connection.log", message);
 
     private static void Backoff(ReconnectLoopController reconnectController, CancellationToken stopToken)
     {

@@ -90,7 +90,7 @@ public sealed class MCPBridgeApplication : IExternalApplication
     /// unbounded append into the same directory, and leaving one of the two capped would only invite
     /// the question of why.</para></summary>
     private static void TryLogDiagnostic(string message)
-        => RollingDiagnosticLog.Append(BrokerDiscoveryOptions.Local().ConnectorRoot, "startup-errors.log", message);
+        => RollingDiagnosticLog.Append(() => BrokerDiscoveryOptions.Local().ConnectorRoot, "startup-errors.log", message);
 
     public Result OnShutdown(UIControlledApplication application)
     {

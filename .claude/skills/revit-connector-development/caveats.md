@@ -30,6 +30,10 @@ out — work down, don't guess.
 **Read the log's own unconditional first line before reasoning about anything after it.**
 `connection.log` opens with `RunConnectionLoop starting. Mode=... ConnectorRoot=...`.
 
+**Unless it has rotated** (issue #11: 5MB cap, previous generation moved to `connection.log.old`). A
+live log that starts mid-stream has rotated, and that startup line is in the `.old` file — it does not
+mean the add-in never started. Check both files before concluding anything from the absence of a line.
+
 ## Symptom: `register` reports `documents: []`
 
 The snapshot is pushed live on open/close/create/activate, so a *persistent* empty list is real.
