@@ -2,6 +2,7 @@ using System;
 using System.IO;
 using Autodesk.Revit.UI;
 using MCPBridge.Core.Connection;
+using MCPBridge.Core.Diagnostics;
 using MCPBridge.Core.Execution;
 
 namespace MCPBridge.AddIn;
@@ -83,21 +84,13 @@ public sealed class MCPBridgeApplication : IExternalApplication
     /// that. Reuses BrokerDiscoveryOptions.Local()'s own path computation rather than hand-rolling
     /// "Connectors"/"Revit" a second time, so the two can't drift apart (a docs-sync audit found this
     /// directory literally hardcoded as "MCPBridge" here, diverging from the documented convention --
-    /// this is that fix).</summary>
+    /// this is that fix).
+    /// <para>Size-capped by RollingDiagnosticLog for the same reason connection.log is (issue #11).
+    /// Less urgent here -- this file's writes are per-startup, not per-retry -- but it is the same
+    /// unbounded append into the same directory, and leaving one of the two capped would only invite
+    /// the question of why.</para></summary>
     private static void TryLogDiagnostic(string message)
-    {
-        try
-        {
-            var directory = BrokerDiscoveryOptions.Local().ConnectorRoot;
-            Directory.CreateDirectory(directory);
-            File.AppendAllText(Path.Combine(directory, "startup-errors.log"), $"{DateTimeOffset.UtcNow:O} {message}\n");
-        }
-        catch
-        {
-            // Best-effort diagnostic only -- a failure here must never mask or replace the original
-            // exception, which is already being reported to the AddInLoader via Result.Failed.
-        }
-    }
+        => RollingDiagnosticLog.Append(() => BrokerDiscoveryOptions.Local().ConnectorRoot, "startup-errors.log", message);
 
     public Result OnShutdown(UIControlledApplication application)
     {

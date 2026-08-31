@@ -165,6 +165,13 @@ function Wait-ForFreshConnection([string]$LogPath, [int]$MinDocuments, [int]$Tim
                 continue
             }
             $currentLength = (Get-Item $LogPath).Length
+            # connection.log ROTATES at 5MB (issue #11), so it is no longer monotonically growing --
+            # the byte-offset scheme this function is built on assumed it was. A shrink means the log
+            # was renamed to .old and a fresh one started, so every byte in the current file is new:
+            # restart from the top rather than waiting forever for it to grow past a length it will
+            # never reach again. Without this the loop skips every iteration and the script reports
+            # FAIL on a deploy that worked -- the exact opaque failure its comments exist to prevent.
+            if ($currentLength -lt $startLength) { $startLength = 0 }
             if ($currentLength -le $startLength) {
                 if ($timedOut) { return $null }
                 continue
@@ -173,7 +180,13 @@ function Wait-ForFreshConnection([string]$LogPath, [int]$MinDocuments, [int]$Tim
             # FileShare.ReadWrite: the add-in process still has this file open for its own appends:
             # a plain Get-Content would be fine too, but an explicit share-mode open is the honest
             # way to say "I know another process is writing this concurrently."
-            $stream = [System.IO.File]::Open($LogPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+            # Delete is in the share mask alongside ReadWrite because the add-in ROTATES this file
+            # (issue #11) with File.Move, which needs delete-sharing on every open handle. Without it
+            # this reader silently blocks the rotation it is watching for, and the log runs over its
+            # cap for as long as the script is polling -- this tooling defeating the very cap it helped
+            # verify.
+            $share = [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete
+            $stream = [System.IO.File]::Open($LogPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, $share)
             try {
                 $stream.Seek($startLength, [System.IO.SeekOrigin]::Begin) | Out-Null
                 $reader = New-Object System.IO.StreamReader($stream)
