@@ -55,6 +55,20 @@ jobs:
         run: go test -v -run TestSkillFileStaysWithinItsLightweightBudget ./internal/mcpserver/
       - name: cross-compile the Windows build (primary shipping target)
         run: GOOS=windows GOARCH=amd64 go build ./...
+      # The broker's staleness guard (issue #116) rests entirely on the Go toolchain stamping the
+      # source revision into the binary automatically, with no -ldflags. That is silent when it
+      # stops working -- a -buildvcs=false or -trimpath added anywhere, or a build from a tree the
+      # toolchain does not recognise as a checkout, and every binary reports "unknown" forever with
+      # nothing else to notice. This asserts a plain `go build` (exactly what a developer runs, and
+      # what install-mac.sh runs) still produces a binary that knows its own revision.
+      - name: assert a plain build carries its source revision
+        run: |
+          go build -o /tmp/mcp-server-provenance-check ./cmd/mcp-server
+          line="$(/tmp/mcp-server-provenance-check -version)"
+          echo "$line"
+          case "$line" in
+            *unknown*) echo "the built broker reports no source revision -- VCS stamping is off; see internal/buildinfo" && exit 1 ;;
+          esac
 
   test-harness:
     name: Test harness type-check (Go)
