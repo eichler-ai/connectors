@@ -36,8 +36,18 @@ func TestSkillFileStaysWithinItsLightweightBudget(t *testing.T) {
 
 	approxTokens := len(skillFile) / pessimisticBytesPerToken
 	if approxTokens > budgetTokens {
-		t.Errorf("skill file is ~%d tokens (%d bytes), over the %d-token budget: keep it lightweight",
-			approxTokens, len(skillFile), budgetTokens)
+		// The remedy is deliberately spelled out. This file has run within ~1% of the budget since
+		// issue #91, so the next person to add a paragraph hits this, and "keep it lightweight" alone
+		// reads as an arbitrary blocker rather than a design constraint with a known escape hatch.
+		t.Errorf("skill file is ~%d tokens (%d bytes), over the %d-token budget by ~%d tokens.\n"+
+			"This budget is a real constraint, not a formality: skill.md is loaded as ORIENTATION and "+
+			"competes with the caller's own context.\n"+
+			"Prefer moving content out over trimming prose. Reference material -- signatures, "+
+			"parameters, per-member behaviour -- belongs in XML doc comments, where describe_function "+
+			"serves it on demand and it cannot drift (issue #91). Keep here only what discovery cannot "+
+			"express: the transaction model, the confirmation-gated tier, ordering rules, and worked "+
+			"examples.",
+			approxTokens, len(skillFile), budgetTokens, approxTokens-budgetTokens)
 	}
 }
 

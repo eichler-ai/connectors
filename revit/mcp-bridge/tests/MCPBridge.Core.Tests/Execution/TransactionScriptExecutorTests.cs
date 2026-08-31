@@ -653,6 +653,82 @@ throw new System.TimeoutException(""cancellation was never observed"");";
         }
     }
 
+    /// <summary>
+    /// Issue #93: three members of the connector facade were forwarded but exercised only at tier 2, so
+    /// the mutation <c>ExportsDirectory =&gt; _runtime.ImportsDirectory</c> passed the entire tier-1 suite.
+    /// Forwarding is exactly the kind of thing that is boring to test and silently wrong when it breaks --
+    /// a transposed pair of one-line properties compiles, ships, and reads correctly.
+    ///
+    /// <para><c>OpenForWriting</c> stays tier-2 by construction (it needs a real second Revit document);
+    /// this covers the other two, plus the seam's cast, against the real script surface.</para>
+    /// </summary>
+    [Fact]
+    public async Task ExportsAndImportsDirectories_ForwardToTheirOwnValues_NotEachOther()
+    {
+        var executor = NewExecutor();
+        var document = new FakeDocumentAdapter();
+        var uiApp = new FakeUiApplicationAdapter();
+        var tempDir = CreateTempDir();
+        try
+        {
+            // Distinct directory names, so a transposed forward produces the WRONG string rather than a
+            // coincidentally-equal one. Asserting on both in a single script means the test fails if
+            // either is wired to the other.
+            var exportsDir = Path.Combine(tempDir, "exports");
+            var importsDir = Path.Combine(tempDir, "imports");
+            Directory.CreateDirectory(exportsDir);
+            Directory.CreateDirectory(importsDir);
+
+            var outcome = await executor.ExecuteAsync(
+                document, uiApp, null,
+                "return Connector.ExportsDirectory + \"|\" + Connector.ImportsDirectory;",
+                CancellationToken.None, exportsDir, importsDir, overwriteOutputFiles: false);
+
+            Assert.True(outcome.Success);
+            Assert.Equal($"{exportsDir}|{importsDir}", outcome.ReturnValue);
+        }
+        finally
+        {
+            Directory.Delete(tempDir, recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// Issue #93, same gap: <c>DialogResultOverrides</c> is the dictionary a script mutates to change how
+    /// a dialog is answered, and <c>TransactionScriptExecutor</c> must hand THAT SAME INSTANCE to
+    /// <c>ActiveDialogContext</c>, which is what the dialog handler reads at runtime.
+    ///
+    /// <para>Asserted through <c>ActiveDialogContext</c> itself, not by reading the dictionary back in the
+    /// script. Review caught the first version doing the latter: writing a key and reading it back proves
+    /// only that the property returns a stable reference within one run, so replacing line 82 with
+    /// <c>SetActive(new Dictionary&lt;string, int&gt;())</c> -- which silently kills every dialog override
+    /// in the product -- left it green. The test name claimed the seam and tested the accessor.</para>
+    ///
+    /// <para>The observation point is a commit hook on the fake transaction, because the executor calls
+    /// <c>CommitAll</c> inside its try block while the ambient context is still live; the finally that
+    /// clears it has not run yet. A script cannot observe this itself -- <c>ActiveDialogContext</c> is
+    /// internal precisely so it cannot (denylist round 3).</para>
+    /// </summary>
+    [Fact]
+    public async Task DialogResultOverrides_WrittenByAScript_ReachesTheDictionaryTheExecutorPublished()
+    {
+        var executor = NewExecutor();
+        var uiApp = new FakeUiApplicationAdapter();
+
+        int? seenByTheDialogHandler = null;
+        var document = new FakeDocumentAdapter();
+        document.OnTransactionCommit = () =>
+            seenByTheDialogHandler = ActiveDialogContext.TryGetOverride("TaskDialog_Probe");
+
+        var outcome = await executor.ExecuteAsync(
+            document, uiApp, null,
+            "Connector.DialogResultOverrides[\"TaskDialog_Probe\"] = 1001;",
+            CancellationToken.None);
+
+        Assert.True(outcome.Success);
+        Assert.Equal(1001, seenByTheDialogHandler);
+    }
+
     [Fact]
     public async Task ScriptThatDoesNotPublish_HasEmptyFilesArray_NoExportsDirectoryNeeded()
     {

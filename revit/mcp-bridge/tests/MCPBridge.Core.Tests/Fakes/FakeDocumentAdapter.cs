@@ -1,3 +1,4 @@
+using System;
 using MCPBridge.RevitAdapter;
 
 namespace MCPBridge.Core.Tests.Fakes;
@@ -23,9 +24,12 @@ internal sealed class FakeDocumentAdapter : IDocumentAdapter
     public FakeTransactionAdapter? LastTransaction { get; private set; }
     public FakeTransactionGroupAdapter? LastTransactionGroup { get; private set; }
 
+    /// <summary>Attached to every transaction this document creates; see FakeTransactionAdapter.OnCommit.</summary>
+    public Action? OnTransactionCommit { get; set; }
+
     public ITransactionAdapter CreateTransaction(string name)
     {
-        var tx = new FakeTransactionAdapter(name);
+        var tx = new FakeTransactionAdapter(name) { OnCommit = OnTransactionCommit };
         LastTransaction = tx;
         return tx;
     }

@@ -351,6 +351,11 @@ on the PR, not in a running report.
   guide. It is embedded in the broker binary, so it is only as current as the last build. Update it
   in the same PR as any change to the tool surface, script globals, file exchange, error shapes, or
   connection/registration behaviour.
+  - **It is at its token budget** (`TestSkillFileStaysWithinItsLightweightBudget`, ~1% headroom), so
+    adding a paragraph means removing one. Reach for that only after the real question: does this
+    belong here at all? Signatures, parameters and per-member behaviour go in XML doc comments, where
+    `describe_function` serves them on demand and they cannot drift. `skill.md` keeps what discovery
+    cannot express — the transaction model, the gated tier, ordering rules, worked examples.
   - **Verify claims against the running connector, not the PRD.** Where the two disagree, find out
     which one reality matches before "fixing" either — it has been the PRD three times.
   - **Pin topics, not the mechanism of the day.** A doc test requiring specific literals blocks the

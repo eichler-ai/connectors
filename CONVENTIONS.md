@@ -42,7 +42,9 @@ A connector that adds its own callable functions on top of the host app's API ex
 Eichler.Connectors.<App>        e.g. Eichler.Connectors.Revit
 ```
 
-Same `Connectors/<App>` shape as the app-data root above and as the Go module path (`github.com/eichler-ai/connectors`), for the same reason: it generalizes to the next connector without renaming anything.
+Same `Connectors/<App>` shape as the app-data root above, and the same vendor root as the Go module path (`github.com/eichler-ai/connectors`, which has no per-app segment). It generalizes to the next connector without renaming anything.
+
+**The entry point is part of the convention, not just the namespace.** Expose exactly **one public type**, named `Connector`, alone in its own assembly, bound into script scope as a single global of that name. That is what makes "everything under this namespace is ours, and reached the same way" true rather than aspirational — one public type means the agent-facing surface is a compile-time fact rather than a filter someone maintains, and one global name means the host app's own objects stay unqualified and obviously not ours.
 
 **Why a vendor root, given "there is no umbrella product name" above.** That rule is about product naming; a company segment is orthogonal and is simply how .NET signals provenance. The signal is the whole point: an agent reading `Eichler.Connectors.Revit.Connector.Publish` beside `Autodesk.Revit.DB.Document.Export` can tell at a glance which one is ours, with no extra wire field and no special-casing in the discovery tools. Deliberately **not** `MCPBridge.*` — that name is reserved above for the add-in specifically, and "Bridge" is internal architecture vocabulary that means nothing from script scope.
 

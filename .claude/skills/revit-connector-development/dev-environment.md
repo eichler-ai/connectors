@@ -191,6 +191,17 @@ each probe call individually and mark them `[MethodImpl(MethodImplOptions.NoInli
   hand-copied into `C:\dotnet10\shared`, so `dotnet --list-runtimes` reports a runtime that
   Add/Remove Programs does not show, and it receives no servicing. **This is a workaround, not a
   pattern** — the clean fix is one root (move the SDK to `C:\Program Files\dotnet`).
+- **A consequence of that non-standard root: .NET global tools install fine and then refuse to start.**
+  `dotnet tool install --global <x>` succeeds, but the generated `<x>.exe` apphost resolves its runtime
+  from the *default* location and the registry — neither of which knows about `C:\dotnet10` — and dies
+  with "You must install .NET to run this application. .NET location: Not found". The install looks
+  clean, so this reads as a broken tool rather than a broken PATH. Run it with `$env:DOTNET_ROOT =
+  "C:\dotnet10"` set, or invoke the tool DLL through `dotnet` directly.
+- **`prlctl exec` runs as SYSTEM, so `--global` installs into
+  `C:\WINDOWS\system32\config\systemprofile\.dotnet\tools`** and is not on any PATH that session
+  sees. Invoke tools by full path from there, not by name — and note the interactive user's own global
+  tools are a *different* set, so "it works when I run it" and "it works from an agent session" are
+  separate facts here, the same way env vars are.
 - **`RollForward=LatestMajor` silently undoes a runtime install** by preferring the highest major even
   when the requested one is present. It is deliberately absent from these projects.
 - `dotnet test` has no `--no-incremental` (that is `dotnet build`); build first, then
