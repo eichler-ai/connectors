@@ -257,8 +257,12 @@ re-resolve rather than hardcoding either. `robocopy` from `cmd /c` mangles a `\\
   reconnecting afterwards (`/mcp`, user-issued — Claude Code does not auto-recover this), not a quick
   aside mid-task. Restarting to force a fresh registration snapshot is obsolete anyway: the add-in
   pushes one live.
-- **The add-in registers with whichever broker `MCPBRIDGE_SHARED_ROOT` points at — NOT the one you
-  just built.** Found running tier 2 for issue #117 from a worktree. The share pointed at
+- **In REMOTE mode, the add-in registers with whichever broker `MCPBRIDGE_SHARED_ROOT` points at —
+  NOT the one you just built.** (In local mode the share is never consulted: `BuildDiscoveryOptions`
+  returns `BrokerDiscoveryOptions.Local()` before reading it, and the add-in uses
+  `%LOCALAPPDATA%\Connectors\Revit\broker.json` — so if you took the "prefer local mode" advice
+  above, this trap cannot bite you and its remedy will do nothing.) Found running tier 2 for issue
+  #117 from a worktree. The share pointed at
   `\\Mac\connectors` (the main checkout), so the add-in attached to a broker built from `main` while
   the harness, talking to the worktree's broker, reported `no Revit instance connected`. The
   dangerous shape is the near miss: had the two brokers been closer in age, the suite would have run

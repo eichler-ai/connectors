@@ -57,22 +57,29 @@ func TestSkillFileStaysWithinItsLightweightBudget(t *testing.T) {
 	// independently right (the MCP tool schema hands an agent all four verbatim), but it was decided by
 	// the budget rather than on its merits, which is the failure this raise exists to stop repeating.
 	//
-	// Still derived from the host cap rather than picked: 35% of it, and still "orientation, not
-	// reference" by a wide margin. The 3-bytes/token measure above stays pessimistic on top of that.
+	// 35% of the host cap. Still anchored to that cap rather than to the file's current size, and
+	// still "orientation, not reference" by a wide margin -- but the honest framing is that the cap
+	// bounds the choice rather than determining it: 32% would have fit this change too. What picks
+	// 35% is the size of the margin wanted (~950 tokens, about three troubleshooting rows), not
+	// arithmetic. The 3-bytes/token measure above stays pessimistic on top of it.
 	const budgetTokens = ceilingTokens * 35 / 100
 
-	// The previous CEILING becomes the soft line, which is this file's established convention (the
-	// 25% figure below held the same role after the last raise). Raising a ceiling removes the thing
-	// that made it useful -- the prompt to ask whether a paragraph earns its space -- and "we'll
-	// refactor it back down later" has no forcing function once the pressure is off. So the warning
-	// now fires from the old limit onward, and the file re-enters it immediately at ~7.5k.
+	// The soft line sits ABOVE the file's current size, deliberately, and this is a correction to a
+	// first draft of this raise (independent PR review). That draft promoted the previous CEILING to
+	// the soft line, following this file's own convention -- but the file is now ~7.8k, i.e. already
+	// past that mark, so the warning would have fired on every CI run from the merge onward, for
+	// everyone, forever. A warning that is unconditionally on is indistinguishable from no warning:
+	// the reviewer seeing it on an unrelated PR learns to scroll past it, and it is then worth less
+	// than nothing, because it also masks the real crossing later. The convention's PURPOSE is that
+	// crossing the line is information, which requires the file to start below it. Nothing plans to
+	// bring skill.md back under 7.5k, so the line goes where crossing it still means something.
 	//
 	// t.Logf alone would be dead code here: `go test` DISCARDS a passing package's output entirely --
 	// t.Logf, stdout and stderr alike -- so nothing below is visible under either the CI command or
 	// the `go test ./...` this repo's SKILL.md documents. The ci.yml step "skill.md budget headroom"
 	// re-runs this one test with -v for the sole purpose of surfacing it. If that step is ever
 	// removed, this branch goes silent and should be deleted rather than left as decoration.
-	const softBudgetTokens = ceilingTokens * 3 / 10
+	const softBudgetTokens = ceilingTokens * 33 / 100
 
 	// The footer get_skills appends at runtime is charged to the same reader's
 	// context as the file itself, so the budget measures what a caller
@@ -171,6 +178,12 @@ func TestSkillFileCoversTheBriefedTopics(t *testing.T) {
 		// from the symptom, which is only a generic "not properly enclosed"
 		// warning.
 		"room computation height": "LEVEL_ROOM_COMPUTATION_HEIGHT",
+		// Issue #113, same shape as the row above and pinned for the same reason: a Revit trap the
+		// compiler cannot catch, where the fix is a member name an agent cannot guess from the
+		// symptom. ChangeTypeId is the marker rather than SheetTitleBlockId because the property
+		// name would still be present in a row that only said "don't touch this" -- it is the
+		// REMEDY that has to survive.
+		"title block retype": "ChangeTypeId",
 	}
 	for topic, marker := range topics {
 		if !strings.Contains(skillFile, marker) {
@@ -348,6 +361,11 @@ func TestSkillFileDescribesCreatedDocumentLifecycleHonestly(t *testing.T) {
 		"has no `document_id`":              "an unsaved created document gets a tmp-<guid> id and appears in list_instances",
 		"never appears in `list_instances`": "it does appear there",
 		"until they restart Revit":          "restarting Revit is not the only recovery; Close works",
+		// Issue #113's own filed hypothesis, disproven live: the defect is a TYPE id in an
+		// INSTANCE-typed property, and cross-family is incidental to it. Forbidden because the
+		// plausible-sounding version would send a reader looking for a same-family workaround that
+		// does not exist, and because ChangeTypeId was verified to cross families cleanly.
+		"same title block family": "ChangeTypeId retypes a placed title block across families; the id KIND is the defect, not the family",
 	}
 	for claim, why := range forbidden {
 		if strings.Contains(skillFile, claim) {
