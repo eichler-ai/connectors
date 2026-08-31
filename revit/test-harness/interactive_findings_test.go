@@ -4,6 +4,7 @@ package harness_test
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -431,6 +432,255 @@ return new { sheetCreated = sheet != null, viewportCreated = viewport != null, p
 	for _, want := range []string{`"sheetCreated":true`, `"viewportCreated":true`, `"placedTypeMatches":true`} {
 		if !strings.Contains(out.ReturnValue, want) {
 			t.Errorf("wanted %q in return_value; (%s)", want, out.diag())
+		}
+	}
+}
+
+// TestRoutingAwayFromATargetMakesItNonModifiable pins the recipe PR #131 wrote
+// into skill.md and caveats.md, which covers two of issue #115's three reported
+// symptoms without any code change at all.
+//
+// THE RULE: the document a call is ROUTED at is modifiable for that whole run,
+// because TransactionScriptExecutor opens the ambient managed transaction on it
+// before the script compiles and there is no per-call opt-out. Any Revit API
+// that manages its own transaction and refuses a modifiable target therefore
+// always fails against the routed document -- and succeeds from a run routed at
+// some OTHER open document, reaching the target through UIApplication.
+//
+// WHY THIS EXISTS AS A TEST, not just as prose: #115 was filed after an
+// interactive session worked around RequestViewChange with a one-shot
+// UIApplication.Idling handler, because nothing wrote the recipe down in
+// general form -- caveats.md carried it only in a LoadFamily-shaped form that
+// did not cover the case where the target IS the routed document. #114 and #118
+// were both fixed as documentation corrections and both got a test here so the
+// doc could not silently go stale; this is the same move for #131. Without it,
+// a Revit version that changes this behaviour breaks nothing and the docs just
+// start lying to agents.
+//
+// The third subtest deliberately asserts BOTH directions. The refusal alone
+// would pass just as well if RequestViewChange had stopped working entirely,
+// and the success alone would pass if the modifiability precondition had
+// quietly stopped applying -- neither is coverage of the rule on its own.
+func TestRoutingAwayFromATargetMakesItNonModifiable(t *testing.T) {
+	c, instanceID, documentID := targetDocument(t)
+	fixtureTitle, fixtureDocID := createAndAwaitDocumentID(t, c, instanceID, documentID)
+	t.Cleanup(func() { closeDocumentByTitle(t, c, instanceID, documentID, fixtureTitle, "") })
+
+	t.Run("TheRoutedDocumentIsModifiable", func(t *testing.T) {
+		out := runScript(t, c, instanceID, fixtureDocID,
+			`return Document.IsModifiable ? "modifiable" : "not-modifiable";`)
+		if out.Status != "success" {
+			t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
+		}
+		// "not-modifiable" contains "modifiable", so match on the negative spelling.
+		if strings.Contains(out.ReturnValue, "not-modifiable") {
+			t.Fatalf("the routed document must be modifiable for the whole run -- if it is not, the ambient managed transaction is no longer being opened and most of this suite's write cases are meaningless; (%s)", out.diag())
+		}
+	})
+
+	t.Run("TheSameDocumentReachedByTitleFromElsewhereIsNot", func(t *testing.T) {
+		out := runScript(t, c, instanceID, documentID, fixtureLookupPreamble(fixtureTitle)+
+			`return doc.IsModifiable ? "modifiable" : "not-modifiable";`)
+		if out.Status != "success" {
+			t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
+		}
+		if !strings.Contains(out.ReturnValue, "not-modifiable") {
+			t.Fatalf("a document reached by Title from a run routed ELSEWHERE must not be modifiable -- that is the whole routing recipe; (%s)", out.diag())
+		}
+	})
+
+	t.Run("RequestViewChangeRefusedAtTheActiveDocumentAndSucceedsRoutedAway", func(t *testing.T) {
+		// Routed AT the active document: UIDocument is non-null and its own
+		// document is modifiable, so Revit refuses. Nothing changes on screen,
+		// so this half needs no cleanup.
+		refused := runScript(t, c, instanceID, documentID, `
+Autodesk.Revit.DB.View target = null;
+foreach (Autodesk.Revit.DB.Element e in new Autodesk.Revit.DB.FilteredElementCollector(Document).OfClass(typeof(Autodesk.Revit.DB.ViewPlan))) {
+  var v = (Autodesk.Revit.DB.View)e;
+  if (!v.IsTemplate && v.Id != UIDocument.ActiveView.Id) { target = v; break; }
+}
+if (target == null) { return "no-other-view"; }
+try {
+  UIDocument.RequestViewChange(target);
+  return "accepted";
+} catch (Autodesk.Revit.Exceptions.InvalidOperationException ex) {
+  return "refused: " + ex.Message;
+}
+`)
+		if refused.Status != "success" {
+			t.Fatalf("expected status=success, got %q (%s)", refused.Status, refused.diag())
+		}
+		if strings.Contains(refused.ReturnValue, "no-other-view") {
+			t.Skip("active document has fewer than two non-template plan views; nothing to switch between")
+		}
+		if !strings.Contains(refused.ReturnValue, "refused:") {
+			t.Fatalf("RequestViewChange was expected to be REFUSED from a call routed at the active document, whose managed transaction makes it modifiable -- if this now succeeds, the recipe #131 documents is no longer needed and both skill.md and caveats.md should be corrected; (%s)", refused.diag())
+		}
+	})
+
+	t.Run("AndTheViewActuallyChangesWhenRoutedAway", func(t *testing.T) {
+		before := runScript(t, c, instanceID, fixtureDocID,
+			`return UIApplication.ActiveUIDocument.ActiveView.Name;`)
+		if before.Status != "success" {
+			t.Fatalf("reading the active view: status=%q (%s)", before.Status, before.diag())
+		}
+		originalView := strings.TrimSpace(before.ReturnValue)
+		if originalView == "" {
+			t.Fatalf("active view reported an empty name; (%s)", before.diag())
+		}
+		// Restore whatever the shared session was looking at, whichever way this
+		// subtest ends. Routed at the fixture document for the same reason the
+		// change itself is: the active document must not be modifiable.
+		t.Cleanup(func() {
+			restore := runScript(t, c, instanceID, fixtureDocID, `
+var uidoc = UIApplication.ActiveUIDocument;
+foreach (Autodesk.Revit.DB.Element e in new Autodesk.Revit.DB.FilteredElementCollector(uidoc.Document).OfClass(typeof(Autodesk.Revit.DB.ViewPlan))) {
+  var v = (Autodesk.Revit.DB.View)e;
+  if (!v.IsTemplate && v.Name == `+strconv.Quote(originalView)+`) { uidoc.RequestViewChange(v); return "restored"; }
+}
+return "original view not found";
+`)
+			if !strings.Contains(restore.ReturnValue, "restored") {
+				t.Logf("WARNING: could not restore the session's original active view %q; (%s)", originalView, restore.diag())
+			}
+		})
+
+		changed := runScript(t, c, instanceID, fixtureDocID, `
+var uidoc = UIApplication.ActiveUIDocument;
+Autodesk.Revit.DB.View target = null;
+foreach (Autodesk.Revit.DB.Element e in new Autodesk.Revit.DB.FilteredElementCollector(uidoc.Document).OfClass(typeof(Autodesk.Revit.DB.ViewPlan))) {
+  var v = (Autodesk.Revit.DB.View)e;
+  if (!v.IsTemplate && v.Id != uidoc.ActiveView.Id) { target = v; break; }
+}
+if (target == null) { return "no-other-view"; }
+uidoc.RequestViewChange(target);
+return "requested " + target.Name;
+`)
+		if changed.Status != "success" {
+			t.Fatalf("RequestViewChange from a run routed AWAY from the active document was expected to succeed (issue #115 triage verified this live); status=%q (%s)", changed.Status, changed.diag())
+		}
+		if strings.Contains(changed.ReturnValue, "no-other-view") {
+			t.Skip("active document has fewer than two non-template plan views; nothing to switch between")
+		}
+
+		// RequestViewChange applies only once the API context ends, so the proof
+		// is necessarily a SECOND call -- asserting on the first would pass even
+		// if the request were silently dropped.
+		after := runScript(t, c, instanceID, fixtureDocID,
+			`return UIApplication.ActiveUIDocument.ActiveView.Name;`)
+		if after.Status != "success" {
+			t.Fatalf("re-reading the active view: status=%q (%s)", after.Status, after.diag())
+		}
+		if strings.TrimSpace(after.ReturnValue) == originalView {
+			t.Fatalf("RequestViewChange reported success but the active view is still %q -- the request was accepted and then dropped, which is worse than a refusal because a script cannot detect it; (%s)", originalView, after.diag())
+		}
+	})
+}
+
+// TestStairsEditScopeCannotCommitWhileAConnectorTransactionIsOpen pins the part
+// of issue #115 that is a REAL capability gap, and corrects where that gap
+// actually sits.
+//
+// #115 states the dead end as "no script-reachable code path satisfies both 'no
+// ambient transaction to start the edit scope' and 'a transaction open to write
+// to it'." That is not the blocker: both ARE satisfiable today, and the first
+// three steps below prove it, using only shipped members. Routing the call away
+// from the fixture leaves it unmanaged so Start() succeeds, and
+// Connector.OpenForWriting -- called INSIDE the scope -- supplies the
+// transaction the runs need.
+//
+// The blocker is a THIRD condition nobody named: no transaction may be open
+// when the edit scope COMMITS. Cancel() refuses identically, so the scope
+// cannot even be abandoned, and closing a connector-owned transaction mid-run
+// is precisely what no script can do.
+//
+// Note what Revit's message says versus what is true. It names "a transaction
+// or transaction group", but the group is NOT the bar: with the connector's
+// transaction committed and its group still open, EditScope.Commit() succeeds
+// (verified live during #115's triage, in the state no sanctioned path exposes
+// yet). That distinction is what makes #115's fix a callback whose transaction
+// CLOSES before the scope commits, rather than merely a way to start the scope.
+//
+// This test is a companion to TestStairsEditScopeBlockedByAmbientTransaction
+// above, not a replacement: that one pins the START edge (a managed transaction
+// opened BEFORE Start()), this one pins the COMMIT edge (a managed transaction
+// opened AFTER it). Both must be replaced with a positive stairs-creation
+// assertion when #115's second PR ships the primitive -- relaxing either one
+// instead would leave the suite claiming stairs are unreachable after they are.
+func TestStairsEditScopeCannotCommitWhileAConnectorTransactionIsOpen(t *testing.T) {
+	c, instanceID, documentID := targetDocument(t)
+	fixtureTitle := createBlankFixtureDocument(t, c, instanceID, documentID)
+
+	probe := runScript(t, c, instanceID, documentID, fixtureLookupPreamble(fixtureTitle)+`
+Autodesk.Revit.DB.Level l1 = null, l2 = null;
+foreach (Autodesk.Revit.DB.Element e in new Autodesk.Revit.DB.FilteredElementCollector(doc).OfClass(typeof(Autodesk.Revit.DB.Level))) {
+  var lv = (Autodesk.Revit.DB.Level)e;
+  if (l1 == null) { l1 = lv; } else if (l2 == null && lv.Elevation != l1.Elevation) { l2 = lv; }
+}
+if (l1 == null || l2 == null) { throw new System.Exception("blank fixture document does not have the two template levels this probe needs"); }
+
+// 1. no managed transaction on this document, because the call is routed elsewhere
+var scope = new Autodesk.Revit.DB.StairsEditScope(doc, "harness #115 commit-edge probe");
+var stairsId = scope.Start(l1.Id, l2.Id);
+
+// 2. the only shipped way to get a transaction -- asked for INSIDE the scope
+Connector.OpenForWriting(doc);
+
+// 3. and it really does let the run be written
+var line = Autodesk.Revit.DB.Line.CreateBound(new Autodesk.Revit.DB.XYZ(0, 0, 0), new Autodesk.Revit.DB.XYZ(20, 0, 0));
+var run = Autodesk.Revit.DB.Architecture.StairsRun.CreateStraightRun(doc, stairsId, line, Autodesk.Revit.DB.Architecture.StairsRunJustification.Center);
+
+// 4. and here is the wall
+string commitOutcome;
+try {
+  scope.Commit(new Preproc());
+  commitOutcome = "committed";
+} catch (Autodesk.Revit.Exceptions.InvalidOperationException ex) {
+  commitOutcome = "refused: " + ex.Message;
+}
+return new { started = stairsId.Value > 0, wroteRun = run != null, commitOutcome };
+
+class Preproc : Autodesk.Revit.DB.IFailuresPreprocessor {
+  public Autodesk.Revit.DB.FailureProcessingResult PreprocessFailures(Autodesk.Revit.DB.FailuresAccessor a) {
+    a.DeleteAllWarnings();
+    return Autodesk.Revit.DB.FailureProcessingResult.Continue;
+  }
+}
+`)
+	if probe.Status != "success" {
+		t.Fatalf("steps 1-3 are expected to SUCCEED on shipped code -- if the run failed before reaching the commit, #115's dead end has moved and this test's premise needs re-deriving; status=%q (%s)", probe.Status, probe.diag())
+	}
+	for _, want := range []string{`"started":true`, `"wroteRun":true`} {
+		if !strings.Contains(probe.ReturnValue, want) {
+			t.Errorf("wanted %q -- StairsEditScope.Start() and CreateStraightRun both work today; only the commit does not; (%s)", want, probe.diag())
+		}
+	}
+	if !strings.Contains(probe.ReturnValue, "EditScope cannot be closed") {
+		t.Fatalf("EditScope.Commit() was expected to be refused while the connector holds a transaction on the document (issue #115). If it now COMMITS, stairs are reachable and this test must be replaced with a positive stairs-creation assertion -- along with TestStairsEditScopeBlockedByAmbientTransaction -- not merely relaxed; (%s)", probe.diag())
+	}
+
+	// THE PART THAT MAKES THIS A SILENT failure, and the reason both skill.md
+	// and caveats.md now tell an agent to check Document.IsInEditMode() rather
+	// than trust an edit-scope result: the run above reported status "success"
+	// while producing nothing at all. Asserting only the refusal would miss
+	// that entirely, and the silence is what cost the interactive session
+	// behind #115 the most time.
+	after := runScript(t, c, instanceID, documentID, fixtureLookupPreamble(fixtureTitle)+`
+return new {
+  inEditMode = doc.IsInEditMode(),
+  stairs = new Autodesk.Revit.DB.FilteredElementCollector(doc).OfClass(typeof(Autodesk.Revit.DB.Architecture.Stairs)).GetElementCount(),
+  runs = new Autodesk.Revit.DB.FilteredElementCollector(doc).OfClass(typeof(Autodesk.Revit.DB.Architecture.StairsRun)).GetElementCount()
+};
+`)
+	if after.Status != "success" {
+		t.Fatalf("re-reading the fixture after the failed edit scope: status=%q (%s)", after.Status, after.diag())
+	}
+	if !strings.Contains(after.ReturnValue, `"inEditMode":false`) {
+		t.Errorf("the fixture document was left IN EDIT MODE after the failed commit -- the connector's unwind is expected to exit it (TransactionGroup.RollBack does so even from inside a scope, verified live in #115's triage). A document stuck in edit mode will wedge later cases in this shared session; (%s)", after.diag())
+	}
+	for _, want := range []string{`"stairs":0`, `"runs":0`} {
+		if !strings.Contains(after.ReturnValue, want) {
+			t.Errorf("wanted %q -- the failed edit scope must leave NOTHING behind, and a partially-built stair surviving would be worse than the current silent no-op; (%s)", want, after.diag())
 		}
 	}
 }
