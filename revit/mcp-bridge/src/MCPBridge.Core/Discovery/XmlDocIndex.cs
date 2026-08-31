@@ -80,7 +80,15 @@ public sealed class XmlDocIndex
     {
         try
         {
-            var doc = XDocument.Load(stream);
+            // PreserveWhitespace is LOAD-BEARING, and its absence was a real defect in shipped
+            // agent-facing text. XDocument's default drops whitespace-only text nodes between sibling
+            // elements, so two consecutive <para> blocks -- which the raw XML separates with a newline
+            // and indentation, and nothing else -- rendered with no separator at all. Found by reading
+            // describe_function's actual output during the issue #91 audit: "...calling this on them
+            // fails.Order matters against Revit APIs...". Not specific to our own docs; Revit's XML uses
+            // <para> heavily, so this degraded its summaries the same way. Normalize() below already
+            // collapses the restored whitespace to a single space, so nothing else needs to change.
+            var doc = XDocument.Load(stream, LoadOptions.PreserveWhitespace);
             var members = new Dictionary<string, XmlDocEntry>(StringComparer.Ordinal);
 
             foreach (var member in doc.Root?.Element("members")?.Elements("member") ?? Enumerable.Empty<XElement>())

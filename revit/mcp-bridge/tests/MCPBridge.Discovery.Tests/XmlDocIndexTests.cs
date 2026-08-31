@@ -34,6 +34,28 @@ public class XmlDocIndexTests
         Assert.Equal("The widget's id.", entry.Parameters["id"]);
     }
 
+    /// <summary>
+    /// Consecutive block elements must not be concatenated. This shipped broken: describe_function
+    /// returned "...calling this on them fails.Order matters against Revit APIs..." for a real member,
+    /// found by reading its actual output during the issue #91 audit rather than by any test.
+    ///
+    /// <para>The cause was XDocument's default load dropping whitespace-only text nodes between sibling
+    /// elements -- the only thing separating two &lt;para&gt; blocks in compiler-emitted XML. It degraded
+    /// Revit's own summaries identically, since RevitAPI.xml uses &lt;para&gt; heavily; it was simply
+    /// never read closely enough to notice.</para>
+    /// </summary>
+    [Fact]
+    public void LoadFromFile_ConsecutiveParagraphs_AreSeparated()
+    {
+        var index = XmlDocIndex.LoadFromFile(SampleDocsPath);
+
+        Assert.True(index.TryGet("M:Sample.Widget.Explain", out var entry));
+        Assert.Equal(
+            "Leading prose before any block element. First paragraph, whose last word must not run into "
+            + "the next. Second paragraph.",
+            entry.Summary);
+    }
+
     [Fact]
     public void LoadFromFile_NormalizesMultiLineWhitespace()
     {

@@ -25,5 +25,20 @@
     <member name="P:Sample.Widget.Id">
       <summary>The widget's id.</summary>
     </member>
+    <!--
+      Two consecutive <para> blocks separated ONLY by a newline and indentation, which is exactly what
+      the C# compiler emits and what Revit's own RevitAPI.xml contains. Shaped this way deliberately:
+      XDocument's default load drops whitespace-only text nodes between sibling elements, so this
+      rendered as "...first block.Second block..." in real describe_function output until
+      LoadOptions.PreserveWhitespace was passed. A fixture with any non-whitespace character between
+      the paragraphs would pass either way and prove nothing.
+    -->
+    <member name="M:Sample.Widget.Explain">
+      <summary>
+        Leading prose before any block element.
+        <para>First paragraph, whose last word must not run into the next.</para>
+        <para>Second paragraph.</para>
+      </summary>
+    </member>
   </members>
 </doc>

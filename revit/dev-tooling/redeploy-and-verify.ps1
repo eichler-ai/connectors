@@ -242,7 +242,15 @@ if (-not $SkipRelaunch) {
 if (-not $SkipCopy) {
     Say "deploying DLLs to $addinsDir (TFM=$Tfm)"
     New-Item -ItemType Directory -Force -Path $addinsDir | Out-Null
-    foreach ($proj in 'MCPBridge.AddIn', 'MCPBridge.Core', 'MCPBridge.RevitAdapter') {
+    # This list is explicit rather than a wildcard because it deploys ONTO a live Revit install and a
+    # stray copy is how a shadowing DLL gets there (see caveats.md). It therefore has to be extended
+    # when a project is added: Eichler.Connectors.Revit was added by issue #91 and its absence here
+    # was caught only by the --marker check, which is exactly what that check is for. Without it Revit
+    # loads an add-in whose Core references an assembly that is not present.
+    #
+    # install.ps1 needs no equivalent change: it copies the AddIn's whole build output ($payloadDir\*),
+    # which already carries both files.
+    foreach ($proj in 'MCPBridge.AddIn', 'MCPBridge.Core', 'MCPBridge.RevitAdapter', 'Eichler.Connectors.Revit') {
         $src = Join-Path $SrcRoot "$proj\bin\Debug\$Tfm\$proj.dll"
         if (-not (Test-Path $src)) {
             Say "FAIL: build output not found: $src -- run dotnet build first"
@@ -250,6 +258,17 @@ if (-not $SkipCopy) {
             exit 1
         }
         Copy-WithRetry -Src $src -Dst (Join-Path $addinsDir "$proj.dll")
+
+        # The XML-doc sidecar, where one exists. LOAD-BEARING for Eichler.Connectors.Revit, not a
+        # nicety: DiscoveryReflector joins each synced assembly against its sidecar and treats a
+        # MISSING file as "everything is documented", so deploying the DLL without the .xml makes the
+        # connector's own API discoverable with empty summaries -- which looks like working discovery
+        # and is worse than none. Only that project sets GenerateDocumentationFile, so this is a no-op
+        # for the others; written generically so the next one to set it is covered without a fix.
+        $docSrc = Join-Path $SrcRoot "$proj\bin\Debug\$Tfm\$proj.xml"
+        if (Test-Path $docSrc) {
+            Copy-WithRetry -Src $docSrc -Dst (Join-Path $addinsDir "$proj.xml")
+        }
     }
 
     if ($Marker) {
