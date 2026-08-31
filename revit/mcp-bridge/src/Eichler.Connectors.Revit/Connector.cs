@@ -68,12 +68,26 @@ public sealed class Connector
     /// Creates a new, blank project document and opens it for writing, so the script can modify it
     /// immediately.
     ///
-    /// <para>Use this rather than <c>UIApplication.Application.NewProjectDocument</c> whenever the script
-    /// intends to write to the document: that returns a document nothing has opened for writing, so you
-    /// would have to pass it to <see cref="OpenForWriting"/> as a separate step. The document is unsaved
-    /// and in memory, and stays open for the rest of the Revit session, so a later execute_script call can
-    /// find it by title.</para>
+    /// <para>The document is headless: in memory, no window, no open view, and never the active document,
+    /// so a person watching Revit sees nothing appear. Writable by script does not mean visible to
+    /// them.</para>
+    ///
+    /// <para>Prefer this over <c>UIApplication.Application.NewProjectDocument</c>, which returns a document
+    /// nothing has opened for writing and would need <see cref="OpenForWriting"/> as a separate step.</para>
+    ///
+    /// <para>Being unsaved, it gets a session-only <c>tmp-</c> document id that <c>list_instances</c>
+    /// reports, so a later execute_script call can target it directly. Close it when done: this call holds
+    /// its transaction open, so Revit refuses <c>Close</c> for the rest of this script, but any later call
+    /// closes it with <c>confirm_lifecycle_actions</c>.</para>
     /// </summary>
+    /// <remarks>
+    /// The headless behaviour is deliberate, not a gap. A script-created document with a real window would
+    /// steal focus from whatever a person has open, and Revit refuses to activate a document while the
+    /// active one is modifiable -- which the script's own target always is -- so a window could not be
+    /// opened from inside the creating call anyway. Making a created document visible is a separate,
+    /// deliberate act: save it, then call OpenAndActivateDocument from a later call routed at a different
+    /// document.
+    /// </remarks>
     /// <param name="templatePath">Path to a project template. Defaults to the Revit install's own default
     /// project template, which is what a blank document needing no template asset should use.</param>
     /// <returns>The new document, open for writing.</returns>
@@ -84,6 +98,10 @@ public sealed class Connector
     /// Creates a new family document from a template and opens it for writing. The family counterpart of
     /// <see cref="CreateProjectDocument"/>; unlike project documents there is no install-wide default
     /// family template, so a template path is required.
+    ///
+    /// <para>Headless and session-lived exactly as <see cref="CreateProjectDocument"/> describes: no
+    /// window, never active, and yours to close from a later execute_script call with
+    /// <c>confirm_lifecycle_actions</c> once you are done with it.</para>
     /// </summary>
     /// <param name="templatePath">Path to a family template (.rft).</param>
     /// <returns>The new family document, open for writing.</returns>

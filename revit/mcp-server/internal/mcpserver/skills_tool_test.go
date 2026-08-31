@@ -127,6 +127,14 @@ func TestSkillFileCoversTheBriefedTopics(t *testing.T) {
 		"self-healing retry":     "re-check",
 		"human status entry":     "Status",
 		"unrecoverable handling": "unrecoverable",
+		// Issue #118 problem 2. Not connector behaviour but a Revit trap that
+		// silently produces a wrong model: a script-created Level leaves its
+		// room computation plane at the level's own elevation, so NewRoom
+		// returns zero boundary loops against walls that have any base offset.
+		// An agent that does not know the parameter's name cannot find the fix
+		// from the symptom, which is only a generic "not properly enclosed"
+		// warning.
+		"room computation height": "LEVEL_ROOM_COMPUTATION_HEIGHT",
 	}
 	for topic, marker := range topics {
 		if !strings.Contains(skillFile, marker) {
@@ -200,6 +208,83 @@ func TestSkillFileAccuratelyDescribesRevitApiReachability(t *testing.T) {
 			t.Errorf("skill file contains %q: that claim is false as of Phase 3 (PRD §14) -- the Document "+
 				"global is the real Autodesk.Revit.DB.Document and needs no reflection. Fix the prose, not this test",
 				forbidden)
+		}
+	}
+}
+
+// Issue #114. This section is the one place in the file whose being wrong
+// actively CAUSED the bug it was blamed for: it told agents that a
+// connector-created document could never be closed, so the agent that read it
+// stopped trying and left five scratch documents open in a live Revit session
+// until Revit warned about memory. Verified against Revit 2027: a same-run
+// Close is refused by Revit ("Close is not allowed when there is any open
+// sub-transaction, transaction or transaction group"), and the very next
+// execute_script call closes the same document successfully with
+// confirm_lifecycle_actions. So the guidance has to carry BOTH halves; either
+// half alone is what produced the leak.
+//
+// Topics, not wording, per this file's own history. The visibility half
+// (#118 problem 1) is checked against a set of alternatives for the same
+// reason -- what must survive is that an agent is told the created document is
+// not something a person can see, not the adjective used to say it.
+func TestSkillFileDescribesCreatedDocumentLifecycleHonestly(t *testing.T) {
+	const start = "**Creating documents"
+	i := strings.Index(skillFile, start)
+	if i < 0 {
+		t.Fatalf("skill file no longer has a %q section: created-document lifecycle is the "+
+			"subject of issue #114 and must be documented somewhere findable", start)
+	}
+	section := skillFile[i:]
+	if j := strings.Index(section, "\n### "); j > 0 {
+		section = section[:j]
+	}
+
+	// Both halves of the close story, plus the fact that a created document is
+	// addressable at all (the old text denied it, and an agent that believes
+	// that cannot even find the document again to close it).
+	//
+	// Honest about their strength: these three passed against the OLD, wrong
+	// text too, because it named the same members while telling the reader they
+	// were useless. They guard against the section being gutted, not against it
+	// being wrong. The forbidden-claims list below is what actually caught the
+	// old text, and it is the assertion to extend if a new false claim appears.
+	for _, marker := range []string{"Close", "confirm_lifecycle_actions", "list_instances"} {
+		if !strings.Contains(section, marker) {
+			t.Errorf("the created-documents section never mentions %q: an agent that creates a scratch "+
+				"document must be told how to close it again, or it will leak documents into a live "+
+				"Revit session (#114)", marker)
+		}
+	}
+	if !strings.Contains(section, "next") && !strings.Contains(section, "later") {
+		t.Error("the created-documents section does not say that closing a created document happens in a " +
+			"SUBSEQUENT call: without that, the same-run refusal reads as 'cannot be closed at all', " +
+			"which is the false claim that caused #114")
+	}
+	visibility := []string{"headless", "no window", "never the active document", "not visible"}
+	found := false
+	for _, marker := range visibility {
+		if strings.Contains(section, marker) {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("the created-documents section says nothing about the document being invisible to the "+
+			"person at the screen (looked for any of %v). 'Writable immediately' alone reads as "+
+			"'usable in the ordinary sense', which it is not (#118)", visibility)
+	}
+
+	// Claims verified false against Revit 2027. Kept as an explicit denylist
+	// because each one was in this file at some point and each one, believed,
+	// leads an agent to abandon cleanup.
+	forbidden := map[string]string{
+		"There is no cleanup path":          "a created document CAN be closed, from any run after the one that created it",
+		"has no `document_id`":              "an unsaved created document gets a tmp-<guid> id and appears in list_instances",
+		"never appears in `list_instances`": "it does appear there",
+		"until they restart Revit":          "restarting Revit is not the only recovery; Close works",
+	}
+	for claim, why := range forbidden {
+		if strings.Contains(skillFile, claim) {
+			t.Errorf("skill file contains the claim %q, which is false: %s. Fix the prose, not this test", claim, why)
 		}
 	}
 }

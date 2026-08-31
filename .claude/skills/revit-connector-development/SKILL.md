@@ -91,8 +91,11 @@ These are the rules that generalize. Each one exists because violating it cost r
   one rung out from the last.
 - **A guard that only fires incidentally is not a guard.** If the thing that actually stopped an
   exploit was a third party's invariant, you are not enforcing anything.
-- **A comment asserting a negative capability is worth nothing until someone tries it.** Verify
-  live rather than reasoning from the code; reasoning has concluded the opposite of reality here.
+- **A claim that something is impossible is worth nothing until someone tries it.** Verify live
+  rather than reasoning from the code; reasoning has concluded the opposite of reality here. This
+  binds hardest in `skill.md`, where such a claim does not merely sit wrong — it is *obeyed*: "there
+  is no cleanup path" for connector-created documents was false (a later run closes them fine), and
+  the agent that believed it stopped trying and leaked five documents into a live session (#114).
 - **A test pinning one exploit's syntax is not coverage of the hole.** Name the *shape* being
   blocked (target-typed construction, method groups, callbacks, aliases), and when adding a case,
   say which shape it adds.

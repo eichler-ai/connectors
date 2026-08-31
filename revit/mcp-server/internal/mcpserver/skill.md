@@ -110,6 +110,11 @@ var doc = Connector.CreateProjectDocument();     // blank, writable, from Revit'
 Autodesk.Revit.DB.Level.Create(doc, 10.0);       // just write to it — no transaction of your own
 ```
 
+**What you get is headless**: in memory, no window, no open view, never the active document — writable
+by *script*, not visible to the person, who sees nothing appear. To hand them something they can see,
+save it and call `UIApplication.OpenAndActivateDocument(path)` from a **later** call routed at a
+*different* document; Revit refuses to activate while the active document is modifiable, and your own
+target always is.
 
 **The raw `UIApplication.Application.NewProjectDocument`/`NewFamilyDocument` still work but return a
 document nothing has opened for writing** — writing to it throws
@@ -121,10 +126,11 @@ path, and `Application.FamilyTemplatePath` is the **root of the family-template 
 folder of `.rft` files — templates sit in subdirectories, so search recursively
 (`SearchOption.AllDirectories`).
 
-However you made it, a created document **has no `document_id`** — it never appears in `list_instances`
-and you cannot point a later call at it. It stays open for the session, so a later script finds it by
-walking `UIApplication.Application.Documents` and matching `Title` or `PathName`. It comes back
-read-only; `Connector.OpenForWriting(doc)` makes it writable again for that script.
+However you made it, a created document is unsaved, so it gets a session-only **`tmp-<guid>`
+`document_id`**: it appears in `list_instances` like any other open document and a later call can be
+routed straight at it, in which case it is that call's own `Document`, writable, nothing more to do.
+Reached the other way — by walking `UIApplication.Application.Documents` and matching `Title` — it comes
+back not modifiable; `Connector.OpenForWriting(doc)` makes it writable for that script.
 
 **With several documents in play**, all of them commit after your script returns — created ones first,
 the active one last. If one commit fails the rest are rolled back, but a commit that already succeeded
@@ -132,12 +138,22 @@ cannot be undone, so an earlier one can keep its changes; you then get a
 `script-partial-commit` notice naming which documents kept theirs and which did not; the ordering means
 the active document is always the one rolled back.
 
-**There is no cleanup path, so create sparingly.** `Document.Close` and `.Dispose` are both
-confirmation-gated (see below), so a script cannot quietly tidy up after itself: every document you
-create stays open in the person's live Revit session until they restart Revit. Worse for a created one:
-**Revit itself** refuses `Close` while its managed transaction is open, even with
-`confirm_lifecycle_actions: true` — for a throwaway you can close, use the raw read-only path. Don't
-create documents in a loop.
+**Close the ones you were only using as scratch — just not in the run that created them.** While your
+script runs, the connector holds that document's transaction open and **Revit itself** refuses `Close`
+("Close is not allowed when there is any open sub-transaction, transaction or transaction group"); no
+flag lifts that. The transaction closes when your script returns, so the **next** call closes the
+document normally, unsaved edits and all, with `confirm_lifecycle_actions: true`:
+
+```csharp
+Autodesk.Revit.DB.Document scratch = null;
+foreach (Autodesk.Revit.DB.Document d in UIApplication.Application.Documents)
+    if (d.Title == "Project1") scratch = d;      // don't Close mid-iteration; find first
+scratch.Close(false);                            // false = discard changes, no save prompt
+```
+
+Nothing tidies up for you: an unclosed document stays open for the rest of the person's session, and a
+run of them will exhaust the memory of the Revit they are working in. Close each as soon as you are
+done. (Revit also refuses to `Close` the *active* document from the API — activate another one first.)
 
 ### What you may not do without saying so
 
@@ -297,6 +313,7 @@ absent. For the why, a human can click **MCP Bridge → Status** on the Revit ri
 | `status: "unresponsive"` | Revit stopped answering heartbeats | Wait; if it persists, Revit needs attention from the user. |
 | `status: "unrecoverable"` | A prior script ignored cancellation | Nothing you send will run. Revit must be restarted; the instance gets a new `instance_id`. |
 | Script fails with `CS0103`/`CS1503`/`CS0246` | A compile error, not infrastructure | Fix the script. `CS0246` usually means an unqualified Revit type — only `System` is imported, so write `Autodesk.Revit.DB.Wall` or add a `using`. Check overloads with `describe_function` rather than guessing at a `CS1503`. |
+| `NewRoom` returns a room with no boundary segments and `Area == 0`, walls look correct | The level's room computation plane misses the walls. `Level.Create` leaves `LEVEL_ROOM_COMPUTATION_HEIGHT` at 0 — the level's own elevation — so walls with any base offset begin above the plane and bound nothing. Revit only warns "Room is not in a properly enclosed region". | Set the level's `BuiltInParameter.LEVEL_ROOM_COMPUTATION_HEIGHT` to a height inside the wall body (e.g. `4.0` feet), then `Document.Regenerate()`. The existing room picks up its boundaries; no need to re-place it. |
 | Error `code` is `script-api-denied` | You used something flatly rejected — most often opening your own `Transaction` | See "What you may not do". Nothing ran and nothing changed; no argument lifts this, the script has to change. |
 | Error `code` is `script-lifecycle-confirmation-required` | A gated lifecycle/worksharing member without confirmation | Nothing ran. If genuinely intended, resend the **identical** call with `confirm_lifecycle_actions: true`. The `message` names every gated member used. |
 
