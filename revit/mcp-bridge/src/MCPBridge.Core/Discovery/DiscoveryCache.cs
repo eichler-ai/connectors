@@ -1193,19 +1193,29 @@ public sealed class DiscoveryCache : IDisposable
             JOIN types t ON m.type_id = t.id
             JOIN assemblies a ON t.assembly_id = a.id
             WHERE members_fts MATCH @match AND t.documented = 1 AND (@ns IS NULL OR t.namespace = @ns)
-            -- ORDER BY relevance ALONE, deliberately (issue #81). This clause used to lead with
-            -- (a.kind != 'core'), which made assembly kind the primary sort of a LIMITed query -- that is
-            -- a filter on candidate SELECTION, not a preference applied to ranking. Once core alone
-            -- supplied @limit candidates, no add-in row was considered at all, however much better its
-            -- bm25. Measured on the real corpus: for the token "parameter", zero add-in rows appeared in
-            -- the first 200 results, while "element" and "view" were unaffected -- it bites exactly when
-            -- core fills the budget, which is why it went unnoticed.
+            -- ORDER BY relevance, then a tie-break, and NOT by assembly kind (issue #81).
             --
-            -- PRD §08 promises add-in APIs are "ranked below core, never suppressed"; that promise lives
-            -- in CoreBoost, which adds +0.5 to a core row's SCORE after selection and expresses the
-            -- preference without excluding anything. Since issue #91 the connector's own script API is
-            -- indexed as an add-in, so an agent searching it by description takes exactly this path.
-            ORDER BY bm25(members_fts)
+            -- This clause used to lead with (a.kind != 'core'), which made kind the primary sort of a
+            -- LIMITed query -- that is a filter on candidate SELECTION, not a preference applied to
+            -- ranking. Once core alone supplied @limit candidates, no add-in row was considered at all,
+            -- however much better its bm25. Measured on the real corpus at the production limit, with
+            -- RevitAPIUI synced as the add-in and the top 50 inspected: "let the user pick an element"
+            -- returned 0 add-in rows before this change and 21 after, while "prompt the user" (12),
+            -- "show a dialog to the user" (23) and "user interface" (14) were identical either way. It
+            -- bites only when core alone fills the budget, which is why it went unnoticed for so long.
+            --
+            -- PRD §08 says add-in APIs rank below core and stay fully searchable; the ranking half of
+            -- that lives in CoreBoost, which adds +0.5 to a core row's SCORE after selection and
+            -- expresses the preference without excluding anything. Since issue #91 the connector's own
+            -- script API is indexed as an add-in, so an agent searching it by description takes this path.
+            --
+            -- m.id is a TIE-BREAK, not a ranking signal: bm25 ties at the boundary are common (the
+            -- committed ranking snapshots show groups of 3 and 7 sharing a score), and a single-key
+            -- ORDER BY under a LIMIT leaves which of them survive to SQLite's scan order. QueryTokenMatch
+            -- states this invariant for tier 2 in its own comment and enforces it with ThenBy(Id); tier 3
+            -- needs it for the same reason, since search_functions' cursors are stateless offsets that
+            -- re-run the query for every page.
+            ORDER BY bm25(members_fts), m.id
             LIMIT @limit
             """;
         cmd.Parameters.AddWithValue("@match", matchExpression);

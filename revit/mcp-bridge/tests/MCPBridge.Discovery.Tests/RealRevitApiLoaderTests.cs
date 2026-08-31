@@ -85,5 +85,15 @@ public class RealRevitApiLoaderTests
             $"(expecting RevitAPI major version {expectedMajor}), but the loaded RevitAPI.dll reports " +
             $"major version {actualMajor}. Both TFM legs are reflecting the same corpus, so one of them " +
             "is asserting against an API it does not target -- which looks like extra coverage and is not.");
+
+        // RevitAPIUI is a SEPARATE load, and AddInVisibilityTests returns early (reporting PASSED) when it
+        // is missing -- the same self-skip shape that has twice hidden a dead test family in this project.
+        // TryLoad succeeding says nothing about the sibling assembly, so it is pinned in the same place as
+        // the rest of this family's liveness.
+        var uiPath = Path.Combine(Path.GetDirectoryName(loaded.Value.Assembly.Location)!, "RevitAPIUI.dll");
+        Assert.True(
+            File.Exists(uiPath),
+            $"RevitAPIUI.dll is missing from '{installDir}'. AddInVisibilityTests needs it and skips " +
+            "silently without it, so its three tests would report PASSED while checking nothing.");
     }
 }

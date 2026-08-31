@@ -39,12 +39,13 @@ namespace MCPBridge.Discovery.Tests;
 /// documented summaries against 2025's 31,216) and this project multi-targets precisely so both are
 /// exercised. A single shared snapshot would be wrong for one of them.</para>
 ///
-/// <para><b>Scope: this corpus is CORE-ONLY, matching a stock Revit session</b> -- RevitAPI and
-/// RevitAPIUI, both synced as <c>"core"</c>, exactly as <c>BridgeHost.CollectAssembliesToSync</c> does.
-/// It therefore says nothing about add-in ranking, and a change that only affects add-in rows will show
-/// zero movement here. That is a useful signal in its own right (it means a stock session is unaffected),
-/// but it is not coverage: <see cref="AddInVisibilityTests"/> owns the add-in path, because reproducing
-/// it needs a second assembly synced under a different kind.</para>
+/// <para><b>Scope: this corpus syncs only the two CORE assemblies</b> -- RevitAPI and RevitAPIUI, both as
+/// <c>"core"</c>, as <c>BridgeHost.CollectAssembliesToSync</c> does. Production ALSO syncs
+/// <c>Eichler.Connectors.Revit</c> as <c>"addin"</c> (issue #91), which this omits: seven members against
+/// ~26k, but the omission is real, and it means the corpus cannot speak to add-in ranking at all. A change
+/// affecting only add-in rows shows zero movement here, and that is an absence of evidence rather than
+/// evidence of absence. <see cref="AddInVisibilityTests"/> owns that path, because reproducing it needs a
+/// second assembly synced under a different kind and at a realistic size.</para>
 /// </summary>
 public class RankingCorpusTests
 {
@@ -158,8 +159,18 @@ public class RankingCorpusTests
                 $"cannot regenerate: source fixture directory not reachable at {sourcePath}. Run the " +
                 "update from a checkout, not from a copied output folder.");
 
+            // Regenerating writes the file and then FAILS ANYWAY, deliberately. Returning success here
+            // would mean that any environment where this variable is set -- a VM user profile, a CI job,
+            // a shell rc -- has a snapshot test that can never fail again AND silently overwrites the
+            // committed baseline on every run, erasing the drift it exists to surface. That is
+            // caveats.md's "opt-in test self-skips and reports passed" trap in mirror image, and this
+            // project has already lost a whole test family to that shape twice. A stuck variable is now
+            // loud instead of invisible.
             File.WriteAllText(sourcePath, actual.ToString());
-            return;
+            Assert.Fail(
+                $"Snapshot regenerated at {sourcePath}. This is deliberately NOT a pass: review the git " +
+                "diff, commit it as the evidence for whatever ranking change you made, then re-run " +
+                "WITHOUT MCPBRIDGE_UPDATE_RANKING_SNAPSHOT set.");
         }
 
         Assert.True(
@@ -349,10 +360,17 @@ public class RankingCorpusTests
             // being extended.
             var fields = line.Split('\t');
             var expected = fields.Length > 1 && fields[1].Trim().Length > 0 ? fields[1].Trim() : null;
-            var maxRank = SnapshotDepth;
-            if (expected is not null && fields.Length > 2 && int.TryParse(fields[2].Trim(), out var parsed))
+            // A row carrying an expectation MUST carry an explicit rank. Defaulting to SnapshotDepth made
+            // the constraint vacuous: Rank() only ever returns SnapshotDepth results, so "within 10 of 10"
+            // is just "present", which the not-found branch already covers. Failing the parse instead
+            // makes a malformed row a red test rather than a silently weaker assertion.
+            var maxRank = 0;
+            if (expected is not null)
             {
-                maxRank = parsed;
+                Assert.True(
+                    fields.Length > 2 && int.TryParse(fields[2].Trim(), out maxRank) && maxRank > 0,
+                    $"corpus row '{fields[0].Trim()}' carries an expectation but no valid max_rank. " +
+                    "Columns are: query, expected, max_rank, note.");
             }
 
             rows.Add(new CorpusRow(fields[0].Trim(), expected, maxRank, fields.Length > 3 ? fields[3].Trim() : ""));

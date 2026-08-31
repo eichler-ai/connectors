@@ -27,14 +27,14 @@ is the element new	Autodesk.Revit.DB.ElementOnPhaseStatus.New	5	#86 -- must surv
 # Open-defect rows: reported, NOT yet fixed. Snapshot-only on purpose -- an expectation here would be a
 # red suite pinned to a known bug. The expectation is added by the PR that fixes it.
 # ---------------------------------------------------------------------------------------------------
-create lineweight		#80 -- 16 rows tie at the tier-2 floor above every tier-3 match
-create an assembly from elements		#86 -- a BuiltInFailures string outranks AssemblyInstance.Create
-create a design option		#86 -- same shape
-create a railing		#86 -- IsValidHostForNewRailing outranks Railing members
-join walls at corner		#87 -- neither JoinGeometryUtils nor WallUtils appears on page 1
-change the width of a wall		#86 secondary -- ChangeRegionWidth demoted by the set/change group
-new wall		pre-#75 this ranked Visual.StoneBumpType.Stonewall first, via "sto(new)all"
-id		#76 -- shortest common token; overflowed the candidate cap
+create lineweight			#80 -- 16 rows tie at the tier-2 floor above every tier-3 match
+create an assembly from elements			#86 -- a BuiltInFailures string outranks AssemblyInstance.Create
+create a design option			#86 -- same shape
+create a railing			#86 -- IsValidHostForNewRailing outranks Railing members
+join walls at corner			#87 -- neither JoinGeometryUtils nor WallUtils appears on page 1
+change the width of a wall			#86 secondary -- ChangeRegionWidth demoted by the set/change group
+new wall			pre-#75 this ranked Visual.StoneBumpType.Stonewall first, via "sto(new)all"
+id			#76 -- shortest common token; overflowed the candidate cap
 #
 # ---------------------------------------------------------------------------------------------------
 # Coverage rows. Snapshot-only. The point is breadth: the reviewer's 71-query set found four regression
@@ -42,7 +42,7 @@ id		#76 -- shortest common token; overflowed the candidate cap
 # ---------------------------------------------------------------------------------------------------
 # -- creation / factories
 create a level
-create a topography		reviewer find: TopographySurface.AddPoints was lost by a locally-correct change
+create a topography			reviewer find: TopographySurface.AddPoints was lost by a locally-correct change
 create a wall
 create a floor
 create a room
