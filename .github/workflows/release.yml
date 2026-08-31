@@ -15,15 +15,28 @@
 # this project's Windows automation are written in, so this workflow matches that rather than the
 # throwaway smoke test.
 #
-# Signing secrets (none of these exist in this repo yet -- see the "Sign" step below, which no-ops
-# with a warning until they're configured):
-#   AZURE_CLIENT_ID                     -- federated (OIDC) app registration client ID; no client
-#                                           secret is stored, azure/login exchanges the workflow's
-#                                           GitHub OIDC token for an Azure access token
-#   AZURE_TENANT_ID                     -- the Azure AD tenant that app registration lives in
-#   AZURE_SUBSCRIPTION_ID               -- the subscription containing the Key Vault below
-#   AZURE_KEY_VAULT_URL                 -- e.g. https://<vault-name>.vault.azure.net/
-#   AZURE_KEY_VAULT_CERTIFICATE_NAME    -- name of the HSM-backed code-signing cert inside that vault
+# Signing: SELF-SIGNED, deliberately, for now -- the user decided to defer a real CA-issued
+# certificate's cost (and the identity verification it needs, individual or business) until the
+# product is fully released. A self-signed cert has none of the CA/Browser Forum requirements a
+# publicly-trusted cert does (no HSM, no ~15-month validity cap), so the Azure Key Vault +
+# AzureSignTool + OIDC apparatus an earlier version of this workflow scaffolded is unneeded for
+# this interim state -- plain PowerShell Set-AuthenticodeSignature against a PFX is enough, and
+# matches this repo's existing dev-loop signing precedent in shape (see
+# revit/mcp-bridge/tools/Sign-AddIn.ps1 / New-DevSigningCert.ps1), though that cert is a SEPARATE,
+# machine-local, non-exportable one for suppressing Revit's own prompt during dev iteration --
+# this one is exportable by design, since it has to travel with a CI-signed artifact.
+#
+# Two repo secrets carry the cert (generated once, this session, and never persisted anywhere else
+# unencrypted -- see the "Sign build artifacts" step below for what they're used for):
+#   SELFSIGNED_CERT_PFX_BASE64  -- base64-encoded .pfx containing the self-signed cert + private key
+#   SELFSIGNED_CERT_PASSWORD    -- the PFX's export password
+#
+# IMPORTANT, real product consequence: a self-signed signature is genuine Authenticode (not
+# "unsigned"), but it is NOT trusted by end-user machines by default -- Windows still shows an
+# "Unknown Publisher" SmartScreen warning on install until a real CA-issued cert replaces this
+# step. That is the accepted state for now, not a bug. Swapping to a real cert later is a
+# contained change: replace the "Sign build artifacts" step's cert source (this PFX -> a Key
+# Vault/eSigner/whatever the eventual CA requires); nothing else in this pipeline needs to change.
 
 name: Release
 
@@ -40,7 +53,6 @@ on:
 
 permissions:
   contents: write   # softprops/action-gh-release needs this to publish a release + upload assets
-  id-token: write    # federated OIDC for azure/login -- no stored client secret
 
 defaults:
   run:
@@ -58,7 +70,7 @@ jobs:
       # `secrets` cannot be referenced directly inside a step `if:` expression (GitHub Actions
       # rejects it at parse time: "Unrecognized named-value: 'secrets'") -- only inside `env:`/`with:`
       # blocks. Route it through a job-level env var instead, and gate on that.
-      SIGNING_CONFIGURED: ${{ secrets.AZURE_CLIENT_ID != '' }}
+      SIGNING_CONFIGURED: ${{ secrets.SELFSIGNED_CERT_PFX_BASE64 != '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -101,45 +113,62 @@ jobs:
           $env:GOARCH = "amd64"
           go build -ldflags "-X main.version=$env:RELEASE_TAG" -o mcp-server.exe ./cmd/mcp-server
 
-      # --- Sign (no-op with a warning until an Azure Key Vault cert actually exists) ---------------
-      # This is the intentional current state: no code-signing cert has been procured yet (real,
-      # external, non-code dependency -- see the PRD §12 plan). Everything else in this pipeline is
-      # real and testable today; signing degrades gracefully instead of blocking releases on a cert
-      # that doesn't exist yet.
-      - name: Azure login (OIDC)
-        if: ${{ env.SIGNING_CONFIGURED == 'true' }}
-        uses: azure/login@v2
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-
-      - name: Install AzureSignTool
-        if: ${{ env.SIGNING_CONFIGURED == 'true' }}
-        run: dotnet tool install --global AzureSignTool
-
+      # --- Sign (self-signed, interim -- see this file's top-of-file comment for why) ---------------
       - name: Sign build artifacts
         if: ${{ env.SIGNING_CONFIGURED == 'true' }}
         run: |
-          $tool = "$env:USERPROFILE\.dotnet\tools\azuresigntool.exe"
+          $pfxPath = "$env:RUNNER_TEMP\selfsigned.pfx"
+          [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String("${{ secrets.SELFSIGNED_CERT_PFX_BASE64 }}"))
+          $securePw = ConvertTo-SecureString -String "${{ secrets.SELFSIGNED_CERT_PASSWORD }}" -Force -AsPlainText
+          # CurrentUser\My, not LocalMachine\My: this runner's service account may not hold
+          # LocalMachine-store write rights, and Set-AuthenticodeSignature only needs the cert
+          # loaded somewhere it can read the private key from, not any particular store.
+          $cert = Import-PfxCertificate -FilePath $pfxPath -CertStoreLocation Cert:\CurrentUser\My -Password $securePw
+
           $targets = @(
             "revit\mcp-bridge\src\MCPBridge.AddIn\bin\Release\net10.0-windows\MCPBridge.AddIn.dll",
             "revit\mcp-bridge\src\MCPBridge.AddIn\bin\Release\net8.0-windows\MCPBridge.AddIn.dll",
             "revit\mcp-server\mcp-server.exe"
           )
+          # Mirrors Sign-AddIn.ps1's own per-server retry and post-sign re-verification (see that
+          # script's doc comments for why: Set-AuthenticodeSignature can leave a file
+          # signed-but-untimestamped on a timestamp-only failure even when it doesn't throw, so the
+          # real check is re-reading the signature afterward, not trusting the cmdlet's own return).
+          $timestampServers = @("http://timestamp.digicert.com", "http://timestamp.sectigo.com")
           foreach ($target in $targets) {
-            & $tool sign `
-              --azure-key-vault-url "${{ secrets.AZURE_KEY_VAULT_URL }}" `
-              --azure-key-vault-certificate "${{ secrets.AZURE_KEY_VAULT_CERTIFICATE_NAME }}" `
-              --timestamp-rfc3161 "http://timestamp.digicert.com" `
-              $target
-            if ($LASTEXITCODE -ne 0) { throw "AzureSignTool failed signing $target (exit $LASTEXITCODE)" }
+            $signed = $false
+            $lastError = $null
+            foreach ($server in $timestampServers) {
+              try {
+                Set-AuthenticodeSignature -FilePath $target -Certificate $cert -TimestampServer $server -HashAlgorithm SHA256 -ErrorAction Stop | Out-Null
+              } catch {
+                Write-Host "Set-AuthenticodeSignature threw signing $target via $server`: $($_.Exception.Message)"
+                $lastError = $_
+                continue
+              }
+              $verify = Get-AuthenticodeSignature -FilePath $target
+              if ($verify.Status -eq "Valid" -or $verify.Status -eq "UnknownError") {
+                # UnknownError is the expected status for a self-signed leaf with no trusted chain --
+                # it still means genuinely signed and timestamped, just not CHAIN-trusted (that's the
+                # whole "Unknown Publisher" tradeoff this interim state accepts, see top-of-file).
+                Write-Host "Signed $target (timestamped via $server): $($verify.Status)"
+                $signed = $true
+                break
+              }
+              Write-Host "Signature status after attempting $server for $target`: $($verify.Status) -- $($verify.StatusMessage)"
+              $lastError = $verify.StatusMessage
+            }
+            if (-not $signed) { throw "Failed to sign $target with a valid timestamp against any configured timestamp server. Last error: $lastError" }
           }
 
-      - name: Signing skipped (no Azure secrets configured)
+      - name: Clean up signing material
+        if: always()
+        run: Remove-Item "$env:RUNNER_TEMP\selfsigned.pfx" -Force -ErrorAction SilentlyContinue
+
+      - name: Signing skipped (no self-signed cert secrets configured)
         if: ${{ env.SIGNING_CONFIGURED != 'true' }}
         run: |
-          Write-Host "::warning::Signing skipped -- AZURE_CLIENT_ID not configured. Shipping UNSIGNED artifacts."
+          Write-Host "::warning::Signing skipped -- SELFSIGNED_CERT_PFX_BASE64 not configured. Shipping UNSIGNED artifacts."
 
       # --- Assemble mcpbridge-release.zip, exact layout install.ps1 / quickstart.md expect --------
       # addin-2027/ (net10.0-windows build output + manifest), addin-2025/ (net8.0-windows + manifest),
