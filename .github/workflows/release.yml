@@ -50,6 +50,11 @@ jobs:
   release:
     name: Build, sign, package, publish
     runs-on: [self-hosted, revit-mcp-release]
+    env:
+      # `secrets` cannot be referenced directly inside a step `if:` expression (GitHub Actions
+      # rejects it at parse time: "Unrecognized named-value: 'secrets'") -- only inside `env:`/`with:`
+      # blocks. Route it through a job-level env var instead, and gate on that.
+      SIGNING_CONFIGURED: ${{ secrets.AZURE_CLIENT_ID != '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -94,7 +99,7 @@ jobs:
       # real and testable today; signing degrades gracefully instead of blocking releases on a cert
       # that doesn't exist yet.
       - name: Azure login (OIDC)
-        if: ${{ secrets.AZURE_CLIENT_ID != '' }}
+        if: ${{ env.SIGNING_CONFIGURED == 'true' }}
         uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
@@ -102,11 +107,11 @@ jobs:
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - name: Install AzureSignTool
-        if: ${{ secrets.AZURE_CLIENT_ID != '' }}
+        if: ${{ env.SIGNING_CONFIGURED == 'true' }}
         run: dotnet tool install --global AzureSignTool
 
       - name: Sign build artifacts
-        if: ${{ secrets.AZURE_CLIENT_ID != '' }}
+        if: ${{ env.SIGNING_CONFIGURED == 'true' }}
         run: |
           $tool = "$env:USERPROFILE\.dotnet\tools\azuresigntool.exe"
           $targets = @(
@@ -124,7 +129,7 @@ jobs:
           }
 
       - name: Signing skipped (no Azure secrets configured)
-        if: ${{ secrets.AZURE_CLIENT_ID == '' }}
+        if: ${{ env.SIGNING_CONFIGURED != 'true' }}
         run: |
           Write-Host "::warning::Signing skipped -- AZURE_CLIENT_ID not configured. Shipping UNSIGNED artifacts."
 
