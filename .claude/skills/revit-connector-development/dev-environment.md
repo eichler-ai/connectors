@@ -257,6 +257,21 @@ re-resolve rather than hardcoding either. `robocopy` from `cmd /c` mangles a `\\
   reconnecting afterwards (`/mcp`, user-issued — Claude Code does not auto-recover this), not a quick
   aside mid-task. Restarting to force a fresh registration snapshot is obsolete anyway: the add-in
   pushes one live.
+- **In REMOTE mode, the add-in registers with whichever broker `MCPBRIDGE_SHARED_ROOT` points at —
+  NOT the one you just built.** (In local mode the share is never consulted: `BuildDiscoveryOptions`
+  returns `BrokerDiscoveryOptions.Local()` before reading it, and the add-in uses
+  `%LOCALAPPDATA%\Connectors\Revit\broker.json` — so if you took the "prefer local mode" advice
+  above, this trap cannot bite you and its remedy will do nothing.) Found running tier 2 for issue
+  #117 from a worktree. The share pointed at
+  `\\Mac\connectors` (the main checkout), so the add-in attached to a broker built from `main` while
+  the harness, talking to the worktree's broker, reported `no Revit instance connected`. The
+  dangerous shape is the near miss: had the two brokers been closer in age, the suite would have run
+  green against the WRONG binary — one with no `return_value` field at all — and "tier 2 passes"
+  would have meant nothing. **Killing the contending primary does not fix it**: other sessions'
+  background secondaries win the lock instantly (see the singleton hazard above). Point the add-in at
+  your worktree's share, restart the launcher agent so it re-reads the environment, relaunch Revit —
+  and put the share back afterwards. Confirm which broker you actually reached before trusting a
+  harness result: `get_skills`' `build` field names the revision.
 - **The running broker is only as current as the last time something BUILT it.** `install-mac.sh` is
   a one-time setup step, so the binary `claude mcp add` registered can predate the repo by weeks
   while serving compiled-in content — `skill.md`, the tool schemas, the descriptions — as if it were
