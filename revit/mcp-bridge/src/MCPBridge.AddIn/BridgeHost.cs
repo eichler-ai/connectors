@@ -673,6 +673,35 @@ internal sealed class BridgeHost
     private static void LogConnectionDiagnostic(string message)
         => RollingDiagnosticLog.Append(() => BrokerDiscoveryOptions.Local().ConnectorRoot, "connection.log", message);
 
+    /// <summary>
+    /// The "dispatch failed" response, for both the synchronous throw out of DispatchAsync and the
+    /// faulted-Task case. Carries a §01 record for the same reason the param errors do (issue #69):
+    /// without one, the broker's fromRPCError stamps it `add-in-error` and the agent learns nothing about
+    /// what failed. Also logs, because unlike a param error this is a connector-side bug rather than
+    /// something the caller can fix -- the agent's copy is a courtesy, the log line is the actionable one.
+    /// </summary>
+    private static string DispatchFailed(JsonRpcRequest request, Exception? ex)
+    {
+        var message = $"dispatch failed: {ex?.Message}";
+        LogConnectionDiagnostic($"dispatch-failed ({request.Method}): {ex}");
+        var diagnostic = DiagnosticRecord.Create(
+            DiagnosticSeverity.Error,
+            "dispatch-failed",
+            // Fully qualified: this file also imports System.Diagnostics, which has its own unrelated
+            // DiagnosticSource type, so the bare name is ambiguous here.
+            MCPBridge.Core.Diagnostics.DiagnosticSource.Connection,
+            message,
+            detail: new Dictionary<string, object?>
+            {
+                ["method"] = request.Method,
+                ["exception_type"] = ex?.GetType().FullName,
+            },
+            // No "fix your request" remedy on purpose: reaching here means the add-in threw where it
+            // should have returned an error response, so there is nothing the caller did wrong to undo.
+            remedy: new[] { "This is a connector-side failure, not a bad request -- retry once, and if it repeats report it with the add-in's connection.log, which carries the full stack trace." });
+        return JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InternalError, message, diagnostic);
+    }
+
     private static void Backoff(ReconnectLoopController reconnectController, CancellationToken stopToken)
     {
         var delay = reconnectController.OnConnectFailed();
@@ -869,9 +898,26 @@ internal sealed class BridgeHost
             {
                 request = JsonRpcRequest.Parse(line);
             }
-            catch
+            catch (JsonRpcParamException ex)
             {
-                continue; // malformed line -- skip it rather than tearing down the whole connection.
+                // Skip the line rather than tearing down an otherwise-healthy connection: a malformed
+                // request has no usable `id`, so there is nothing to address a response to.
+                //
+                // But LOG it. Review of the issue-#69 change caught this as a bare `catch { continue; }`
+                // -- the exception discarded without even being bound -- while the throw site's own
+                // comment claimed its §01 record "earns its place in the log/diagnostic path". There was
+                // no such path; the record was built and dropped on every malformed line, and a broker
+                // sending garbage looked identical to a broker sending nothing at all. This is the one
+                // place that record can actually be read, so this is where it goes.
+                LogConnectionDiagnostic($"{ex.Diagnostic.Code} ({ex.Diagnostic.Source}): {ex.Message}");
+                continue;
+            }
+            catch (Exception ex)
+            {
+                // Anything else out of Parse is a JsonException from JsonDocument.Parse (not even
+                // syntactically JSON). Same disposition, same reason -- and logged for the same reason.
+                LogConnectionDiagnostic($"unparseable line discarded: {ex.Message}");
+                continue;
             }
 
             // Fire-and-continue: execute_script's own dispatch can take a while (up to its timeout_ms) and
@@ -894,7 +940,7 @@ internal sealed class BridgeHost
             }
             catch (Exception ex)
             {
-                dispatchTask = Task.FromResult(JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InternalError, $"dispatch failed: {ex.Message}", null));
+                dispatchTask = Task.FromResult(DispatchFailed(request, ex));
             }
 
             _ = dispatchTask.ContinueWith(
@@ -902,7 +948,7 @@ internal sealed class BridgeHost
                 {
                     var response = t.IsCompletedSuccessfully
                         ? t.Result
-                        : JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InternalError, $"dispatch failed: {t.Exception?.GetBaseException().Message}", null);
+                        : DispatchFailed(request, t.Exception?.GetBaseException());
 
                     try
                     {

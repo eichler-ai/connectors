@@ -324,6 +324,37 @@ func TestCancelExecutionUnknownID(t *testing.T) {
 	}
 }
 
+// The OTHER branch of fromRPCError, which had no coverage at all until issue #69
+// went looking for it. When the add-in sends an error with no `data` record, the
+// broker synthesises a generic `add-in-error` -- so a record-less add-in error does
+// not merely arrive without a code, it arrives stamped with one that says only
+// "something went wrong over there". That is what every C#-side param error looked
+// like before #69, and pinning it here is what makes the passthrough test above
+// mean something: without this, a change that dropped `data` on the floor entirely
+// would still leave that test green.
+func TestWireErrorWithoutDataSynthesisesAGenericRecord(t *testing.T) {
+	_, conn := newFakeInstance(t, func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
+		return nil, &transport.RPCError{
+			Code:    transport.ErrCodeInvalidParams,
+			Message: "params.script must be a non-empty string.",
+			Data:    nil,
+		}
+	})
+	m := NewManager()
+	m.AttachInstance("inst-1", conn)
+
+	_, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "boom", 1000, 60000, ScriptOptions{})
+	if drec == nil {
+		t.Fatal("expected diag error")
+	}
+	if drec.Code != "add-in-error" {
+		t.Errorf("Code = %q, want the synthesised add-in-error fallback", drec.Code)
+	}
+	if len(drec.Remedy) != 0 {
+		t.Errorf("Remedy = %v, want empty: the synthesised record cannot know a next step, which is the whole cost of the add-in not sending its own", drec.Remedy)
+	}
+}
+
 func TestWireErrorPropagatesDiagnosticData(t *testing.T) {
 	addinRecord := diag.New(diag.SeverityError, "revit-api-exception", "mcp-bridge.core.execution", "System.InvalidOperationException: document is not active")
 	_, conn := newFakeInstance(t, func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {

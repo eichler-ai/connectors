@@ -117,11 +117,41 @@ public sealed class RequestDispatcher
         "list_functions" => Task.FromResult(HandleListFunctions(request)),
         "search_functions" => Task.FromResult(HandleSearchFunctions(request)),
         "describe_function" => Task.FromResult(HandleDescribeFunction(request)),
-        _ => Task.FromResult(JsonRpcErrorMessage.ToJson(
-            request.Id,
-            JsonRpcErrorCode.MethodNotFound,
+        _ => Task.FromResult(UnknownMethod(request)),
+    };
+
+    /// <summary>
+    /// The method-not-found response. Carries a §01 record for the same reason every param error now
+    /// does (issue #69): without one the broker's fromRPCError stamps it `add-in-error`, which tells an
+    /// agent only that something went wrong on the other side.
+    /// </summary>
+    private static string UnknownMethod(JsonRpcRequest request)
+    {
+        var diagnostic = DiagnosticRecord.Create(
+            DiagnosticSeverity.Error,
+            "unknown-method",
+            DiagnosticSource.Connection,
             $"unknown method '{request.Method}'",
-            null)),
+            detail: new Dictionary<string, object?>
+            {
+                ["method"] = request.Method,
+                ["supported_methods"] = SupportedMethods,
+            },
+            remedy: new[] { "Call one of: " + string.Join(", ", SupportedMethods) + "." });
+        return JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.MethodNotFound, $"unknown method '{request.Method}'", diagnostic);
+    }
+
+    /// <summary>
+    /// Every method <see cref="DispatchAsync"/> routes. A C# switch over strings cannot be enumerated at
+    /// runtime, so this is a hand-maintained mirror of it -- state that plainly rather than implying it
+    /// is derived. `EveryMethodInSupportedMethodsIsActuallyRouted` catches the deletion direction (a name
+    /// listed here that no longer routes); the addition direction (a new case not added here) is NOT
+    /// caught by anything, and the mitigation is that the only cost is an incomplete remedy list.
+    /// </summary>
+    private static readonly string[] SupportedMethods =
+    {
+        "execute_script", "poll_execution", "cancel_execution",
+        "list_functions", "search_functions", "describe_function",
     };
 
     private async Task<string> HandleExecuteScriptAsync(JsonRpcRequest request)
@@ -719,7 +749,21 @@ public sealed class RequestDispatcher
 
         return record is not null
             ? ExecutionResultMessage.FromRecord(request.Id, record)
-            : JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InternalError, $"execution_id '{executionId}' vanished mid-cancellation.", null);
+            : JsonRpcErrorMessage.ToJson(
+                request.Id,
+                JsonRpcErrorCode.InternalError,
+                $"execution_id '{executionId}' vanished mid-cancellation.",
+                DiagnosticRecord.Create(
+                    DiagnosticSeverity.Error,
+                    "execution-record-vanished",
+                    DiagnosticSource.Execution,
+                    $"execution_id '{executionId}' vanished mid-cancellation.",
+                    detail: new Dictionary<string, object?> { ["execution_id"] = executionId },
+                    // Its own code rather than folding into unknown-execution-id: this is the ring buffer
+                    // evicting a record between RequestCancellation and the Poll a few lines above, which
+                    // is a connector-side race, not the agent addressing something that never existed.
+                    // Retrying is genuinely the right move here and genuinely the wrong move there.
+                    remedy: new[] { "Re-issue cancel_execution, or poll_execution to read the execution's final state." }));
     }
 
     /// <summary>
@@ -794,21 +838,17 @@ public sealed class RequestDispatcher
         {
             // member is optional when member_id is supplied (issue #64) -- member_id alone is a reliable
             // disambiguator (see DiscoveryService.DescribeFunction's own doc comment for the full contract),
-            // so at least one of the two, not necessarily member, is required here.
+            // so at least one of the two, not necessarily member, is required.
+            //
+            // That "at least one" rule is enforced by DescribeFunction itself, NOT duplicated here. There
+            // used to be a copy of the check at this line, and review of the issue-#69 change caught what
+            // duplication had cost: the copy shadowed the real guard (so DiscoveryService's own branch was
+            // unreachable through dispatch, and silently untested -- a mutation that broke its record
+            // entirely still passed 1,252 tests), and the two copies had already drifted to two different
+            // messages for the identical condition. Two shapes for one failure is the very thing issue #69
+            // is about; keeping one guard is the fix, not keeping two in sync.
             var member = request.GetOptionalString("member");
             var memberId = request.GetOptionalString("member_id");
-            if (string.IsNullOrEmpty(member) && string.IsNullOrEmpty(memberId))
-            {
-                // Same code/detail/remedy as DiscoveryService's own guard for this condition, and as the
-                // Go broker's: which of the three answers first depends only on where the request was
-                // validated, and issue #69 is about that not changing the shape an agent sees.
-                throw new JsonRpcParamException(
-                    "params.member and params.member_id are both missing -- at least one is required.",
-                    DiagnosticSource.Discovery,
-                    "missing-required-param",
-                    detail: new Dictionary<string, object?> { ["params"] = new[] { "member", "member_id" } },
-                    remedy: new[] { "Pass member (a fully-qualified Type.Member) or member_id (an exact XML-doc-id from search_functions or a prior describe_function's overloads[] list)." });
-            }
 
             var result = _discoveryService.DescribeFunction(member, memberId);
             return DiscoveryResultMessage.DescribeFunction(request.Id, result);

@@ -80,11 +80,14 @@ public sealed class JsonRpcRequest
 
         if (!root.TryGetProperty("method", out var methodElement) || methodElement.ValueKind != JsonValueKind.String || string.IsNullOrEmpty(methodElement.GetString()))
         {
-            // The two Parse throws carry a §01 record for consistency, but be honest about their reach:
-            // BridgeHost's read loop catches a Parse failure and SKIPS the line, so this record has no
-            // wire path back to the agent today. That is not an oversight to fix here -- a request with no
-            // usable `id` cannot be answered at all (there is nothing to echo), which is the whole reason
-            // Parse rejects it. The record earns its place in the log/diagnostic path, not the response.
+            // The two Parse throws carry a §01 record, but be precise about its reach: BridgeHost's read
+            // loop catches a Parse failure and SKIPS the line, so this record never reaches the agent. A
+            // request with no usable `id` cannot be answered at all -- there is nothing to address a
+            // response to -- which is the whole reason Parse rejects it. Its consumer is BridgeHost's
+            // connection.log line instead. (When this was first written the comment claimed a "log path"
+            // that did not exist -- the catch was a bare `catch { continue; }` that discarded the
+            // exception. Review caught it; the log path is real now, and this sentence is only true
+            // because that was fixed rather than reworded.)
             throw new JsonRpcParamException(
                 "message has no non-empty string 'method' field; not a valid JSON-RPC request.",
                 DiagnosticSource.Protocol,
@@ -124,12 +127,22 @@ public sealed class JsonRpcRequest
     /// the identical failure, and §01's value here comes from `code`/`detail` being genuinely the same
     /// across all four rather than four hand-written near-copies free to drift apart.
     /// </summary>
-    private static JsonRpcParamException WrongType(string name, string expectedJsonType) =>
+    /// <param name="hasDefault">
+    /// Whether omitting the param is legal. This is NOT cosmetic: review of the change that introduced
+    /// this helper caught it telling a caller of a REQUIRED param to "omit it entirely to take this
+    /// parameter's default" -- a remedy that provably does not work, since the next call comes back
+    /// `missing-required-param`. A §01 remedy that sends an agent down a dead end is worse than no
+    /// remedy, and the "every remedy is a non-empty string" assertion cannot tell the two apart, so the
+    /// distinction has to exist in the code rather than in the reviewer's attention.
+    /// </param>
+    private static JsonRpcParamException WrongType(string name, string expectedJsonType, bool hasDefault) =>
         new($"params.{name} must be a {expectedJsonType}.",
             DiagnosticSource.Protocol,
             "invalid-param-type",
             detail: new Dictionary<string, object?> { ["param"] = name, ["expected_type"] = expectedJsonType },
-            remedy: new[] { $"Pass params.{name} as a JSON {expectedJsonType}, or omit it entirely to take this parameter's default." });
+            remedy: hasDefault
+                ? new[] { $"Pass params.{name} as a JSON {expectedJsonType}, or omit it entirely to take this parameter's default." }
+                : new[] { $"Pass params.{name} as a JSON {expectedJsonType}; it is required and has no default." });
 
     /// <summary>Reads a required non-empty string param. Throws <see cref="JsonRpcParamException"/> if absent, empty, or the wrong JSON type.</summary>
     public string GetRequiredString(string name)
@@ -143,9 +156,19 @@ public sealed class JsonRpcRequest
             throw MissingRequired(name);
         }
 
+        // An explicit JSON `null` is ABSENT, not wrong-typed -- it is the canonical encoding of "not
+        // supplied" and what a client serializing from a nullable field emits. Every optional accessor
+        // below already treats Null/Undefined as absent; review caught this one classifying it as
+        // `invalid-param-type`, which put the most common way of omitting a param on the wrong side of
+        // the very split this change introduced.
+        if (value.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+        {
+            throw MissingRequired(name);
+        }
+
         if (value.ValueKind != JsonValueKind.String)
         {
-            throw WrongType(name, "string");
+            throw WrongType(name, "string", hasDefault: false);
         }
 
         if (string.IsNullOrEmpty(value.GetString()))
@@ -175,7 +198,7 @@ public sealed class JsonRpcRequest
         {
             JsonValueKind.Number => value.GetInt64(),
             JsonValueKind.Null or JsonValueKind.Undefined => defaultValue,
-            _ => throw WrongType(name, "number"),
+            _ => throw WrongType(name, "number", hasDefault: true),
         };
     }
 
@@ -194,7 +217,7 @@ public sealed class JsonRpcRequest
         {
             JsonValueKind.True or JsonValueKind.False => value.GetBoolean(),
             JsonValueKind.Null or JsonValueKind.Undefined => defaultValue,
-            _ => throw WrongType(name, "boolean"),
+            _ => throw WrongType(name, "boolean", hasDefault: true),
         };
     }
 
@@ -210,7 +233,7 @@ public sealed class JsonRpcRequest
         {
             JsonValueKind.String => string.IsNullOrEmpty(value.GetString()) ? null : value.GetString(),
             JsonValueKind.Null or JsonValueKind.Undefined => null,
-            _ => throw WrongType(name, "string"),
+            _ => throw WrongType(name, "string", hasDefault: true),
         };
     }
 }
