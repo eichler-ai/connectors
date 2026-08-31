@@ -169,9 +169,15 @@
     Version/LatestAvailableVersion from BrokerJson, with an "update available" comparison.
   -->
   <Target Name="MCPBridgeEmbedVersion" BeforeTargets="GetAssemblyAttributes" Condition="'$(TargetFramework)'!=''">
+    <!--
+      Trimmed, deliberately: independent review found that MSBuild's '$(X)'=='' does not trim, so a
+      natural "set MCPBRIDGE_VERSION=1.2.3 and then dotnet build" invocation, which is exactly what a
+      release pipeline would write, embeds "1.2.3 " with a trailing space, silently defeating Stage
+      3's later version-string comparison. Trim() on both sides closes that.
+    -->
     <PropertyGroup>
-      <MCPBridgeVersion Condition="'$(MCPBridgeVersion)'==''">$(MCPBRIDGE_VERSION)</MCPBridgeVersion>
-      <MCPBridgeVersion Condition="'$(MCPBridgeVersion)'==''">dev</MCPBridgeVersion>
+      <MCPBridgeVersion Condition="'$(MCPBridgeVersion.Trim())'==''">$(MCPBRIDGE_VERSION.Trim())</MCPBridgeVersion>
+      <MCPBridgeVersion Condition="'$(MCPBridgeVersion.Trim())'==''">dev</MCPBridgeVersion>
     </PropertyGroup>
     <ItemGroup>
       <AssemblyMetadata Include="Version" Value="$(MCPBridgeVersion)" />
