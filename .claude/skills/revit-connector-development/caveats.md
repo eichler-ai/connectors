@@ -27,12 +27,12 @@ out — work down, don't guess.
 | 7 | A shadow copy in Revit's install directory is winning | Log every loaded assembly's `.Location` early in `OnStartup` |
 | 8 | You deployed from the wrong checkout | `redeploy-and-verify.sh --share-name`; its identity guard refuses rather than reporting PASS |
 
-**Read the log's own unconditional first line before reasoning about anything after it.**
-`connection.log` opens with `RunConnectionLoop starting. Mode=... ConnectorRoot=...`.
-
-**Unless it has rotated** (issue #11: 5MB cap, previous generation moved to `connection.log.old`). A
-live log that starts mid-stream has rotated, and that startup line is in the `.old` file — it does not
-mean the add-in never started. Check both files before concluding anything from the absence of a line.
+**Check for the log's startup line before reasoning about anything after it, in `connection.log`
+*and* `connection.log.old`.** A session opens with `RunConnectionLoop starting. Mode=... ConnectorRoot=...`
+— but these logs rotate at 5MB (issue #11), so a live log that begins mid-stream has rotated and that
+line is in the `.old` file. Its absence from `connection.log` alone does **not** mean the add-in never
+started, and only one previous generation is kept: the next rotation overwrites `.old`, so history
+older than that is gone rather than archived. `startup-errors.log` rotates the same way.
 
 ## Symptom: `register` reports `documents: []`
 

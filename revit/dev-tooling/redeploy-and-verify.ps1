@@ -180,7 +180,13 @@ function Wait-ForFreshConnection([string]$LogPath, [int]$MinDocuments, [int]$Tim
             # FileShare.ReadWrite: the add-in process still has this file open for its own appends:
             # a plain Get-Content would be fine too, but an explicit share-mode open is the honest
             # way to say "I know another process is writing this concurrently."
-            $stream = [System.IO.File]::Open($LogPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+            # Delete is in the share mask alongside ReadWrite because the add-in ROTATES this file
+            # (issue #11) with File.Move, which needs delete-sharing on every open handle. Without it
+            # this reader silently blocks the rotation it is watching for, and the log runs over its
+            # cap for as long as the script is polling -- this tooling defeating the very cap it helped
+            # verify.
+            $share = [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete
+            $stream = [System.IO.File]::Open($LogPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, $share)
             try {
                 $stream.Seek($startLength, [System.IO.SeekOrigin]::Begin) | Out-Null
                 $reader = New-Object System.IO.StreamReader($stream)
