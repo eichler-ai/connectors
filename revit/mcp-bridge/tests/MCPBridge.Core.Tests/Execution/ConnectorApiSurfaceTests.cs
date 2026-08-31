@@ -180,6 +180,90 @@ public class ConnectorApiSurfaceTests
     }
 
     /// <summary>
+    /// Every paragraph boundary in a shipped summary must survive rendering as a separator. This is the
+    /// issue #91 defect -- <c>describe_function</c> returned "...calling this on them fails.Order matters
+    /// against Revit APIs..." -- pinned at the layer that can be exact about it.
+    ///
+    /// <para>Checked against the XML's own structure rather than by pattern-matching the rendered prose,
+    /// and that distinction was learned the hard way: a <c>[a-z][.!?][A-Z]</c> regex over the live output
+    /// flagged five of seven summaries, because it cannot tell a paragraph join from an ordinary dotted
+    /// identifier (<c>System.IO</c>, <c>Document.LoadFamily</c>). Once the text is rendered the two are
+    /// genuinely indistinguishable. Here the last word of one block and the first word of the next are
+    /// known exactly, so the assertion is exact -- and it holds for wording that does not exist yet.</para>
+    /// </summary>
+    [Fact]
+    public void ParagraphBoundaries_SurviveRenderingAsASeparator()
+    {
+        var docs = LoadShippedDocs();
+        var checkedPairs = 0;
+
+        foreach (var member in XDocument.Load(SidecarPath()).Root?.Element("members")?.Elements("member")
+                               ?? Enumerable.Empty<XElement>())
+        {
+            var docId = (string?)member.Attribute("name");
+            if (docId is null || !docs.TryGetValue(docId, out var entry) || entry.Summary is null)
+            {
+                continue;
+            }
+
+            var summaryElement = member.Element("summary");
+            if (summaryElement is null)
+            {
+                continue;
+            }
+
+            foreach (var block in summaryElement.Elements())
+            {
+                var previousWord = LastWordBefore(block);
+                var nextWord = FirstWordIn(block);
+                if (previousWord is null || nextWord is null)
+                {
+                    continue;
+                }
+
+                checkedPairs++;
+                Assert.False(
+                    entry.Summary.Contains(previousWord + nextWord, StringComparison.Ordinal),
+                    $"{docId}: the boundary between '{previousWord}' and '{nextWord}' rendered with no " +
+                    $"separator, so an agent reads them as one word. Summary: {entry.Summary}");
+                Assert.True(
+                    entry.Summary.Contains(previousWord + " " + nextWord, StringComparison.Ordinal),
+                    $"{docId}: expected '{previousWord} {nextWord}' across a block boundary. " +
+                    $"Summary: {entry.Summary}");
+            }
+        }
+
+        // Without this the whole test passes vacuously the moment the summaries stop using block
+        // elements -- which is exactly when someone would be least likely to notice it had stopped
+        // checking anything. Two members carry multiple paragraphs today.
+        Assert.True(checkedPairs >= 2, $"only {checkedPairs} block boundaries found to check; this test is not covering anything");
+    }
+
+    /// <summary>
+    /// Last whitespace-delimited word rendered immediately before <paramref name="block"/>, whether that
+    /// is loose prose or another block element.
+    ///
+    /// <para>Handling the ELEMENT case is the entire point, and the first version of this helper got it
+    /// wrong: it returned null unless the previous node was text, which skipped every
+    /// <c>&lt;/para&gt;&lt;para&gt;</c> boundary -- the only boundary that was ever broken. The test
+    /// passed with BOTH halves of the fix reverted, checking exclusively the boundaries that already
+    /// worked. A prose-preceded block is separated by its own trailing text node either way; only two
+    /// adjacent elements depend on the fix.</para>
+    /// </summary>
+    private static string? LastWordBefore(XElement block) => block.PreviousNode switch
+    {
+        XText text => text.Value.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).LastOrDefault(),
+        XElement previous => previous.Value.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).LastOrDefault(),
+        _ => null,
+    };
+
+    /// <summary>First whitespace-delimited word inside <paramref name="block"/>, or null when it starts with markup rather than text.</summary>
+    private static string? FirstWordIn(XElement block) =>
+        block.Nodes().FirstOrDefault() is XText text
+            ? text.Value.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).FirstOrDefault()
+            : null;
+
+    /// <summary>
     /// The measured D5 failure mode was not missing text but WRONG-AUDIENCE text: summaries that cited PRD
     /// sections, issue numbers and internal type names an agent cannot see, act on, or look up. Those read
     /// as authoritative and send an agent nowhere.
@@ -256,10 +340,13 @@ public class ConnectorApiSurfaceTests
     /// Revit types this test host cannot load. The text itself then comes from
     /// <see cref="XmlDocIndex"/>, so what is asserted is exactly what describe_function would return.</para>
     /// </summary>
+    private static string SidecarPath() =>
+        Path.ChangeExtension(typeof(Connector).Assembly.Location, ".xml");
+
     private static IReadOnlyDictionary<string, XmlDocEntry> LoadShippedDocs()
     {
         var assemblyPath = typeof(Connector).Assembly.Location;
-        var sidecarPath = Path.ChangeExtension(assemblyPath, ".xml");
+        var sidecarPath = SidecarPath();
 
         Assert.True(
             File.Exists(sidecarPath),

@@ -26,10 +26,18 @@ internal sealed class FakeTransactionAdapter : ITransactionAdapter
 
     public IReadOnlyList<FailureSummary> CommitFailures { get; private set; } = Array.Empty<FailureSummary>();
 
+    /// <summary>
+    /// Runs at the start of <see cref="Commit"/>, which the executor calls INSIDE its try block -- before
+    /// the finally that tears down per-run ambient state. That makes it the one hook a tier-1 test has for
+    /// observing that state while it is still live. Null by default; nothing pays for it.
+    /// </summary>
+    public Action? OnCommit { get; set; }
+
     public void Start() => Calls.Add("Start");
 
     public TransactionCommitResult Commit()
     {
+        OnCommit?.Invoke();
         Calls.Add("Commit");
         if (ThrowOnCommit)
         {

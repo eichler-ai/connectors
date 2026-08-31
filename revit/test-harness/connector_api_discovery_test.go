@@ -18,6 +18,8 @@ package harness_test
 
 import (
 	"encoding/json"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -81,15 +83,19 @@ func TestConnectorApiIsDiscoverable(t *testing.T) {
 			"type_name":   connectorTypeName,
 		}))
 
+		// Sorted slice equality, not a count plus Contains-per-member. Review found the latter could not
+		// catch a rename whose old name is a substring of the new one -- Publish -> PublishFile,
+		// OpenForWriting -> OpenForWritingAsync -- because Contains ran against the whole joined string
+		// and the count stayed 7. Those are the spellings a maintainer would actually use, so the guard
+		// was open on its most likely mutation. Equality also covers duplicates, extras, ordering and
+		// whitespace in one comparison, which is what "exactly" in the test name claims.
 		got := strings.Split(out.Members, ", ")
-		if len(got) != len(connectorMembers) {
-			t.Fatalf("expected exactly %d connector members, got %d: %q",
-				len(connectorMembers), len(got), out.Members)
-		}
-		for _, want := range connectorMembers {
-			if !strings.Contains(out.Members, want) {
-				t.Errorf("list_functions did not return the connector member %q; got %q", want, out.Members)
-			}
+		sort.Strings(got)
+		want := append([]string(nil), connectorMembers...)
+		sort.Strings(want)
+		if !slices.Equal(got, want) {
+			t.Fatalf("list_functions did not return exactly the connector API.\n got: %v\nwant: %v\n(raw: %q)",
+				got, want, out.Members)
 		}
 	})
 
@@ -106,7 +112,7 @@ func TestConnectorApiIsDiscoverable(t *testing.T) {
 			t.Errorf("IConnectorRuntime is indexed and visible to an agent; it must stay internal. types=%q", out.Types)
 		}
 		if strings.TrimSpace(out.Types) != connectorTypeName {
-			t.Errorf("expected %q to contain exactly one type (%s), got %q",
+			t.Errorf("expected %q to be exactly one type (%s), got %q",
 				connectorNamespace, connectorTypeName, out.Types)
 		}
 	})
@@ -115,37 +121,62 @@ func TestConnectorApiIsDiscoverable(t *testing.T) {
 	// sidecar as "everything is documented", so a DLL-only deploy yields a fully browsable API whose
 	// summaries are all empty -- which looks like working discovery. Only a live call can tell the two
 	// apart, because both produce a well-formed response.
-	t.Run("DescribeFunctionReturnsRealDocumentation", func(t *testing.T) {
-		out := describeFunctionSuccess(t, callDescribeFunction(t, c, map[string]any{
-			"instance_id": instanceID,
-			"member":      connectorNamespace + "." + connectorTypeName + ".Publish",
-		}))
+	//
+	// Covers ALL SEVEN members, not just Publish. The first version described only Publish, so a sidecar
+	// covering some members and not others would have passed (review finding).
+	t.Run("DescribeFunctionReturnsRealDocumentationForEveryMember", func(t *testing.T) {
+		// NOTE ON WHAT THIS DOES NOT CHECK. An earlier version asserted the summary did not contain
+		// ".Never" or ".Order" -- literal fragments of one member's then-current prose. That was doubly
+		// weak: ".Order" was already dead (it came from OpenForWriting's old text, which this subtest
+		// never fetched), and ".Never" would go vacuous the moment anyone reworded Publish.
+		//
+		// Replacing it with a general `[a-z][.!?][A-Z]` regex was worse, and running it live is what
+		// showed why: it fires on every dotted identifier in ordinary prose -- "System.IO",
+		// "UIApplication.Application", "Document.LoadFamily" -- which is indistinguishable from a
+		// paragraph join once the text is rendered. Five of seven summaries "failed".
+		//
+		// So the paragraph-separator property is pinned at TIER 1 instead, in ConnectorApiSurfaceTests,
+		// where the XML is still structured and the check can be exact: for each adjacent block pair it
+		// compares the rendered text against the actual last/first words of those blocks. This subtest
+		// keeps the job only a live call can do -- proving the sidecar is deployed and carries real text.
+		for _, member := range connectorMembers {
+			out := describeFunctionSuccess(t, callDescribeFunction(t, c, map[string]any{
+				"instance_id": instanceID,
+				"member":      connectorNamespace + "." + connectorTypeName + "." + member,
+			}))
 
-		summary, _ := out.Result["summary"].(string)
-		if strings.TrimSpace(summary) == "" {
-			t.Fatalf("Publish has an empty summary live -- the XML doc sidecar is probably not deployed "+
-				"beside Eichler.Connectors.Revit.dll. result=%+v", out.Result)
-		}
+			summary, _ := out.Result["summary"].(string)
+			if strings.TrimSpace(summary) == "" {
+				t.Errorf("%s has an empty summary live -- the XML doc sidecar is probably not deployed "+
+					"beside Eichler.Connectors.Revit.dll. result=%+v", member, out.Result)
+				continue
+			}
 
-		// Pins the issue #91 paragraph-separator fix at the layer an agent actually reads. The defect
-		// produced "...fails.Order matters..." -- text that is present, plausible, and wrong, which no
-		// emptiness check would catch.
-		if strings.Contains(summary, ".Order") || strings.Contains(summary, ".Never") {
-			t.Errorf("summary has concatenated paragraphs (missing separator after a sentence): %q", summary)
-		}
-
-		// The summaries are agent-facing product; maintainer vocabulary in them is a defect (D5).
-		for _, forbidden := range []string{"ScriptGlobals", "PRD §", "IConnectorRuntime"} {
-			if strings.Contains(summary, forbidden) {
-				t.Errorf("summary leaks maintainer vocabulary %q to an agent: %q", forbidden, summary)
+			// The summaries are agent-facing product; maintainer vocabulary in them is a defect (D5).
+			for _, forbidden := range []string{"ScriptGlobals", "PRD §", "IConnectorRuntime", "issue #"} {
+				if strings.Contains(summary, forbidden) {
+					t.Errorf("%s leaks maintainer vocabulary %q to an agent: %q", member, forbidden, summary)
+				}
 			}
 		}
 	})
 
-	// Ranked BELOW Revit's own API, per PRD §08. An add-in API that outranked Autodesk's would be a
-	// regression in its own right, and the ordering is a property of the synced `kind` column -- i.e.
-	// of the same registration this file exists to cover.
-	t.Run("ExactNameSearchFindsItAndItIsIndexedAsAnAddin", func(t *testing.T) {
+	// Exact-name resolution. Deliberately does NOT assert anything about ranking relative to Revit's
+	// own API, and the reason is worth recording because the first version of this subtest was named
+	// "...AndItIsIndexedAsAnAddin" and its comment claimed "ranked BELOW Revit's own API, per PRD §08".
+	//
+	// Review pointed out that nothing here could catch the ("addin", ...) -> ("core", ...) mutation, and
+	// suggested asserting that a core member outranks the connector's. Measured live before writing
+	// that, and it is false: `search_functions "Publish"` puts Eichler...Connector.Publish at 636.95,
+	// ABOVE Autodesk.Revit.DB.Document.PublishCoordinates at 591.8. The connector wins on an exact
+	// member-name match in tier 2, which no assembly kind changes.
+	//
+	// What `kind` actually does is narrower than "ranked below": a +0.5 CoreBoost (DiscoveryCache.cs)
+	// and a tie-break inside the FTS tier's ORDER BY. It is not serialised onto the wire at all, so an
+	// addin/core mislabel is not observable through the tools -- and an assertion pretending otherwise
+	// would be exactly the kind of guard this suite keeps having to delete. The registration ITSELF is
+	// pinned: removing it makes every subtest above fail, because nothing gets indexed.
+	t.Run("ExactNameSearchResolvesTheConnectorMember", func(t *testing.T) {
 		raw, err := c.CallTool("search_functions", map[string]any{
 			"instance_id": instanceID,
 			"query":       connectorTypeName + ".Publish",

@@ -91,9 +91,22 @@ The most expensive findings in the #92 review were not in the feature. They were
 - Claimed "the tool description names every global"; asserted `Contains("Document")` alongside `Contains("UIDocument")`, and `Contains("Connector")` alongside `Contains("Eichler.Connectors.Revit")`. Neither could fail.
 - Claimed "the public surface is exactly these seven"; reflected `BindingFlags.Public | Instance`. A `public static` member reaches `describe_function` and never appears.
 
+**It recurs inside the fix, too.** Correcting one instance of this produced another within the hour: a
+paragraph-separator guard was rewritten to compare the rendered text against the XML's own block
+boundaries — exact, structural, no prose matching — and it still passed with the fix fully reverted,
+because the helper returned null unless the previous node was *text*. That skipped every
+`</para><para>` boundary, which is the only boundary that was ever broken. It was checking exclusively
+the cases that already worked. **Run the mutation after fixing a guard, not just after writing one.**
+
 **The check.** For any guard, name the production code path that decides the thing, and call *that* — not your own reading of it. If production has a predicate, a parser, or a visibility rule, the test must go through it; a reimplementation tests the reimplementation. Where you genuinely cannot call production (a different assembly, a load-context limit), say so in the test and pin the divergence.
 
 **The second check, cheaper.** Write the mutation you are most afraid of, in the spelling a *maintainer* would actually use — not the spelling that is easiest to mutate. The #92 tests killed "put `PRD §` in a summary" and missed "put `<see cref="ScriptGlobals"/>` in a summary", which is the same mutation in the form someone would really write.
+
+**Beware the general-looking pattern.** Replacing a brittle literal with a regex feels like a
+strengthening and often is not: `[a-z][.!?][A-Z]` was meant to catch concatenated paragraphs and
+instead flagged five of seven live summaries, because rendered prose cannot distinguish a sentence join
+from `System.IO` or `Document.LoadFamily`. If the property is structural, assert it where the structure
+still exists — here, against the XML rather than the rendered string.
 
 **And prefer the shape that cannot drift.** A guard that reflects, parses, or derives from the real artifact stays true; one that restates a rule in a second language goes stale the first time the rule moves. That is the whole argument behind issue #91: five hand-maintained lists, three already wrong.
 
