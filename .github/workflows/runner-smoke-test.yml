@@ -1,0 +1,30 @@
+name: Runner smoke test (temporary)
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  smoke:
+    runs-on: [self-hosted, revit-mcp-release]
+    steps:
+      - name: Whoami and environment
+        shell: cmd
+        run: |
+          whoami
+          echo PATH=%PATH%
+      - name: dotnet --version
+        shell: cmd
+        run: dotnet --version
+      - name: git --version
+        shell: cmd
+        run: git --version
+      - name: Check Revit install and API DLLs
+        shell: cmd
+        run: |
+          dir "C:\Program Files\Autodesk\Revit 2027\RevitAPI.dll"
+          dir "C:\Program Files\Autodesk\Revit 2027\RevitAPIUI.dll"
+      - name: Checkout works
+        uses: actions/checkout@v4
+      - name: List checked-out repo root
+        shell: cmd
+        run: dir
