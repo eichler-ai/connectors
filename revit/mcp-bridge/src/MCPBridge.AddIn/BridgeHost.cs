@@ -11,6 +11,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Autodesk.Revit.UI;
 using MCPBridge.Core.Connection;
+using MCPBridge.Core.Diagnostics;
 using MCPBridge.Core.Discovery;
 using MCPBridge.Core.Dispatch;
 using MCPBridge.Core.Execution;
@@ -665,22 +666,12 @@ internal sealed class BridgeHost
     /// OnStartup failure ever would, so keeping them apart means a busy connection log never buries a
     /// startup failure underneath it. Always the LOCAL per-machine directory regardless of local/remote
     /// topology (see TryLogDiagnostic's own comment for why), reusing BrokerDiscoveryOptions.Local()'s
-    /// path computation rather than hand-rolling it a second time.
+    /// path computation rather than hand-rolling it a second time. Size-capped by RollingDiagnosticLog:
+    /// this is the caller that made issue #11 real, since the reconnect loop logs on every failed attempt
+    /// for as long as an outage lasts.
     /// </summary>
     private static void LogConnectionDiagnostic(string message)
-    {
-        try
-        {
-            var directory = BrokerDiscoveryOptions.Local().ConnectorRoot;
-            Directory.CreateDirectory(directory);
-            File.AppendAllText(Path.Combine(directory, "connection.log"), $"{DateTimeOffset.UtcNow:O} {message}\n");
-        }
-        catch
-        {
-            // Best-effort diagnostic only -- a failure here must never mask or interfere with the
-            // reconnect loop itself, which already handles its own failures independently.
-        }
-    }
+        => RollingDiagnosticLog.Append(BrokerDiscoveryOptions.Local().ConnectorRoot, "connection.log", message);
 
     private static void Backoff(ReconnectLoopController reconnectController, CancellationToken stopToken)
     {

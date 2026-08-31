@@ -301,7 +301,8 @@ absent. For the why, a human can click **MCP Bridge → Status** on the Revit ri
 | Error `code` is `script-lifecycle-confirmation-required` | A gated lifecycle/worksharing member without confirmation | Nothing ran. If genuinely intended, resend the **identical** call with `confirm_lifecycle_actions: true`. The `message` names every gated member used. |
 
 For a human debugging deeper: the add-in writes `connection.log` and `startup-errors.log` to
-`%LOCALAPPDATA%\Connectors\Revit\` on the machine running Revit. `broker.json` lives there too in
+`%LOCALAPPDATA%\Connectors\Revit\` on the machine running Revit. Each is capped at 5MB and rotates
+once to `<name>.log.old`, so if a log looks suspiciously short, the earlier history is in that file. `broker.json` lives there too in
 local mode; in remote mode it moves to the shared drive — ask a human where that's configured.
 
 ## Quick reference
