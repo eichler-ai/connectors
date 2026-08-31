@@ -444,7 +444,8 @@ internal sealed class BridgeHost
         var assemblies = new List<(string Kind, Assembly Assembly)>(coreAssemblies.Select(a => ("core", a)));
 
         // The connector's OWN script API, indexed as an "addin" (issue #91) -- because that is exactly
-        // what it is. PRD §08 already says add-in APIs stay fully searchable and ranked below core, and a
+        // what it is. PRD §08 already says add-in APIs stay fully searchable (its "ranked below core" is a
+        // tie-break and a browse ordering rather than a ranking guarantee -- measured in issue #97), and a
         // script can call ours as validly as any other add-in's. The only reason it was invisible before
         // is that we excluded ourselves from the mechanism we offer everyone else.
         //
