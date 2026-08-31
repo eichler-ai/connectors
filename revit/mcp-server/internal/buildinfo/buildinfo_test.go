@@ -146,12 +146,13 @@ func TestStalenessCheckOffersOnlyTheCheckThatIsValid(t *testing.T) {
 	}
 
 	// The BLOCKER case. The Go toolchain resolves a repository by walking up
-	// for a `.git` DIRECTORY, so a build made inside a git worktree is
-	// stamped with the ENCLOSING checkout's revision -- measured: a worktree
-	// at 34af007 nested in a checkout at 25cf232 produced a binary serving
-	// the worktree's code and reporting 25cf232, clean. A reader told to
-	// compare that against `git rev-parse HEAD` in the enclosing checkout
-	// gets a MATCH, and concludes a mismatched broker is current.
+	// for a `.git` DIRECTORY, and a worktree's `.git` is a file, so a build
+	// made inside a worktree carries the ENCLOSING checkout's revision: the
+	// binary holds the worktree's code and names the enclosing checkout's
+	// commit. A reader told to compare that against `git rev-parse HEAD` in
+	// the enclosing checkout gets a MATCH, and concludes a mismatched broker
+	// is current. See internal/buildinfo's package comment for the measured
+	// run; the revision below is a fixture, not that measurement.
 	inferred := Info{Revision: full}.StalenessCheck("dev")
 	if strings.Contains(inferred, "git rev-parse HEAD") {
 		t.Errorf("inferred: StalenessCheck() = %q offers a comparison that returns a false MATCH for a "+

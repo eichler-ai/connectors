@@ -24,16 +24,27 @@
 // omits vcs stamps there) must read as unknown, never as a plausible-looking
 // fake value.
 //
-// One toolchain behaviour to know about, measured rather than assumed: the Go
-// toolchain locates the repository by walking up for a `.git` DIRECTORY, so
-// building inside a git WORKTREE (whose `.git` is a file) stamps the revision
-// of the ENCLOSING checkout when the worktree sits inside one -- measured, not
-// assumed: a worktree at 34af007 nested in a checkout at 25cf232 produced a
-// binary serving the worktree's code and reporting 25cf232, clean. That is
-// worse than no signal, because the reader then runs the comparison below in
-// the enclosing checkout and it MATCHES, certifying a mismatched broker as
-// current. This project runs agents in nested worktrees (.gitignore's
-// .claude/worktrees/), so it is a live path, not a hypothetical.
+// One toolchain behaviour to know about. The Go toolchain locates the
+// repository by walking up for a `.git` DIRECTORY; a git worktree's `.git` is
+// a FILE, so the walk continues past it, and a build made inside a worktree
+// nested in another checkout is stamped with the ENCLOSING checkout's
+// revision. The binary contains the WORKTREE's code and reports the ENCLOSING
+// checkout's revision -- that direction is the whole point, and it is the
+// opposite of harmless.
+//
+// Measured here, in this repo, on 2026-08-31 (`go build` in the worktree, then
+// `go version -m` on the result -- run it yourself the same way):
+//
+//	worktree   .claude/worktrees/agent-a18034fd0  HEAD 1b0d96c  (a branch)  .git is a FILE
+//	enclosing  the repo root                      HEAD 34af007  (main)      .git is a DIRECTORY
+//	stamped into the binary built from the worktree: vcs.revision=34af007  <- the enclosing one
+//	vcs.modified=true, describing the ENCLOSING tree's stray untracked file, while the worktree
+//	itself was clean -- the stamp reports another tree's state entirely, not merely another commit
+//
+// That is worse than no signal at all: a reader who runs the comparison this
+// package recommends, in the enclosing checkout, gets a MATCH, and concludes a
+// mismatched broker is current. This project runs agents in nested worktrees
+// (.gitignore's .claude/worktrees/), so it is a live path, not a hypothetical.
 //
 // Two things answer it. Any build that KNOWS which checkout it came from
 // stamps that explicitly via -ldflags (install-mac.sh and

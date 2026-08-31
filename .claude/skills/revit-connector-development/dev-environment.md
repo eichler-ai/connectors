@@ -265,10 +265,13 @@ re-resolve rather than hardcoding either. `robocopy` from `cmd /c` mangles a `\\
   it matches the checkout you are reading.
 - **`go build` stamps the source revision automatically — and gets it WRONG in a git worktree.** The
   toolchain finds the repository by walking up for a `.git` *directory*, and a worktree's `.git` is a
-  file: a build inside a worktree nested in another checkout is stamped with the ENCLOSING
-  checkout's revision (measured: worktree at `34af007`, binary reports `25cf232`, clean), and one
-  outside any checkout is stamped with nothing. `go version -m <binary>` shows what a binary actually
-  carries. Anything that needs the right answer must pass it explicitly
+  file: a build inside a worktree nested in another checkout holds the WORKTREE's code and is stamped
+  with the ENCLOSING checkout's revision (measured: worktree at `1b0d96c`, enclosing checkout at
+  `34af007`, binary reports `34af007` — and its `vcs.modified=true` described the enclosing tree's
+  stray untracked file while the worktree itself was clean, so the stamp is another tree's state
+  entirely). A worktree outside any checkout is stamped with nothing. `go version -m <binary>` shows
+  what a binary actually carries — read it off the binary rather than trusting the build command.
+  Anything that needs the right answer must pass it explicitly
   (`-ldflags "-X .../internal/buildinfo.stampedRevision=$(git -C "$REPO_ROOT" rev-parse HEAD)"`, as
   both build scripts now do).
 - **Run the test harness natively on the Mac** (`-broker-mode remote -broker-bind
