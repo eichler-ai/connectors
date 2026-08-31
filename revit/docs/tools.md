@@ -126,6 +126,13 @@ not message text:
 | `script-await-not-allowed` | top-level `await` isn't supported in scripts |
 | `unknown-execution-id` | the execution predates a Revit/add-in restart; re-run |
 | `ambiguous-instance-version` | discovery call with instances of multiple Revit versions connected; pass an `instance_id` from `detail.candidates` |
+| `missing-required-param` | a required param was absent or empty; `detail.param` (or `detail.params`, where either of two satisfies the rule) names which |
+| `invalid-param-type` | the param was present but the wrong JSON type; `detail.param` and `detail.expected_type` name which and what |
+| `invalid-cursor` | `cursor` was unparseable, or was issued for a different query; re-issue with the original params, or drop `cursor` to start over |
+| `invalid-execution-id` | `execution_id` is whitespace-only, or collides with a different, already-finished execution; `message` says which. Mint a fresh unique id per `execute_script` |
+| `unknown-method` | the add-in doesn't route that method; `detail.supported_methods` lists what it does |
+| `execution-record-vanished` | the execution's record aged out of the ring buffer mid-cancellation (a connector-side race, not a bad request); retry |
+| `dispatch-failed` | the add-in threw where it should have returned an error — a connector-side bug; retry once, then report with `connection.log` |
 
 `notices[]` on a **successful** result reports what was auto-resolved (PRD's
 observability-over-silence principle): auto-answered dialogs, auto-dismissed transaction

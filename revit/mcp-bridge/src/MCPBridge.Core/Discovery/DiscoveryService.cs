@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
+using MCPBridge.Core.Diagnostics;
 using MCPBridge.Core.Protocol;
 
 namespace MCPBridge.Core.Discovery;
@@ -40,8 +41,20 @@ public sealed class DiscoveryService
     {
         if (!string.IsNullOrEmpty(typeFilter) && string.IsNullOrEmpty(namespaceFilter))
         {
+            // `missing-required-param` rather than a code of its own: namespace IS required here, and the
+            // only reason it isn't required unconditionally is that omitting BOTH is the legal namespaces
+            // tier. detail names what makes it required, so a caller branching on the code still learns
+            // the conditional part without a bespoke code for every such rule.
             throw new JsonRpcParamException(
-                "params.type_name requires params.namespace -- list_functions is a strict one-level-at-a-time tree (namespaces -> types -> members); scope by namespace first, then narrow by type.");
+                "params.type_name requires params.namespace -- list_functions is a strict one-level-at-a-time tree (namespaces -> types -> members); scope by namespace first, then narrow by type.",
+                DiagnosticSource.Discovery,
+                "missing-required-param",
+                detail: new Dictionary<string, object?> { ["param"] = "namespace", ["required_by"] = "type_name" },
+                remedy: new[]
+                {
+                    "Re-call list_functions with params.namespace set to the namespace the type lives in, alongside params.type_name.",
+                    "Call list_functions with no params to list the namespaces, then with params.namespace alone to list that namespace's types.",
+                });
         }
 
         if (!string.IsNullOrEmpty(typeFilter))
@@ -215,8 +228,16 @@ public sealed class DiscoveryService
         }
         else
         {
+            // Deliberately the same code/detail/remedy shape the Go broker already emits for this exact
+            // condition (mcp-server discovery_tools.go's own describe_function guard) -- the two sides
+            // shadow each other depending on where validation lands first, and issue #69 is precisely
+            // about them not answering in two different shapes.
             throw new JsonRpcParamException(
-                "params.member and params.member_id are both missing -- at least one is required to identify the member to describe.");
+                "params.member and params.member_id are both missing -- at least one is required to identify the member to describe.",
+                DiagnosticSource.Discovery,
+                "missing-required-param",
+                detail: new Dictionary<string, object?> { ["params"] = new[] { "member", "member_id" } },
+                remedy: new[] { "Pass member (a fully-qualified Type.Member) or member_id (an exact XML-doc-id from search_functions or a prior describe_function's overloads[] list)." });
         }
 
         if (!_cache.TypeExistsByFullName(typeName))
@@ -352,12 +373,33 @@ public sealed class DiscoveryService
         var parts = cursor.Split(':', 2);
         if (parts.Length != 2 || !int.TryParse(parts[0], out var offset) || offset < 0)
         {
-            throw new JsonRpcParamException($"params.cursor '{cursor}' is not a valid cursor.");
+            throw new JsonRpcParamException(
+                $"params.cursor '{cursor}' is not a valid cursor.",
+                DiagnosticSource.Discovery,
+                "invalid-cursor",
+                detail: new Dictionary<string, object?> { ["param"] = "cursor", ["cursor"] = cursor },
+                remedy: new[]
+                {
+                    "Pass back the next_cursor value from the previous response verbatim -- a cursor is opaque and is not meant to be constructed or edited.",
+                    "Omit params.cursor to start the listing from the beginning.",
+                });
         }
 
         if (!string.Equals(parts[1], HashScope(scopeKey), StringComparison.Ordinal))
         {
-            throw new JsonRpcParamException($"params.cursor '{cursor}' was issued for a different query -- re-issue the original request without a cursor to start over, rather than reusing this one with different params.");
+            // Same code as the unparseable case above, different remedy: both are "this cursor is not
+            // usable here", and the actionable difference is which of the two remedies applies, not a
+            // second code a caller would have to learn to handle identically.
+            throw new JsonRpcParamException(
+                $"params.cursor '{cursor}' was issued for a different query -- re-issue the original request without a cursor to start over, rather than reusing this one with different params.",
+                DiagnosticSource.Discovery,
+                "invalid-cursor",
+                detail: new Dictionary<string, object?> { ["param"] = "cursor", ["cursor"] = cursor },
+                remedy: new[]
+                {
+                    "Re-issue the request with the SAME query/namespace/type params the cursor was issued for.",
+                    "Or, to change those params, drop params.cursor and start that new listing from the beginning.",
+                });
         }
 
         return offset;
