@@ -46,6 +46,11 @@ These are the rules that generalize. Each one exists because violating it cost r
   file and filter the file. A `tail`/`grep` chain has repeatedly destroyed the one line that
   mattered, and an empty filter result reads identically to a pass. In a background pipeline `grep`
   also needs `--line-buffered`, or the output file stays empty until the process exits.
+  **This applies hardest to a run you expect to pass.** A one-off failure filtered down to its summary
+  line is unattributable: a Core suite went red once on the net8 leg, the filter kept only
+  `Failed: 1`, and ten subsequent runs were clean -- so the failing test's name, the only thing that
+  would have identified it, was destroyed by the command that observed it. Intermittents are exactly
+  the results you get one chance to capture.
 - **Prove identity, don't compare names.** To check that two paths are the same tree, drop a
   uniquely-named probe file on one side and look for it from the other. Names legitimately differ
   (a worktree's share name need not match its directory), so a name comparison both false-positives
