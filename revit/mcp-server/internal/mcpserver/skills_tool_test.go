@@ -255,16 +255,35 @@ func TestSkillFileDescribesCreatedDocumentLifecycleHonestly(t *testing.T) {
 				"Revit session (#114)", marker)
 		}
 	}
-	if !strings.Contains(section, "next") && !strings.Contains(section, "later") {
-		t.Error("the created-documents section does not say that closing a created document happens in a " +
-			"SUBSEQUENT call: without that, the same-run refusal reads as 'cannot be closed at all', " +
-			"which is the false claim that caused #114")
+	// The close RECIPE itself, which is the part with consequences. Scoped to the fenced block so a
+	// stray "later" elsewhere in the section cannot satisfy it -- an earlier version of this check
+	// looked for "next"/"later" anywhere in the section and passed on an unrelated sentence three
+	// paragraphs up, guarding nothing while claiming to guard the whole close story.
+	recipe := ""
+	if a := strings.Index(section, "```csharp\nAutodesk.Revit.DB.Document scratch"); a >= 0 {
+		if b := strings.Index(section[a:], "```\n"); b > 0 {
+			recipe = section[a : a+b]
+		}
+	}
+	if recipe == "" {
+		t.Error("the created-documents section no longer carries a runnable Close recipe: an agent told " +
+			"only that cleanup is possible, without the four lines that do it, is where #114 started")
+	}
+	// PathName is the load-bearing one. Title alone does not identify a scratch document -- Revit
+	// auto-names unsaved documents Project1, Project2..., and a SAVED model at ...\Project1.rvt has
+	// Title == "Project1" too -- so a recipe matching on Title alone hands an agent a Close(false),
+	// which discards without prompting, aimed at a real user file. Verified live that both collide.
+	if recipe != "" && !strings.Contains(recipe, "PathName") {
+		t.Error("the Close recipe does not filter on PathName: matching a scratch document by Title alone " +
+			"can resolve to a person's own unsaved document, or to a saved model of the same name, and " +
+			"Close(false) then discards their work without a prompt")
 	}
 	visibility := []string{"headless", "no window", "never the active document", "not visible"}
 	found := false
 	for _, marker := range visibility {
 		if strings.Contains(section, marker) {
 			found = true
+			break
 		}
 	}
 	if !found {
@@ -276,6 +295,13 @@ func TestSkillFileDescribesCreatedDocumentLifecycleHonestly(t *testing.T) {
 	// Claims verified false against Revit 2027. Kept as an explicit denylist
 	// because each one was in this file at some point and each one, believed,
 	// leads an agent to abandon cleanup.
+	//
+	// Deliberately scanning the WHOLE file, not just section -- these claims are
+	// wrong wherever they appear, and one of them migrating into the quick
+	// reference or the troubleshooting table should still fail. Note the honest
+	// limit: exact substrings catch these four regressions, not a newly-invented
+	// false claim. Nothing automatic can do the latter; that is what verifying
+	// against a running Revit before writing is for.
 	forbidden := map[string]string{
 		"There is no cleanup path":          "a created document CAN be closed, from any run after the one that created it",
 		"has no `document_id`":              "an unsaved created document gets a tmp-<guid> id and appears in list_instances",

@@ -65,28 +65,28 @@ public sealed class Connector
     public void Publish(string sourcePath, string? name = null) => _runtime.Publish(sourcePath, name);
 
     /// <summary>
-    /// Creates a new, blank project document and opens it for writing, so the script can modify it
-    /// immediately.
-    ///
-    /// <para>The document is headless: in memory, no window, no open view, and never the active document,
-    /// so a person watching Revit sees nothing appear. Writable by script does not mean visible to
-    /// them.</para>
+    /// Creates a new, blank project document, open for writing but headless: in memory, with no window,
+    /// no open view, and never the active document. The script can modify it at once; a person watching
+    /// Revit sees nothing appear.
     ///
     /// <para>Prefer this over <c>UIApplication.Application.NewProjectDocument</c>, which returns a document
     /// nothing has opened for writing and would need <see cref="OpenForWriting"/> as a separate step.</para>
     ///
     /// <para>Being unsaved, it gets a session-only <c>tmp-</c> document id that <c>list_instances</c>
-    /// reports, so a later execute_script call can target it directly. Close it when done: this call holds
-    /// its transaction open, so Revit refuses <c>Close</c> for the rest of this script, but any later call
-    /// closes it with <c>confirm_lifecycle_actions</c>.</para>
+    /// reports, so a later execute_script call can target it directly. This call holds its transaction
+    /// open, so Revit refuses both <c>Close</c> and <c>SaveAs</c> on it for the rest of this script; any
+    /// later call does either, with <c>confirm_lifecycle_actions</c>. Close your scratch documents —
+    /// nothing else will.</para>
     /// </summary>
     /// <remarks>
     /// The headless behaviour is deliberate, not a gap. A script-created document with a real window would
     /// steal focus from whatever a person has open, and Revit refuses to activate a document while the
     /// active one is modifiable -- which the script's own target always is -- so a window could not be
     /// opened from inside the creating call anyway. Making a created document visible is a separate,
-    /// deliberate act: save it, then call OpenAndActivateDocument from a later call routed at a different
-    /// document.
+    /// deliberate act, and takes two further calls because SaveAs is blocked here for the same reason
+    /// Close is: SaveAs it from one later call, then OpenAndActivateDocument from another routed at a
+    /// different document. Verified live against Revit 2027; the raw NewProjectDocument path, having no
+    /// managed transaction, can SaveAs in its own run.
     /// </remarks>
     /// <param name="templatePath">Path to a project template. Defaults to the Revit install's own default
     /// project template, which is what a blank document needing no template asset should use.</param>
@@ -100,8 +100,8 @@ public sealed class Connector
     /// family template, so a template path is required.
     ///
     /// <para>Headless and session-lived exactly as <see cref="CreateProjectDocument"/> describes: no
-    /// window, never active, and yours to close from a later execute_script call with
-    /// <c>confirm_lifecycle_actions</c> once you are done with it.</para>
+    /// window, never active, no <c>Close</c> or <c>SaveAs</c> during the run that creates it, and yours to
+    /// close from a later execute_script call with <c>confirm_lifecycle_actions</c> once you are done.</para>
     /// </summary>
     /// <param name="templatePath">Path to a family template (.rft).</param>
     /// <returns>The new family document, open for writing.</returns>

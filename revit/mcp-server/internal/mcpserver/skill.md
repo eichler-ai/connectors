@@ -112,9 +112,10 @@ Autodesk.Revit.DB.Level.Create(doc, 10.0);       // just write to it — no tran
 
 **What you get is headless**: in memory, no window, no open view, never the active document — writable
 by *script*, not visible to the person, who sees nothing appear. To hand them something they can see,
-save it and call `UIApplication.OpenAndActivateDocument(path)` from a **later** call routed at a
-*different* document; Revit refuses to activate while the active document is modifiable, and your own
-target always is.
+`SaveAs` it in one call, then `UIApplication.OpenAndActivateDocument(path)` from a **later** call routed
+at a *different* document (Revit refuses to activate while the active document is modifiable, and your
+own target always is). Note the ordering: a connector-created document cannot be saved in the run that
+created it either — see below.
 
 **The raw `UIApplication.Application.NewProjectDocument`/`NewFamilyDocument` still work but return a
 document nothing has opened for writing** — writing to it throws
@@ -138,22 +139,32 @@ cannot be undone, so an earlier one can keep its changes; you then get a
 `script-partial-commit` notice naming which documents kept theirs and which did not; the ordering means
 the active document is always the one rolled back.
 
-**Close the ones you were only using as scratch — just not in the run that created them.** While your
-script runs, the connector holds that document's transaction open and **Revit itself** refuses `Close`
-("Close is not allowed when there is any open sub-transaction, transaction or transaction group"); no
-flag lifts that. The transaction closes when your script returns, so the **next** call closes the
-document normally, unsaved edits and all, with `confirm_lifecycle_actions: true`:
+**Close your scratch documents — just not in the run that created them.** For the length of that run the
+connector holds the document's transaction open, and **Revit itself** refuses both `Close` ("Close is not
+allowed when there is any open sub-transaction, transaction or transaction group") and `SaveAs` ("Unable
+to close all open transaction phases!"); no flag lifts either. The transaction closes when your script
+returns, so the **next** call does both normally with `confirm_lifecycle_actions: true`. Have the creating
+run `return doc.Title;` so the follow-up matches a title it actually saw:
 
 ```csharp
 Autodesk.Revit.DB.Document scratch = null;
 foreach (Autodesk.Revit.DB.Document d in UIApplication.Application.Documents)
-    if (d.Title == "Project1") scratch = d;      // don't Close mid-iteration; find first
-scratch.Close(false);                            // false = discard changes, no save prompt
+    if (d.PathName == "" && d.Title == "Project7") { scratch = d; break; }
+if (scratch == null) return "already gone";
+scratch.Close(false);            // false = discard; never prompts
 ```
 
-Nothing tidies up for you: an unclosed document stays open for the rest of the person's session, and a
-run of them will exhaust the memory of the Revit they are working in. Close each as soon as you are
-done. (Revit also refuses to `Close` the *active* document from the API — activate another one first.)
+**Test `PathName == ""` as well as `Title`.** `Close(false)` discards unsaved work without asking, and
+`Title` alone does not identify a scratch document: Revit auto-names unsaved ones `Project1`, `Project2`,
+… so a person's own looks exactly like yours, and a *saved* model at `…\Project1.rvt` has
+`Title == "Project1"` too. The empty-`PathName` test keeps you off anything on disk.
+
+**If your script threw, whatever it created is still open** — transactions roll back, documents don't
+disappear. `list_instances` lists unsaved ones as `tmp-` ids; those absent before your call are yours.
+
+Nothing tidies up for you, and a run of scratch documents will exhaust the memory of the Revit a person
+is working in. (Revit refuses to `Close` the *active* document — route a call at another document,
+activate that, then close.)
 
 ### What you may not do without saying so
 
@@ -313,7 +324,7 @@ absent. For the why, a human can click **MCP Bridge → Status** on the Revit ri
 | `status: "unresponsive"` | Revit stopped answering heartbeats | Wait; if it persists, Revit needs attention from the user. |
 | `status: "unrecoverable"` | A prior script ignored cancellation | Nothing you send will run. Revit must be restarted; the instance gets a new `instance_id`. |
 | Script fails with `CS0103`/`CS1503`/`CS0246` | A compile error, not infrastructure | Fix the script. `CS0246` usually means an unqualified Revit type — only `System` is imported, so write `Autodesk.Revit.DB.Wall` or add a `using`. Check overloads with `describe_function` rather than guessing at a `CS1503`. |
-| `NewRoom` returns a room with no boundary segments and `Area == 0`, walls look correct | The level's room computation plane misses the walls. `Level.Create` leaves `LEVEL_ROOM_COMPUTATION_HEIGHT` at 0 — the level's own elevation — so walls with any base offset begin above the plane and bound nothing. Revit only warns "Room is not in a properly enclosed region". | Set the level's `BuiltInParameter.LEVEL_ROOM_COMPUTATION_HEIGHT` to a height inside the wall body (e.g. `4.0` feet), then `Document.Regenerate()`. The existing room picks up its boundaries; no need to re-place it. |
+| `NewRoom` returns a room with no boundary segments and `Area == 0`, walls look correct | The room computation plane must fall *inside* the wall bodies, and doesn't. `Level.Create` leaves `LEVEL_ROOM_COMPUTATION_HEIGHT` at 0, i.e. the level's own elevation — fine for walls sitting flush on it, but not if they have a base offset, are based on a lower level, or are shorter than the height you set. Revit only warns "Room is not in a properly enclosed region". | Set the level's `BuiltInParameter.LEVEL_ROOM_COMPUTATION_HEIGHT` to a height crossing the walls (e.g. `4.0` feet), then `Document.Regenerate()`; the existing room picks up its boundaries, no need to re-place it. It is a **per-level** setting and recomputes every room on that level, so pick a height that suits all of them. |
 | Error `code` is `script-api-denied` | You used something flatly rejected — most often opening your own `Transaction` | See "What you may not do". Nothing ran and nothing changed; no argument lifts this, the script has to change. |
 | Error `code` is `script-lifecycle-confirmation-required` | A gated lifecycle/worksharing member without confirmation | Nothing ran. If genuinely intended, resend the **identical** call with `confirm_lifecycle_actions: true`. The `message` names every gated member used. |
 
