@@ -33,10 +33,10 @@ func TestSkillFileStaysWithinItsLightweightBudget(t *testing.T) {
 	const pessimisticBytesPerToken = 3
 	const ceilingTokens = 25000
 
-	// Raised from ceiling/4 (6250) once the connector's own script API and file exchange landed
-	// (#91/#92, §09). The file had run flush against the old figure since #91, so every skill.md PR
-	// was arriving at a hard wall -- and a budget calibrated to a smaller product surface eventually
-	// evicts something an agent genuinely needs. An agent that doesn't know about the
+	// Raised from ceiling/4 (6250). The file has sat within a few tokens of that figure for a long
+	// time -- long enough that any addition now arrives at a hard wall -- while the connector grew its
+	// own script API (#91/#92) and file exchange (§09). A budget calibrated to a smaller surface
+	// eventually evicts content an agent genuinely needs, and an agent that does not know about the
 	// confirmation-gated tier costs far more than the 1250 tokens saved by not telling it.
 	//
 	// Still derived from the host cap rather than picked: 30% of it, and still "orientation, not
@@ -45,16 +45,22 @@ func TestSkillFileStaysWithinItsLightweightBudget(t *testing.T) {
 
 	// The old figure is kept as a SOFT line. Raising a ceiling removes the thing that made it useful
 	// -- the prompt to ask whether a paragraph earns its space -- and "we'll refactor it back down
-	// later" has no forcing function once the pressure is off. This restores the prompt without
-	// blocking: crossing it reports how much headroom is left, so the trend is visible in CI output
-	// rather than only discovered by hitting the wall.
+	// later" has no forcing function once the pressure is off.
+	//
+	// t.Logf alone would be dead code here: `go test` DISCARDS a passing package's output entirely --
+	// t.Logf, stdout and stderr alike -- so nothing below is visible under either the CI command or
+	// the `go test ./...` this repo's SKILL.md documents. The ci.yml step "skill.md budget headroom"
+	// re-runs this one test with -v for the sole purpose of surfacing it. If that step is ever
+	// removed, this branch goes silent and should be deleted rather than left as decoration.
 	const softBudgetTokens = ceilingTokens / 4
 
 	approxTokens := len(skillFile) / pessimisticBytesPerToken
 	if approxTokens > softBudgetTokens && approxTokens <= budgetTokens {
-		t.Logf("skill file is ~%d tokens, past the ~%d-token soft line with ~%d tokens of headroom "+
-			"before the %d-token limit. Not a failure. Worth asking whether what you just added is "+
-			"orientation an agent cannot get from describe_function.",
+		// Phrased as state, not as a change: this fires on every run of the package while the file
+		// sits in the window, including for someone who never opened skill.md.
+		t.Logf("skill.md is ~%d tokens, past the ~%d-token soft line, with ~%d tokens of headroom "+
+			"before the %d-token limit. Not a failure. If you are adding to this file, it is worth "+
+			"asking whether the addition is orientation an agent cannot get from describe_function.",
 			approxTokens, softBudgetTokens, budgetTokens-approxTokens, budgetTokens)
 	}
 	if approxTokens > budgetTokens {
