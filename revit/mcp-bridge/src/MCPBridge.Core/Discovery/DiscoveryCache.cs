@@ -1130,6 +1130,28 @@ public sealed class DiscoveryCache : IDisposable
                 isConstructor ? string.Empty : name,
                 ShortTypeName(declaringType));
 
+            // A row the query's words do not explain AT ALL is not a tier-2 row (issue #80). Admission is
+            // `LOWER(name) LIKE '%token%'` against the raw stored name, which matches across word
+            // boundaries; IdentifierRelevance scores against SplitWords, which never does. So a token can
+            // admit a row and then earn it nothing: SplitWords("LineWeight") is ["line","weight"], and the
+            // token "lineweight" is a contiguous substring of the raw name but is in no word-part, giving
+            // relevance 0. At the old floor that row scored 500.5 and therefore outranked EVERY tier-3
+            // match in the corpus, however strong.
+            //
+            // Measured on the real corpus: "create lineweight" put Category.GetLineWeight,
+            // Category.SetLineWeight, FilledRegionType.IsValidLineWeight,
+            // OverrideGraphicSettings.SetProjectionLineWeight and a dozen more at exactly 500.50, above
+            // the best tier-3 row. Dropping them lets tier 3 rank them on their merits, and makes the tier
+            // boundary mean what its own comments already claim: tier 2 is "the query's words explain this
+            // name", and a zero score says they do not.
+            //
+            // Note this leaves WEAK-but-nonzero rows alone (UnitTypeId.Kilonewtons earns a prefix credit
+            // for "create kilonewton"). That is arguably correct and deliberately unchanged.
+            if (relevance <= 0.0)
+            {
+                continue;
+            }
+
             scored.Add((id, 500 + (TierTwoBand * relevance) + CoreBoost(isCore)));
         }
 

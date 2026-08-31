@@ -29,7 +29,7 @@ is the element new	Autodesk.Revit.DB.ElementOnPhaseStatus.New	5	#86 -- must surv
 # Open-defect rows: reported, NOT yet fixed. Snapshot-only on purpose -- an expectation here would be a
 # red suite pinned to a known bug. The expectation is added by the PR that fixes it.
 # ---------------------------------------------------------------------------------------------------
-create lineweight			#80 -- 16 rows tie at the tier-2 floor above every tier-3 match
+create lineweight			#80 -- FIXED; 16 rows tied at the tier-2 floor above every tier-3 match. Snapshot-only: the offenders sat at ranks 35-42, below this file's depth, so the invariant is asserted in TierBoundaryTests instead
 create a design option			#86 -- FIXED (CannotCreateNewDesignOption no longer rank 1); snapshot-only because Revit exposes no API to create a design option, so there is no defensible right answer to assert
 join walls at corner			#87 -- neither JoinGeometryUtils nor WallUtils appears on page 1
 change the width of a wall			#86 secondary -- ChangeRegionWidth demoted by the set/change group
