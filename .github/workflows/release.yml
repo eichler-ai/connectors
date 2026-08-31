@@ -1,0 +1,242 @@
+# PRD §12 release pipeline. Builds, (optionally) signs, packages, and publishes a real GitHub
+# Release for the MCP Bridge add-in (C#, both Revit TFMs) + MCP Server broker (Go).
+#
+# Runs on the self-hosted Windows runner (label `revit-mcp-release`, registered from the project's
+# own Mac+Parallels dev VM) -- the real RevitAPI.dll/RevitAPIUI.dll references only resolve on a
+# machine with a real Revit install (see ci.yml's own comment on why the C# side isn't built on
+# GitHub's hosted runners at all). Deliberately triggered on `push: tags` and `workflow_dispatch`
+# ONLY, never `pull_request` -- that is the safe pattern for a self-hosted runner sitting on a
+# public repo, since a PR from a fork could otherwise get arbitrary code executed on our own VM.
+#
+# Shell: `powershell` (Windows PowerShell 5.1) throughout, not `pwsh` -- confirmed via `prlctl exec`
+# that this runner's VM has no PowerShell Core installed, and the project's own dev-environment
+# tooling already assumes Windows PowerShell 5.1 is what's present on this machine. `cmd` was used
+# for this session's earlier runner smoke test, but PowerShell is what install.ps1 and the rest of
+# this project's Windows automation are written in, so this workflow matches that rather than the
+# throwaway smoke test.
+#
+# Signing: SELF-SIGNED, deliberately, for now -- the user decided to defer a real CA-issued
+# certificate's cost (and the identity verification it needs, individual or business) until the
+# product is fully released. A self-signed cert has none of the CA/Browser Forum requirements a
+# publicly-trusted cert does (no HSM, no ~15-month validity cap), so the Azure Key Vault +
+# AzureSignTool + OIDC apparatus an earlier version of this workflow scaffolded is unneeded for
+# this interim state -- plain PowerShell Set-AuthenticodeSignature against a PFX is enough, and
+# matches this repo's existing dev-loop signing precedent in shape (see
+# revit/mcp-bridge/tools/Sign-AddIn.ps1 / New-DevSigningCert.ps1), though that cert is a SEPARATE,
+# machine-local, non-exportable one for suppressing Revit's own prompt during dev iteration --
+# this one is exportable by design, since it has to travel with a CI-signed artifact.
+#
+# Two repo secrets carry the cert (generated once, this session, and never persisted anywhere else
+# unencrypted -- see the "Sign build artifacts" step below for what they're used for):
+#   SELFSIGNED_CERT_PFX_BASE64  -- base64-encoded .pfx containing the self-signed cert + private key
+#   SELFSIGNED_CERT_PASSWORD    -- the PFX's export password
+#
+# IMPORTANT, real product consequence: a self-signed signature is genuine Authenticode (not
+# "unsigned"), but it is NOT trusted by end-user machines by default -- Windows still shows an
+# "Unknown Publisher" SmartScreen warning on install until a real CA-issued cert replaces this
+# step. That is the accepted state for now, not a bug. Swapping to a real cert later is a
+# contained change: replace the "Sign build artifacts" step's cert source (this PFX -> a Key
+# Vault/eSigner/whatever the eventual CA requires); nothing else in this pipeline needs to change.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to build (e.g. v0.1.0) -- for manual/test runs only, must still start with "v"'
+        required: true
+        type: string
+
+permissions:
+  contents: write   # softprops/action-gh-release needs this to publish a release + upload assets
+
+defaults:
+  run:
+    # Plain `shell: powershell` dot-sources the generated step script under this runner's default
+    # execution policy, which is Restricted (confirmed live: "running scripts is disabled on this
+    # system", PSSecurityException) -- not something to fix by mutating the VM's machine-wide policy
+    # for one workflow. -ExecutionPolicy Bypass scopes the relaxation to just this process.
+    shell: powershell -ExecutionPolicy Bypass -Command ". '{0}'"
+
+jobs:
+  release:
+    name: Build, sign, package, publish
+    runs-on: [self-hosted, revit-mcp-release]
+    env:
+      # `secrets` cannot be referenced directly inside a step `if:` expression (GitHub Actions
+      # rejects it at parse time: "Unrecognized named-value: 'secrets'") -- only inside `env:`/`with:`
+      # blocks. Route it through a job-level env var instead, and gate on that.
+      SIGNING_CONFIGURED: ${{ secrets.SELFSIGNED_CERT_PFX_BASE64 != '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine release tag
+        run: |
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $tag = "${{ inputs.tag }}"
+          } else {
+            $tag = "${{ github.ref_name }}"
+          }
+          if (-not $tag.StartsWith("v")) {
+            throw "Release tag '$tag' must start with 'v' (e.g. v0.1.0)."
+          }
+          Write-Host "Release tag: $tag"
+          echo "RELEASE_TAG=$tag" >> $env:GITHUB_ENV
+
+      # --- Build: MCP Bridge (C#), both TFMs ------------------------------------------------------
+      # -p:MCPBridgeSignDevBuild=false: the csproj's dev-loop auto-signing (a LOCAL self-signed cert,
+      # see dev-environment.md) is a convenience for the VM's interactive dev loop, not this runner --
+      # it just failed here trying to reach a timestamp server with no cert configured. This
+      # workflow's own AzureSignTool step (or its no-op) is the real release-signing story.
+      - name: Build MCP Bridge (both TFMs, Release)
+        run: dotnet build revit\mcp-bridge\MCPBridge.sln -c Release -p:MCPBridgeSignDevBuild=false
+        env:
+          MCPBRIDGE_VERSION: ${{ env.RELEASE_TAG }}
+
+      # --- Build: MCP Server (Go broker), Windows/amd64 -------------------------------------------
+      # actions/setup-go downloads its own Go toolchain into the runner's tool cache -- this VM has
+      # no Go installed system-wide (confirmed via `prlctl exec ... go version` before writing this
+      # workflow), so this is not optional the way it might be read as on a normal dev machine.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: revit/mcp-server/go.mod
+          cache-dependency-path: revit/mcp-server/go.sum
+
+      - name: Build MCP Server broker (windows/amd64)
+        working-directory: revit/mcp-server
+        run: |
+          $env:GOOS = "windows"
+          $env:GOARCH = "amd64"
+          go build -ldflags "-X main.version=$env:RELEASE_TAG" -o mcp-server.exe ./cmd/mcp-server
+
+      # --- Sign (self-signed, interim -- see this file's top-of-file comment for why) ---------------
+      - name: Sign build artifacts
+        if: ${{ env.SIGNING_CONFIGURED == 'true' }}
+        run: |
+          $pfxPath = "$env:RUNNER_TEMP\selfsigned.pfx"
+          [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String("${{ secrets.SELFSIGNED_CERT_PFX_BASE64 }}"))
+          $securePw = ConvertTo-SecureString -String "${{ secrets.SELFSIGNED_CERT_PASSWORD }}" -Force -AsPlainText
+          # CurrentUser\My, not LocalMachine\My: this runner's service account may not hold
+          # LocalMachine-store write rights, and Set-AuthenticodeSignature only needs the cert
+          # loaded somewhere it can read the private key from, not any particular store.
+          $cert = Import-PfxCertificate -FilePath $pfxPath -CertStoreLocation Cert:\CurrentUser\My -Password $securePw
+          # Independent review finding: the private key otherwise stays resident in this persistent
+          # runner's cert store indefinitely after every release -- any later code running as this
+          # same service account could sign as "Eichler Connectors" without ever touching the
+          # secrets. Recorded here so the cleanup step below can remove it by thumbprint regardless
+          # of which step in this job actually failed.
+          echo "SIGNING_CERT_THUMBPRINT=$($cert.Thumbprint)" >> $env:GITHUB_ENV
+
+          $targets = @(
+            "revit\mcp-bridge\src\MCPBridge.AddIn\bin\Release\net10.0-windows\MCPBridge.AddIn.dll",
+            "revit\mcp-bridge\src\MCPBridge.AddIn\bin\Release\net8.0-windows\MCPBridge.AddIn.dll",
+            "revit\mcp-server\mcp-server.exe"
+          )
+          # Mirrors Sign-AddIn.ps1's own per-server retry and post-sign re-verification (see that
+          # script's doc comments for why: Set-AuthenticodeSignature can leave a file
+          # signed-but-untimestamped on a timestamp-only failure even when it doesn't throw, so the
+          # real check is re-reading the signature afterward, not trusting the cmdlet's own return).
+          $timestampServers = @("http://timestamp.digicert.com", "http://timestamp.sectigo.com")
+          foreach ($target in $targets) {
+            $signed = $false
+            $lastError = $null
+            foreach ($server in $timestampServers) {
+              try {
+                Set-AuthenticodeSignature -FilePath $target -Certificate $cert -TimestampServer $server -HashAlgorithm SHA256 -ErrorAction Stop | Out-Null
+              } catch {
+                Write-Host "Set-AuthenticodeSignature threw signing $target via $server`: $($_.Exception.Message)"
+                $lastError = $_
+                continue
+              }
+              $verify = Get-AuthenticodeSignature -FilePath $target
+              # UnknownError is the expected status for a self-signed leaf with no trusted chain --
+              # not CHAIN-trusted is the whole "Unknown Publisher" tradeoff this interim state
+              # accepts (see top-of-file) -- but Set-AuthenticodeSignature can throw NOTHING and
+              # still leave a file signed-but-UNTIMESTAMPED on a timestamp-only failure (the reason
+              # this re-verification step exists at all, per the comment above). Status alone
+              # cannot tell the two apart: a self-signed cert reports UnknownError identically
+              # whether or not a timestamp landed. Independent review finding: the original version
+              # of this check accepted Status alone and so verified nothing about the timestamp it
+              # claims to guarantee -- TimeStamperCertificate is the actual proof a countersignature
+              # was applied, present only when the timestamp genuinely succeeded.
+              if (($verify.Status -eq "Valid" -or $verify.Status -eq "UnknownError") -and $verify.TimeStamperCertificate) {
+                Write-Host "Signed $target (timestamped via $server): $($verify.Status)"
+                $signed = $true
+                break
+              }
+              Write-Host "Signature status after attempting $server for $target`: $($verify.Status) -- $($verify.StatusMessage) -- TimeStamperCertificate=$($verify.TimeStamperCertificate)"
+              $lastError = $verify.StatusMessage
+            }
+            if (-not $signed) { throw "Failed to sign $target with a valid timestamp against any configured timestamp server. Last error: $lastError" }
+          }
+
+      - name: Clean up signing material
+        if: always()
+        run: |
+          Remove-Item "$env:RUNNER_TEMP\selfsigned.pfx" -Force -ErrorAction SilentlyContinue
+          # Removes the imported cert (private key included) from Cert:\CurrentUser\My, not just the
+          # temp PFX file -- see the import step's own comment for why this matters on a runner that
+          # stays up indefinitely. Empty when signing was skipped entirely, hence the guard.
+          if ($env:SIGNING_CERT_THUMBPRINT) {
+            Remove-Item "Cert:\CurrentUser\My\$env:SIGNING_CERT_THUMBPRINT" -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Signing skipped (no self-signed cert secrets configured)
+        if: ${{ env.SIGNING_CONFIGURED != 'true' }}
+        run: |
+          Write-Host "::warning::Signing skipped -- SELFSIGNED_CERT_PFX_BASE64 not configured. Shipping UNSIGNED artifacts."
+
+      # --- Assemble mcpbridge-release.zip, exact layout install.ps1 / quickstart.md expect --------
+      # addin-2027/ (net10.0-windows build output + manifest), addin-2025/ (net8.0-windows + manifest),
+      # server/ (the built broker exe) -- all at the zip root. See quickstart.md "3. Assemble the
+      # local package zip" and install.ps1's per-version `addin-$version` extraction.
+      - name: Assemble release package
+        run: |
+          $stage = New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\mcpbridge-package"
+
+          $addin2027 = New-Item -ItemType Directory -Force "$($stage.FullName)\addin-2027"
+          Copy-Item revit\mcp-bridge\src\MCPBridge.AddIn\bin\Release\net10.0-windows\* $addin2027 -Recurse
+          Copy-Item revit\mcp-bridge\src\MCPBridge.AddIn\MCPBridge.addin $addin2027
+
+          $addin2025 = New-Item -ItemType Directory -Force "$($stage.FullName)\addin-2025"
+          Copy-Item revit\mcp-bridge\src\MCPBridge.AddIn\bin\Release\net8.0-windows\* $addin2025 -Recurse
+          Copy-Item revit\mcp-bridge\src\MCPBridge.AddIn\MCPBridge.addin $addin2025
+
+          $server = New-Item -ItemType Directory -Force "$($stage.FullName)\server"
+          Copy-Item revit\mcp-server\mcp-server.exe $server
+
+          $zipPath = "$env:RUNNER_TEMP\mcpbridge-release.zip"
+          if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
+          Compress-Archive "$($stage.FullName)\*" $zipPath
+          echo "ZIP_PATH=$zipPath" >> $env:GITHUB_ENV
+
+      # --- checksums.txt -- install.ps1 (around line 424-433) only verifies mcpbridge-release.zip's
+      # hash: it finds the line whose whitespace-separated first token is the SHA256 and which
+      # otherwise contains the asset's filename, matched via `$checksums | Where-Object { $_ -match
+      # [regex]::Escape($asset.name) }`. `Get-FileHash | Format-List` etc. don't match that shape
+      # directly, so the line is built by hand: "<hash>  <filename>", same as the conventional
+      # `sha256sum` output format.
+      - name: Generate checksums.txt
+        run: |
+          $zipHash = (Get-FileHash $env:ZIP_PATH -Algorithm SHA256).Hash
+          $exeHash = (Get-FileHash revit\mcp-server\mcp-server.exe -Algorithm SHA256).Hash
+          $lines = @(
+            "$zipHash  mcpbridge-release.zip",
+            "$exeHash  mcp-server.exe"
+          )
+          $checksumsPath = "$env:RUNNER_TEMP\checksums.txt"
+          $lines -join "`n" | Out-File -FilePath $checksumsPath -Encoding ascii -NoNewline
+          echo "CHECKSUMS_PATH=$checksumsPath" >> $env:GITHUB_ENV
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: ${{ env.RELEASE_TAG }}
+          files: |
+            ${{ env.ZIP_PATH }}
+            ${{ env.CHECKSUMS_PATH }}
