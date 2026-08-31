@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace MCPBridge.Core.Discovery;
 
@@ -129,7 +130,7 @@ internal static class IdentifierRelevance
     /// </summary>
     internal static string? Singularize(string token)
     {
-        if (token.Length <= 3 || !token.EndsWith('s'))
+        if (!token.EndsWith('s'))
         {
             return null;
         }
@@ -141,7 +142,12 @@ internal static class IdentifierRelevance
             return null;
         }
 
-        return token[..^1];
+        // The length guard applies to the RESULT, not the input. Guarding the input let a 4-character
+        // token produce a 3-character singular -- exactly what the guard refuses when typed directly:
+        // "sets" -> "set" admits every %set% in the corpus (Offset, Settings, Reset, Preset, Asset) and
+        // earns SubstringCredit against "offset"; "ends" -> "end" reaches Append, Extend, Legend.
+        var singular = token[..^1];
+        return singular.Length <= 3 ? null : singular;
     }
 
     /// <summary>
@@ -156,20 +162,42 @@ internal static class IdentifierRelevance
     public static IReadOnlyList<string> Expand(string token)
     {
         var singular = Singularize(token);
-        if (!Synonyms.TryGetValue(token, out var synonyms))
+        var hasOwnSynonyms = Synonyms.TryGetValue(token, out var synonyms);
+        if (singular is null && !hasOwnSynonyms)
         {
-            return singular is null ? new[] { token } : new[] { token, singular };
+            return new[] { token };
         }
 
-        var extra = singular is null ? 1 : 2;
-        var expanded = new string[synonyms.Length + extra];
-        expanded[0] = token;
+        var expanded = new List<string>(4) { token };
         if (singular is not null)
         {
-            expanded[1] = singular;
+            expanded.Add(singular);
         }
 
-        Array.Copy(synonyms, 0, expanded, extra, synonyms.Length);
+        if (hasOwnSynonyms)
+        {
+            expanded.AddRange(synonyms!);
+        }
+
+        // The SINGULAR's synonyms matter as much as the token's own, and omitting them silently
+        // un-fixed issue #75 for any query that typed the verb with an -s (independent review finding).
+        // SynonymClassKey is the minimum of this list, and a singular is always a prefix of its plural,
+        // so "creates" keys to "create" -- the same class as "new". TokenizeQuery then drops "new" as a
+        // duplicate slot and keeps "creates". If Expand("creates") did not reach "new",
+        // Document.NewFamilyInstance became unreachable through the synonym route that #75 exists to
+        // provide, for a query that merely conjugated the verb. No corpus query uses an -s verb, so the
+        // snapshot showed nothing: absence of evidence.
+        if (singular is not null && Synonyms.TryGetValue(singular, out var singularSynonyms))
+        {
+            foreach (var s in singularSynonyms)
+            {
+                if (!expanded.Contains(s, StringComparer.Ordinal))
+                {
+                    expanded.Add(s);
+                }
+            }
+        }
+
         return expanded;
     }
 
