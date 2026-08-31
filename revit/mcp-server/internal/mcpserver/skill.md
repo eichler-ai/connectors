@@ -69,19 +69,20 @@ surfaces. Scripts are always explicitly targeted, so they're unaffected. Discove
 
 ## Running a script
 
-`execute_script` takes `instance_id`, `document_id`, `script`, and optional `timeout_ms`,
-`max_duration_ms`, `overwrite_output_files` and `confirm_lifecycle_actions`. `document_id` routes:
-the script runs against that document — active or background — and its workspace follows it. An
-unknown id fails with `document-not-found` plus an `open_documents` candidates list; omitted means
-the active document. `UIDocument` is null unless the routed document is the active one — use
-`Document` when addressing a background document. `return` a value and it
-comes back as `output`:
+`execute_script` takes `instance_id`, `document_id` and `script`; its own schema lists the optional
+timeout, duration, overwrite and confirmation parameters. `document_id` routes: the script runs
+against that document — active or background — and its workspace follows it. An unknown id fails
+with `document-not-found` and an `open_documents` list; omitted means the active document.
+`UIDocument` is null unless the routed document is the active one; use `Document` for a background
+one. `return` a value and it comes back as `return_value` — strings verbatim, collections and
+anonymous types as JSON, anything else as a self-explaining `<...>` marker. `output` is stdout,
+Revit's own writes too.
 
 ```csharp
 return Document.Title;
 ```
 ```json
-{"status":"success","execution_id":"exec-4927...","output":"MCPBridgeTest","files":[],"notices":[]}
+{"status":"success","execution_id":"exec-4927...","return_value":"MCPBridgeTest"}
 ```
 
 ### What's actually in scope
