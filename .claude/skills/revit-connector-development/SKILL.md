@@ -60,6 +60,13 @@ These are the rules that generalize. Each one exists because violating it cost r
   uniquely-named probe file on one side and look for it from the other. Names legitimately differ
   (a worktree's share name need not match its directory), so a name comparison both false-positives
   and false-negatives.
+- **A right conclusion is where wrong evidence hides.** Review checks conclusions, so support that is
+  inverted, borrowed or invented survives whenever the conclusion itself is true — twice in one day: a
+  "measured, not assumed" worked example with its two SHAs swapped (it read as the *opposite* of the
+  bug it documented), and a true "three calls" claim resting on a false reason. Both had been reviewed.
+  So: cite only runs you made, paste them with their labels attached, and never re-label someone else's
+  numbers as your own measurement. Evidence marked "measured" carries an obligation — re-derive it
+  before it becomes a comment, because a comment's whole job is to stop the next person re-deriving it.
 - **Confirm you are running the artifact you just built.** Byte-grep the *deployed* binary for a
   string unique to your change, decoding at both byte alignments (the `#US` heap stores UTF-16
   literals at arbitrary offsets, so a single-alignment decode gives false negatives). Timestamps
@@ -91,8 +98,11 @@ These are the rules that generalize. Each one exists because violating it cost r
   one rung out from the last.
 - **A guard that only fires incidentally is not a guard.** If the thing that actually stopped an
   exploit was a third party's invariant, you are not enforcing anything.
-- **A comment asserting a negative capability is worth nothing until someone tries it.** Verify
-  live rather than reasoning from the code; reasoning has concluded the opposite of reality here.
+- **A claim that something is impossible is worth nothing until someone tries it.** Verify live
+  rather than reasoning from the code; reasoning has concluded the opposite of reality here. This
+  binds hardest in `skill.md`, where such a claim does not merely sit wrong — it is *obeyed*: "there
+  is no cleanup path" for connector-created documents was false (a later run closes them fine), and
+  the agent that believed it stopped trying and leaked five documents into a live session (#114).
 - **A test pinning one exploit's syntax is not coverage of the hole.** Name the *shape* being
   blocked (target-typed construction, method groups, callbacks, aliases), and when adding a case,
   say which shape it adds.

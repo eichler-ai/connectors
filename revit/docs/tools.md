@@ -21,6 +21,17 @@ Design rationale for all of it: [`PRD.md`](PRD.md) §06 (execution), §07 (dialo
 | `describe_function` | yes | full signature/params/docs for one member |
 | `get_skills` | no | the built-in agent guide for using all of the above |
 
+> **Everything above is compiled into the broker binary** — the guide, these schemas, the
+> descriptions — so a broker left running from an older build serves an older connector
+> (issue #116). `get_skills` therefore returns a `build` field, repeated as a footer on the
+> guide itself; the same provenance is the version at `initialize`, the first line of the
+> broker's log, and `mcp-server -version`. The check to trust is `skill_sha256`: it is the
+> served document's own hash, so `shasum -a 256
+> revit/mcp-server/internal/mcpserver/skill.md` printing anything else means the broker is
+> not your checkout. The revision is a weaker signal — the Go toolchain infers it, and
+> misattributes it for a build made inside a git worktree, so only builds that stamp it
+> explicitly (`install-mac.sh`, `redeploy-and-verify.sh`) offer a revision comparison.
+
 ### `execute_script`
 
 | Parameter | Default | Meaning |

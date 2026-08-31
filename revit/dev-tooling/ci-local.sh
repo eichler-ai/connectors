@@ -45,6 +45,24 @@ run_step "go vet ./..." go vet ./...
 run_step "go test -race ./..." go test -race ./...
 run_step "cross-compile Windows build" env GOOS=windows GOARCH=amd64 go build ./...
 
+# CI's "assert a plain build carries its source revision" step, WARN-only here -- the one
+# deliberate divergence from ci.yml in this script, and the reason is a legitimate local setup: the
+# Go toolchain finds a repository by looking for a `.git` DIRECTORY, so a build from a git worktree
+# whose `.git` is a file stamps the enclosing checkout's revision (when nested inside one) or
+# nothing at all (when it isn't). This project's own dev process uses external worktrees for Go
+# work, so failing here would fail every one of them for an environment property, not a defect.
+# What CI asserts is what matters: the artifacts people install know their own revision (#116).
+echo "==> build provenance (warn-only locally -- CI asserts it)"
+provenance_bin="$(mktemp -t mcp-server-provenance)"
+if go build -o "$provenance_bin" ./cmd/mcp-server; then
+    provenance_line="$("$provenance_bin" -version)"
+    echo "    $provenance_line"
+    case "$provenance_line" in
+        *unknown*) echo "    NOTE: this build carries no source revision. Expected from a git worktree; a defect from the main checkout (see internal/buildinfo)." ;;
+    esac
+fi
+rm -f "$provenance_bin"
+
 echo
 echo "### Test harness type-check (Go) -- revit/test-harness"
 cd "$REPO_ROOT/revit/test-harness" || exit 1

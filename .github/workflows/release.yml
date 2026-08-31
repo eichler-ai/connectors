@@ -113,6 +113,23 @@ jobs:
           $env:GOARCH = "amd64"
           go build -ldflags "-X main.version=$env:RELEASE_TAG" -o mcp-server.exe ./cmd/mcp-server
 
+      # A released broker must be able to say which source it was built from: skill.md, every tool
+      # schema and every tool description are compiled into it, so "which revision is this?" is the
+      # only question that distinguishes a stale broker from a wrong document (issue #116). The
+      # revision comes from the Go toolchain's automatic VCS stamping, which needs no flags -- but
+      # -buildvcs=false, -trimpath, or building outside a git checkout would silently turn it off and
+      # ship binaries that report "unknown" forever, with no other symptom. Assert it here, at the one
+      # build whose output people actually install. Self-hosted Windows runner, so the freshly built
+      # windows/amd64 binary runs natively.
+      - name: Assert the release binary carries its build provenance
+        working-directory: revit/mcp-server
+        run: |
+          $line = & .\mcp-server.exe -version
+          Write-Host $line
+          if ($line -match 'unknown') {
+            throw "the release broker reports no source revision ('$line') -- VCS stamping is off (a -buildvcs=false/-trimpath flag, or a build outside the checkout). See internal/buildinfo."
+          }
+
       # --- Sign (self-signed, interim -- see this file's top-of-file comment for why) ---------------
       - name: Sign build artifacts
         if: ${{ env.SIGNING_CONFIGURED == 'true' }}

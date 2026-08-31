@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # One-shot dev-loop helper: optionally build, close Revit gracefully, deploy freshly-built DLLs,
-# relaunch (optionally with a pristine-copy fixture document), ensure a healthy standalone Mac
-# broker (restarting only if the current one is missing/dead/mismatched), and wait until the
+# relaunch (optionally with a pristine-copy fixture document), rebuild the Mac broker from this
+# checkout and ensure a healthy one is running (restarting only if the binary changed, or the
+# current one is missing/dead/mismatched -- issue #116), and wait until the
 # add-in's registration actually lands with the expected document count -- all of it. Replaces a
 # sequence that used to take five-plus separate manual steps (each its own round trip) per cycle.
 #
@@ -56,7 +57,10 @@
 #   --mac-bind IP            This Mac's address the VM can reach (default: auto-detected, first
 #                             10.211.55.x address from ifconfig -- override if that ever changes)
 #   --app-data-dir PATH      Shared broker app-data dir (default: <repo>/Connectors/Revit)
-#   --broker-exe PATH        Mac broker binary (default: <repo>/revit/mcp-server/mcp-server-mac)
+#   --broker-exe PATH        Mac broker binary (default: <repo>/revit/mcp-server/mcp-server-mac).
+#                             This is a BUILD OUTPUT, not just an input: unless --skip-broker-restart
+#                             is given, the broker is rebuilt from this checkout and written here,
+#                             overwriting whatever was at that path.
 #   --tfm TFM                Build output TFM to deploy (default: net10.0-windows)
 #   --revit-version VER      Addins\<VER> folder to deploy into (default: 2027)
 #   --doc-source PATH        VM-side pristine fixture .rvt to launch with (needs --doc-dest too)
@@ -68,10 +72,14 @@
 #                            take ~50s before it even attempts to connect)
 #   --skip-copy               Only close/relaunch/verify -- DLLs already deployed
 #   --skip-relaunch            Only redeploy DLLs -- don't touch the running Revit instance
-#   --skip-broker-restart      Don't touch the standalone Mac broker at all (skips the initial
-#                              ensure/restart). Use when the add-in is already connected to a broker
-#                              that will pick up the new DLLs fine, e.g. redeploying without
-#                              relaunching Revit, or when another process owns the broker.
+#   --skip-broker-restart      Don't touch the standalone Mac broker at all (skips the rebuild AND
+#                              the ensure/restart). Use when the add-in is already connected to a
+#                              broker that will pick up the new DLLs fine, e.g. redeploying without
+#                              relaunching Revit, or when another process owns the broker. Note what
+#                              you are giving up: skill.md and every tool schema live inside the
+#                              broker binary, so a session run this way can be served content older
+#                              than this checkout (issue #116) -- get_skills' own build field and
+#                              `<broker> -version` say which revision is actually running.
 #
 # On success, prints the `go test -tags harness` command line ready to copy-paste, with
 # -broker-bind/-broker-app-data-dir already filled in.
@@ -262,16 +270,61 @@ if $BUILD; then
 fi
 
 if ! $SKIP_BROKER_RESTART; then
+  # BROKER FRESHNESS (issue #116). This script deploys the ADD-IN; nothing here ever rebuilt the
+  # broker, and install-mac.sh -- the only thing that does -- is a one-time setup step. So the
+  # broker serving this dev loop was whatever binary was built whenever that was last run, while
+  # skill.md, every tool schema and every tool description are compiled INTO it. That produced a
+  # live session where get_skills taught an API surface deleted by #91/#92 and the on-disk file was
+  # already correct, which read as a documentation bug for three separate diagnoses.
+  #
+  # Rebuild unconditionally rather than comparing revisions: `go build` is content-addressed and a
+  # no-op run costs well under a second, whereas a comparison would have to be right about which
+  # checkout produced the existing binary. Restart only when the BYTES changed, which keeps the
+  # ensure-not-churn property below: an unchanged binary never drops the add-in's live connection.
+  #
+  # The revision is STAMPED explicitly from $REPO_ROOT rather than left to the toolchain's automatic
+  # stamp. The toolchain finds a repository by walking up for a `.git` DIRECTORY, so a build made
+  # inside a git worktree -- which this project's own agent sessions use -- reports the ENCLOSING
+  # checkout's revision, and a reader comparing that against `git rev-parse HEAD` there would get a
+  # MATCH on a mismatched broker. Same shape in revit/install-mac.sh. "Modified" counts uncommitted
+  # changes to TRACKED files only; a stray untracked scratch file must not permanently light up a
+  # warning.
+  if ! command -v go >/dev/null 2>&1; then
+    echo "Go toolchain not found on PATH -- required to rebuild the broker (issue #116: a stale broker serves a stale skill.md and stale tool schemas)." >&2
+    exit 1
+  fi
+  buildinfo_pkg="github.com/eichler-ai/connectors/revit/mcp-server/internal/buildinfo"
+  broker_ldflags=()
+  if broker_rev="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null)"; then
+    broker_rev_time="$(git -C "$REPO_ROOT" show -s --format=%cI HEAD 2>/dev/null || true)"
+    if git -C "$REPO_ROOT" diff --quiet HEAD 2>/dev/null; then broker_dirty=false; else broker_dirty=true; fi
+    broker_ldflags=(-ldflags "-X $buildinfo_pkg.stampedRevision=$broker_rev -X $buildinfo_pkg.stampedRevisionTime=$broker_rev_time -X $buildinfo_pkg.stampedModified=$broker_dirty")
+  else
+    say "WARNING: $REPO_ROOT is not a git checkout -- the broker will report its revision as unknown"
+  fi
+  broker_hash_before="$(shasum -a 256 "$BROKER_EXE" 2>/dev/null | awk '{print $1}')"
+  say "rebuilding the Mac broker from this checkout -> $BROKER_EXE"
+  if ! ( cd "$REPO_ROOT/revit/mcp-server" && go build "${broker_ldflags[@]}" -o "$BROKER_EXE" ./cmd/mcp-server ); then
+    echo "broker build FAILED -- refusing to continue against whatever binary is already there" >&2
+    exit 1
+  fi
+  broker_hash_after="$(shasum -a 256 "$BROKER_EXE" 2>/dev/null | awk '{print $1}')"
+
   # Ensure-not-churn: a healthy primary already running with our exact arguments is reused as is
   # -- restarting it would drop the add-in's live connection for no benefit (a relaunch produces
-  # its fresh registration from Revit's side). Anything else -- no broker, dead pid in broker.json, or a primary running with
-  # different arguments -- gets the full guarded restart.
-  if broker_is_healthy; then
-    say "standalone Mac broker already healthy (matching args, live pid) -- reusing it"
+  # its fresh registration from Revit's side). Anything else -- a changed binary, no broker, dead
+  # pid in broker.json, or a primary running with different arguments -- gets the full guarded
+  # restart.
+  if [[ "$broker_hash_before" != "$broker_hash_after" ]]; then
+    say "broker binary changed -- restarting so the running primary is the one just built"
+    restart_broker
+  elif broker_is_healthy; then
+    say "standalone Mac broker already healthy (matching args, live pid) and unchanged by the rebuild -- reusing it"
   else
     say "restarting the standalone Mac broker (fresh primary, confirmed via broker.json)"
     restart_broker
   fi
+  say "broker now serving: $("$BROKER_EXE" -version)"
 fi
 
 PS_ARGS=(-SrcRoot "$UNC_ROOT\\revit\\mcp-bridge\\src" -Tfm "$TFM" -AddinsVersion "$REVIT_VERSION" -TimeoutSec "$TIMEOUT_SEC")

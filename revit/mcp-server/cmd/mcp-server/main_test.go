@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/eichler-ai/connectors/revit/mcp-server/internal/buildinfo"
 )
 
 // TestTurnReaderStopUnblocksReadEvenWithNoData is the regression test for
@@ -486,5 +488,26 @@ func TestStdinRelayExhausted(t *testing.T) {
 	}
 	if !r.exhausted() {
 		t.Fatal("once pending is drained and stdin is closed, exhausted must be true")
+	}
+}
+
+// Issue #116: a broker that cannot say which source it was built from leaves a
+// stale binary indistinguishable from a wrong document. versionLine is the one
+// string that answers, and it is used by -version, the startup log and the MCP
+// initialize response alike, so its properties are pinned here once.
+func TestVersionLineNamesBothTheReleaseAndTheBuild(t *testing.T) {
+	got := versionLine()
+
+	if !strings.HasPrefix(got, version) {
+		t.Errorf("versionLine() = %q, want it to lead with the release version %q", got, version)
+	}
+	if !strings.Contains(got, buildinfo.Read().Summary()) {
+		t.Errorf("versionLine() = %q, want it to carry the build provenance %q", got, buildinfo.Read().Summary())
+	}
+	// A test binary carries no vcs stamps, so this exercises the degraded
+	// path: it must say so rather than imply a revision. That is what keeps a
+	// plain `go build`/`go test` honest rather than merely non-crashing.
+	if !buildinfo.Read().Known() && !strings.Contains(got, "unknown") {
+		t.Errorf("versionLine() = %q: with no VCS information it must say the revision is unknown", got)
 	}
 }

@@ -257,6 +257,23 @@ re-resolve rather than hardcoding either. `robocopy` from `cmd /c` mangles a `\\
   reconnecting afterwards (`/mcp`, user-issued — Claude Code does not auto-recover this), not a quick
   aside mid-task. Restarting to force a fresh registration snapshot is obsolete anyway: the add-in
   pushes one live.
+- **The running broker is only as current as the last time something BUILT it.** `install-mac.sh` is
+  a one-time setup step, so the binary `claude mcp add` registered can predate the repo by weeks
+  while serving compiled-in content — `skill.md`, the tool schemas, the descriptions — as if it were
+  current (issue #116). `redeploy-and-verify.sh` now rebuilds and restarts it each run; ask a broker
+  which source it is, with `mcp-server -version` or `get_skills`' `build` field, rather than assuming
+  it matches the checkout you are reading.
+- **`go build` stamps the source revision automatically — and gets it WRONG in a git worktree.** The
+  toolchain finds the repository by walking up for a `.git` *directory*, and a worktree's `.git` is a
+  file: a build inside a worktree nested in another checkout holds the WORKTREE's code and is stamped
+  with the ENCLOSING checkout's revision (measured: worktree at `1b0d96c`, enclosing checkout at
+  `34af007`, binary reports `34af007` — and its `vcs.modified=true` described the enclosing tree's
+  stray untracked file while the worktree itself was clean, so the stamp is another tree's state
+  entirely). A worktree outside any checkout is stamped with nothing. `go version -m <binary>` shows
+  what a binary actually carries — read it off the binary rather than trusting the build command.
+  Anything that needs the right answer must pass it explicitly
+  (`-ldflags "-X .../internal/buildinfo.stampedRevision=$(git -C "$REPO_ROOT" rev-parse HEAD)"`, as
+  both build scripts now do).
 - **Run the test harness natively on the Mac** (`-broker-mode remote -broker-bind
   -broker-app-data-dir`) rather than cross-compiling and pushing it to the VM — one bundle (a single
   `-run TestX` target) runs in seconds instead of minutes this way; the FULL suite is minutes either

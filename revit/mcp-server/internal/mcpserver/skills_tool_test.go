@@ -1,8 +1,16 @@
 package mcpserver
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/eichler-ai/connectors/revit/mcp-server/internal/buildinfo"
 )
 
 // The skill file is shipped content, not code, so these tests pin the
@@ -54,7 +62,23 @@ func TestSkillFileStaysWithinItsLightweightBudget(t *testing.T) {
 	// removed, this branch goes silent and should be deleted rather than left as decoration.
 	const softBudgetTokens = ceilingTokens / 4
 
-	approxTokens := len(skillFile) / pessimisticBytesPerToken
+	// The footer get_skills appends at runtime is charged to the same reader's
+	// context as the file itself, so the budget measures what a caller
+	// actually receives, not what is on disk. Measured against the longest
+	// note the product produces rather than a nominal figure.
+	longestFooter := 0
+	for _, b := range []SkillBuild{
+		buildSkillsOut("dev", stampedInfo).Build,
+		buildSkillsOut("dev", buildinfo.Info{Revision: "34af007ca7daf0d4bce77ebb68d5041df17b9339"}).Build,
+		buildSkillsOut("dev", buildinfo.Info{}).Build,
+		buildSkillsOut("v1.2.3", stampedInfo).Build,
+	} {
+		if n := len(skillFooter(b)); n > longestFooter {
+			longestFooter = n
+		}
+	}
+
+	approxTokens := (len(skillFile) + longestFooter) / pessimisticBytesPerToken
 	if approxTokens > softBudgetTokens && approxTokens <= budgetTokens {
 		// Phrased as state, not as a change: this fires on every run of the package while the file
 		// sits in the window, including for someone who never opened skill.md.
@@ -127,6 +151,14 @@ func TestSkillFileCoversTheBriefedTopics(t *testing.T) {
 		"self-healing retry":     "re-check",
 		"human status entry":     "Status",
 		"unrecoverable handling": "unrecoverable",
+		// Issue #118 problem 2. Not connector behaviour but a Revit trap that
+		// silently produces a wrong model: a script-created Level leaves its
+		// room computation plane at the level's own elevation, so NewRoom
+		// returns zero boundary loops against walls that have any base offset.
+		// An agent that does not know the parameter's name cannot find the fix
+		// from the symptom, which is only a generic "not properly enclosed"
+		// warning.
+		"room computation height": "LEVEL_ROOM_COMPUTATION_HEIGHT",
 	}
 	for topic, marker := range topics {
 		if !strings.Contains(skillFile, marker) {
@@ -204,6 +236,114 @@ func TestSkillFileAccuratelyDescribesRevitApiReachability(t *testing.T) {
 	}
 }
 
+// Issue #114. This section is the one place in the file whose being wrong
+// actively CAUSED the bug it was blamed for: it told agents that a
+// connector-created document could never be closed, so the agent that read it
+// stopped trying and left five scratch documents open in a live Revit session
+// until Revit warned about memory. Verified against Revit 2027: a same-run
+// Close is refused by Revit ("Close is not allowed when there is any open
+// sub-transaction, transaction or transaction group"), and the very next
+// execute_script call closes the same document successfully with
+// confirm_lifecycle_actions. So the guidance has to carry BOTH halves; either
+// half alone is what produced the leak.
+//
+// Topics, not wording, per this file's own history. The visibility half
+// (#118 problem 1) is checked against a set of alternatives for the same
+// reason -- what must survive is that an agent is told the created document is
+// not something a person can see, not the adjective used to say it.
+func TestSkillFileDescribesCreatedDocumentLifecycleHonestly(t *testing.T) {
+	const start = "**Creating documents"
+	i := strings.Index(skillFile, start)
+	if i < 0 {
+		t.Fatalf("skill file no longer has a %q section: created-document lifecycle is the "+
+			"subject of issue #114 and must be documented somewhere findable", start)
+	}
+	section := skillFile[i:]
+	if j := strings.Index(section, "\n### "); j > 0 {
+		section = section[:j]
+	}
+
+	// Both halves of the close story, plus the fact that a created document is
+	// addressable at all (the old text denied it, and an agent that believes
+	// that cannot even find the document again to close it).
+	//
+	// Honest about their strength: these three passed against the OLD, wrong
+	// text too, because it named the same members while telling the reader they
+	// were useless. They guard against the section being gutted, not against it
+	// being wrong. The forbidden-claims list below is what actually caught the
+	// old text, and it is the assertion to extend if a new false claim appears.
+	for _, marker := range []string{"Close", "confirm_lifecycle_actions", "list_instances"} {
+		if !strings.Contains(section, marker) {
+			t.Errorf("the created-documents section never mentions %q: an agent that creates a scratch "+
+				"document must be told how to close it again, or it will leak documents into a live "+
+				"Revit session (#114)", marker)
+		}
+	}
+	// The close RECIPE itself, which is the part with consequences. Scoped to the fenced block so a
+	// stray "later" elsewhere in the section cannot satisfy it -- an earlier version of this check
+	// looked for "next"/"later" anywhere in the section and passed on an unrelated sentence three
+	// paragraphs up, guarding nothing while claiming to guard the whole close story.
+	// Located by the Close call it must contain, then widened to its fence, rather than by the
+	// block's first line -- anchoring on that made an ordinary edit to the snippet's first line
+	// read as "the recipe is gone".
+	recipe := ""
+	if c := strings.Index(section, "scratch.Close("); c >= 0 {
+		if a := strings.LastIndex(section[:c], "```csharp\n"); a >= 0 {
+			if b := strings.Index(section[c:], "```"); b > 0 {
+				recipe = section[a : c+b]
+			}
+		}
+	}
+	if recipe == "" {
+		t.Error("the created-documents section no longer carries a runnable Close recipe: an agent told " +
+			"only that cleanup is possible, without the four lines that do it, is where #114 started")
+	}
+	// PathName is the load-bearing one. Title alone does not identify a scratch document -- Revit
+	// auto-names unsaved documents Project1, Project2..., and a SAVED model at ...\Project1.rvt has
+	// Title == "Project1" too -- so a recipe matching on Title alone hands an agent a Close(false),
+	// which discards without prompting, aimed at a real user file. Verified live that both collide.
+	if recipe != "" && !strings.Contains(recipe, "PathName") {
+		t.Error("the Close recipe does not filter on PathName: matching a scratch document by Title alone " +
+			"can resolve to a person's own unsaved document, or to a saved model of the same name, and " +
+			"Close(false) then discards their work without a prompt")
+	}
+	visibility := []string{"headless", "no window", "never the active document", "not visible"}
+	found := false
+	for _, marker := range visibility {
+		if strings.Contains(section, marker) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("the created-documents section says nothing about the document being invisible to the "+
+			"person at the screen (looked for any of %v). 'Writable immediately' alone reads as "+
+			"'usable in the ordinary sense', which it is not (#118)", visibility)
+	}
+
+	// Claims verified false against Revit 2027. Kept as an explicit denylist
+	// because each one was in this file at some point and each one, believed,
+	// leads an agent to abandon cleanup.
+	//
+	// Deliberately scanning the WHOLE file, not just section -- these claims are
+	// wrong wherever they appear, and one of them migrating into the quick
+	// reference or the troubleshooting table should still fail. Note the honest
+	// limit: exact substrings catch these four regressions, not a newly-invented
+	// false claim. Nothing automatic can do the latter; that is what verifying
+	// against a running Revit before writing is for.
+	forbidden := map[string]string{
+		"There is no cleanup path":          "a created document CAN be closed, from any run after the one that created it",
+		"has no `document_id`":              "an unsaved created document gets a tmp-<guid> id and appears in list_instances",
+		"never appears in `list_instances`": "it does appear there",
+		"until they restart Revit":          "restarting Revit is not the only recovery; Close works",
+	}
+	for claim, why := range forbidden {
+		if strings.Contains(skillFile, claim) {
+			t.Errorf("skill file contains the claim %q, which is false: %s. Fix the prose, not this test", claim, why)
+		}
+	}
+}
+
 func TestSkillFileDoesNotHardcodeTheWorkspacePath(t *testing.T) {
 	// The workspace root has already moved once relative to what PRD §09
 	// describes (RevitMCPExchange live, not the documented %LOCALAPPDATA%
@@ -231,12 +371,222 @@ func TestSkillFileDoesNotHardcodeTheWorkspacePath(t *testing.T) {
 	}
 }
 
+// stampedInfo is the provenance shape a REAL build produces. Tests must inject
+// it: a test binary carries no VCS stamps of its own, so a suite that let
+// buildSkillsOut read its own would only ever exercise the degraded path and
+// would pass with the production shape completely broken.
+var stampedInfo = buildinfo.Info{
+	Revision:     "34af007ca7daf0d4bce77ebb68d5041df17b9339",
+	RevisionTime: "2026-08-31T13:32:07Z",
+	Stamped:      true,
+}
+
 func TestGetSkillsReturnsTheEmbeddedFile(t *testing.T) {
-	out := buildSkillsOut()
+	out := buildSkillsOut("dev", stampedInfo)
 	if out.Skill != skillFile {
 		t.Error("get_skills returned something other than the embedded skill file verbatim")
 	}
 	if out.Format != "markdown" {
 		t.Errorf("format = %q, want %q", out.Format, "markdown")
+	}
+}
+
+// Issue #116: the served document was right in the repo and wrong in the
+// running binary, and nothing in the response let the reading agent tell those
+// apart. Every field below is what makes that distinguishable, so each is
+// pinned rather than left to prose.
+func TestGetSkillsReportsTheBuildThatServedIt(t *testing.T) {
+	out := buildSkillsOut("dev", stampedInfo)
+
+	if out.Build.Version != "dev" {
+		t.Errorf("Build.Version = %q, want the broker's own version string passed through", out.Build.Version)
+	}
+	if out.Build.Revision != "34af007ca7da" {
+		t.Errorf("Build.Revision = %q, want the injected build's short revision", out.Build.Revision)
+	}
+	if out.Build.RevisionTime != stampedInfo.RevisionTime {
+		t.Errorf("Build.RevisionTime = %q, want %q", out.Build.RevisionTime, stampedInfo.RevisionTime)
+	}
+	if out.Build.Note == "" {
+		t.Error("Build.Note is empty: a revision a reader cannot compare against anything is decoration")
+	}
+
+	// The hash is computed here from the document itself, not read back from
+	// the field it is meant to verify -- asserting the field against itself
+	// would pass under any implementation, including one that hashed the
+	// wrong thing.
+	sum := sha256.Sum256([]byte(skillFile))
+	want := hex.EncodeToString(sum[:])[:12]
+	if out.Build.SkillHash != want {
+		t.Errorf("Build.SkillHash = %q, want %q (sha256 of the embedded document)", out.Build.SkillHash, want)
+	}
+	if !strings.Contains(out.Build.Note, want) {
+		t.Error("the note omits the document hash: it is the only check that stays valid when the " +
+			"revision is misattributed (git worktree) or absent")
+	}
+	if !strings.Contains(out.Build.Note, "shasum") {
+		t.Error("the note names a hash but no way to compute one to compare against")
+	}
+}
+
+// An unstamped revision is the toolchain's inference from whatever checkout it
+// found, which is the ENCLOSING one for a build made inside a git worktree.
+// Telling that reader to compare it against `git rev-parse HEAD` produces a
+// MATCH on a mismatched broker -- a confidently wrong answer, worse than none.
+func TestGetSkillsDoesNotOfferARevisionComparisonItCannotStandBehind(t *testing.T) {
+	inferred := buildinfo.Info{Revision: "34af007ca7daf0d4bce77ebb68d5041df17b9339", Stamped: false}
+	note := buildSkillsOut("dev", inferred).Build.Note
+
+	if strings.Contains(note, "git rev-parse HEAD") {
+		t.Errorf("note = %q: an inferred revision must not be presented as a comparison a reader can trust", note)
+	}
+	if !strings.Contains(note, "worktree") {
+		t.Errorf("note = %q: it must say why the revision is only a hint", note)
+	}
+	// The check that still works must still be offered.
+	if !strings.Contains(note, "shasum") {
+		t.Errorf("note = %q: the document-hash check is valid regardless of the revision and must survive", note)
+	}
+}
+
+// A release install has no repo, no checkout and no Go toolchain -- advice to
+// run git and rebuild from source is advice that reader cannot follow, and the
+// connector already tracks the answer they can use (broker.json's
+// latest_available_version, written by internal/updatecheck).
+func TestGetSkillsGivesAReleaseBuildAdviceItsReaderCanFollow(t *testing.T) {
+	note := buildSkillsOut("v1.2.3", stampedInfo).Build.Note
+
+	if !strings.Contains(note, "v1.2.3") {
+		t.Errorf("note = %q, want it to name the release the reader is running", note)
+	}
+	if !strings.Contains(note, "latest_available_version") {
+		t.Errorf("note = %q, want it to point at the freshness answer this reader actually has", note)
+	}
+	for _, forbidden := range []string{"git rev-parse", "shasum", "go build"} {
+		if strings.Contains(note, forbidden) {
+			t.Errorf("note = %q tells a release install to run %q, which needs a source checkout it does not have", note, forbidden)
+		}
+	}
+}
+
+// The response an agent actually receives, end to end. The structured Build
+// field is invisible to a host that surfaces only text content -- which is how
+// the agent in issue #116 read this document -- so the markdown half must
+// carry the provenance too, and the document itself must still arrive intact.
+func TestGetSkillsCallResultCarriesTheDocumentAndItsProvenance(t *testing.T) {
+	res, out := skillsCallResult("v9.9.9", stampedInfo)
+
+	if len(res.Content) != 1 {
+		t.Fatalf("got %d content items, want exactly the document", len(res.Content))
+	}
+	text, ok := res.Content[0].(*mcp.TextContent)
+	if !ok {
+		t.Fatalf("content is %T, want *mcp.TextContent", res.Content[0])
+	}
+	if !strings.HasPrefix(text.Text, skillFile) {
+		t.Error("text content no longer starts with the embedded document verbatim")
+	}
+	// Deliberately distinctive values: "unknown" or a short hex string could
+	// be satisfied by skill.md's own prose, making the assertion pass while
+	// the footer carried nothing.
+	for _, want := range []string{"34af007ca7da", out.Build.Note, "v9.9.9"} {
+		if !strings.Contains(text.Text, want) {
+			t.Errorf("text content omits %q: a host that shows only text content would leave a reader "+
+				"unable to tell a stale broker from a wrong document", want)
+		}
+	}
+}
+
+// Through the registered tool, over a real MCP session -- the only thing that
+// proves the handler passes the broker's own version and provenance in, rather
+// than something the tests supply.
+func TestRegisteredGetSkillsToolServesTheDocumentAndAFooter(t *testing.T) {
+	server := mcp.NewServer(&mcp.Implementation{Name: "revit-mcp-server-test", Version: "0.0.0"}, nil)
+	RegisterSkills(server, "v4.5.6")
+
+	clientTransport, serverTransport := mcp.NewInMemoryTransports()
+	ctx := context.Background()
+	if _, err := server.Connect(ctx, serverTransport, nil); err != nil {
+		t.Fatalf("server.Connect: %v", err)
+	}
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0.0.0"}, nil)
+	cs, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("client.Connect: %v", err)
+	}
+	defer cs.Close()
+
+	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "get_skills", Arguments: map[string]any{}})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	raw, err := json.Marshal(res.StructuredContent)
+	if err != nil {
+		t.Fatalf("marshal StructuredContent: %v", err)
+	}
+	var out GetSkillsOut
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatalf("unmarshal into GetSkillsOut: %v", err)
+	}
+
+	if out.Build.Version != "v4.5.6" {
+		t.Errorf("Build.Version = %q: the registration is not passing the broker's own version to the handler", out.Build.Version)
+	}
+	if out.Skill != skillFile {
+		t.Error("the registered tool did not serve the embedded document verbatim")
+	}
+	sum := sha256.Sum256([]byte(skillFile))
+	if want := hex.EncodeToString(sum[:])[:12]; out.Build.SkillHash != want {
+		t.Errorf("Build.SkillHash = %q, want %q", out.Build.SkillHash, want)
+	}
+	text, ok := res.Content[0].(*mcp.TextContent)
+	if !ok {
+		t.Fatalf("content is %T, want *mcp.TextContent", res.Content[0])
+	}
+	if !strings.Contains(text.Text, "**Provenance.**") {
+		t.Error("the registered tool served the document without its provenance footer")
+	}
+	if !strings.Contains(text.Text, "v4.5.6") {
+		t.Error("the footer does not name the version the handler was registered with")
+	}
+}
+
+// The footer's own contract, measured against the notes the product actually
+// produces rather than a synthetic short one -- a cap fed a 27-byte note
+// proves nothing about a 570-byte one.
+func TestSkillFooterStaysAFooterForEveryRealNote(t *testing.T) {
+	cases := map[string]SkillBuild{
+		"dev, stamped":  buildSkillsOut("dev", stampedInfo).Build,
+		"dev, inferred": buildSkillsOut("dev", buildinfo.Info{Revision: "34af007ca7daf0d4bce77ebb68d5041df17b9339"}).Build,
+		"dev, unknown":  buildSkillsOut("dev", buildinfo.Info{}).Build,
+		"release":       buildSkillsOut("v1.2.3", stampedInfo).Build,
+	}
+	// It is appended to a document already within ~1% of its token budget and
+	// is charged to the same reader's context, so it must stay a footer
+	// rather than grow into a section. The real notes run ~300-600 bytes.
+	const maxFooterBytes = 800
+	for name, b := range cases {
+		footer := skillFooter(b)
+		if len(footer) > maxFooterBytes {
+			t.Errorf("%s: footer is %d bytes, over the %d-byte cap -- it is charged to the same context "+
+				"budget as skill.md itself", name, len(footer), maxFooterBytes)
+		}
+		for _, want := range []string{b.Version, b.Revision, b.Note} {
+			if !strings.Contains(footer, want) {
+				t.Errorf("%s: footer = %q, missing %q", name, footer, want)
+			}
+		}
+		if strings.Contains(footer, "tree not clean") {
+			t.Errorf("%s: footer = %q warns about the tree for a clean build", name, footer)
+		}
+	}
+
+	// A text-content reader never sees the structured `modified` field, so the
+	// footer has to carry it: a revision built from a dirty tree does not
+	// identify what is running and must not be presented as if it did.
+	dirty := stampedInfo
+	dirty.Modified = true
+	if footer := skillFooter(buildSkillsOut("dev", dirty).Build); !strings.Contains(footer, "tree not clean") {
+		t.Errorf("footer = %q: a build from an unclean tree must say so in the markdown too", footer)
 	}
 }
