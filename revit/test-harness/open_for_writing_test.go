@@ -44,10 +44,10 @@ foreach (Autodesk.Revit.DB.Level lv in collector) {
 return new { survived = survived > 0 };
 `, distinctiveElevation))
 		if check.Status != "success" {
-			t.Fatalf("follow-up check failed: status=%q output=%s", check.Status, check.Output)
+			t.Fatalf("follow-up check failed: status=%q %s", check.Status, check.diag())
 		}
-		if !strings.Contains(check.Output, "survived = False") {
-			t.Errorf("expected the Level created before the throw to have been rolled back; output: %s", check.Output)
+		if !strings.Contains(check.ReturnValue, "\"survived\":false") {
+			t.Errorf("expected the Level created before the throw to have been rolled back; %s", check.diag())
 		}
 	})
 

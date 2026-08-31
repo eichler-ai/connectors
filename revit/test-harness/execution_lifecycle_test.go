@@ -219,7 +219,7 @@ throw new System.TimeoutException("failsafe: cancellation never arrived within 6
 		}
 	}
 	if started.Status != "pending" && started.Status != "running" {
-		t.Fatalf("a script outliving timeout_ms must return pending/running, got %q (execution_id: %s, output: %s)", started.Status, started.ExecutionID, started.Output)
+		t.Fatalf("a script outliving timeout_ms must return pending/running, got %q (execution_id: %s, %s)", started.Status, started.ExecutionID, started.diag())
 	}
 	if started.ExecutionID == "" {
 		t.Fatalf("non-terminal status carried no execution_id, so nothing can ever poll it: %+v", started)
@@ -253,7 +253,7 @@ throw new System.TimeoutException("failsafe: cancellation never arrived within 6
 	// poll_execution: still the non-terminal shape while the script loops.
 	polled := decodeToolResult[executeScriptOut](t, callPollExecution(t, c, started.ExecutionID, 1000))
 	if polled.Status != "pending" && polled.Status != "running" {
-		t.Fatalf("polling a live run must report pending/running, got %q (output: %s)", polled.Status, polled.Output)
+		t.Fatalf("polling a live run must report pending/running, got %q (%s)", polled.Status, polled.diag())
 	}
 
 	// Cooperative cancellation: the script observes its token within ~50ms,
@@ -279,6 +279,6 @@ throw new System.TimeoutException("failsafe: cancellation never arrived within 6
 	// terminal state, so ordinary work proceeds.
 	after := runScript(t, c, instanceID, documentID, `return "freed";`)
 	if after.Status != "success" {
-		t.Fatalf("instance still not usable after a cancelled run: status=%q output=%s", after.Status, after.Output)
+		t.Fatalf("instance still not usable after a cancelled run: status=%q %s", after.Status, after.diag())
 	}
 }

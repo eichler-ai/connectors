@@ -46,11 +46,11 @@ doc.Regenerate();
 return new { floorCreated = floor != null, category = floor.Category == null ? "null" : floor.Category.Name };
 `)
 		if out.Status != "success" {
-			t.Fatalf("expected status=success, got %q (output: %s)", out.Status, out.Output)
+			t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
 		}
-		for _, want := range []string{"floorCreated = True", "category = Floors"} {
-			if !strings.Contains(out.Output, want) {
-				t.Errorf("wanted %q in output: %s", want, out.Output)
+		for _, want := range []string{"\"floorCreated\":true", "\"category\":\"Floors\""} {
+			if !strings.Contains(out.ReturnValue, want) {
+				t.Errorf("wanted %q in %s", want, out.diag())
 			}
 		}
 	})
@@ -78,11 +78,11 @@ var grid2 = Autodesk.Revit.DB.Grid.Create(doc, line2);
 return new { grid1Created = grid1 != null, grid2Created = grid2 != null, namesDiffer = grid1.Name != grid2.Name };
 `)
 		if out.Status != "success" {
-			t.Fatalf("expected status=success, got %q (output: %s)", out.Status, out.Output)
+			t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
 		}
-		for _, want := range []string{"grid1Created = True", "grid2Created = True", "namesDiffer = True"} {
-			if !strings.Contains(out.Output, want) {
-				t.Errorf("wanted %q in output: %s", want, out.Output)
+		for _, want := range []string{"\"grid1Created\":true", "\"grid2Created\":true", "\"namesDiffer\":true"} {
+			if !strings.Contains(out.ReturnValue, want) {
+				t.Errorf("wanted %q in %s", want, out.diag())
 			}
 		}
 	})
@@ -129,15 +129,15 @@ return new {
 };
 `)
 		if out.Status != "success" {
-			t.Fatalf("expected status=success, got %q (output: %s)", out.Status, out.Output)
+			t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
 		}
-		for _, want := range []string{"vftFound = True", "sheetCreated = True", "canAddFirstTime = True", "viewportCreated = True"} {
-			if !strings.Contains(out.Output, want) {
-				t.Errorf("wanted %q in output: %s", want, out.Output)
+		for _, want := range []string{"\"vftFound\":true", "\"sheetCreated\":true", "\"canAddFirstTime\":true", "\"viewportCreated\":true"} {
+			if !strings.Contains(out.ReturnValue, want) {
+				t.Errorf("wanted %q in %s", want, out.diag())
 			}
 		}
-		if !strings.Contains(out.Output, "canAddSecondTime = False") {
-			t.Errorf("a view already placed on one sheet must not be addable to a second one; output: %s", out.Output)
+		if !strings.Contains(out.ReturnValue, "\"canAddSecondTime\":false") {
+			t.Errorf("a view already placed on one sheet must not be addable to a second one; %s", out.diag())
 		}
 	})
 
@@ -160,11 +160,11 @@ var note = Autodesk.Revit.DB.TextNote.Create(doc, view.Id, new Autodesk.Revit.DB
 return new { viewFound = view != null, typeFound = typeId != null, noteCreated = note != null, text = note.Text.TrimEnd('\r') };
 `)
 		if out.Status != "success" {
-			t.Fatalf("expected status=success, got %q (output: %s)", out.Status, out.Output)
+			t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
 		}
-		for _, want := range []string{"viewFound = True", "typeFound = True", "noteCreated = True", "text = Phase C text note"} {
-			if !strings.Contains(out.Output, want) {
-				t.Errorf("wanted %q in output: %s", want, out.Output)
+		for _, want := range []string{"\"viewFound\":true", "\"typeFound\":true", "\"noteCreated\":true", "\"text\":\"Phase C text note\""} {
+			if !strings.Contains(out.ReturnValue, want) {
+				t.Errorf("wanted %q in %s", want, out.diag())
 			}
 		}
 	})

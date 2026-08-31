@@ -12,22 +12,32 @@ namespace MCPBridge.Core.Protocol;
 /// Serializes an execution outcome (an <see cref="ExecutionRecord"/>, a Busy pointer, or an
 /// instance-unrecoverable refusal) into the wire response shape the Go broker's execution.Result struct
 /// expects (mcp-server/internal/execution/execution.go): {"jsonrpc":"2.0","id":&lt;echoed&gt;,"result":
-/// {"status","execution_id","output","notices","error"}}.
+/// {"status","execution_id","output","return_value","notices","error"}}.
 ///
 /// <para>
-/// <b>Output field mapping</b> (flagged as an open question in the cross-PR review; resolved here, revisit
-/// if wrong): the Go side's Result.Output is documented (PRD §06 step 4) as "stdout captured into the
-/// result" -- a single string field, with no separate slot for a script's own *return value*
-/// (<see cref="ScriptExecutionOutcome.ReturnValue"/>). Roslyn C# scripting scripts are frequently a bare
-/// trailing expression whose value IS the answer an agent wants (e.g. a script that's just
-/// `doc.Title`, with no Console.Write at all) -- silently dropping ReturnValue would make the single most
-/// common trivial-script shape look like it produced nothing. This class's mapping: Output = StdOut, with
-/// the return value's display string (formatted at completion time on the UI thread -- see
-/// RequestDispatcher.SafeFormatReturnValue; this class only ever sees the string) appended after it,
-/// separated by a blank line for readability when both are present. This is a judgment call the wire
-/// contract itself doesn't specify;
-/// if the broker/agent side later wants the return value surfaced as a separate structured field instead
-/// of folded into Output textually, that's a wire-shape change on both sides, not just this method.
+/// <b>Output field mapping.</b> The Go side's Result.Output is documented (PRD §06 step 4) as "stdout
+/// captured into the result", and a script's own *return value*
+/// (<see cref="ScriptExecutionOutcome.ReturnValue"/>) is a different thing: Roslyn C# scripting scripts
+/// are frequently a bare trailing expression whose value IS the answer an agent wants (e.g. a script
+/// that's just `doc.Title`, with no Console.Write at all), so dropping it is not an option either.
+/// This class originally folded both into <c>output</c>, separated by a blank line, and flagged that as a
+/// judgment call to revisit if the two ever needed telling apart. Issue #117 is that case, reported live:
+/// Revit writes to the process console during a script (`PlayerServer:Warning:No subscriber registered.`),
+/// ScriptConsoleCapture correctly captures it as stdout, and an agent reading <c>output</c> saw two lines
+/// of Revit's internal chatter ahead of the value its script returned with nothing marking the boundary.
+/// So the fold is gone: <c>output</c> is stdout and only stdout -- its documented meaning -- and the
+/// return value's display string (formatted at completion time on the UI thread by
+/// ReturnValueFormatter, via RequestDispatcher.SafeFormatReturnValue; this class only ever sees the
+/// string) has its own <c>return_value</c> field. Both ends changed together: execution.Result and
+/// mcpserver.ExecutionOut on the Go side, and revit/docs/tools.md.
+/// </para>
+///
+/// <para>
+/// <b>Version skew</b> is worth stating rather than discovering: an OLD broker against a NEW add-in drops
+/// return_value on the floor (its Result struct has no such field), so a script's returned value goes
+/// missing entirely rather than appearing in the wrong place. A new broker against an old add-in sees no
+/// return_value and an <c>output</c> that still has the value folded in -- degraded, not broken. The
+/// installer ships both halves together, which is what keeps this a note and not a compatibility scheme.
 /// </para>
 ///
 /// <para>
@@ -55,6 +65,10 @@ public static class ExecutionResultMessage
         [JsonPropertyName("output")]
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public string? Output { get; set; }
+
+        [JsonPropertyName("return_value")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string? ReturnValue { get; set; }
 
         [JsonPropertyName("notices")]
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
@@ -103,7 +117,14 @@ public static class ExecutionResultMessage
         {
             Status = ToWireStatus(record.Status),
             ExecutionId = record.ExecutionId,
-            Output = ComposeOutput(record),
+            Output = string.IsNullOrEmpty(record.StdOut) ? null : record.StdOut,
+            // Non-null only on a Completed record: MarkCompleted is the sole writer of
+            // ExecutionRecord.Result, so no status check belongs here -- one would be unfalsifiable
+            // defensive code duplicating an invariant that record already owns. It is already the
+            // formatted display string: formatting happens at completion time on the UI thread
+            // (RequestDispatcher.SafeFormatReturnValue), never here on the TCP thread, where a Revit
+            // object's ToString() would run off the API context (v1 integrated review).
+            ReturnValue = record.Result,
             Notices = notices,
             Files = record.Files.Count > 0 ? new List<PublishedFileRecord>(record.Files) : null,
             Error = record.Error,
@@ -124,35 +145,6 @@ public static class ExecutionResultMessage
     {
         var envelope = new Envelope { Id = id, Result = dto };
         return JsonSerializer.Serialize(envelope, WireJson.Compact);
-    }
-
-    private static string? ComposeOutput(ExecutionRecord record)
-    {
-        if (record.Status != ExecutionStatus.Completed)
-        {
-            // Error/Cancelled/Pending/Running: whatever stdout was captured before the execution stopped
-            // (if any), no return value to fold in (Completed is the only status with one).
-            return string.IsNullOrEmpty(record.StdOut) ? null : record.StdOut;
-        }
-
-        var stdOut = record.StdOut ?? "";
-        if (record.Result is null)
-        {
-            return stdOut.Length == 0 ? null : stdOut;
-        }
-
-        // record.Result is already the formatted display string -- formatting happens at completion
-        // time on the UI thread (RequestDispatcher.SafeFormatReturnValue), never here on the TCP
-        // thread where a Revit-object ToString() would run off the API context (v1 integrated review).
-        var formatted = record.Result;
-        if (stdOut.Length == 0)
-        {
-            return formatted;
-        }
-
-        // Trim any trailing newline stdOut already ends with (the common case -- Console.WriteLine)
-        // before inserting the blank-line separator, so the two don't compound into three-plus newlines.
-        return stdOut.TrimEnd('\n', '\r') + "\n\n" + formatted;
     }
 
     // Deliberately a separate small mapping rather than reusing ExecutionStatus's own

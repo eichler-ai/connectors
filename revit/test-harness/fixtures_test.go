@@ -40,11 +40,11 @@ func createBlankFixtureDocument(t *testing.T, c *mcpclient.Client, instanceID, d
 	t.Helper()
 	out := runScript(t, c, instanceID, documentID, `return Connector.CreateProjectDocument().Title;`)
 	if out.Status != "success" {
-		t.Fatalf("failed to create blank fixture document: status=%q output=%s", out.Status, out.Output)
+		t.Fatalf("failed to create blank fixture document: status=%q %s", out.Status, out.diag())
 	}
-	title := strings.TrimSpace(out.Output)
+	title := strings.TrimSpace(out.ReturnValue)
 	if title == "" {
-		t.Fatalf("blank fixture document reported an empty title; output=%q", out.Output)
+		t.Fatalf("blank fixture document reported an empty title; %s", out.diag())
 	}
 	t.Cleanup(func() { closeDocumentByTitle(t, c, instanceID, documentID, title, "") })
 	return title
@@ -142,11 +142,11 @@ doc.Close(false);
 		return
 	}
 	if out.Status != "success" {
-		t.Logf("cleanup: failed to close fixture document %q: status=%q output=%s", title, out.Status, out.Output)
+		t.Logf("cleanup: failed to close fixture document %q: status=%q %s", title, out.Status, out.diag())
 		return
 	}
-	if strings.Contains(out.Output, "close-failed:") {
-		t.Logf("cleanup: closing document %q reported: %s", title, strings.TrimSpace(out.Output))
+	if strings.Contains(out.ReturnValue, "close-failed:") {
+		t.Logf("cleanup: closing document %q reported: %s", title, out.diag())
 	}
 }
 
@@ -209,8 +209,10 @@ Connector.OpenForWriting(doc);
 // matches on) print this marker instead --
 // System.Console.WriteLine("cleanup-title=" + doc.Title + ";") -- so the Go
 // side can register closeDocumentByTitle without changing what the test
-// asserts (stdout is prepended to Output; substring assertions are
-// unaffected). The trailing semicolon terminates the title the same way the
+// asserts. Since issue #117 split the wire fields, stdout is Output and the
+// script's returned value is ReturnValue, so the marker and the assertion no
+// longer share a field at all — this reads Output, and every assertion in the
+// suite reads ReturnValue. The trailing semicolon terminates the title the same way the
 // suite's counted assertions terminate numbers: without it, a title that is
 // a prefix of another could not be extracted unambiguously.
 func cleanupTitles(output string) []string {

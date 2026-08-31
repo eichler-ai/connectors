@@ -71,13 +71,18 @@ type CancelExecutionIn struct {
 
 // ExecutionOut is the output schema shared by all three tools — PRD §06's
 // two-shape contract: either a terminal result (Status
-// success/error/cancelled/unrecoverable, with Output/Notices as relevant)
-// or a non-terminal status (pending/running/busy) with ExecutionID for the
-// caller to poll.
+// success/error/cancelled/unrecoverable, with Output/ReturnValue/Notices as
+// relevant) or a non-terminal status (pending/running/busy) with ExecutionID
+// for the caller to poll.
+//
+// ReturnValue carries what the script returned; Output carries stdout
+// captured during the run, which includes Revit's own console writes and not
+// just the script's. See execution.Result for why issue #117 split them.
 type ExecutionOut struct {
 	Status      string                 `json:"status"`
 	ExecutionID string                 `json:"execution_id"`
 	Output      string                 `json:"output,omitempty"`
+	ReturnValue string                 `json:"return_value,omitempty"`
 	Notices     []diag.Record          `json:"notices,omitempty"`
 	Files       []execution.FileRecord `json:"files,omitempty"`
 	Error       *diag.Record           `json:"error,omitempty"`
@@ -161,6 +166,7 @@ func toolResult(res *execution.Result, drec *diag.Record) (*mcp.CallToolResult, 
 		Status:      string(res.Status),
 		ExecutionID: res.ExecutionID,
 		Output:      res.Output,
+		ReturnValue: res.ReturnValue,
 		Notices:     res.Notices,
 		Files:       res.Files,
 		Error:       res.ErrorDetail,

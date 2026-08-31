@@ -96,7 +96,7 @@ return "opened an unmanaged transaction";`,
 	// rejections, so the ambient transaction unwinds cleanly.
 	out := runScript(t, c, instanceID, documentID, `return Document.Title;`)
 	if out.Status != "success" {
-		t.Errorf("instance unusable after the rejections: status=%q output=%s", out.Status, out.Output)
+		t.Errorf("instance unusable after the rejections: status=%q %s", out.Status, out.diag())
 	}
 }
 
@@ -176,7 +176,7 @@ return "captured an adapter through a callback";`
 	// The connector is still usable afterwards: an ordinary compile rejection.
 	out := runScript(t, c, instanceID, documentID, `return Document.Title;`)
 	if out.Status != "success" {
-		t.Errorf("instance unusable after the rejection: status=%q output=%s", out.Status, out.Output)
+		t.Errorf("instance unusable after the rejection: status=%q %s", out.Status, out.diag())
 	}
 }
 
@@ -254,7 +254,7 @@ return "nested run Success=" + outcome.Success + " returned=" + outcome.ReturnVa
 	// The instance is still usable: an ordinary compile rejection.
 	out := runScript(t, c, instanceID, documentID, `return Document.Title;`)
 	if out.Status != "success" {
-		t.Errorf("instance unusable after the rejection: status=%q output=%s", out.Status, out.Output)
+		t.Errorf("instance unusable after the rejection: status=%q %s", out.Status, out.diag())
 	}
 }
 
@@ -324,7 +324,7 @@ return "erased " + erased + " dialog notice(s)";`,
 
 	out := runScript(t, c, instanceID, documentID, `return Document.Title;`)
 	if out.Status != "success" {
-		t.Errorf("instance unusable after the rejections: status=%q output=%s", out.Status, out.Output)
+		t.Errorf("instance unusable after the rejections: status=%q %s", out.Status, out.diag())
 	}
 }
 

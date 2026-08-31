@@ -38,7 +38,7 @@ public class ExecutionResultMessageTests
     }
 
     [Fact]
-    public void FromRecord_Success_MapsToStatusSuccess_AndComposesStdOutAndReturnValue()
+    public void FromRecord_Success_KeepsStdOutAndReturnValueInSeparateFields()
     {
         var record = ExecutionRecord.CreatePending("exec-1", "1+1", 600_000, Now);
         record.MarkRunning(Now);
@@ -47,14 +47,16 @@ public class ExecutionResultMessageTests
         var json = ExecutionResultMessage.FromRecord(Id, record);
 
         Assert.Contains("\"status\":\"success\"", json);
-        // Output field composition: StdOut is PRD §06's documented mapping ("stdout captured into the
-        // result"); the script's own return value (2) is appended after it since Result has no separate
-        // slot for it -- see ExecutionResultMessage's own doc comment for the full reasoning.
-        Assert.Contains("\"output\":\"hello\\n\\n2\"", json);
+        // Issue #117: these were one folded field, so Revit's own console writes during a run
+        // ("PlayerServer:Warning:No subscriber registered.") landed ahead of the script's returned
+        // value with nothing marking the boundary. output is stdout verbatim -- PRD §06's documented
+        // mapping, trailing newline and all, since trimming it was only ever in service of the fold.
+        Assert.Contains("\"output\":\"hello\\n\"", json);
+        Assert.Contains("\"return_value\":\"2\"", json);
     }
 
     [Fact]
-    public void FromRecord_Success_NoStdOut_OutputIsJustTheReturnValue()
+    public void FromRecord_Success_NoStdOut_OmitsOutputButKeepsReturnValue()
     {
         var record = ExecutionRecord.CreatePending("exec-1", "1+1", 600_000, Now);
         record.MarkRunning(Now);
@@ -62,11 +64,12 @@ public class ExecutionResultMessageTests
 
         var json = ExecutionResultMessage.FromRecord(Id, record);
 
-        Assert.Contains("\"output\":\"2\"", json);
+        Assert.DoesNotContain("\"output\"", json);
+        Assert.Contains("\"return_value\":\"2\"", json);
     }
 
     [Fact]
-    public void FromRecord_Success_NullReturnValueAndNoStdOut_OmitsOutput()
+    public void FromRecord_Success_NullReturnValueAndNoStdOut_OmitsBoth()
     {
         var record = ExecutionRecord.CreatePending("exec-1", "Console.Write(1)", 600_000, Now);
         record.MarkRunning(Now);
@@ -75,6 +78,52 @@ public class ExecutionResultMessageTests
         var json = ExecutionResultMessage.FromRecord(Id, record);
 
         Assert.DoesNotContain("\"output\"", json);
+        Assert.DoesNotContain("\"return_value\"", json);
+    }
+
+    /// <summary>
+    /// The pairing that made issue #117 hard to see from the agent's side: stdout the script never wrote.
+    /// Revit writes to the process console while a script runs, ScriptConsoleCapture correctly captures it,
+    /// and folded into one field it read as part of the answer. Nothing about the split is worth much if
+    /// the noisy half can still reach return_value.
+    /// </summary>
+    [Fact]
+    public void FromRecord_Success_RevitsOwnConsoleChatterStaysOutOfReturnValue()
+    {
+        var record = ExecutionRecord.CreatePending("exec-1", "...", 600_000, Now);
+        record.MarkRunning(Now);
+        record.MarkCompleted(
+            Now,
+            result: @"C:\dev\fixtures\ProjectFresh.rvt",
+            stdOut: "PlayerServer:Warning:No subscriber registered.\nPlayerServer:Warning:No subscriber registered.\n",
+            notices: Array.Empty<DiagnosticRecord>());
+
+        var json = ExecutionResultMessage.FromRecord(Id, record);
+        using var parsed = JsonDocument.Parse(json);
+        var result = parsed.RootElement.GetProperty("result");
+
+        Assert.Equal(@"C:\dev\fixtures\ProjectFresh.rvt", result.GetProperty("return_value").GetString());
+        Assert.DoesNotContain("PlayerServer", result.GetProperty("return_value").GetString()!);
+        Assert.Contains("PlayerServer", result.GetProperty("output").GetString()!);
+    }
+
+    /// <summary>
+    /// FromRecord reads ExecutionRecord.Result unconditionally, relying on MarkCompleted being its only
+    /// writer. That invariant lives in another type, so it gets pinned from this side too: an errored
+    /// run's stdout must not reappear as something the script returned.
+    /// </summary>
+    [Fact]
+    public void FromRecord_Error_OmitsReturnValueEvenWithStdOut()
+    {
+        var record = ExecutionRecord.CreatePending("exec-1", "throw null;", 600_000, Now);
+        record.MarkRunning(Now);
+        var error = DiagnosticRecord.Create(DiagnosticSeverity.Error, "script-execution-failed", DiagnosticSource.Execution, "boom.", null, null);
+        record.MarkError(Now, error, stdOut: "wrote this before throwing");
+
+        var json = ExecutionResultMessage.FromRecord(Id, record);
+
+        Assert.Contains("\"output\":\"wrote this before throwing\"", json);
+        Assert.DoesNotContain("\"return_value\"", json);
     }
 
     [Fact]

@@ -57,9 +57,9 @@ func TestZZDocumentCleanupRoundTrip(t *testing.T) {
 
 	created := runScript(t, c, instanceID, documentID, `return Connector.CreateProjectDocument().Title;`)
 	if created.Status != "success" {
-		t.Fatalf("create failed: status=%q output=%s", created.Status, created.Output)
+		t.Fatalf("create failed: status=%q %s", created.Status, created.diag())
 	}
-	title := strings.TrimSpace(created.Output)
+	title := strings.TrimSpace(created.ReturnValue)
 	if title == "" {
 		t.Fatalf("created document reported no title")
 	}

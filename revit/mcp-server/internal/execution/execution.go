@@ -61,13 +61,33 @@ func IsTerminal(s Status) bool {
 
 // Result is the shape returned to the MCP tool layer by ExecuteScript,
 // PollExecution, and CancelExecution — either a completed result (Status
-// success/error/cancelled/unrecoverable, with Output/Notices/ErrorDetail
-// populated as relevant) or a non-terminal status pointing at ExecutionID
-// for the caller to poll (PRD §06's two-shape contract).
+// success/error/cancelled/unrecoverable, with Output/ReturnValue/Notices/
+// ErrorDetail populated as relevant) or a non-terminal status pointing at
+// ExecutionID for the caller to poll (PRD §06's two-shape contract).
+//
+// Output and ReturnValue are two different things and were one field until
+// issue #117. Output is stdout captured during the run (PRD §06 step 4) —
+// including writes the script never made, since Revit itself writes to the
+// process console while a script runs ("PlayerServer:Warning:No subscriber
+// registered."). ReturnValue is the display string for the value the script
+// explicitly returned. Folding them into one field put Revit's chatter ahead
+// of the answer with nothing marking the boundary. The add-in's
+// ExecutionResultMessage is the other half of this change; keep the two in
+// step.
+//
+// Known asymmetry, stated rather than left to be discovered (independent
+// review): the add-in omits return_value only when it is null, so a script
+// that returns an empty string puts "return_value":"" on the wire — and
+// omitempty here drops it again, so the agent cannot tell `return "";` from
+// "returned nothing". Fixing it properly means *string on both structs,
+// which would ripple through ~170 harness assertion sites for a distinction
+// with no practical consequence (both mean "no useful value"). Left as-is
+// deliberately; revisit if a caller ever needs to tell them apart.
 type Result struct {
 	Status      Status        `json:"status"`
 	ExecutionID string        `json:"execution_id"`
 	Output      string        `json:"output,omitempty"`
+	ReturnValue string        `json:"return_value,omitempty"`
 	Notices     []diag.Record `json:"notices,omitempty"`
 	Files       []FileRecord  `json:"files,omitempty"`
 	ErrorDetail *diag.Record  `json:"error,omitempty"`

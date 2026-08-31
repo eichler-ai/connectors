@@ -52,11 +52,11 @@ return new {
 };
 `)
 		if out.Status != "success" {
-			t.Fatalf("expected status=success, got %q (output: %s)", out.Status, out.Output)
+			t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
 		}
-		for _, want := range []string{"created = True", "category = Walls"} {
-			if !strings.Contains(out.Output, want) {
-				t.Errorf("wanted %q in output: %s", want, out.Output)
+		for _, want := range []string{"\"created\":true", "\"category\":\"Walls\""} {
+			if !strings.Contains(out.ReturnValue, want) {
+				t.Errorf("wanted %q in %s", want, out.diag())
 			}
 		}
 	})
@@ -76,10 +76,10 @@ var count = new Autodesk.Revit.DB.FilteredElementCollector(doc)
 return new { foundAtLeastOne = count >= 1, count };
 `)
 		if out.Status != "success" {
-			t.Fatalf("expected status=success, got %q (output: %s)", out.Status, out.Output)
+			t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
 		}
-		if !strings.Contains(out.Output, "foundAtLeastOne = True") {
-			t.Errorf("category query did not find the wall it just created; output: %s", out.Output)
+		if !strings.Contains(out.ReturnValue, "\"foundAtLeastOne\":true") {
+			t.Errorf("category query did not find the wall it just created; %s", out.diag())
 		}
 	})
 
@@ -100,10 +100,10 @@ var readBack = wall.get_Parameter(Autodesk.Revit.DB.BuiltInParameter.ALL_MODEL_I
 return new { roundTripped = readBack == "mcp-harness-phase-a", readBack };
 `)
 		if out.Status != "success" {
-			t.Fatalf("expected status=success, got %q (output: %s)", out.Status, out.Output)
+			t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
 		}
-		if !strings.Contains(out.Output, "roundTripped = True") {
-			t.Errorf("parameter set/get round-trip failed; output: %s", out.Output)
+		if !strings.Contains(out.ReturnValue, "\"roundTripped\":true") {
+			t.Errorf("parameter set/get round-trip failed; %s", out.diag())
 		}
 	})
 
@@ -121,10 +121,10 @@ var stillThere = doc.GetElement(id) != null;
 return new { deleted = !stillThere };
 `)
 		if out.Status != "success" {
-			t.Fatalf("expected status=success, got %q (output: %s)", out.Status, out.Output)
+			t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
 		}
-		if !strings.Contains(out.Output, "deleted = True") {
-			t.Errorf("element was not actually deleted; output: %s", out.Output)
+		if !strings.Contains(out.ReturnValue, "\"deleted\":true") {
+			t.Errorf("element was not actually deleted; %s", out.diag())
 		}
 	})
 
@@ -192,11 +192,11 @@ try {
 return new { bound, definitionName };
 `)
 		if out.Status != "success" {
-			t.Fatalf("expected status=success, got %q (output: %s)", out.Status, out.Output)
+			t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
 		}
-		for _, want := range []string{"bound = True", "definitionName = MCPHarnessTestParam"} {
-			if !strings.Contains(out.Output, want) {
-				t.Errorf("wanted %q in output: %s", want, out.Output)
+		for _, want := range []string{"\"bound\":true", "\"definitionName\":\"MCPHarnessTestParam\""} {
+			if !strings.Contains(out.ReturnValue, want) {
+				t.Errorf("wanted %q in %s", want, out.diag())
 			}
 		}
 	})
@@ -321,13 +321,13 @@ return new {
 };
 `)
 		if out.Status != "success" {
-			t.Fatalf("expected status=success, got %q (output: %s)", out.Status, out.Output)
+			t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
 		}
-		if !strings.Contains(out.Output, "group2HasMember = True") || !strings.Contains(out.Output, "group3HasMember = True") {
-			t.Fatalf("one of the group instances reported no member wall at all; output: %s", out.Output)
+		if !strings.Contains(out.ReturnValue, "\"group2HasMember\":true") || !strings.Contains(out.ReturnValue, "\"group3HasMember\":true") {
+			t.Fatalf("one of the group instances reported no member wall at all; %s", out.diag())
 		}
-		if !strings.Contains(out.Output, "propagated = True") {
-			t.Errorf("reassigning Group.GroupType did not make the existing instance match a fresh instance of the same (edited) type -- output: %s", out.Output)
+		if !strings.Contains(out.ReturnValue, "\"propagated\":true") {
+			t.Errorf("reassigning Group.GroupType did not make the existing instance match a fresh instance of the same (edited) type -- %s", out.diag())
 		}
 	})
 }

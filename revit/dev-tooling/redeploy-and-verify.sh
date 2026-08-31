@@ -177,7 +177,13 @@ restart_broker() {
     deadline=$((SECONDS + 10))
     while (( SECONDS < deadline )); do
       # Pretty-printed one-key-per-line JSON written only by our own broker -- sed is enough.
-      pid="$(sed -n 's/.*"pid": *\([0-9][0-9]*\).*/\1/p' "$APP_DATA_DIR/broker.json" 2>/dev/null | head -1)"
+      # `|| true` for the same reason as broker_hash_before above, and it bites HARDER here: this
+      # poll runs BEFORE the freshly-started broker has written broker.json, so on a first run in a
+      # worktree with no Connectors/Revit yet, sed fails on the missing file, pipefail fails the
+      # pipeline, and set -e kills the script silently one line after "broker binary changed --
+      # restarting". The loop's own comment already anticipated a missing/unparsable broker.json;
+      # only the shell disagreed.
+      pid="$(sed -n 's/.*"pid": *\([0-9][0-9]*\).*/\1/p' "$APP_DATA_DIR/broker.json" 2>/dev/null | head -1 || true)"
       if [[ -n "$pid" ]] && cmd="$(ps -p "$pid" -o command= 2>/dev/null)"; then
         if [[ "$cmd" == *"$BROKER_ARGS_PATTERN"* ]]; then
           return 0   # a live primary running with exactly our arguments -- confirmed
@@ -201,7 +207,11 @@ restart_broker() {
 # True iff broker.json currently names a live process running with exactly our arguments.
 broker_is_healthy() {
   local pid cmd
-  pid="$(sed -n 's/.*"pid": *\([0-9][0-9]*\).*/\1/p' "$APP_DATA_DIR/broker.json" 2>/dev/null | head -1)"
+  # `|| true`: same missing-broker.json-under-pipefail trap as restart_broker's poll. This one is
+  # only reached from an `elif`, where set -e is suspended, so it degrades to a wrong ANSWER rather
+  # than a silent exit -- still worth closing, since "no broker.json" means "not healthy", not
+  # "abandon the check".
+  pid="$(sed -n 's/.*"pid": *\([0-9][0-9]*\).*/\1/p' "$APP_DATA_DIR/broker.json" 2>/dev/null | head -1 || true)"
   [[ -n "$pid" ]] && cmd="$(ps -p "$pid" -o command= 2>/dev/null)" && [[ "$cmd" == *"$BROKER_ARGS_PATTERN"* ]]
 }
 
@@ -302,13 +312,19 @@ if ! $SKIP_BROKER_RESTART; then
   else
     say "WARNING: $REPO_ROOT is not a git checkout -- the broker will report its revision as unknown"
   fi
-  broker_hash_before="$(shasum -a 256 "$BROKER_EXE" 2>/dev/null | awk '{print $1}')"
+  # `|| true` is load-bearing, not defensive trim. $BROKER_EXE legitimately does not exist yet on
+  # the first run in a fresh git worktree (it is a build output, and only this block creates it),
+  # and under `set -o pipefail` a failing shasum makes the whole pipeline fail, which `set -e` then
+  # turns into a SILENT exit -- no message, exit 1, right after the share-identity line. Cost a
+  # tier-2 run to diagnose, twice, because the script's own failure contract (REDEPLOY_RESULT:
+  # PASS|FAIL) never gets a chance to print. An empty hash then correctly reads as "changed" below.
+  broker_hash_before="$(shasum -a 256 "$BROKER_EXE" 2>/dev/null | awk '{print $1}' || true)"
   say "rebuilding the Mac broker from this checkout -> $BROKER_EXE"
   if ! ( cd "$REPO_ROOT/revit/mcp-server" && go build "${broker_ldflags[@]}" -o "$BROKER_EXE" ./cmd/mcp-server ); then
     echo "broker build FAILED -- refusing to continue against whatever binary is already there" >&2
     exit 1
   fi
-  broker_hash_after="$(shasum -a 256 "$BROKER_EXE" 2>/dev/null | awk '{print $1}')"
+  broker_hash_after="$(shasum -a 256 "$BROKER_EXE" 2>/dev/null | awk '{print $1}' || true)"
 
   # Ensure-not-churn: a healthy primary already running with our exact arguments is reused as is
   # -- restarting it would drop the add-in's live connection for no benefit (a relaunch produces

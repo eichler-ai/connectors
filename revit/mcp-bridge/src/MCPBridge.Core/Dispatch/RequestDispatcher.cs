@@ -540,6 +540,14 @@ public sealed class RequestDispatcher
     /// on the TCP thread, a Revit API call off the API context whenever the type overrides ToString.
     /// The try/catch is for the same reason the formatting moved: a script-defined ToString() is
     /// arbitrary code and must not turn a completed run into an unhandled UI-thread exception.
+    ///
+    /// <para>The formatting ITSELF lives in <see cref="ReturnValueFormatter"/> (issue #117), which
+    /// replaced this method's original one-liner -- <c>value as string ?? value.ToString()</c> -- because
+    /// that rendered `return levels.Select(l =&gt; new { l.Name, l.Elevation }).ToList()` as the collection's
+    /// type name and gave a caller no way to tell that from data. That class owns the bounds (depth, node
+    /// count, characters, cycles) which are what make reflecting over a script-controlled graph safe to do
+    /// here, on the UI thread. This try/catch stays as the outermost guarantee: the formatter is written
+    /// not to throw, and a bug in it still must not crash the UI thread.</para>
     /// </summary>
     private static string? SafeFormatReturnValue(object? value)
     {
@@ -550,14 +558,14 @@ public sealed class RequestDispatcher
 
         try
         {
-            return value as string ?? value.ToString() ?? "";
+            return ReturnValueFormatter.Format(value);
         }
         catch (Exception ex)
         {
             // Deliberately no ex.Message here (PR review finding): Message is virtual and
             // script-definable, so interpolating it would have the guard against arbitrary script
             // code calling arbitrary script code. GetType().Name cannot run script code.
-            return $"<return value of type {value.GetType().FullName} -- ToString() threw {ex.GetType().Name}>";
+            return $"<return value of type {value.GetType().FullName} -- formatting threw {ex.GetType().Name}>";
         }
     }
 

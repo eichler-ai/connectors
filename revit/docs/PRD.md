@@ -198,7 +198,7 @@ The Revit API is single-threaded and callable only from the main UI thread. The 
 1. TCP thread receives an `execute_script` request, decodes it, and hands the script text to an `IExternalEventHandler`.
 2. `ExternalEvent.Raise()` wakes Revit's idle loop; `Execute(UIApplication)` runs on the correct thread.
 3. Inside `Execute`, the script is compiled/run via Roslyn scripting, with a globals object exposing `Document`, `UIApplication`, and `UIDocument` into script scope. Isolation and memory lifecycle are covered separately below — the naive "cache every compiled `Script<T>` for the session" approach doesn't hold up under real agent usage.
-4. The call is wrapped in a `Transaction`/`TransactionGroup` so failed scripts roll back cleanly; stdout is captured into the result, and any exception populates the JSON-RPC `error` using the shared diagnostic-record shape (§01) — never a bare wrapper message.
+4. The call is wrapped in a `Transaction`/`TransactionGroup` so failed scripts roll back cleanly; stdout is captured into the result's `output`, the script's own returned value is formatted into the separate `return_value` field (they are separate because Revit writes to the process console during a script, so `output` is not the script's alone — issue #117), and any exception populates the JSON-RPC `error` using the shared diagnostic-record shape (§01) — never a bare wrapper message.
 5. The result is signaled back to the waiting TCP thread via a blocking handoff (e.g. `TaskCompletionSource`), never returned directly from `Execute`.
 
 > **Risk.** A script that spins forever, or an API call that genuinely blocks on I/O, occupies Revit's UI thread until it returns — there is no preemption.

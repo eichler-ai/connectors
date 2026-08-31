@@ -38,9 +38,9 @@ func TestOpenForWritingMemoryCycles(t *testing.T) {
 		func() {
 			created := runScript(t, c, instanceID, documentID, `return Connector.CreateProjectDocument().Title;`)
 			if created.Status != "success" {
-				t.Fatalf("cycle %d: create failed: status=%q output=%s", i, created.Status, created.Output)
+				t.Fatalf("cycle %d: create failed: status=%q %s", i, created.Status, created.diag())
 			}
-			title := strings.TrimSpace(created.Output)
+			title := strings.TrimSpace(created.ReturnValue)
 			// Independent PR review finding: a t.Fatalf on the write below used to skip
 			// closeFixtureDocument entirely, leaking the just-created document -- in the one test whose
 			// whole purpose is measuring document-cycle memory, a leaked-on-failure document would
@@ -53,7 +53,7 @@ func TestOpenForWritingMemoryCycles(t *testing.T) {
 			written := runScript(t, c, instanceID, documentID, fixtureWritePreamble(title)+
 				fmt.Sprintf("var level = Autodesk.Revit.DB.Level.Create(doc, %d.0);\nreturn level != null;\n", 10+i))
 			if written.Status != "success" {
-				t.Fatalf("cycle %d: write failed: status=%q output=%s", i, written.Status, written.Output)
+				t.Fatalf("cycle %d: write failed: status=%q %s", i, written.Status, written.diag())
 			}
 		}()
 	}
@@ -73,7 +73,7 @@ foreach (Autodesk.Revit.DB.Document d in UIApplication.Application.Documents) { 
 return string.Join(", ", titles) + " (count=" + titles.Count + ")";
 `)
 	if out.Status != "success" {
-		t.Fatalf("status=%q output=%s", out.Status, out.Output)
+		t.Fatalf("status=%q %s", out.Status, out.diag())
 	}
-	t.Logf("open documents: %s", out.Output)
+	t.Logf("open documents: %s", out.diag())
 }
