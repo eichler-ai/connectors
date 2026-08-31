@@ -46,6 +46,13 @@ jobs:
         run: go vet ./...
       - name: go test -race
         run: go test -race ./...
+      # Re-runs one test verbosely purely to SURFACE its headroom line. `go test` discards a passing
+      # package's output entirely -- t.Logf, stdout and stderr alike -- so a warn-on-pass check is
+      # invisible without this, which is exactly the trap the first version of the skill.md budget's
+      # soft line fell into. Cheap (one already-compiled test), and it is what makes the soft line a
+      # real signal rather than dead code.
+      - name: skill.md budget headroom
+        run: go test -v -run TestSkillFileStaysWithinItsLightweightBudget ./internal/mcpserver/
       - name: cross-compile the Windows build (primary shipping target)
         run: GOOS=windows GOARCH=amd64 go build ./...
 

@@ -32,9 +32,37 @@ func TestSkillFileStaysWithinItsLightweightBudget(t *testing.T) {
 	// design constraint, not a formality.
 	const pessimisticBytesPerToken = 3
 	const ceilingTokens = 25000
-	const budgetTokens = ceilingTokens / 4 // stay well inside; this is orientation, not reference
+
+	// Raised from ceiling/4 (6250). The file has sat within a few tokens of that figure for a long
+	// time -- long enough that any addition now arrives at a hard wall -- while the connector grew its
+	// own script API (#91/#92) and file exchange (§09). A budget calibrated to a smaller surface
+	// eventually evicts content an agent genuinely needs, and an agent that does not know about the
+	// confirmation-gated tier costs far more than the 1250 tokens saved by not telling it.
+	//
+	// Still derived from the host cap rather than picked: 30% of it, and still "orientation, not
+	// reference" by a wide margin. The 3-bytes/token measure above stays pessimistic on top of that.
+	const budgetTokens = ceilingTokens * 3 / 10
+
+	// The old figure is kept as a SOFT line. Raising a ceiling removes the thing that made it useful
+	// -- the prompt to ask whether a paragraph earns its space -- and "we'll refactor it back down
+	// later" has no forcing function once the pressure is off.
+	//
+	// t.Logf alone would be dead code here: `go test` DISCARDS a passing package's output entirely --
+	// t.Logf, stdout and stderr alike -- so nothing below is visible under either the CI command or
+	// the `go test ./...` this repo's SKILL.md documents. The ci.yml step "skill.md budget headroom"
+	// re-runs this one test with -v for the sole purpose of surfacing it. If that step is ever
+	// removed, this branch goes silent and should be deleted rather than left as decoration.
+	const softBudgetTokens = ceilingTokens / 4
 
 	approxTokens := len(skillFile) / pessimisticBytesPerToken
+	if approxTokens > softBudgetTokens && approxTokens <= budgetTokens {
+		// Phrased as state, not as a change: this fires on every run of the package while the file
+		// sits in the window, including for someone who never opened skill.md.
+		t.Logf("skill.md is ~%d tokens, past the ~%d-token soft line, with ~%d tokens of headroom "+
+			"before the %d-token limit. Not a failure. If you are adding to this file, it is worth "+
+			"asking whether the addition is orientation an agent cannot get from describe_function.",
+			approxTokens, softBudgetTokens, budgetTokens-approxTokens, budgetTokens)
+	}
 	if approxTokens > budgetTokens {
 		// The remedy is deliberately spelled out. This file has run within ~1% of the budget since
 		// issue #91, so the next person to add a paragraph hits this, and "keep it lightweight" alone
