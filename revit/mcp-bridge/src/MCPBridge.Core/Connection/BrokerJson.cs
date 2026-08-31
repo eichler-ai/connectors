@@ -20,7 +20,11 @@ public sealed class BrokerJsonParseException : Exception
 /// The contents of broker.json (PRD §05/§10): host/port/PID/start-time for discovery, and
 /// the auth token the add-in must present on the TCP handshake (PRD §10). Field names here
 /// match the Go broker's actual JSON writer (singleton.go's BrokerInfo) verbatim: "host",
-/// "port", "pid", "started_at", "token".
+/// "port", "pid", "started_at", "token". Two further fields, "version" and
+/// "latest_available_version", are OPTIONAL: they may be absent, null, or empty. That's
+/// deliberate backward compatibility -- a broker.json written by an older, not-yet-updated
+/// broker (or one written before these fields existed at all) won't carry them, and must
+/// still parse successfully rather than throw.
 /// </summary>
 public sealed class BrokerJson
 {
@@ -29,14 +33,25 @@ public sealed class BrokerJson
     public int Pid { get; }
     public DateTimeOffset StartedAt { get; }
     public string Token { get; }
+    public string? Version { get; }
+    public string? LatestAvailableVersion { get; }
 
-    private BrokerJson(string host, int port, int pid, DateTimeOffset startedAt, string token)
+    private BrokerJson(
+        string host,
+        int port,
+        int pid,
+        DateTimeOffset startedAt,
+        string token,
+        string? version,
+        string? latestAvailableVersion)
     {
         Host = host;
         Port = port;
         Pid = pid;
         StartedAt = startedAt;
         Token = token;
+        Version = version;
+        LatestAvailableVersion = latestAvailableVersion;
     }
 
     public static BrokerJson Parse(string json)
@@ -60,8 +75,10 @@ public sealed class BrokerJson
             var pid = RequireInt(root, "pid");
             var startedAt = RequireDateTimeOffset(root, "started_at");
             var token = RequireNonEmptyString(root, "token");
+            var version = OptionalString(root, "version");
+            var latestAvailableVersion = OptionalString(root, "latest_available_version");
 
-            return new BrokerJson(host, port, pid, startedAt, token);
+            return new BrokerJson(host, port, pid, startedAt, token, version, latestAvailableVersion);
         }
     }
 
@@ -110,5 +127,19 @@ public sealed class BrokerJson
         }
 
         return value.GetString()!;
+    }
+
+    // Unlike RequireNonEmptyString, absence, non-string values, and blank strings are all valid --
+    // they just mean "not reported", not a malformed file. See the class doc comment for why
+    // "version" and "latest_available_version" are optional.
+    private static string? OptionalString(JsonElement root, string name)
+    {
+        if (!root.TryGetProperty(name, out var value) || value.ValueKind != JsonValueKind.String)
+        {
+            return null;
+        }
+
+        var s = value.GetString();
+        return string.IsNullOrWhiteSpace(s) ? null : s;
     }
 }

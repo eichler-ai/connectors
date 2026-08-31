@@ -27,6 +27,14 @@ type BrokerInfo struct {
 	PID       int       `json:"pid"`
 	StartedAt time.Time `json:"started_at"`
 	Token     string    `json:"token"`
+
+	// Version is the running broker's own version, mirroring
+	// cmd/mcp-server/main.go's build-time -ldflags -X main.version=... var.
+	Version string `json:"version,omitempty"`
+	// LatestAvailableVersion is a placeholder for a later stage that will
+	// periodically check GitHub's latest release and cache the result
+	// here; it is left empty for now.
+	LatestAvailableVersion string `json:"latest_available_version,omitempty"`
 }
 
 const brokerJSONFile = "broker.json"

@@ -64,4 +64,60 @@ public class BrokerJsonTests
     {
         Assert.Throws<BrokerJsonParseException>(() => BrokerJson.Parse(json));
     }
+
+    // The whole reason Version/LatestAvailableVersion are optional: a broker.json written by an
+    // older, not-yet-updated broker (or from before these fields existed) carries only the original
+    // five fields and must still parse successfully.
+    [Fact]
+    public void Parse_WithoutVersionFields_ParsesSuccessfully_WithNullVersions()
+    {
+        var json = """{"host":"h","port":1,"pid":1,"started_at":"2026-01-01T00:00:00Z","token":"t"}""";
+
+        var brokerJson = BrokerJson.Parse(json);
+
+        Assert.Null(brokerJson.Version);
+        Assert.Null(brokerJson.LatestAvailableVersion);
+    }
+
+    [Fact]
+    public void Parse_WithVersionFields_ReadsBothValues()
+    {
+        var json = """
+            {
+              "host": "h",
+              "port": 1,
+              "pid": 1,
+              "started_at": "2026-01-01T00:00:00Z",
+              "token": "t",
+              "version": "1.2.3",
+              "latest_available_version": "1.3.0"
+            }
+            """;
+
+        var brokerJson = BrokerJson.Parse(json);
+
+        Assert.Equal("1.2.3", brokerJson.Version);
+        Assert.Equal("1.3.0", brokerJson.LatestAvailableVersion);
+    }
+
+    [Fact]
+    public void Parse_EmptyVersionFields_TreatedAsAbsent()
+    {
+        var json = """
+            {
+              "host": "h",
+              "port": 1,
+              "pid": 1,
+              "started_at": "2026-01-01T00:00:00Z",
+              "token": "t",
+              "version": "",
+              "latest_available_version": ""
+            }
+            """;
+
+        var brokerJson = BrokerJson.Parse(json);
+
+        Assert.Null(brokerJson.Version);
+        Assert.Null(brokerJson.LatestAvailableVersion);
+    }
 }

@@ -1,6 +1,7 @@
 package singleton
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -117,6 +118,100 @@ func TestBrokerJSONRoundTrip(t *testing.T) {
 	}
 	if !got.StartedAt.Equal(info.StartedAt) {
 		t.Errorf("StartedAt mismatch: got %v, want %v", got.StartedAt, info.StartedAt)
+	}
+}
+
+func TestBrokerJSONRoundTripWithVersionFields(t *testing.T) {
+	dir := t.TempDir()
+	info := BrokerInfo{
+		Host:                   "127.0.0.1",
+		Port:                   54321,
+		PID:                    os.Getpid(),
+		StartedAt:              time.Now().UTC().Truncate(time.Second),
+		Token:                  "s3cr3t-token-value",
+		Version:                "1.2.3",
+		LatestAvailableVersion: "1.3.0",
+	}
+	if err := WriteBrokerJSON(dir, info); err != nil {
+		t.Fatalf("WriteBrokerJSON: %v", err)
+	}
+
+	got, err := ReadBrokerJSON(dir)
+	if err != nil {
+		t.Fatalf("ReadBrokerJSON: %v", err)
+	}
+	if got.Version != info.Version {
+		t.Errorf("Version mismatch: got %q, want %q", got.Version, info.Version)
+	}
+	if got.LatestAvailableVersion != info.LatestAvailableVersion {
+		t.Errorf("LatestAvailableVersion mismatch: got %q, want %q", got.LatestAvailableVersion, info.LatestAvailableVersion)
+	}
+}
+
+// TestReadBrokerJSONBackwardCompatible ensures a broker.json written before
+// Version/LatestAvailableVersion existed (e.g. by a not-yet-updated broker,
+// or a stale marker left on disk) still decodes cleanly, with the new
+// fields defaulting to the empty string.
+func TestReadBrokerJSONBackwardCompatible(t *testing.T) {
+	dir := t.TempDir()
+	oldJSON := `{
+		"host": "127.0.0.1",
+		"port": 54321,
+		"pid": 4242,
+		"started_at": "2026-01-01T00:00:00Z",
+		"token": "s3cr3t-token-value"
+	}`
+	if err := os.WriteFile(filepath.Join(dir, brokerJSONFile), []byte(oldJSON), 0o600); err != nil {
+		t.Fatalf("writing old-shaped broker.json: %v", err)
+	}
+
+	got, err := ReadBrokerJSON(dir)
+	if err != nil {
+		t.Fatalf("ReadBrokerJSON: %v", err)
+	}
+	if got.Host != "127.0.0.1" || got.Port != 54321 || got.PID != 4242 || got.Token != "s3cr3t-token-value" {
+		t.Errorf("decoded old-shaped broker.json unexpectedly: %+v", got)
+	}
+	if got.Version != "" {
+		t.Errorf("Version = %q, want empty string for old-shaped broker.json", got.Version)
+	}
+	if got.LatestAvailableVersion != "" {
+		t.Errorf("LatestAvailableVersion = %q, want empty string for old-shaped broker.json", got.LatestAvailableVersion)
+	}
+}
+
+// TestWriteBrokerJSONOmitsEmptyVersionFields guards against omitempty
+// silently not being respected: when Version/LatestAvailableVersion are
+// left at their zero value (as today's un-migrated callers do), the
+// on-disk JSON must not contain those keys at all, preserving the
+// pre-existing on-disk shape.
+func TestWriteBrokerJSONOmitsEmptyVersionFields(t *testing.T) {
+	dir := t.TempDir()
+	info := BrokerInfo{
+		Host:      "127.0.0.1",
+		Port:      54321,
+		PID:       os.Getpid(),
+		StartedAt: time.Now().UTC().Truncate(time.Second),
+		Token:     "s3cr3t-token-value",
+	}
+	if err := WriteBrokerJSON(dir, info); err != nil {
+		t.Fatalf("WriteBrokerJSON: %v", err)
+	}
+
+	b, err := os.ReadFile(filepath.Join(dir, brokerJSONFile))
+	if err != nil {
+		t.Fatalf("reading broker.json: %v", err)
+	}
+
+	var raw map[string]any
+	if err := json.Unmarshal(b, &raw); err != nil {
+		t.Fatalf("unmarshaling broker.json into map: %v", err)
+	}
+	if _, ok := raw["version"]; ok {
+		t.Errorf("broker.json unexpectedly contains %q key when Version is empty: %s", "version", b)
+	}
+	if _, ok := raw["latest_available_version"]; ok {
+		t.Errorf("broker.json unexpectedly contains %q key when LatestAvailableVersion is empty: %s", "latest_available_version", b)
 	}
 }
 

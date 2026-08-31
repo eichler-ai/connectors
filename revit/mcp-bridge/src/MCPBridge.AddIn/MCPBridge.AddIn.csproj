@@ -156,4 +156,26 @@
     </ItemGroup>
   </Target>
 
+  <!--
+    Embeds the add-in's release version into the assembly as an AssemblyMetadata entry named
+    "Version", read from the MCPBRIDGE_VERSION environment variable (a release pipeline sets this;
+    MSBuild implicitly exposes environment variables as properties of the same name, so
+    $(MCPBRIDGE_VERSION) just works with no explicit plumbing) and falling back to the literal "dev"
+    when unset. Unlike MCPBridgeEmbedGitCommit above, this does NOT shell out to git; it's a plain
+    property read with a default. Not consumed anywhere yet: Stage 3 of the version-plumbing work
+    (dapper-giggling-snowglobe.md; PRD.md §12) is what will read this back via
+    AssemblyMetadataAttribute reflection (mirroring ReadBuildIdentity's GitCommit lookup in
+    MCPBridgeStatusCommand.cs) to show it in the status UI alongside the broker-reported
+    Version/LatestAvailableVersion from BrokerJson, with an "update available" comparison.
+  -->
+  <Target Name="MCPBridgeEmbedVersion" BeforeTargets="GetAssemblyAttributes" Condition="'$(TargetFramework)'!=''">
+    <PropertyGroup>
+      <MCPBridgeVersion Condition="'$(MCPBridgeVersion)'==''">$(MCPBRIDGE_VERSION)</MCPBridgeVersion>
+      <MCPBridgeVersion Condition="'$(MCPBridgeVersion)'==''">dev</MCPBridgeVersion>
+    </PropertyGroup>
+    <ItemGroup>
+      <AssemblyMetadata Include="Version" Value="$(MCPBridgeVersion)" />
+    </ItemGroup>
+  </Target>
+
 </Project>
