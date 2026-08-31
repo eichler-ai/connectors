@@ -31,9 +31,10 @@ type BrokerInfo struct {
 	// Version is the running broker's own version, mirroring
 	// cmd/mcp-server/main.go's build-time -ldflags -X main.version=... var.
 	Version string `json:"version,omitempty"`
-	// LatestAvailableVersion is a placeholder for a later stage that will
-	// periodically check GitHub's latest release and cache the result
-	// here; it is left empty for now.
+	// LatestAvailableVersion is kept current by internal/updatecheck's background goroutine, which
+	// periodically checks GitHub's latest release and caches the result here. Empty until that
+	// goroutine's first successful check completes, and left at its previous value (never cleared)
+	// on any check failure -- see internal/updatecheck's own doc comment for why.
 	LatestAvailableVersion string `json:"latest_available_version,omitempty"`
 }
 
