@@ -76,8 +76,12 @@ jobs:
           echo "RELEASE_TAG=$tag" >> $env:GITHUB_ENV
 
       # --- Build: MCP Bridge (C#), both TFMs ------------------------------------------------------
+      # -p:MCPBridgeSignDevBuild=false: the csproj's dev-loop auto-signing (a LOCAL self-signed cert,
+      # see dev-environment.md) is a convenience for the VM's interactive dev loop, not this runner --
+      # it just failed here trying to reach a timestamp server with no cert configured. This
+      # workflow's own AzureSignTool step (or its no-op) is the real release-signing story.
       - name: Build MCP Bridge (both TFMs, Release)
-        run: dotnet build revit\mcp-bridge\MCPBridge.sln -c Release
+        run: dotnet build revit\mcp-bridge\MCPBridge.sln -c Release -p:MCPBridgeSignDevBuild=false
         env:
           MCPBRIDGE_VERSION: ${{ env.RELEASE_TAG }}
 
