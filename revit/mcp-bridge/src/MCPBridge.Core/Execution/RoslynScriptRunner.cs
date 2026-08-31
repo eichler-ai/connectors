@@ -82,14 +82,21 @@ namespace MCPBridge.Core.Execution;
 /// only production caller is TransactionScriptExecutor, itself internal for the same reason.
 ///
 /// The exact snippet above no longer compiles as written, because issue #91 moved Publish behind the
-/// Connector facade -- but do not read that as the hole having a second lock on it. The SHAPE is
-/// undiminished: Document is still a bare global over the live ScriptGlobals, so a method-group
-/// delegate over it hands back the same object by the same public Delegate.Target route. This type
-/// being internal is still the only thing closing it. What #91 did change is what the FACADE's own
-/// members yield: `((System.Action&lt;string, string&gt;)Connector.Publish).Target` is the Connector
-/// instance, which holds one private IConnectorRuntime reference and nothing else -- strictly less
-/// than before, and worth noting only so a future reader does not mistake the narrower leak for a
-/// closed one.
+/// Connector facade. Do not read that as the hole having grown a second lock: this type being
+/// internal is still the only thing closing it, and reflection still reaches everything, which is the
+/// accepted guard-not-sandbox line.
+///
+/// What #91 did change is how much the Delegate.Target route yields. It now yields the Connector
+/// facade -- one private IConnectorRuntime reference -- rather than the live ScriptGlobals.
+///
+/// An earlier version of this comment claimed the shape was undiminished because "Document is still a
+/// bare global over the live ScriptGlobals, so a method-group delegate over it hands back the same
+/// object". That is WRONG, and worth leaving recorded because it is the exact error this file warns
+/// about elsewhere: asserting a capability without trying it. Document is a PROPERTY, not a method, so
+/// there is no method group to convert and no delegate whose Target is the globals object. After #91
+/// every public instance member of ScriptGlobals is a property, so the Target route to ScriptGlobals
+/// is gone entirely -- narrower than the paragraph above used to claim, and still not the thing
+/// holding the boundary.
 /// </summary>
 internal sealed class RoslynScriptRunner
 {
@@ -157,8 +164,14 @@ internal sealed class RoslynScriptRunner
             // not list it -- leaving every script that writes `Connector.Publish(...)` to fail
             // compilation with the assembly simply absent from its references. The typeof() below is
             // what forces the load, so the reference is present rather than merely likely.
-            .Append(typeof(Eichler.Connectors.Revit.Connector).Assembly)
             .Where(a => !a.IsDynamic && !string.IsNullOrEmpty(a.Location))
+            // Appended AFTER the filter, not before. Before it, the deliberately-added reference was
+            // subject to the very predicate it exists to bypass: an assembly loaded with an empty Location
+            // (single-file bundling, Assembly.Load(byte[]), an ILMerge step) would be silently dropped and
+            // every script writing Connector.Publish(...) would fail with a bare CS0103 pointing nowhere.
+            // The comment above claimed the reference was "present rather than merely likely", which is
+            // only true in this order (review finding).
+            .Append(typeof(Eichler.Connectors.Revit.Connector).Assembly)
             .Distinct()
             .ToArray();
 

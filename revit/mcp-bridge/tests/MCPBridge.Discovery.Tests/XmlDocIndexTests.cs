@@ -56,6 +56,21 @@ public class XmlDocIndexTests
             entry.Summary);
     }
 
+    /// <summary>
+    /// The same property, for a sidecar with no whitespace between the blocks at all. Review found that
+    /// <c>LoadOptions.PreserveWhitespace</c> alone fixes only the indented case -- it restores the source's
+    /// own whitespace, so where the source has none the paragraphs still concatenate. A doc generator
+    /// emitting one line per member is an ordinary shape, and <c>RevitAPI.xml</c> is tool-generated.
+    /// </summary>
+    [Fact]
+    public void LoadFromFile_ConsecutiveParagraphsWithNoSourceWhitespace_AreStillSeparated()
+    {
+        var index = XmlDocIndex.LoadFromFile(SampleDocsPath);
+
+        Assert.True(index.TryGet("M:Sample.Widget.ExplainUnindented", out var entry));
+        Assert.Equal("First paragraph. Second paragraph.", entry.Summary);
+    }
+
     [Fact]
     public void LoadFromFile_NormalizesMultiLineWhitespace()
     {

@@ -364,12 +364,18 @@ func TestExecuteScriptToolForwardsConfirmLifecycleActions(t *testing.T) {
 func TestExecuteScriptDescription_NamesTheScriptGlobalsAndRoutesOnward(t *testing.T) {
 	desc := executeScriptDescription
 
-	for _, name := range []string{
-		"CancellationToken", "Connector", "Document", "UIApplication", "UIDocument",
+	// Asserted on the DELIMITED prose, not on the bare names, because two of the bare-name checks could
+	// not fail (review finding, and the "assertion cannot fail" row in caveats.md): "Connector" is a
+	// substring of both "Eichler.Connectors.Revit" and "Connector.Publish", and "Document" is a substring
+	// of "UIDocument" -- all of which are separately asserted below. Deleting either global from the
+	// description left the old loop green.
+	for _, phrase := range []string{
+		"Document, UIApplication, UIDocument and CancellationToken",
+		"plus Connector,",
 	} {
-		if !strings.Contains(desc, name) {
-			t.Errorf("execute_script description does not name the %q global; an agent has no way to "+
-				"discover it (issue #84)", name)
+		if !strings.Contains(desc, phrase) {
+			t.Errorf("execute_script description no longer contains %q; an agent has no way to discover "+
+				"the globals it names (issue #84)", phrase)
 		}
 	}
 
@@ -398,7 +404,12 @@ func TestExecuteScriptDescription_NamesTheScriptGlobalsAndRoutesOnward(t *testin
 
 	// Connector members are documented by describe_function now, not here. If one of these reappears,
 	// the Go copy is back and so is the drift.
-	for _, name := range []string{"CreateProjectDocument", "OpenForWriting", "ExportsDirectory"} {
+	// All six of the connector members that must NOT reappear. `Publish` is deliberately absent from this
+	// list: it legitimately appears as part of the `Connector.Publish(path)` calling form asserted above.
+	for _, name := range []string{
+		"CreateProjectDocument", "CreateFamilyDocument", "OpenForWriting",
+		"ExportsDirectory", "ImportsDirectory", "DialogResultOverrides",
+	} {
 		if strings.Contains(desc, name) {
 			t.Errorf("execute_script description enumerates the connector member %q again; since "+
 				"issue #91 it names only the Connector entry point, so this list cannot drift", name)

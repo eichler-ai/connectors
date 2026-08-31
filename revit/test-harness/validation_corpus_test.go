@@ -16,11 +16,12 @@ import (
 // DWGExportOptions) at rank 6 of the first page and DWGExportOptions itself at rank 1; no
 // reformulation was needed.
 //
-// One real discovery-tool GAP found in that same research, worth recording even though it isn't a
-// blocker: `Publish`/`ExportsDirectory` (this connector's own script globals, PRD §09) are invisible
-// to list_functions/search_functions entirely -- those tools only reflect the RevitAPI corpus, not
-// ScriptGlobals itself, so an agent has no discovery path to them at all short of already knowing they
-// exist (from get_skills, or from a prior script's own compile error naming `doc` as undefined, as
+// One real discovery-tool GAP found in that same research -- SINCE CLOSED by issue #91, and kept here
+// as the record of why the connector's API moved behind `Connector`. At the time,
+// `Publish`/`ExportsDirectory` (this connector's own script globals, PRD §09) were invisible to
+// list_functions/search_functions entirely -- those tools only reflected the RevitAPI corpus, not
+// ScriptGlobals itself, so an agent had no discovery path to them at all short of already knowing they
+// existed (from get_skills, or from a prior script's own compile error naming `doc` as undefined, as
 // happened live during this case's own research -- ScriptGlobals.Document is the real global, `doc` is
 // a fixture-only local alias this file's OWN preambles define, not a name to write freehand elsewhere).
 // Filed as a discovery-coverage gap, not fixed here: PRD §13's grading protocol says a rough discovery

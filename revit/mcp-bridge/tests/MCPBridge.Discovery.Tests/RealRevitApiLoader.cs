@@ -24,9 +24,22 @@ namespace MCPBridge.Discovery.Tests;
 internal static class RealRevitApiLoader
 {
     /// <summary>
-    /// Returns the real RevitAPI.dll reflected for metadata only, or null when this environment has no
-    /// Revit install configured (MCPBRIDGE_REVITAPI_DLL unset or pointing at a missing file) -- callers
-    /// skip rather than fail, matching the existing convention for these optional tests.
+    /// The Revit version this test assembly's TFM targets, matching the RevitVersion property every
+    /// .csproj in this solution sets. Kept as a compile-time constant so the two cannot disagree at
+    /// runtime; if a TFM is added to the project, this fails to compile until it is handled here.
+    /// </summary>
+    internal const string RevitVersionForThisTargetFramework =
+#if NET8_0_WINDOWS
+        "2025";
+#else
+        "2027";
+#endif
+
+    /// <summary>
+    /// Returns the real RevitAPI.dll reflected for metadata only, or null when this machine has no Revit
+    /// install for the version this TFM targets -- callers skip rather than fail, matching the existing
+    /// convention for these optional tests. An explicitly-set MCPBRIDGE_REVITAPI_DLL pointing at a missing
+    /// file THROWS instead, since that is a misconfiguration rather than an absent install.
     ///
     /// <para>The returned <see cref="MetadataLoadContext"/> owns the assembly and must outlive every use of
     /// it, so it is handed back for the caller to dispose.</para>
@@ -45,12 +58,21 @@ internal static class RealRevitApiLoader
             // "return-on-missing-config reports as passed, not skipped" trap, caught here only because a
             // mutation of a NEW test in this family passed when it should have failed.
             //
-            // These paths mirror $(RevitInstallDir) in every .csproj here, so they are already the
-            // project's assumption about where Revit lives rather than a new one. The env var stays as an
-            // override for a non-standard install.
-            dllPath = new[] { "2027", "2025" }
-                .Select(version => $@"C:\Program Files\Autodesk\Revit {version}\RevitAPI.dll")
-                .FirstOrDefault(File.Exists);
+            // The version is derived from the TFM, NOT probed in a fixed order, and that distinction is
+            // the whole point (review finding). Every .csproj in this solution maps net10.0-windows -> 2027
+            // and net8.0-windows -> 2025, and this project multi-targets precisely because the discovery
+            // reflection path is version-sensitive. A first-hit-wins probe defeats that: on the dev VM,
+            // where both versions are installed, BOTH legs would load 2027 and the net8.0 leg would report
+            // a result about a corpus it never touched. That is worse than not running -- the 2025 leg
+            // would look like coverage while duplicating the 2027 leg.
+            //
+            // This mirrors $(RevitInstallDir) rather than inventing a third source of truth for where
+            // Revit lives. The env var stays as an override for a non-standard install.
+            dllPath = $@"C:\Program Files\Autodesk\Revit {RevitVersionForThisTargetFramework}\RevitAPI.dll";
+            if (!File.Exists(dllPath))
+            {
+                return null; // This machine has no Revit for the version this TFM targets.
+            }
         }
 
         if (string.IsNullOrEmpty(dllPath))

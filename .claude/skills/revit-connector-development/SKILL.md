@@ -57,12 +57,21 @@ These are the rules that generalize. Each one exists because violating it cost r
 
 ### Boundaries and guards
 
-- **In `MCPBridge.Core` and `MCPBridge.RevitAdapter`, `public` means script-reachable.**
-  `RoslynScriptRunner.LoadableReferences()` hands script scope every assembly in the Revit AppDomain.
-  A public type must neither *be* an adapter/capability type nor *return or yield* one — directly, or
-  through a caller-supplied callback or delegate. Default new types to `internal`; when reviewing a
-  `public` type here, read its members' **bodies** for what they pass outward, not just signatures.
-  This also covers types that decide **policy**, not just those holding capability.
+- **In `MCPBridge.Core`, `MCPBridge.RevitAdapter` and `Eichler.Connectors.Revit`, `public` means
+  script-reachable.** `RoslynScriptRunner.LoadableReferences()` hands script scope every assembly in the
+  Revit AppDomain, and explicitly appends the third one. A public type must neither *be* an
+  adapter/capability type nor *return or yield* one — directly, or through a caller-supplied callback or
+  delegate. Default new types to `internal`; when reviewing a `public` type here, read its members'
+  **bodies** for what they pass outward, not just signatures. This also covers types that decide
+  **policy**, not just those holding capability.
+  - **The one exemption, stated narrowly because it is easy to over-apply.** `ScriptGlobals`' own bound
+    globals ARE the script API by definition — Roslyn requires that type and its bound members to be
+    public — so `public Connector Connector { get; }` is not a violation. The exemption stops exactly
+    there: it covers the globals type's own bound members and nothing they lead to. Every member of
+    `Connector`, and anything `Connector` returns, is held to the rule in full. Adding
+    `public void ForEachDocument(Action<Document> f)` to `Connector` would be the round-2 exploit shape
+    (a public member handing a capability to script-supplied callback code) and no test in the repo
+    would catch it.
 - **Close a hole structurally, not by extending a list.** A name-based table is only as complete as
   whoever last remembered to extend it. Making a capability *unnameable* is usually cheaper than
   teaching a guard to judge — check first whether public members already return interfaces, in which

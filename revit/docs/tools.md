@@ -95,9 +95,9 @@ Its members are deliberately **not enumerated here**, and that is the point of i
 indexed as an add-in API under the `Eichler.Connectors.Revit` namespace, so `list_functions`,
 `search_functions` and `describe_function` return them with live signatures and summaries, generated
 from the XML doc comments beside the code. Five hand-maintained copies of this list existed before, and
-three of them were wrong. `ImportsDirectory`/`ExportsDirectory` name the file-exchange workspace
-(PRD §09), which also carries a per-run audit trail beside them — `scripts/` (verbatim script per run)
-and `logs/` (per-run NDJSON diagnostics), aged out after 14 days.
+three of them were wrong. The file-exchange workspace (PRD §09) that `Connector` exposes the
+imports and exports directories of also carries a per-run audit trail beside them — `scripts/`
+(verbatim script per run) and `logs/` (per-run NDJSON diagnostics), aged out after 14 days.
 
 **Transactions are never yours to open.** Every script runs inside a connector-managed
 `Transaction`/`TransactionGroup`: changes commit when the script returns and roll back if it

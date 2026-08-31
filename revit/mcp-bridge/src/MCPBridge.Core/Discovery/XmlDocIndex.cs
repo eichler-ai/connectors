@@ -164,6 +164,21 @@ public sealed class XmlDocIndex
                 case XElement el when el.Name.LocalName is "paramref" or "typeparamref":
                     sb.Append((string?)el.Attribute("name") ?? "");
                     break;
+                // BLOCK-LEVEL elements get an explicit separator, and this is not redundant with
+                // LoadOptions.PreserveWhitespace above -- the two fix different halves of the same defect
+                // and neither subsumes the other. PreserveWhitespace restores the newline the SOURCE FILE
+                // puts between two </para><para> pairs, which is what compiler-emitted XML always has. But
+                // a tool-generated sidecar may emit <para>A</para><para>B</para> on one line, with no
+                // whitespace to restore, and that would still render "AB". Injecting here is
+                // formatting-independent. Conversely, injection alone would not separate whitespace-only
+                // gaps between INLINE siblings (`<see cref="X"/>\n<see cref="Y"/>` -> "XY"), which
+                // PreserveWhitespace does handle. Normalize() collapses the doubled spaces either way.
+                case XElement el when el.Name.LocalName
+                    is "para" or "list" or "item" or "description" or "term" or "code" or "br":
+                    sb.Append(' ');
+                    AppendText(el, sb);
+                    sb.Append(' ');
+                    break;
                 case XElement el:
                     AppendText(el, sb); // unrecognized nested element -- still walk into it for its own text.
                     break;

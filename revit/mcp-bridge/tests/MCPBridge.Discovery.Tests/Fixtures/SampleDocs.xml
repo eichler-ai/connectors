@@ -40,5 +40,14 @@
         <para>Second paragraph.</para>
       </summary>
     </member>
+    <!--
+      The same two paragraphs with NO whitespace between them at all, which is what a tool-generated
+      sidecar can emit. LoadOptions.PreserveWhitespace cannot fix this one ; there is no whitespace node
+      to preserve ; so it is what pins the block-element separator injected in AppendText. Review found
+      the PR's first fix handled only the indented case while its test name claimed the general property.
+    -->
+    <member name="M:Sample.Widget.ExplainUnindented">
+      <summary><para>First paragraph.</para><para>Second paragraph.</para></summary>
+    </member>
   </members>
 </doc>

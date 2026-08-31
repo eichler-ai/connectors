@@ -110,11 +110,11 @@ var doc = Connector.CreateProjectDocument();     // blank, writable, from Revit'
 Autodesk.Revit.DB.Level.Create(doc, 10.0);       // just write to it — no transaction of your own
 ```
 
-`Connector.CreateProjectDocument()` defaults to the install's default project template; pass a path for
-another. `Connector.CreateFamilyDocument(path)` needs a path — there is no default family template.
 
-**The raw `UIApplication.Application.NewProjectDocument`/`NewFamilyDocument` still work and are
-READ-ONLY** — that is the only difference between the two paths. Use them only to inspect.
+**The raw `UIApplication.Application.NewProjectDocument`/`NewFamilyDocument` still work but return a
+document nothing has opened for writing** — writing to it throws
+`ModificationOutsideTransactionException`. Pass it to `Connector.OpenForWriting` first, or just use the
+`Connector` calls above, which do both in one step.
 
 Ask Revit for template paths rather than guessing: `Application.DefaultProjectTemplate` is a full `.rte`
 path, and `Application.FamilyTemplatePath` is the **root of the family-template tree**, not a flat
