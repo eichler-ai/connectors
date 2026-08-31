@@ -244,6 +244,28 @@ func (b *Broker) serveAddIn(rwc io.ReadWriteCloser) {
 				b.logf("broker: malformed register notification: %v", err)
 				return
 			}
+			// A second register on the SAME connection under a DIFFERENT
+			// instance_id would otherwise strand the first: instanceID and
+			// registerEpoch are single locals, so overwriting them leaves the
+			// previous registration attached to this connection in all three
+			// stores with nothing left holding the identity needed to detach
+			// it. Serve's own teardown below would then only ever clean up the
+			// last instance_id seen, and the earlier one would sit in the
+			// registry -- advertised by list_instances, routable to a dead
+			// connection -- until the 5-minute prune sweep aged it out.
+			//
+			// The real add-in never sends two instance_ids down one socket, so
+			// this is defensive rather than observed. It is here because it is
+			// the same orphan class as the teardown race in issue #111, and
+			// found while fixing that: the guards are cheap and identical to
+			// the ones the close path already uses.
+			if instanceID != "" && instanceID != rp.InstanceID {
+				b.logf("broker: connection re-registered from instance %s to %s; detaching the former", instanceID, rp.InstanceID)
+				b.Execution.DetachInstance(instanceID, conn)
+				b.Discovery.DetachInstance(instanceID, conn)
+				b.Registry.RemoveIfEpoch(instanceID, registerEpoch)
+			}
+
 			instanceID = rp.InstanceID
 			registerEpoch = b.Registry.Register(&registry.Instance{
 				InstanceID:   rp.InstanceID,
