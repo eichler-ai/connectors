@@ -257,6 +257,15 @@ re-resolve rather than hardcoding either. `robocopy` from `cmd /c` mangles a `\\
   reconnecting afterwards (`/mcp`, user-issued — Claude Code does not auto-recover this), not a quick
   aside mid-task. Restarting to force a fresh registration snapshot is obsolete anyway: the add-in
   pushes one live.
+- **The connected Revit is shared, and it may currently belong to another session.** There is one VM
+  and one Revit; several Claude sessions reach it through their own brokers. Check before acting, and
+  the tells are cheap: `list_instances` gives `pid` and `connected_since`, and its document list is the
+  giveaway — `C:\dev\fixtures\work.rvt` plus a run of unsaved `Project1..N` is a tier-2 harness run in
+  progress, not your instance. A `pid` that differs from the one you last saw means Revit was restarted
+  under you. `ListAgents` shows whether a peer session is `busy`. Coordinate by message before anything
+  that can wedge or restart it: a modal that needs a human click, or a `.close` signal, hits every
+  session on that instance, not just yours. Read-only probes are usually fine; anything that pops a
+  dialog is not.
 - **In REMOTE mode, the add-in registers with whichever broker `MCPBRIDGE_SHARED_ROOT` points at —
   NOT the one you just built.** (In local mode the share is never consulted: `BuildDiscoveryOptions`
   returns `BrokerDiscoveryOptions.Local()` before reading it, and the add-in uses

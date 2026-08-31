@@ -61,12 +61,32 @@ These are the rules that generalize. Each one exists because violating it cost r
   (a worktree's share name need not match its directory), so a name comparison both false-positives
   and false-negatives.
 - **A right conclusion is where wrong evidence hides.** Review checks conclusions, so support that is
-  inverted, borrowed or invented survives whenever the conclusion itself is true — twice in one day: a
-  "measured, not assumed" worked example with its two SHAs swapped (it read as the *opposite* of the
-  bug it documented), and a true "three calls" claim resting on a false reason. Both had been reviewed.
-  So: cite only runs you made, paste them with their labels attached, and never re-label someone else's
-  numbers as your own measurement. Evidence marked "measured" carries an obligation — re-derive it
-  before it becomes a comment, because a comment's whole job is to stop the next person re-deriving it.
+  inverted, borrowed or invented survives whenever the conclusion itself is true. Four instances in one
+  day, in four separate PRs, every one found by an independent reviewer and none by its author — and one
+  of those authors was actively hunting this exact failure mode at the time. The shapes seen so far:
+  someone else's numbers re-labelled as your own measurement; a "measured, not assumed" worked example
+  with its two SHAs swapped, so it read as the *opposite* of the bug it documented; a true conclusion
+  ("three calls") resting on a false reason; and a remedy that forbade the one operation its own
+  experiment had proven safe. So: cite only runs you made, paste them with their labels attached, and
+  re-derive anything marked "measured" before it becomes a comment — a comment's whole job is to stop
+  the next person re-deriving it. Because the author is the one person who cannot see this, an
+  independent review is the control, and it is worth running **even on a comment-only diff**: a
+  three-line prose PR was reviewed here and two of its claims were wrong.
+- **A specification is not behaviour. Cite the code, or a run.** PRD prose describes intent, and the
+  implementation can differ without either being wrong yet. "§07's window-inventory fallback only fires
+  when no `DialogBoxShowing` event was raised" was quoted as if it were a gate; the actual trigger is
+  `first != workTask && !record.Status.IsTerminal()` — a timeout, nothing more — and the comment beside
+  it says outright that the dialog part is an inference. A conclusion resting on the PRD is a conclusion
+  resting on a plan. This is the general form of the `skill.md` rule below, where reality has disagreed
+  with the PRD three times.
+- **A bug report's stated cause is a hypothesis; its suggested fix inherits that.** Of six issues filed
+  from one live agent session, four had a diagnosis that did not survive contact with a running Revit —
+  and in three, implementing the suggested fix would have shipped the wrong thing: a new
+  `DiscardDocument` API for documents that were already closeable, a content-hash guard that
+  `go:embed` makes incapable of ever failing, and a connector-side guard for a property setter the
+  connector cannot intercept. Reproduce the *cause* before accepting the *cure*. Every issue here is
+  still worth filing — each pointed at something real — but the reported mechanism is more often wrong
+  than right, because it was inferred mid-task by whoever hit the symptom.
 - **Confirm you are running the artifact you just built.** Byte-grep the *deployed* binary for a
   string unique to your change, decoding at both byte alignments (the `#US` heap stores UTF-16
   literals at arbitrary offsets, so a single-alignment decode gives false negatives). Timestamps
@@ -340,7 +360,15 @@ on the PR, not in a running report.
    no `--amend` on pushed commits.
 6. **Deploy an independent code-review agent** — fresh, no shared context, reading the diff itself:
    Opus for groundbreaking, default model for additive. It posts findings to the PR and reports back.
-7. **Merging is a human decision.** This pipeline creates and reviews PRs; it does not merge them.
+   **Run it for docs- and comment-only PRs too.** They are exactly where an unsupported claim survives,
+   because there is no test to contradict it and nothing to run; see "a right conclusion is where wrong
+   evidence hides".
+7. **Merging needs human authorization, which may be granted in advance.** Default is per-PR approval.
+   A human can pre-grant it for a session or a scope of work ("work through these issues, merge once
+   review is clean"), and then the agent merges on CI green plus review findings addressed — that is
+   authorization, not an exception to the rule. Without a grant, take the PR to reviewed-and-green and
+   stop there. Never infer a grant from a previous session, from another agent, or from the fact that
+   earlier PRs in the same series were merged.
 
 ## PR review checklist
 
