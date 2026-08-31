@@ -124,6 +124,12 @@ jobs:
           # LocalMachine-store write rights, and Set-AuthenticodeSignature only needs the cert
           # loaded somewhere it can read the private key from, not any particular store.
           $cert = Import-PfxCertificate -FilePath $pfxPath -CertStoreLocation Cert:\CurrentUser\My -Password $securePw
+          # Independent review finding: the private key otherwise stays resident in this persistent
+          # runner's cert store indefinitely after every release -- any later code running as this
+          # same service account could sign as "Eichler Connectors" without ever touching the
+          # secrets. Recorded here so the cleanup step below can remove it by thumbprint regardless
+          # of which step in this job actually failed.
+          echo "SIGNING_CERT_THUMBPRINT=$($cert.Thumbprint)" >> $env:GITHUB_ENV
 
           $targets = @(
             "revit\mcp-bridge\src\MCPBridge.AddIn\bin\Release\net10.0-windows\MCPBridge.AddIn.dll",
@@ -147,15 +153,22 @@ jobs:
                 continue
               }
               $verify = Get-AuthenticodeSignature -FilePath $target
-              if ($verify.Status -eq "Valid" -or $verify.Status -eq "UnknownError") {
-                # UnknownError is the expected status for a self-signed leaf with no trusted chain --
-                # it still means genuinely signed and timestamped, just not CHAIN-trusted (that's the
-                # whole "Unknown Publisher" tradeoff this interim state accepts, see top-of-file).
+              # UnknownError is the expected status for a self-signed leaf with no trusted chain --
+              # not CHAIN-trusted is the whole "Unknown Publisher" tradeoff this interim state
+              # accepts (see top-of-file) -- but Set-AuthenticodeSignature can throw NOTHING and
+              # still leave a file signed-but-UNTIMESTAMPED on a timestamp-only failure (the reason
+              # this re-verification step exists at all, per the comment above). Status alone
+              # cannot tell the two apart: a self-signed cert reports UnknownError identically
+              # whether or not a timestamp landed. Independent review finding: the original version
+              # of this check accepted Status alone and so verified nothing about the timestamp it
+              # claims to guarantee -- TimeStamperCertificate is the actual proof a countersignature
+              # was applied, present only when the timestamp genuinely succeeded.
+              if (($verify.Status -eq "Valid" -or $verify.Status -eq "UnknownError") -and $verify.TimeStamperCertificate) {
                 Write-Host "Signed $target (timestamped via $server): $($verify.Status)"
                 $signed = $true
                 break
               }
-              Write-Host "Signature status after attempting $server for $target`: $($verify.Status) -- $($verify.StatusMessage)"
+              Write-Host "Signature status after attempting $server for $target`: $($verify.Status) -- $($verify.StatusMessage) -- TimeStamperCertificate=$($verify.TimeStamperCertificate)"
               $lastError = $verify.StatusMessage
             }
             if (-not $signed) { throw "Failed to sign $target with a valid timestamp against any configured timestamp server. Last error: $lastError" }
@@ -163,7 +176,14 @@ jobs:
 
       - name: Clean up signing material
         if: always()
-        run: Remove-Item "$env:RUNNER_TEMP\selfsigned.pfx" -Force -ErrorAction SilentlyContinue
+        run: |
+          Remove-Item "$env:RUNNER_TEMP\selfsigned.pfx" -Force -ErrorAction SilentlyContinue
+          # Removes the imported cert (private key included) from Cert:\CurrentUser\My, not just the
+          # temp PFX file -- see the import step's own comment for why this matters on a runner that
+          # stays up indefinitely. Empty when signing was skipped entirely, hence the guard.
+          if ($env:SIGNING_CERT_THUMBPRINT) {
+            Remove-Item "Cert:\CurrentUser\My\$env:SIGNING_CERT_THUMBPRINT" -Force -ErrorAction SilentlyContinue
+          }
 
       - name: Signing skipped (no self-signed cert secrets configured)
         if: ${{ env.SIGNING_CONFIGURED != 'true' }}

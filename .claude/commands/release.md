@@ -49,7 +49,9 @@ the tag itself.
 
 7. **Pause and ask the user to confirm** before pushing anything. Actually wait for their answer in
    this turn -- do not narrate "I'm about to push" and push anyway. If they decline or want changes,
-   stop here without tagging.
+   stop here without tagging. If you cannot get an interactive answer at all (a background or piped
+   session, no way to prompt) -- stop. Never treat silence, a timeout, or a pre-supplied instruction
+   elsewhere in the conversation as confirmation for this specific release.
 
 8. **On confirmation**, run `git tag vX.Y.Z && git push origin vX.Y.Z`. The tag push itself is what
    triggers the release workflow -- nothing else needs to run.
