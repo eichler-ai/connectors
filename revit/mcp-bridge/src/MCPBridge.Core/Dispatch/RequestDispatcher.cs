@@ -1,7 +1,10 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
+using Microsoft.CodeAnalysis.Scripting;
 using MCPBridge.Core.Diagnostics;
 using MCPBridge.Core.Discovery;
 using MCPBridge.Core.Execution;
@@ -550,8 +553,61 @@ public sealed class RequestDispatcher
             {
                 "Rewrite the script without async/await; call the synchronous form of whatever it awaited.",
             }),
+        // Issue #84. A compile failure is not "an arbitrary exception thrown by script code" -- it is the
+        // one failure where the connector knows something the agent doesn't, and said nothing. Found live
+        // building validation-corpus case #1: a script wrote `doc.Export(...)`, got back
+        // "CS0103: The name 'doc' does not exist in the current context", and had no way to learn that the
+        // global is `Document`. The names were never secret -- get_skills lists all ten with prose -- but
+        // an agent that didn't call get_skills first had no path from the error to the answer.
+        CompilationErrorException compilation => ("script-compilation-failed", CompilationRemedy(compilation)),
         _ => ("script-execution-failed", null),
     };
+
+    /// <summary>
+    /// Remedy lines for a compile failure. The globals are listed ONLY for CS0103 ("the name X does not
+    /// exist in the current context"), because that is the diagnostic that means "you guessed an
+    /// identifier" -- attaching ten names to every syntax error would be noise on the majority of compile
+    /// failures, which are ordinary mistakes in the script's own code.
+    ///
+    /// <para>CS0246 ("type or namespace not found") is deliberately NOT included. It looks adjacent but
+    /// means a missing using/reference, not a missing global, and pointing at the globals list there would
+    /// send an agent looking in the wrong place.</para>
+    /// </summary>
+    private static string[]? CompilationRemedy(CompilationErrorException exception)
+    {
+        var unknownNameDiagnostics = exception.Diagnostics.Where(d => d.Id == "CS0103").ToArray();
+        if (unknownNameDiagnostics.Length == 0)
+        {
+            return null;
+        }
+
+        // Taken from the diagnostic's MESSAGE ("The name 'doc' does not exist in the current context"),
+        // not from its source span. The span route looked cleaner and did not work: these diagnostics come
+        // back off a Roslyn scripting Compilation whose SourceTree is not reliably attached to the text the
+        // span indexes into, so it silently produced an empty name and suppressed the whole remedy. The
+        // message is a stable, documented part of the diagnostic; extracting from it is best-effort by
+        // design, and the globals list -- the part that actually helps -- is emitted either way.
+        var unknownNames = unknownNameDiagnostics
+            .Select(d => Regex.Match(d.GetMessage(CultureInfo.InvariantCulture), "'([^']+)'"))
+            .Where(m => m.Success)
+            .Select(m => m.Groups[1].Value)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+
+        var opening = unknownNames.Length == 0
+            ? "A name in this script did not resolve."
+            : $"{(unknownNames.Length == 1 ? "The name" : "The names")} " +
+              string.Join(", ", unknownNames.Select(n => "'" + n + "'")) + " did not resolve.";
+
+        return new[]
+        {
+            opening + " A script's scope carries exactly these connector-provided globals: " +
+            string.Join(", ", ScriptGlobals.GlobalNames) + ".",
+            "Names are case-sensitive -- the document global is 'Document', not 'doc'.",
+            "Call get_skills for what each global does, with examples; search_functions only indexes " +
+            "Revit's own API and will never return these.",
+        };
+    }
 
     /// <summary>
     /// Second live-wiring review finding: poll_execution previously ignored timeout_ms entirely and

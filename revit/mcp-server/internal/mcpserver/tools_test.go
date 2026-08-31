@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -347,5 +348,34 @@ func TestExecuteScriptToolForwardsConfirmLifecycleActions(t *testing.T) {
 	}
 	if !gotConfirm {
 		t.Error("confirm_lifecycle_actions did not reach the wire params as true")
+	}
+}
+
+// Issue #84. execute_script's description is the only place an agent is guaranteed to see before
+// writing its first script, so the globals are named there. The list is maintained by hand in Go and
+// reflected in C# (ScriptGlobals.GlobalNames); the C# side carries the tripwire that fails when the two
+// drift (ScriptGlobalsDiscoverabilityTests). This test guards the Go half: that the names are present at
+// all, and that the description routes onward to get_skills rather than trying to explain them here.
+func TestExecuteScriptDescription_NamesTheScriptGlobalsAndPointsAtGetSkills(t *testing.T) {
+	desc := executeScriptDescription
+
+	for _, name := range []string{
+		"CancellationToken", "CreateFamilyDocument", "CreateProjectDocument", "DialogResultOverrides",
+		"Document", "ExportsDirectory", "ImportsDirectory", "OpenForWriting", "Publish",
+		"UIApplication", "UIDocument",
+	} {
+		if !strings.Contains(desc, name) {
+			t.Errorf("execute_script description does not name the %q global; an agent has no way to "+
+				"discover it (issue #84)", name)
+		}
+	}
+
+	if !strings.Contains(desc, "get_skills") {
+		t.Error("execute_script description must point at get_skills, which documents what the globals do")
+	}
+	// The reason the names are here at all: search_functions cannot answer this, and saying so stops an
+	// agent burning a call on it.
+	if !strings.Contains(desc, "search_functions") {
+		t.Error("execute_script description should say search_functions will not return these")
 	}
 }
