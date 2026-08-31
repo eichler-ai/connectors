@@ -16,47 +16,72 @@ namespace MCPBridge.Discovery.Tests;
 /// "lineweight" is a contiguous substring of the raw name and is in no word-part at all.</para>
 ///
 /// <para>Not covered by the ranking snapshot, and that is why this file exists rather than another corpus
-/// row: the offending rows score 500.5, which puts them at ranks 35-42 for the reported query -- below the
-/// snapshot's depth of 10. A defect can be real, reproducible and still invisible to the instrument built
-/// to catch ranking changes, so it needs an assertion on the INVARIANT rather than on a leaderboard.</para>
+/// row: the offending rows sit at the tier-2 floor, which puts them around rank 35 for the reported query
+/// -- below the snapshot's depth of 10. A defect can be real, reproducible and still invisible to the
+/// instrument built to catch ranking changes, so it needs an assertion on the INVARIANT rather than on a
+/// leaderboard. Measured: 17 of that query's 548 rows, and the mutation message names them.</para>
 /// </summary>
 public class TierBoundaryTests
 {
-    /// <summary>Tier 2's floor: <c>500 + CoreBoost</c>. A row landing exactly here earned no relevance at all.</summary>
-    private const double TierTwoFloorForCore = 500.5;
+    /// <summary>
+    /// A tolerance around tier 2's floor, wide enough to catch a row of either assembly kind and far
+    /// narrower than the smallest score a genuine match can earn.
+    ///
+    /// <para>Both bounds come from production constants rather than literals. An earlier version
+    /// hard-coded 500.5, which was a proxy for "relevance == 0" and not the property itself: changing
+    /// <c>CoreBoost</c> or the tier-2 base would move every zero-relevance row somewhere else, the filter
+    /// would match nothing, and the test would stay green while the invariant was fully broken. It also
+    /// missed non-core rows entirely, which land at 500.0 -- not reachable while this fixture syncs only
+    /// core assemblies, but issue #91 made an add-in assembly a real production configuration.</para>
+    ///
+    /// <para>The window is safe because the smallest NONZERO relevance a row can earn is
+    /// <c>0.75 x 0.15 x 0.9 = 0.10125</c>, worth about 25 points -- so nothing genuine can land inside it.</para>
+    /// </summary>
+    private const double FloorTolerance = 0.0001;
 
     /// <summary>
     /// The query issue #80 reported, whose admitted-but-unexplained rows are the clearest instance.
     ///
-    /// <para>Measured before the fix, at these exact scores: <c>Category.GetLineWeight</c>,
-    /// <c>Category.SetLineWeight</c>, <c>FilledRegionType.IsValidLineWeight</c>,
-    /// <c>OverrideGraphicSettings.SetProjectionLineWeight</c>, <c>DWGImportOptions.GetLineWeights</c> and a
-    /// dozen more, all at 500.50 and all above the best tier-3 row.</para>
+    /// <para>Measured before the fix: <c>Category.GetLineWeight</c>, <c>Category.SetLineWeight</c>,
+    /// <c>FilledRegionType.IsValidLineWeight</c>, <c>OverrideGraphicSettings.SetProjectionLineWeight</c>,
+    /// <c>DWGImportOptions.GetLineWeights</c> and a dozen more -- 17 rows in all, every one at the floor
+    /// and above the best tier-3 row.</para>
     /// </summary>
     [Fact]
     public void NoTierTwoRowIsEmittedWithZeroRelevance()
     {
-        var loaded = RealRevitApiLoader.TryLoad();
-        if (loaded is null)
+        // Self-skips when this machine has no Revit for the TFM under test. Acceptable here ONLY because
+        // RealRevitApiLoaderTests turns "Revit is installed but this family skipped anyway" into a red
+        // build -- otherwise this is the reported-as-PASSED shape that has killed a test family twice.
+        var built = RealRevitCorpus.TryBuild();
+        if (built is null)
         {
             return;
         }
 
-        using var context = loaded.Value.Context;
-        using var cache = new DiscoveryCache(":memory:");
-        cache.Sync(new[] { ("core", loaded.Value.Assembly) });
+        using var context = built.Value.Context;
+        using var cache = built.Value.Cache;
 
-        var atTheFloor = cache.Search("create lineweight", namespaceFilter: null)
-            .Where(r => Math.Abs(r.Score - TierTwoFloorForCore) < 0.0001)
+        var results = cache.Search("create lineweight", namespaceFilter: null).ToList();
+
+        // POSITIVE CONTROL. Without it, a sync that no-ops or an admission predicate that stops matching
+        // makes the assertion below trivially true: zero rows means zero rows at the floor. Test 2 has
+        // this control; this one did not until review pointed it out.
+        Assert.True(results.Count > 0, "the query matched nothing at all, so the fixture is broken");
+
+        var atTheFloor = results
+            .Where(r => r.Score >= DiscoveryCache.TierTwoFloor - FloorTolerance
+                     && r.Score <= DiscoveryCache.TierTwoFloor + DiscoveryCache.CoreAssemblyBoost + FloorTolerance)
             .Select(r => $"{r.Member.DeclaringType}.{r.Member.Name}")
             .OrderBy(n => n, StringComparer.Ordinal)
             .ToList();
 
         Assert.True(
             atTheFloor.Count == 0,
-            $"{atTheFloor.Count} rows sit at the tier-2 floor ({TierTwoFloorForCore}), meaning the query's " +
-            "words explain nothing about them, yet they outrank every tier-3 match in the corpus:\n  " +
-            string.Join("\n  ", atTheFloor.Take(20)));
+            $"{atTheFloor.Count} of {results.Count} rows sit at the tier-2 floor " +
+            $"({DiscoveryCache.TierTwoFloor}-{DiscoveryCache.TierTwoFloor + DiscoveryCache.CoreAssemblyBoost}), " +
+            "meaning the query's words explain nothing about them, yet they outrank every tier-3 match in " +
+            "the corpus:\n  " + string.Join("\n  ", atTheFloor.Take(20)));
     }
 
     /// <summary>
@@ -70,15 +95,14 @@ public class TierBoundaryTests
     [Fact]
     public void AWeakButNonZeroMatchStillReachesTierTwo()
     {
-        var loaded = RealRevitApiLoader.TryLoad();
-        if (loaded is null)
+        var built = RealRevitCorpus.TryBuild();
+        if (built is null)
         {
             return;
         }
 
-        using var context = loaded.Value.Context;
-        using var cache = new DiscoveryCache(":memory:");
-        cache.Sync(new[] { ("core", loaded.Value.Assembly) });
+        using var context = built.Value.Context;
+        using var cache = built.Value.Cache;
 
         var kilonewtons = cache.Search("create kilonewton", namespaceFilter: null)
             .Where(r => r.Member.Name.Contains("Kilonewton", StringComparison.Ordinal))
@@ -86,7 +110,7 @@ public class TierBoundaryTests
 
         Assert.True(kilonewtons.Count > 0, "no Kilonewton member matched at all; the fixture assumption is wrong");
         Assert.True(
-            kilonewtons.Any(r => r.Score > TierTwoFloorForCore),
+            kilonewtons.Any(r => r.Score > DiscoveryCache.TierTwoFloor + DiscoveryCache.CoreAssemblyBoost),
             "every Kilonewton row fell out of tier 2. A weak-but-nonzero match must still be admitted -- " +
             "issue #80 drops rows the query explains NOTHING about, not rows it explains poorly.");
     }

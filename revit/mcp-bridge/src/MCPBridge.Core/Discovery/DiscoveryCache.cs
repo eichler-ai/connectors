@@ -759,7 +759,19 @@ public sealed class DiscoveryCache : IDisposable
     /// within the tier. Mirrors the same "core wins ties" policy <see cref="FindTypeRow"/>/
     /// <see cref="FindTypeRowByFullName"/> already apply to type lookups.
     /// </summary>
-    private static double CoreBoost(bool isCoreAssembly) => isCoreAssembly ? 0.5 : 0.0;
+    /// <summary>
+    /// Tier 2's floor: the score of a row admitted to tier 2 with zero relevance, before
+    /// <see cref="CoreBoost"/>. INTERNAL rather than private so a test can assert the tier boundary
+    /// against the value production actually uses -- an independent review found TierBoundaryTests
+    /// hard-coding 500.5, which meant changing this constant would leave the invariant fully broken and
+    /// the test permanently green, since its filter would simply match nothing.
+    /// </summary>
+    internal const double TierTwoFloor = 500.0;
+
+    /// <summary>The bonus a core-assembly row earns, applied AFTER candidate selection. See <see cref="CoreBoost"/>.</summary>
+    internal const double CoreAssemblyBoost = 0.5;
+
+    private static double CoreBoost(bool isCoreAssembly) => isCoreAssembly ? CoreAssemblyBoost : 0.0;
 
     /// <summary>
     /// Width of the score band tier 2 spreads its graded relevance across, above its floor of 500 and well
@@ -1138,12 +1150,15 @@ public sealed class DiscoveryCache : IDisposable
             // relevance 0. At the old floor that row scored 500.5 and therefore outranked EVERY tier-3
             // match in the corpus, however strong.
             //
-            // Measured on the real corpus: "create lineweight" put Category.GetLineWeight,
-            // Category.SetLineWeight, FilledRegionType.IsValidLineWeight,
-            // OverrideGraphicSettings.SetProjectionLineWeight and a dozen more at exactly 500.50, above
-            // the best tier-3 row. Dropping them lets tier 3 rank them on their merits, and makes the tier
-            // boundary mean what its own comments already claim: tier 2 is "the query's words explain this
-            // name", and a zero score says they do not.
+            // Measured on the real corpus: "create lineweight" put 17 of its 548 rows at the tier-2 floor
+            // -- Category.GetLineWeight, Category.SetLineWeight, FilledRegionType.IsValidLineWeight,
+            // OverrideGraphicSettings.SetProjectionLineWeight and a dozen more -- every one of them above
+            // the best tier-3 row. (16 against RevitAPI alone; the 17th is in RevitAPIUI, which the test
+            // corpus only started syncing once it was made to match production. They begin around rank 35
+            // rather than rank 1, because issue #79 lifted genuinely-relevant rows above them -- the
+            // defect was intact, only its visibility had changed.) Dropping them lets tier 3 rank them on
+            // their merits, and makes the tier boundary mean what its own comments already claim: tier 2
+            // is "the query's words explain this name", and a zero score says they do not.
             //
             // Note this leaves WEAK-but-nonzero rows alone (UnitTypeId.Kilonewtons earns a prefix credit
             // for "create kilonewton"). That is arguably correct and deliberately unchanged.
@@ -1152,7 +1167,7 @@ public sealed class DiscoveryCache : IDisposable
                 continue;
             }
 
-            scored.Add((id, 500 + (TierTwoBand * relevance) + CoreBoost(isCore)));
+            scored.Add((id, TierTwoFloor + (TierTwoBand * relevance) + CoreBoost(isCore)));
         }
 
         return scored;

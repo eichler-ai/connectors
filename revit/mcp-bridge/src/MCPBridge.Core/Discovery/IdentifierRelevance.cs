@@ -251,7 +251,16 @@ internal static class IdentifierRelevance
         // SaveAsNewCentral.
         //
         // Counted over the reflected corpus: 217 members carry "new" as a word-part; 176 have it leading,
-        // 41 do not, and not one of the 41 is a factory. Those 41 are worse than merely wrong -- their
+        // 41 do not, and not one of the 41 is a factory.
+        //
+        // SCOPE, stated because the evidence is narrower than the rule: that count is about "new" alone,
+        // and the factory-convention argument is specific to the create/new group. The gate nonetheless
+        // applies to every group -- delete/remove/erase, get/find/lookup, modify/set/change. Revit's
+        // verb-first house style makes that plausible rather than merely convenient, and the ranking
+        // corpus showed no regression across 79 queries, but four of the queries that reordered
+        // ("delete an element", "find the level of an element", "set a view template", "change the view
+        // scale") come from the other groups and carry no expectation. Snapshot-only, so a future
+        // regression there would show as a diff rather than a failure. Those 41 are worse than merely wrong -- their
         // names are long, so they match MORE query tokens than the real factory does
         // (NoElementsAddedtoNewAssembly supplies "elements", "assembly" and, via the synonym, "create",
         // where AssemblyInstance.Create supplies only two of the three), and recall carried them past the

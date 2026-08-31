@@ -73,14 +73,14 @@ public class RankingCorpusTests
     [Fact]
     public void ExpectedAnswersAreFound()
     {
-        var loaded = RealRevitApiLoader.TryLoad();
-        if (loaded is null)
+        var built = RealRevitCorpus.TryBuild();
+        if (built is null)
         {
             return; // No Revit for this TFM; RealRevitApiLoaderTests fails if that is wrong.
         }
 
-        using var context = loaded.Value.Context;
-        using var cache = BuildCache(loaded.Value.Assembly, TryLoadUi(loaded.Value.Context, loaded.Value.Assembly));
+        using var context = built.Value.Context;
+        using var cache = built.Value.Cache;
         var service = new DiscoveryService(cache);
 
         var failures = new List<string>();
@@ -113,14 +113,14 @@ public class RankingCorpusTests
     [Fact]
     public void RankingSnapshotIsUnchanged()
     {
-        var loaded = RealRevitApiLoader.TryLoad();
-        if (loaded is null)
+        var built = RealRevitCorpus.TryBuild();
+        if (built is null)
         {
             return;
         }
 
-        using var context = loaded.Value.Context;
-        using var cache = BuildCache(loaded.Value.Assembly, TryLoadUi(loaded.Value.Context, loaded.Value.Assembly));
+        using var context = built.Value.Context;
+        using var cache = built.Value.Cache;
         var service = new DiscoveryService(cache);
 
         var actual = new StringBuilder();
@@ -294,32 +294,6 @@ public class RankingCorpusTests
         return result.Results
             .Select(r => ($"{r.Member.DeclaringType}.{r.Member.Name}", r.Score))
             .ToList();
-    }
-
-    /// <summary>
-    /// Syncs BOTH core assemblies, matching <c>BridgeHost.CollectAssembliesToSync</c>, which registers
-    /// RevitAPI and RevitAPIUI together as <c>"core"</c>.
-    ///
-    /// <para>An earlier version synced RevitAPI alone, which quietly made the corpus a weaker instrument
-    /// than it looked: every <c>Autodesk.Revit.UI</c> member was absent, so a query like "prompt the user"
-    /// or "let the user pick an element" ranked against a corpus an agent never sees. A regression corpus
-    /// whose corpus differs from production measures the wrong thing.</para>
-    /// </summary>
-    private static DiscoveryCache BuildCache(System.Reflection.Assembly revitApi, System.Reflection.Assembly? revitApiUi)
-    {
-        var cache = new DiscoveryCache(":memory:");
-        cache.Sync(revitApiUi is null
-            ? new[] { ("core", revitApi) }
-            : new[] { ("core", revitApi), ("core", revitApiUi) });
-        return cache;
-    }
-
-    /// <summary>RevitAPIUI from the same install, loaded into the same metadata context; null if absent.</summary>
-    private static System.Reflection.Assembly? TryLoadUi(
-        System.Reflection.MetadataLoadContext context, System.Reflection.Assembly core)
-    {
-        var uiPath = Path.Combine(Path.GetDirectoryName(core.Location)!, "RevitAPIUI.dll");
-        return File.Exists(uiPath) ? context.LoadFromAssemblyPath(uiPath) : null;
     }
 
     private static string SnapshotFileName =>
