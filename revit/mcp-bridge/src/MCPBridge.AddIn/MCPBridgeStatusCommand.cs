@@ -4,6 +4,7 @@ using System.Linq;
 using System.Reflection;
 using Autodesk.Revit.Attributes;
 using Autodesk.Revit.UI;
+using MCPBridge.Core.Connection;
 
 namespace MCPBridge.AddIn;
 
@@ -44,13 +45,41 @@ public sealed class MCPBridgeStatusCommand : IExternalCommand
 
         var (buildTimestamp, gitCommit) = ReadBuildIdentity();
 
+        // PRD §12 Stage 3: broker.json's own Version/LatestAvailableVersion fields (Stage 1 plumbing,
+        // Stage 2's periodic GitHub check) reached here via BridgeHost's existing volatile status
+        // fields -- the same reconnect-loop poll path already used for IsConnected/BrokerAddress, no
+        // new RPC. UpdateAvailability.IsAvailable is entirely broker-sourced; it deliberately does NOT
+        // factor in gitCommit/buildTimestamp above (a different, build-identity purpose).
+        var brokerVersion = host?.BrokerVersion;
+        var latestAvailableVersion = host?.LatestAvailableVersion;
+        var updateAvailable = UpdateAvailability.IsAvailable(brokerVersion, latestAvailableVersion);
+
         var content =
             $"Instance ID: {MCPBridgeApplication.InstanceId}\n" +
             $"Status: {connectionLine}\n\n" +
             $"Build: {buildTimestamp}\n" +
             $"Commit: {gitCommit}";
 
-        MCPBridgeStatusWindow.ShowOrActivate(commandData.Application.MainWindowHandle, content);
+        if (updateAvailable)
+        {
+            content += $"\n\nUpdate available (v{latestAvailableVersion})";
+        }
+
+        var ownerHandle = commandData.Application.MainWindowHandle;
+
+        if (updateAvailable)
+        {
+            MCPBridgeStatusWindow.ShowOrActivate(
+                ownerHandle,
+                content,
+                actionLabel: "Update Now",
+                onAction: () => UpdateTrigger.TriggerUpdate(
+                    statusText => MCPBridgeStatusWindow.ShowOrActivate(ownerHandle, statusText)));
+        }
+        else
+        {
+            MCPBridgeStatusWindow.ShowOrActivate(ownerHandle, content);
+        }
 
         return Result.Succeeded;
     }

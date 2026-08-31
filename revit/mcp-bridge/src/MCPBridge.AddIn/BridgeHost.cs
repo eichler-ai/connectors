@@ -67,6 +67,8 @@ internal sealed class BridgeHost
     // would have no business contending with a background thread over.
     private volatile bool _isConnected;
     private volatile string? _brokerAddress;
+    private volatile string? _brokerVersion;
+    private volatile string? _latestAvailableVersion;
     private long _connectedSinceUtcTicks;
 
     /// <summary>True once auth+register has succeeded on the current connection; false while disconnected/reconnecting.</summary>
@@ -74,6 +76,12 @@ internal sealed class BridgeHost
 
     /// <summary>The broker's "host:port" for the current (or most recent) connection, if one has ever succeeded.</summary>
     public string? BrokerAddress => _brokerAddress;
+
+    /// <summary>The connected broker's own self-reported running version (broker.json's Version field, PRD §12), if known.</summary>
+    public string? BrokerVersion => _brokerVersion;
+
+    /// <summary>The latest connector release version the broker's own periodic GitHub check has found (broker.json's LatestAvailableVersion field, PRD §12), if known.</summary>
+    public string? LatestAvailableVersion => _latestAvailableVersion;
 
     /// <summary>When the current connection's auth+register last succeeded, if <see cref="IsConnected"/>.</summary>
     public DateTimeOffset? ConnectedSince
@@ -741,14 +749,17 @@ internal sealed class BridgeHost
         // returns (which happens on disconnect, the opposite condition). Same moment defines "connected"
         // for the ribbon status button.
         reconnectController.OnConnectSucceeded();
-        // _isConnected MUST be written last, after _brokerAddress/_connectedSinceUtcTicks (independent PR
-        // review confirmed this ordering is what makes the three safe to read together from another
-        // thread without a lock): _isConnected is the volatile "release" a UI-thread reader synchronizes
-        // on -- observing _isConnected == true is only meaningful as a guarantee that the writes before it
-        // are also visible if it's genuinely the LAST of the three to be written. Reordering these three
-        // lines would reopen a window where a status read could observe IsConnected=true alongside a
-        // stale/null BrokerAddress from a previous connection.
+        // _isConnected MUST be written last, after _brokerAddress/_brokerVersion/_latestAvailableVersion/
+        // _connectedSinceUtcTicks (independent PR review confirmed this ordering is what makes these safe
+        // to read together from another thread without a lock): _isConnected is the volatile "release" a
+        // UI-thread reader synchronizes on -- observing _isConnected == true is only meaningful as a
+        // guarantee that the writes before it are also visible if it's genuinely the LAST of them to be
+        // written. Reordering these lines would reopen a window where a status read could observe
+        // IsConnected=true alongside stale/null BrokerAddress/BrokerVersion/LatestAvailableVersion from a
+        // previous connection.
         _brokerAddress = $"{address.Host}:{address.Port}";
+        _brokerVersion = brokerJson.Version;
+        _latestAvailableVersion = brokerJson.LatestAvailableVersion;
         Interlocked.Exchange(ref _connectedSinceUtcTicks, DateTimeOffset.UtcNow.Ticks);
         _activeStream = stream; // published only once the connection is fully established (auth+register done)
         _isConnected = true;
