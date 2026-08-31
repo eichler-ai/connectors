@@ -163,7 +163,7 @@ public sealed class RequestDispatcher
         }
         catch (JsonRpcParamException ex)
         {
-            return JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InvalidParams, ex.Message, null);
+            return JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InvalidParams, ex.Message, ex.Diagnostic);
         }
 
         ExecuteOutcome outcome;
@@ -175,7 +175,21 @@ public sealed class RequestDispatcher
         {
             // Hard requirement 4: Start's validation failure (null/empty/colliding executionId) must
             // become a JSON-RPC error response, not propagate and kill the connection.
-            return JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InvalidParams, ex.Message, null);
+            //
+            // The record is synthesised here rather than carried on the exception (the shape issue #69
+            // gave JsonRpcParamException): this is a plain ArgumentException from ExecutionManager, whose
+            // own contract is an ordinary .NET argument guard, and giving it a wire-diagnostic field would
+            // push protocol concerns into a module that has none. It is included in this change anyway
+            // because it is the SAME defect one line away -- an InvalidParams with a bare message, from
+            // the same handler -- and leaving it would just relocate the inconsistency the issue is about.
+            var startDiagnostic = DiagnosticRecord.Create(
+                DiagnosticSeverity.Error,
+                "invalid-execution-id",
+                DiagnosticSource.Execution,
+                ex.Message,
+                detail: new Dictionary<string, object?> { ["param"] = "execution_id", ["execution_id"] = executionId },
+                remedy: new[] { "Mint a fresh, unique execution_id for each execute_script call and echo it back unchanged on poll_execution/cancel_execution." });
+            return JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InvalidParams, ex.Message, startDiagnostic);
         }
 
         switch (outcome.Kind)
@@ -635,7 +649,7 @@ public sealed class RequestDispatcher
         }
         catch (JsonRpcParamException ex)
         {
-            return JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InvalidParams, ex.Message, null);
+            return JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InvalidParams, ex.Message, ex.Diagnostic);
         }
 
         var deadline = _now().AddMilliseconds(ClampTimeoutMs(timeoutMs));
@@ -670,7 +684,7 @@ public sealed class RequestDispatcher
         }
         catch (JsonRpcParamException ex)
         {
-            return JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InvalidParams, ex.Message, null);
+            return JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InvalidParams, ex.Message, ex.Diagnostic);
         }
 
         var outcome = _executionManager.RequestCancellation(executionId, _now());
@@ -734,7 +748,7 @@ public sealed class RequestDispatcher
         }
         catch (JsonRpcParamException ex)
         {
-            return JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InvalidParams, ex.Message, null);
+            return JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InvalidParams, ex.Message, ex.Diagnostic);
         }
         catch (Exception ex)
         {
@@ -761,7 +775,7 @@ public sealed class RequestDispatcher
         }
         catch (JsonRpcParamException ex)
         {
-            return JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InvalidParams, ex.Message, null);
+            return JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InvalidParams, ex.Message, ex.Diagnostic);
         }
         catch (Exception ex)
         {
@@ -785,7 +799,15 @@ public sealed class RequestDispatcher
             var memberId = request.GetOptionalString("member_id");
             if (string.IsNullOrEmpty(member) && string.IsNullOrEmpty(memberId))
             {
-                throw new JsonRpcParamException("params.member and params.member_id are both missing -- at least one is required.");
+                // Same code/detail/remedy as DiscoveryService's own guard for this condition, and as the
+                // Go broker's: which of the three answers first depends only on where the request was
+                // validated, and issue #69 is about that not changing the shape an agent sees.
+                throw new JsonRpcParamException(
+                    "params.member and params.member_id are both missing -- at least one is required.",
+                    DiagnosticSource.Discovery,
+                    "missing-required-param",
+                    detail: new Dictionary<string, object?> { ["params"] = new[] { "member", "member_id" } },
+                    remedy: new[] { "Pass member (a fully-qualified Type.Member) or member_id (an exact XML-doc-id from search_functions or a prior describe_function's overloads[] list)." });
             }
 
             var result = _discoveryService.DescribeFunction(member, memberId);
@@ -793,7 +815,7 @@ public sealed class RequestDispatcher
         }
         catch (JsonRpcParamException ex)
         {
-            return JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InvalidParams, ex.Message, null);
+            return JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InvalidParams, ex.Message, ex.Diagnostic);
         }
         catch (DiscoveryMemberNotFoundException ex)
         {
