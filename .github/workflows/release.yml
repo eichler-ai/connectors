@@ -1,0 +1,180 @@
+# PRD §12 release pipeline. Builds, (optionally) signs, packages, and publishes a real GitHub
+# Release for the MCP Bridge add-in (C#, both Revit TFMs) + MCP Server broker (Go).
+#
+# Runs on the self-hosted Windows runner (label `revit-mcp-release`, registered from the project's
+# own Mac+Parallels dev VM) -- the real RevitAPI.dll/RevitAPIUI.dll references only resolve on a
+# machine with a real Revit install (see ci.yml's own comment on why the C# side isn't built on
+# GitHub's hosted runners at all). Deliberately triggered on `push: tags` and `workflow_dispatch`
+# ONLY, never `pull_request` -- that is the safe pattern for a self-hosted runner sitting on a
+# public repo, since a PR from a fork could otherwise get arbitrary code executed on our own VM.
+#
+# Shell: `powershell` (Windows PowerShell 5.1) throughout, not `pwsh` -- confirmed via `prlctl exec`
+# that this runner's VM has no PowerShell Core installed, and the project's own dev-environment
+# tooling already assumes Windows PowerShell 5.1 is what's present on this machine. `cmd` was used
+# for this session's earlier runner smoke test, but PowerShell is what install.ps1 and the rest of
+# this project's Windows automation are written in, so this workflow matches that rather than the
+# throwaway smoke test.
+#
+# Signing secrets (none of these exist in this repo yet -- see the "Sign" step below, which no-ops
+# with a warning until they're configured):
+#   AZURE_CLIENT_ID                     -- federated (OIDC) app registration client ID; no client
+#                                           secret is stored, azure/login exchanges the workflow's
+#                                           GitHub OIDC token for an Azure access token
+#   AZURE_TENANT_ID                     -- the Azure AD tenant that app registration lives in
+#   AZURE_SUBSCRIPTION_ID               -- the subscription containing the Key Vault below
+#   AZURE_KEY_VAULT_URL                 -- e.g. https://<vault-name>.vault.azure.net/
+#   AZURE_KEY_VAULT_CERTIFICATE_NAME    -- name of the HSM-backed code-signing cert inside that vault
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to build (e.g. v0.1.0) -- for manual/test runs only, must still start with "v"'
+        required: true
+        type: string
+
+permissions:
+  contents: write   # softprops/action-gh-release needs this to publish a release + upload assets
+  id-token: write    # federated OIDC for azure/login -- no stored client secret
+
+defaults:
+  run:
+    shell: powershell
+
+jobs:
+  release:
+    name: Build, sign, package, publish
+    runs-on: [self-hosted, revit-mcp-release]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine release tag
+        run: |
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $tag = "${{ inputs.tag }}"
+          } else {
+            $tag = "${{ github.ref_name }}"
+          }
+          if (-not $tag.StartsWith("v")) {
+            throw "Release tag '$tag' must start with 'v' (e.g. v0.1.0)."
+          }
+          Write-Host "Release tag: $tag"
+          echo "RELEASE_TAG=$tag" >> $env:GITHUB_ENV
+
+      # --- Build: MCP Bridge (C#), both TFMs ------------------------------------------------------
+      - name: Build MCP Bridge (both TFMs, Release)
+        run: dotnet build revit\mcp-bridge\MCPBridge.sln -c Release
+        env:
+          MCPBRIDGE_VERSION: ${{ env.RELEASE_TAG }}
+
+      # --- Build: MCP Server (Go broker), Windows/amd64 -------------------------------------------
+      # actions/setup-go downloads its own Go toolchain into the runner's tool cache -- this VM has
+      # no Go installed system-wide (confirmed via `prlctl exec ... go version` before writing this
+      # workflow), so this is not optional the way it might be read as on a normal dev machine.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: revit/mcp-server/go.mod
+          cache-dependency-path: revit/mcp-server/go.sum
+
+      - name: Build MCP Server broker (windows/amd64)
+        working-directory: revit/mcp-server
+        run: |
+          $env:GOOS = "windows"
+          $env:GOARCH = "amd64"
+          go build -ldflags "-X main.version=$env:RELEASE_TAG" -o mcp-server.exe ./cmd/mcp-server
+
+      # --- Sign (no-op with a warning until an Azure Key Vault cert actually exists) ---------------
+      # This is the intentional current state: no code-signing cert has been procured yet (real,
+      # external, non-code dependency -- see the PRD §12 plan). Everything else in this pipeline is
+      # real and testable today; signing degrades gracefully instead of blocking releases on a cert
+      # that doesn't exist yet.
+      - name: Azure login (OIDC)
+        if: ${{ secrets.AZURE_CLIENT_ID != '' }}
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Install AzureSignTool
+        if: ${{ secrets.AZURE_CLIENT_ID != '' }}
+        run: dotnet tool install --global AzureSignTool
+
+      - name: Sign build artifacts
+        if: ${{ secrets.AZURE_CLIENT_ID != '' }}
+        run: |
+          $tool = "$env:USERPROFILE\.dotnet\tools\azuresigntool.exe"
+          $targets = @(
+            "revit\mcp-bridge\src\MCPBridge.AddIn\bin\Release\net10.0-windows\MCPBridge.AddIn.dll",
+            "revit\mcp-bridge\src\MCPBridge.AddIn\bin\Release\net8.0-windows\MCPBridge.AddIn.dll",
+            "revit\mcp-server\mcp-server.exe"
+          )
+          foreach ($target in $targets) {
+            & $tool sign `
+              --azure-key-vault-url "${{ secrets.AZURE_KEY_VAULT_URL }}" `
+              --azure-key-vault-certificate "${{ secrets.AZURE_KEY_VAULT_CERTIFICATE_NAME }}" `
+              --timestamp-rfc3161 "http://timestamp.digicert.com" `
+              $target
+            if ($LASTEXITCODE -ne 0) { throw "AzureSignTool failed signing $target (exit $LASTEXITCODE)" }
+          }
+
+      - name: Signing skipped (no Azure secrets configured)
+        if: ${{ secrets.AZURE_CLIENT_ID == '' }}
+        run: |
+          Write-Host "::warning::Signing skipped -- AZURE_CLIENT_ID not configured. Shipping UNSIGNED artifacts."
+
+      # --- Assemble mcpbridge-release.zip, exact layout install.ps1 / quickstart.md expect --------
+      # addin-2027/ (net10.0-windows build output + manifest), addin-2025/ (net8.0-windows + manifest),
+      # server/ (the built broker exe) -- all at the zip root. See quickstart.md "3. Assemble the
+      # local package zip" and install.ps1's per-version `addin-$version` extraction.
+      - name: Assemble release package
+        run: |
+          $stage = New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\mcpbridge-package"
+
+          $addin2027 = New-Item -ItemType Directory -Force "$($stage.FullName)\addin-2027"
+          Copy-Item revit\mcp-bridge\src\MCPBridge.AddIn\bin\Release\net10.0-windows\* $addin2027 -Recurse
+          Copy-Item revit\mcp-bridge\src\MCPBridge.AddIn\MCPBridge.addin $addin2027
+
+          $addin2025 = New-Item -ItemType Directory -Force "$($stage.FullName)\addin-2025"
+          Copy-Item revit\mcp-bridge\src\MCPBridge.AddIn\bin\Release\net8.0-windows\* $addin2025 -Recurse
+          Copy-Item revit\mcp-bridge\src\MCPBridge.AddIn\MCPBridge.addin $addin2025
+
+          $server = New-Item -ItemType Directory -Force "$($stage.FullName)\server"
+          Copy-Item revit\mcp-server\mcp-server.exe $server
+
+          $zipPath = "$env:RUNNER_TEMP\mcpbridge-release.zip"
+          if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
+          Compress-Archive "$($stage.FullName)\*" $zipPath
+          echo "ZIP_PATH=$zipPath" >> $env:GITHUB_ENV
+
+      # --- checksums.txt -- install.ps1 (around line 424-433) only verifies mcpbridge-release.zip's
+      # hash: it finds the line whose whitespace-separated first token is the SHA256 and which
+      # otherwise contains the asset's filename, matched via `$checksums | Where-Object { $_ -match
+      # [regex]::Escape($asset.name) }`. `Get-FileHash | Format-List` etc. don't match that shape
+      # directly, so the line is built by hand: "<hash>  <filename>", same as the conventional
+      # `sha256sum` output format.
+      - name: Generate checksums.txt
+        run: |
+          $zipHash = (Get-FileHash $env:ZIP_PATH -Algorithm SHA256).Hash
+          $exeHash = (Get-FileHash revit\mcp-server\mcp-server.exe -Algorithm SHA256).Hash
+          $lines = @(
+            "$zipHash  mcpbridge-release.zip",
+            "$exeHash  mcp-server.exe"
+          )
+          $checksumsPath = "$env:RUNNER_TEMP\checksums.txt"
+          $lines -join "`n" | Out-File -FilePath $checksumsPath -Encoding ascii -NoNewline
+          echo "CHECKSUMS_PATH=$checksumsPath" >> $env:GITHUB_ENV
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: ${{ env.RELEASE_TAG }}
+          files: |
+            ${{ env.ZIP_PATH }}
+            ${{ env.CHECKSUMS_PATH }}
