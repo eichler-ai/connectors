@@ -270,70 +270,139 @@ func TestPingNotificationReachesRegistry(t *testing.T) {
 	t.Fatal("ping notification never reached Registry.RecordPing (IsResponsive at the virtual query time still reflects pre-ping staleness)")
 }
 
-// TestRegisterThenImmediateCloseDetachesCleanly is a regression test for a
-// race between the register notification handler and the connection
-// closing right after: if AttachInstance hadn't reliably completed before
-// Serve() observed the close and ran DetachInstance, the instance would be
-// left permanently attached to a dead connection (a leaked, unroutable
-// registration) instead of cleanly detached.
-//
-// Since a cleanly closed connection now also removes the instance from the
-// registry immediately (rather than leaving it to age out via the
-// heartbeat prune sweep), this test's own assertion is the mirror image of
-// what it originally checked: the registry entry must NOT still be present
-// after the close, and execute_script against it must report
-// instance-not-found -- both are evidence AttachInstance/Register
-// completed and then were cleanly torn down, not evidence of a leak.
-func TestRegisterThenImmediateCloseDetachesCleanly(t *testing.T) {
-	b, ln := newTestBroker(t)
-	conn, br, resp := dialAndAuth(t, ln.Addr().String(), testToken, RoleAddIn)
+// waitFor polls cond every millisecond until it holds or the budget runs
+// out, reporting ok. Callers decide whether a timeout is a failure (waiting
+// for a state that must be reached) or merely informational (sampling for a
+// state that must never be reached).
+func waitFor(budget time.Duration, cond func() bool) bool {
+	deadline := time.Now().Add(budget)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return true
+		}
+		time.Sleep(time.Millisecond)
+	}
+	return cond()
+}
+
+// registerAddIn dials, authenticates as an add-in, and sends one register
+// notification, returning the raw connection and the transport.Conn over it.
+// Neither is closed -- the caller decides when and how, which is the whole
+// variable the two tests below differ on.
+func registerAddIn(t *testing.T, addr, instanceID string) (net.Conn, *transport.Conn) {
+	t.Helper()
+	conn, br, resp := dialAndAuth(t, addr, testToken, RoleAddIn)
 	if resp.Error != nil {
 		t.Fatalf("auth failed: %+v", resp.Error)
 	}
-
-	rest := &tail{r: br, conn: conn}
-	addinConn := transport.NewConn(rest)
+	addinConn := transport.NewConn(&tail{r: br, conn: conn})
 	go addinConn.Serve()
-
 	if err := addinConn.Notify("register", registerParams{
-		InstanceID:   "inst-fastclose",
+		InstanceID:   instanceID,
 		PID:          1,
 		RevitVersion: "2027",
 	}); err != nil {
 		t.Fatalf("Notify register: %v", err)
 	}
+	return conn, addinConn
+}
 
-	// Close immediately after sending register.
+// TestRegisterThenCloseRemovesTheInstance covers the ordinary lifecycle:
+// a registration that is definitely established, then torn down by a close.
+// A cleanly closed connection removes the instance from the registry
+// immediately rather than leaving it to age out via the heartbeat prune
+// sweep (PRD §05), and detaches it from the execution manager so
+// execute_script against it reports instance-not-found.
+//
+// The close deliberately waits for the entry to APPEAR first. That is what
+// makes the teardown assertion mean anything: absent-because-never-
+// registered and absent-because-torn-down are the same observation, so a
+// test that does not first establish presence cannot tell them apart. Its
+// predecessor did not, and measurably never once observed a teardown --
+// see TestRegisterThenImmediateCloseLeavesNoOrphan below.
+func TestRegisterThenCloseRemovesTheInstance(t *testing.T) {
+	b, ln := newTestBroker(t)
+	conn, addinConn := registerAddIn(t, ln.Addr().String(), "inst-lifecycle")
+
+	if !waitFor(2*time.Second, func() bool {
+		_, ok := b.Registry.Get("inst-lifecycle")
+		return ok
+	}) {
+		t.Fatal("register was never processed: the entry never appeared in the registry")
+	}
+
 	addinConn.Close()
 	conn.Close()
 
-	// The registry entry must settle to absent (Remove runs once Serve()
-	// observes the close), not linger present -- confirms the connection
-	// teardown path actually ran to completion rather than the close
-	// racing ahead of the register handler.
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, ok := b.Registry.Get("inst-fastclose"); !ok {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if _, ok := b.Registry.Get("inst-fastclose"); ok {
+	if !waitFor(2*time.Second, func() bool {
+		_, ok := b.Registry.Get("inst-lifecycle")
+		return !ok
+	}) {
 		t.Fatal("instance should have been removed from the registry after the connection closed")
 	}
 
-	// Confirm it was also detached from the execution manager — not left
-	// attached to the now-closed connection forever.
-	deadline = time.Now().Add(2 * time.Second)
+	// Also detached from the execution manager -- not left attached to the
+	// now-closed connection forever.
 	var drec *diag.Record
-	for time.Now().Before(deadline) {
-		_, drec = b.Execution.ExecuteScript(context.Background(), "inst-fastclose", "doc-1", "1+1", 500, 60000, execution.ScriptOptions{})
-		if drec != nil && drec.Code == "instance-not-found" {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
+	if !waitFor(2*time.Second, func() bool {
+		_, drec = b.Execution.ExecuteScript(context.Background(), "inst-lifecycle", "doc-1", "1+1", 500, 60000, execution.ScriptOptions{})
+		return drec != nil && drec.Code == "instance-not-found"
+	}) {
+		t.Fatalf("expected instance-not-found after the connection closed (attach must have been detached), got %+v", drec)
 	}
-	t.Fatalf("expected instance-not-found after the connection closed (attach must have been detached), got %+v", drec)
+}
+
+// TestRegisterThenImmediateCloseLeavesNoOrphan covers the race the previous
+// version of this test was named for: a connection that drops in the same
+// breath as its register notification. The hazard is an entry ADDED AFTER
+// its own teardown ran -- a registration for a connection that is already
+// gone, which nothing later cleans up and which list_instances would go on
+// advertising.
+//
+// Issue #111. The original test asserted the entry was absent, polling in a
+// loop that broke as soon as it saw absence. Absence is also the state
+// BEFORE the server has processed the register, and instrumenting the loop
+// showed that is what it saw every time: across 200 runs the entry was
+// observed present 0 times. So the loop exited on its first iteration
+// always, the test never once witnessed a teardown, and the ~1-in-400
+// "failure" was simply the server winning the race to register between the
+// loop's exit and the final check -- the run where the code did MORE work,
+// not less. The bug was in the test, and it was not merely flaky: it was
+// vacuous in every run that passed.
+//
+// Asserting on a transient cannot be fixed by polling harder, because the
+// entry's correct lifetime here is microseconds -- appear, then vanish --
+// and any sampling interval can miss it entirely. So this asserts the
+// SETTLED state instead, which is the property that actually matters: once
+// the dust settles the entry must be gone and must STAY gone. A transient
+// appearance is fine. A permanent one is the orphan bug.
+func TestRegisterThenImmediateCloseLeavesNoOrphan(t *testing.T) {
+	b, ln := newTestBroker(t)
+	conn, addinConn := registerAddIn(t, ln.Addr().String(), "inst-fastclose")
+
+	// Close in the same breath as the register -- no wait, that is the point.
+	addinConn.Close()
+	conn.Close()
+
+	// Long enough for a loopback register + EOF to have been processed many
+	// times over, so "absent" here is settled rather than not-yet-arrived.
+	time.Sleep(250 * time.Millisecond)
+
+	// Then keep sampling: an entry added after its own teardown would be
+	// permanently present, and would show up in every one of these samples.
+	if waitFor(250*time.Millisecond, func() bool {
+		_, ok := b.Registry.Get("inst-fastclose")
+		return ok
+	}) {
+		t.Fatal("registry still holds inst-fastclose after everything settled: a register was applied after its own teardown, orphaning the entry")
+	}
+
+	// The same property for the execution manager: routable to a dead
+	// connection forever is the equivalent leak on that side.
+	_, drec := b.Execution.ExecuteScript(context.Background(), "inst-fastclose", "doc-1", "1+1", 500, 60000, execution.ScriptOptions{})
+	if drec == nil || drec.Code != "instance-not-found" {
+		t.Fatalf("expected instance-not-found once settled, got %+v", drec)
+	}
 }
 
 func TestAgentClientRoleProxiesMCPSession(t *testing.T) {
