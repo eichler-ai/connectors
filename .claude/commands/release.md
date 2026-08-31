@@ -43,9 +43,11 @@ the tag itself.
 
 6. **Show the user a summary** before doing anything irreversible: current version -> new version,
    plus a change preview (`git log <last-tag>..HEAD --oneline`, or `git log --oneline` from the
-   beginning if there was no previous tag). State plainly that confirming will push a real tag,
-   which triggers `.github/workflows/release.yml` and publishes a real, live GitHub Release with
-   `mcpbridge-release.zip` and `checksums.txt` attached.
+   beginning if there was no previous tag) -- this preview is informational only, not something you
+   author into release notes; the workflow generates those itself. State plainly that confirming
+   will push a real tag, which triggers `.github/workflows/release.yml` and publishes a real, live
+   GitHub Release with `mcpbridge-release.zip` and `checksums.txt` attached, plus notes GitHub
+   auto-generates from merged-PR titles since the previous release tag.
 
 7. **Pause and ask the user to confirm** before pushing anything. Actually wait for their answer in
    this turn -- do not narrate "I'm about to push" and push anyway. If they decline or want changes,
