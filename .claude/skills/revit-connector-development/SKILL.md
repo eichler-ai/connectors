@@ -60,6 +60,13 @@ These are the rules that generalize. Each one exists because violating it cost r
   uniquely-named probe file on one side and look for it from the other. Names legitimately differ
   (a worktree's share name need not match its directory), so a name comparison both false-positives
   and false-negatives.
+- **A right conclusion is where wrong evidence hides.** Review checks conclusions, so support that is
+  inverted, borrowed or invented survives whenever the conclusion itself is true — twice in one day: a
+  "measured, not assumed" worked example with its two SHAs swapped (it read as the *opposite* of the
+  bug it documented), and a true "three calls" claim resting on a false reason. Both had been reviewed.
+  So: cite only runs you made, paste them with their labels attached, and never re-label someone else's
+  numbers as your own measurement. Evidence marked "measured" carries an obligation — re-derive it
+  before it becomes a comment, because a comment's whole job is to stop the next person re-deriving it.
 - **Confirm you are running the artifact you just built.** Byte-grep the *deployed* binary for a
   string unique to your change, decoding at both byte alignments (the `#US` heap stores UTF-16
   literals at arbitrary offsets, so a single-alignment decode gives false negatives). Timestamps

@@ -117,9 +117,29 @@ else
 fi
 
 # --- Build the broker ---------------------------------------------------------------------------
+# Stamped with the revision of THIS checkout (issue #116). The Go toolchain stamps one
+# automatically, which is why a plain `go build` still carries provenance -- but it finds the
+# repository by walking up for a `.git` DIRECTORY, so a build made inside a git worktree gets the
+# ENCLOSING checkout's revision, or none at all. Declaring it here means the binary reports the tree
+# it was actually built from, which is what makes `get_skills`' own "compare this against
+# `git rev-parse HEAD`" advice safe to give. Same shape in dev-tooling/redeploy-and-verify.sh.
+#
+# "Modified" here counts uncommitted changes to TRACKED files only -- `git status --porcelain` would
+# also flip on any stray untracked scratch file, and a warning that is permanently on stops being
+# read.
+BUILDINFO_PKG="github.com/eichler-ai/connectors/revit/mcp-server/internal/buildinfo"
+BROKER_LDFLAGS=()
+if BROKER_REV="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null)"; then
+    BROKER_REV_TIME="$(git -C "$REPO_ROOT" show -s --format=%cI HEAD 2>/dev/null || true)"
+    if git -C "$REPO_ROOT" diff --quiet HEAD 2>/dev/null; then BROKER_DIRTY=false; else BROKER_DIRTY=true; fi
+    BROKER_LDFLAGS=(-ldflags "-X $BUILDINFO_PKG.stampedRevision=$BROKER_REV -X $BUILDINFO_PKG.stampedRevisionTime=$BROKER_REV_TIME -X $BUILDINFO_PKG.stampedModified=$BROKER_DIRTY")
+else
+    echo "Note: $REPO_ROOT is not a git checkout -- the broker will report its revision as unknown." >&2
+fi
+
 echo "Building mcp-server for macOS..."
-( cd "$BROKER_SRC_DIR" && go build -o "$BROKER_BIN" ./cmd/mcp-server )
-echo "Built: $BROKER_BIN"
+( cd "$BROKER_SRC_DIR" && go build "${BROKER_LDFLAGS[@]}" -o "$BROKER_BIN" ./cmd/mcp-server )
+echo "Built: $BROKER_BIN -- $("$BROKER_BIN" -version)"
 
 mkdir -p "$APP_DATA_DIR"
 

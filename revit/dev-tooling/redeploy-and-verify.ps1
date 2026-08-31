@@ -19,6 +19,16 @@
 # with redeploy-and-verify.sh reacting by force-restarting the Mac-side broker per marker (issue
 # #32's workaround) -- is deleted; this file works standalone in document mode now.
 
+# SCOPE, stated because it has already been guessed wrong: this file deploys the ADD-IN and
+# nothing else. The mcp-server broker is a separate binary that runs on the MAC, and everything it
+# serves an agent -- skill.md via get_skills, the tool schemas, the tool descriptions -- is compiled
+# into that binary, with no Revit instance and no add-in in the path at all. So a stale skill.md or
+# a stale tool schema is NEVER fixed by redeploying from here, and a hash check here could not
+# detect one either: go:embed is resolved at compile time, so a built binary's embedded copy always
+# matches the source file it was built from -- the only drift possible is binary vs repo. That is
+# handled where the broker is actually built, in redeploy-and-verify.sh's broker-freshness step,
+# and reported at runtime by get_skills' build field and `mcp-server -version` (issue #116).
+#
 # Output contract: every progress line is prefixed "[redeploy +<elapsed>s]"; the very last line is
 # "REDEPLOY_RESULT: PASS" or "REDEPLOY_RESULT: FAIL", and the exit code matches (0/1). PASS in a
 # document launch means a registration with the expected document count was actually observed in
