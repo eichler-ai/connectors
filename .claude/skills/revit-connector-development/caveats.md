@@ -79,6 +79,23 @@ the API itself is broken.
 | An opt-in test self-skips on an unset env var, so it has never once run | `return`-on-missing-config reports as **passed**, not skipped. Set the var and watch it fail before trusting it — `RealRevitApiTests` was dead from the day it was written, and **dead again later for a different reason**: the var was set for the interactive user, but `prlctl exec` runs as SYSTEM, which is how every agent session invokes `dotnet test`. Prefer probing a known path over requiring a variable; a suite whose duration jumps (0.7s → 10s) when you fix it was not running before |
 | The assertion cannot fail | Revert the fix and confirm the test fails. If it still passes, it was never coverage |
 | The fixture makes the test pass for the wrong reason | A ranking test passed under a mutation that removed the sort entirely, because SQLite's scan order happened to agree with the score order. Reversing two fixture declarations killed it. Mutating the mechanism is not enough — check the fixture actually *opposes* the mutation |
+| The test faithfully checks a **proxy** for the property, not the property | Four instances in one PR (#92): a hand-rolled visibility predicate walking one nesting level where production used `Type.IsVisible`; a hand-rolled XML parse where production used `XmlDocIndex` (and dropped `<see cref>` text, the exact thing being forbidden); `Contains("Document")` where `"UIDocument"` was also asserted; reflecting instance members where the risk was a static one. All four passed; none was coverage. **Ask what production actually calls, and call that** — see the section below |
+| A test asserts against the wrong corpus/build/version | A version probe that ignored the TFM made both multi-target legs load Revit 2027, so the `net8.0` leg reported on a corpus it never touched. Assert *which* input was chosen, not just that the assertion passed |
+
+### If you wrote the guard, you are the last person who should trust it
+
+The most expensive findings in the #92 review were not in the feature. They were in the **tests written to protect the feature**, and four of them could not fail. Every one had the same shape: the test checked something *adjacent to* the property it claimed to check.
+
+- Claimed "`Connector` is the only publicly visible type"; checked `IsPublic || (IsNestedPublic && DeclaringType.IsPublic)`. Production checks `Type.IsVisible`, which walks the whole nesting chain. A type nested two deep was indexed by production and invisible to the test.
+- Claimed "no summary leaks internal type names"; parsed the sidecar with `XElement.Value`. Production uses `XmlDocIndex`, which deliberately does *not*, because `.Value` drops self-closing elements. `<see cref="ScriptGlobals"/>` shipped the literal word to an agent while the test saw an empty string.
+- Claimed "the tool description names every global"; asserted `Contains("Document")` alongside `Contains("UIDocument")`, and `Contains("Connector")` alongside `Contains("Eichler.Connectors.Revit")`. Neither could fail.
+- Claimed "the public surface is exactly these seven"; reflected `BindingFlags.Public | Instance`. A `public static` member reaches `describe_function` and never appears.
+
+**The check.** For any guard, name the production code path that decides the thing, and call *that* — not your own reading of it. If production has a predicate, a parser, or a visibility rule, the test must go through it; a reimplementation tests the reimplementation. Where you genuinely cannot call production (a different assembly, a load-context limit), say so in the test and pin the divergence.
+
+**The second check, cheaper.** Write the mutation you are most afraid of, in the spelling a *maintainer* would actually use — not the spelling that is easiest to mutate. The #92 tests killed "put `PRD §` in a summary" and missed "put `<see cref="ScriptGlobals"/>` in a summary", which is the same mutation in the form someone would really write.
+
+**And prefer the shape that cannot drift.** A guard that reflects, parses, or derives from the real artifact stays true; one that restates a rule in a second language goes stale the first time the rule moves. That is the whole argument behind issue #91: five hand-maintained lists, three already wrong.
 
 ## Symptom: a live run stalls with no error
 
