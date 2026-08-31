@@ -27,7 +27,7 @@ Design rationale for all of it: [`PRD.md`](PRD.md) §06 (execution), §07 (dialo
 |---|---|---|
 | `instance_id` | required | target Revit instance, from `list_instances` |
 | `document_id` | required | **see routing caveat below** |
-| `script` | required | C# script body; `return` a value to get it back as `output` |
+| `script` | required | C# script body; `return` a value to get it back as `return_value` |
 | `timeout_ms` | 30000 | how long the call waits before returning a non-terminal `pending`/`running` status with an `execution_id` to poll |
 | `max_duration_ms` | 600000 | hard runtime ceiling; on lapse the broker auto-issues cancellation |
 | `overwrite_output_files` | `false` | whether `Connector.Publish` may replace an existing file in `exports/` (per-file failure otherwise) |
@@ -47,11 +47,25 @@ Design rationale for all of it: [`PRD.md`](PRD.md) §06 (execution), §07 (dialo
 > connect-time snapshot.
 
 Results are one of two shapes (all three execution tools share it): a terminal result —
-`status` `success` / `error` / `cancelled` / `unrecoverable`, with `output`, `notices[]`,
-`files[]`, and `error` as relevant — or a non-terminal `pending` / `running` / `busy` status
+`status` `success` / `error` / `cancelled` / `unrecoverable`, with `return_value`, `output`,
+`notices[]`, `files[]`, and `error` as relevant — or a non-terminal `pending` / `running` / `busy` status
 carrying the `execution_id` to pass to `poll_execution`. `busy` means the instance is already
 running some other script (one at a time per instance, it's Revit's UI thread); the returned
 `execution_id` is that script's.
+
+> **`return_value` vs `output`.** `return_value` is what your script `return`ed; `output` is stdout
+> captured while it ran. They are separate fields because `output` is not your script's alone —
+> Revit writes to the process console during a run (`PlayerServer:Warning:No subscriber
+> registered.`), and those lines used to appear ahead of the returned value in the same field.
+> A returned string comes back verbatim. Anything structural — a collection, a dictionary, an
+> anonymous type, a type your script declared — is serialized to JSON, so
+> `return levels.Select(l => new { l.Name, l.Elevation }).ToList();` gives you the data rather than
+> the collection's type name. A value the connector will not serialize and that has no display
+> form of its own (a Revit `Element`, say) comes back as an explicit
+> `<Autodesk.Revit.DB.Level: no display form ...>` marker naming its type: never a type name
+> dressed up as data. Serialization is bounded (depth 6, 500 items per collection, 5,000 values,
+> 64 KB); every limit reports itself in place with a `<truncated: ...>` marker. For a large result,
+> return a projection of the fields you need, or write it to a file with `Connector.Publish`.
 
 ### Discovery tools
 

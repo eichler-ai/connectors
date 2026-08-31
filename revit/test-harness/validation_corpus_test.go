@@ -50,15 +50,15 @@ long size = exists ? new System.IO.FileInfo(dwgPath).Length : 0;
 return new { exported = ok, dwgExists = exists, dwgSize = size, exportName };
 `)
 	if out.Status != "success" {
-		t.Fatalf("expected status=success, got %q (output: %s)", out.Status, out.Output)
+		t.Fatalf("expected status=success, got %q (return_value: %s)", out.Status, out.ReturnValue)
 	}
-	for _, want := range []string{"exported = True", "dwgExists = True"} {
-		if !strings.Contains(out.Output, want) {
-			t.Errorf("wanted %q in output: %s", want, out.Output)
+	for _, want := range []string{"\"exported\":true", "\"dwgExists\":true"} {
+		if !strings.Contains(out.ReturnValue, want) {
+			t.Errorf("wanted %q in return_value: %s", want, out.ReturnValue)
 		}
 	}
-	if strings.Contains(out.Output, "dwgSize = 0") {
-		t.Errorf("exported DWG must be non-empty (a False export or a zero-byte file both read as 'exists' but neither is a real export): %s", out.Output)
+	if strings.Contains(out.ReturnValue, "\"dwgSize\":0") {
+		t.Errorf("exported DWG must be non-empty (a False export or a zero-byte file both read as 'exists' but neither is a real export): %s", out.ReturnValue)
 	}
 
 	// The exported .dwg (and Revit's own .pcp plot-color sidecar alongside it) are cleanup, not
@@ -130,11 +130,11 @@ var loopCloses =
 return new { wallTypeFound = wallType != null, wallCount = walls.Length, loopCloses, allEndsAllowJoin };
 `)
 	if out.Status != "success" {
-		t.Fatalf("expected status=success, got %q (output: %s)", out.Status, out.Output)
+		t.Fatalf("expected status=success, got %q (return_value: %s)", out.Status, out.ReturnValue)
 	}
-	for _, want := range []string{"wallTypeFound = True", "wallCount = 4", "loopCloses = True", "allEndsAllowJoin = True"} {
-		if !strings.Contains(out.Output, want) {
-			t.Errorf("wanted %q in output: %s", want, out.Output)
+	for _, want := range []string{"\"wallTypeFound\":true", "\"wallCount\":4", "\"loopCloses\":true", "\"allEndsAllowJoin\":true"} {
+		if !strings.Contains(out.ReturnValue, want) {
+			t.Errorf("wanted %q in return_value: %s", want, out.ReturnValue)
 		}
 	}
 }
@@ -199,22 +199,22 @@ famDoc.Regenerate();
 return $"famTitle={famDoc.Title} extrusionCreated={extrusion != null}";
 `)
 	if build.Status != "success" {
-		t.Fatalf("family-build call: expected status=success, got %q (output: %s)", build.Status, build.Output)
+		t.Fatalf("family-build call: expected status=success, got %q (return_value: %s)", build.Status, build.ReturnValue)
 	}
-	if strings.Contains(build.Output, "no-template") {
+	if strings.Contains(build.ReturnValue, "no-template") {
 		t.Skip("no \"Generic Model.rft\" under Application.FamilyTemplatePath on this machine")
 	}
-	if !strings.Contains(build.Output, "extrusionCreated=True") {
-		t.Fatalf("extrusion was not created: %s", build.Output)
+	if !strings.Contains(build.ReturnValue, "extrusionCreated=True") {
+		t.Fatalf("extrusion was not created: %s", build.ReturnValue)
 	}
 	famTitle := ""
-	for _, field := range strings.Split(build.Output, " ") {
+	for _, field := range strings.Split(build.ReturnValue, " ") {
 		if strings.HasPrefix(field, "famTitle=") {
 			famTitle = strings.TrimPrefix(field, "famTitle=")
 		}
 	}
 	if famTitle == "" {
-		t.Fatalf("could not parse famTitle from build output: %s", build.Output)
+		t.Fatalf("could not parse famTitle from build return_value: %s", build.ReturnValue)
 	}
 
 	loadScript := fixtureLookupPreamble(fixtureTitle) + `
@@ -258,11 +258,11 @@ return new {
 	load := decodeToolResult[executeScriptOut](t, callExecuteScriptWith(t, c, instanceID, documentID, loadScript,
 		map[string]any{"confirm_lifecycle_actions": true}))
 	if load.Status != "success" {
-		t.Fatalf("load/place call: expected status=success, got %q (output: %s)", load.Status, load.Output)
+		t.Fatalf("load/place call: expected status=success, got %q (return_value: %s)", load.Status, load.ReturnValue)
 	}
-	for _, want := range []string{"familyLoaded = True", "symbolFound = True", "symbolActive = True", "instanceCreated = True", "placedCount = 1"} {
-		if !strings.Contains(load.Output, want) {
-			t.Errorf("wanted %q in output: %s", want, load.Output)
+	for _, want := range []string{"\"familyLoaded\":true", "\"symbolFound\":true", "\"symbolActive\":true", "\"instanceCreated\":true", "\"placedCount\":1"} {
+		if !strings.Contains(load.ReturnValue, want) {
+			t.Errorf("wanted %q in return_value: %s", want, load.ReturnValue)
 		}
 	}
 }

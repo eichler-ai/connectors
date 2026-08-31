@@ -159,7 +159,60 @@ public class RequestDispatcherTests
 
         Assert.Contains("\"status\":\"success\"", json);
         Assert.Contains("\"execution_id\":\"exec-1\"", json);
-        Assert.Contains("\"output\":\"2\"", json);
+        Assert.Contains("\"return_value\":\"2\"", json);
+    }
+
+    /// <summary>
+    /// Issue #117, end to end across the seam that produced it: a real script, compiled and run, through
+    /// SafeFormatReturnValue, into the record, out as wire JSON. The reported script came back as
+    /// "System.Collections.Generic.List`1[&lt;&gt;f__AnonymousType0#1[...]]" -- a type name an agent had
+    /// no way to distinguish from data. ReturnValueFormatterTests covers the formatting rules in
+    /// isolation; this one exists because the defect was only visible from the wire.
+    /// </summary>
+    [Fact]
+    public async Task ExecuteScript_ReturningAnonymousProjections_PutsTheDataOnTheWire_NotATypeName()
+    {
+        var executionManager = NewExecutionManager();
+        var bridge = new ExternalEventBridge<ScriptExecutionOutcome>(new FakeExternalEventRaiser());
+        var dispatcher = new RequestDispatcher(executionManager, bridge, NewScriptExecutor());
+
+        // Enumerable.ToList spelled out: RoslynScriptRunner imports only "System", and the List<T> (not
+        // the array) is the shape the issue reported.
+        var script = "return System.Linq.Enumerable.ToList(new[] { new { Name = \"Level 1\", Elevation = 0.0 } });";
+        var dispatchTask = dispatcher.DispatchAsync(ExecuteScriptRequest(1, "exec-1", script));
+        bridge.OnExecute(NewUiApp());
+
+        var json = await dispatchTask;
+        using var parsed = JsonDocument.Parse(json);
+        var returnValue = parsed.RootElement.GetProperty("result").GetProperty("return_value").GetString();
+
+        Assert.Contains("\"Name\":\"Level 1\"", returnValue);
+        Assert.Contains("\"Elevation\":0", returnValue);
+        Assert.DoesNotContain("AnonymousType", returnValue);
+    }
+
+    /// <summary>
+    /// The other half of #117: stdout and the returned value are separate wire fields now. What made the
+    /// mixing hard to spot live is that the interleaved lines were Revit's own console writes, not the
+    /// script's -- so a script that wrote nothing still had noise ahead of its answer.
+    /// </summary>
+    [Fact]
+    public async Task ExecuteScript_ScriptThatWritesAndReturns_KeepsStdOutOutOfTheReturnValue()
+    {
+        var executionManager = NewExecutionManager();
+        var bridge = new ExternalEventBridge<ScriptExecutionOutcome>(new FakeExternalEventRaiser());
+        var dispatcher = new RequestDispatcher(executionManager, bridge, NewScriptExecutor());
+
+        var script = "System.Console.WriteLine(\"PlayerServer:Warning:No subscriber registered.\"); return \"the answer\";";
+        var dispatchTask = dispatcher.DispatchAsync(ExecuteScriptRequest(1, "exec-1", script));
+        bridge.OnExecute(NewUiApp());
+
+        var json = await dispatchTask;
+        using var parsed = JsonDocument.Parse(json);
+        var result = parsed.RootElement.GetProperty("result");
+
+        Assert.Equal("the answer", result.GetProperty("return_value").GetString());
+        Assert.Contains("PlayerServer", result.GetProperty("output").GetString()!);
     }
 
     [Fact]

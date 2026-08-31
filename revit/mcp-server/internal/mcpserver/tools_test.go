@@ -88,6 +88,58 @@ func TestExecuteScriptToolSuccess(t *testing.T) {
 	}
 }
 
+// TestExecuteScriptToolKeepsReturnValueSeparateFromOutput is issue #117's
+// broker half. The add-in used to fold a script's returned value into
+// output behind a blank line, so Revit's own console writes during a run
+// ("PlayerServer:Warning:No subscriber registered.") arrived ahead of the
+// answer in the same field with nothing marking the boundary. Both ends
+// changed; this pins that the broker actually carries the new field
+// through to the agent rather than dropping it on the floor, which is
+// exactly what an unchanged Result struct would have done silently.
+func TestExecuteScriptToolKeepsReturnValueSeparateFromOutput(t *testing.T) {
+	mgr := execution.NewManager()
+	attachFakeInstance(t, mgr, "inst-1", func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
+		var p map[string]any
+		json.Unmarshal(params, &p)
+		return map[string]any{
+			"status":       "success",
+			"execution_id": p["execution_id"],
+			"output":       "PlayerServer:Warning:No subscriber registered.\n",
+			"return_value": `C:\dev\fixtures\ProjectFresh.rvt`,
+		}, nil
+	})
+	cs := connectClient(t, mgr)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	res, err := cs.CallTool(ctx, &mcp.CallToolParams{
+		Name: "execute_script",
+		Arguments: map[string]any{
+			"instance_id": "inst-1",
+			"document_id": "doc-1",
+			"script":      "return doc.PathName;",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+
+	var out ExecutionOut
+	sc, _ := json.Marshal(res.StructuredContent)
+	if err := json.Unmarshal(sc, &out); err != nil {
+		t.Fatalf("decoding structured content: %v", err)
+	}
+	if out.ReturnValue != `C:\dev\fixtures\ProjectFresh.rvt` {
+		t.Errorf("return_value = %q, want the script's returned value carried through untouched", out.ReturnValue)
+	}
+	if !strings.Contains(out.Output, "PlayerServer") {
+		t.Errorf("output = %q, want the captured stdout still present in its own field", out.Output)
+	}
+	if strings.Contains(out.ReturnValue, "PlayerServer") {
+		t.Errorf("return_value = %q, want no captured stdout mixed into it", out.ReturnValue)
+	}
+}
+
 // TestExecuteScriptToolAddInReportedErrorIsToolError is a regression test:
 // a script that fails on the add-in side (a real wire round trip, reported
 // back as a normal Result with status:"error") must surface as IsError:true

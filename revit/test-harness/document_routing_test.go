@@ -21,7 +21,7 @@ func TestDocumentIdRouting(t *testing.T) {
 
 	t.Run("ExplicitActiveDocumentIdRoutes", func(t *testing.T) {
 		out := runScript(t, c, instanceID, documentID, "return Document.Title;")
-		if out.Status != "success" || out.Output == "" {
+		if out.Status != "success" || out.ReturnValue == "" {
 			t.Fatalf("routing to the active document by its own id should just work: %+v", out)
 		}
 	})
@@ -56,7 +56,7 @@ return dest;`, copyTitle)
 		if opened.Status != "success" {
 			t.Fatalf("opening the background copy failed: %+v", opened)
 		}
-		copyPath := strings.TrimSpace(opened.Output)
+		copyPath := strings.TrimSpace(opened.ReturnValue)
 
 		// Best-effort cleanup regardless of what happens below, via the shared
 		// helper: close the background copy FROM the active document's context
@@ -103,8 +103,8 @@ return dest;`, copyTitle)
 		// the exact wrong-document hazard routing exists to end.
 		routed := runScript(t, c, instanceID, copyDocumentID,
 			`return (UIDocument == null ? "uidoc-null:" : "uidoc-nonnull:") + Document.Title;`)
-		if routed.Output != "uidoc-null:"+copyTitle {
-			t.Fatalf("routed run output = %q, want %q -- the script must run against the addressed background document with a null UIDocument", routed.Output, "uidoc-null:"+copyTitle)
+		if routed.ReturnValue != "uidoc-null:"+copyTitle {
+			t.Fatalf("routed run output = %q, want %q -- the script must run against the addressed background document with a null UIDocument", routed.ReturnValue, "uidoc-null:"+copyTitle)
 		}
 	})
 }
