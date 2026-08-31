@@ -158,9 +158,15 @@ internal static class ReturnValueFormatter
             case char c:
                 return TakeString(c.ToString(), budget);
             case bool or sbyte or byte or short or ushort or int or uint or long or ulong or float or double or decimal:
-                // Enums are NOT here: `value is int` is false for an enum-typed box, so an enum falls
-                // through to the IFormattable arm below and renders as its NAME, which is what an agent
-                // wants from `return wall.Location` style code far more often than the ordinal.
+                // Enums are deliberately NOT covered by this arm, and the CLR agrees: `value is int` is
+                // false for a boxed enum even when its underlying type is int, so an enum reaches its own
+                // arm below and renders as its NAME rather than its ordinal -- which is what an agent
+                // wants back from a script that returns one.
+                //
+                // These pass through as their boxed selves so JsonSerializer emits real JSON numbers and
+                // booleans rather than strings. At the root, Format renders them with the INVARIANT
+                // culture; the old ToString() used the current one, so a machine with a comma decimal
+                // separator used to return "12,5" here.
                 return value;
             case Enum e:
                 return TakeString(e.ToString(), budget);
