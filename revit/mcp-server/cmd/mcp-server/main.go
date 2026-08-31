@@ -415,6 +415,7 @@ func runPrimary(ctx context.Context, bindAddr string, port int, dataDir string, 
 		PID:       os.Getpid(),
 		StartedAt: time.Now().UTC(),
 		Token:     token,
+		Version:   version,
 	}
 	if err := singleton.WriteBrokerJSON(dataDir, info); err != nil {
 		return fmt.Errorf("writing broker.json: %w", err)
