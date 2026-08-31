@@ -111,19 +111,65 @@ internal static class IdentifierRelevance
     };
 
     /// <summary>
+    /// Singular form of a simple English plural, or null when <paramref name="token"/> is not one this
+    /// will strip.
+    ///
+    /// <para>Issue #87: Revit's API names are singular (<c>WallUtils.AllowWallJoinAtEnd</c>,
+    /// <c>Element</c>, <c>Parameter</c>) while a person asks about "walls" or "elements". Without this the
+    /// plural matched no word-part at all, so the row was never admitted -- measured on the real corpus,
+    /// "join walls at corner" admitted 181 candidates and ZERO tier-2 rows, while "join wall at corner"
+    /// admitted 503 and 8, putting the three correct WallUtils members at ranks 1-3 (586.3) instead of
+    /// rank 3 (458.1). One character of English cost the query its answer.</para>
+    ///
+    /// <para>Deliberately crude. A real stemmer is a dependency and a behaviour change across the whole
+    /// corpus; this handles the case that actually occurs in Revit's naming -- a trailing "s" -- and
+    /// refuses the endings where stripping it is wrong: "class" -> "clas", "status" -> "statu",
+    /// "axis" -> "axi". Tokens of three characters or fewer are left alone, since "ids"/"gas" are as
+    /// likely to be words as plurals and nothing is gained by guessing.</para>
+    /// </summary>
+    internal static string? Singularize(string token)
+    {
+        if (token.Length <= 3 || !token.EndsWith('s'))
+        {
+            return null;
+        }
+
+        if (token.EndsWith("ss", StringComparison.Ordinal)
+            || token.EndsWith("us", StringComparison.Ordinal)
+            || token.EndsWith("is", StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        return token[..^1];
+    }
+
+    /// <summary>
     /// Every word that earns the same credit as <paramref name="token"/> when matched against a name's
-    /// word-parts: itself, plus its <see cref="Synonyms"/> if it has any.
+    /// word-parts: itself, its <see cref="Synonyms"/> if it has any, and its singular if it is a simple
+    /// plural (<see cref="Singularize"/>).
+    ///
+    /// <para>The singular belongs here as well as in <see cref="Credit"/> because this method decides
+    /// candidate MEMBERSHIP in <c>DiscoveryCache</c>, and scoring never runs on a row that was not
+    /// admitted. That asymmetry is what made issue #87 a total miss rather than a ranking wobble.</para>
     /// </summary>
     public static IReadOnlyList<string> Expand(string token)
     {
+        var singular = Singularize(token);
         if (!Synonyms.TryGetValue(token, out var synonyms))
         {
-            return new[] { token };
+            return singular is null ? new[] { token } : new[] { token, singular };
         }
 
-        var expanded = new string[synonyms.Length + 1];
+        var extra = singular is null ? 1 : 2;
+        var expanded = new string[synonyms.Length + extra];
         expanded[0] = token;
-        Array.Copy(synonyms, 0, expanded, 1, synonyms.Length);
+        if (singular is not null)
+        {
+            expanded[1] = singular;
+        }
+
+        Array.Copy(synonyms, 0, expanded, extra, synonyms.Length);
         return expanded;
     }
 
@@ -269,6 +315,17 @@ internal static class IdentifierRelevance
         // Position is checked on the NAME side, which both of Score's loops pass in this argument -- the
         // symmetry that doc comment describes is preserved, because the rule applies identically to
         // recall and precision.
+        // A plural earns its singular's credit at FULL weight, and is not subject to the leading-word gate
+        // below. Both are deliberate: "walls" and "wall" are the same word, not two words that happen to
+        // mean similar things, so neither the synonym discount (which exists because a synonym is the
+        // author's word rather than the caller's) nor the factory-convention position rule (which is about
+        // where a verb sits in a name) has anything to say about it.
+        var singular = Singularize(token);
+        if (singular is not null)
+        {
+            best = Math.Max(best, CreditDirect(singular, word));
+        }
+
         if (wordIsLeading && Synonyms.TryGetValue(token, out var synonyms))
         {
             foreach (var synonym in synonyms)

@@ -31,7 +31,7 @@ is the element new	Autodesk.Revit.DB.ElementOnPhaseStatus.New	5	#86 -- must surv
 # ---------------------------------------------------------------------------------------------------
 create lineweight			#80 -- FIXED; 16 rows tied at the tier-2 floor above every tier-3 match. Snapshot-only: the offenders sat at ranks 35-42, below this file's depth, so the invariant is asserted in TierBoundaryTests instead
 create a design option			#86 -- FIXED (CannotCreateNewDesignOption no longer rank 1); snapshot-only because Revit exposes no API to create a design option, so there is no defensible right answer to assert
-join walls at corner			#87 -- neither JoinGeometryUtils nor WallUtils appears on page 1
+join walls at corner	Autodesk.Revit.DB.WallUtils.AllowWallJoinAtEnd	3	#87 -- the plural "walls" matched no word-part, so tier 2 never fired and page 1 was BuiltInParameter noise. max_rank 3: AllowWallJoinAtEnd, DisallowWallJoinAtEnd and IsWallJoinAllowedAtEnd all tie at 586.3, so which of the three leads is an id tie-break
 change the width of a wall			#86 secondary -- ChangeRegionWidth demoted by the set/change group
 new wall			pre-#75 this ranked Visual.StoneBumpType.Stonewall first, via "sto(new)all"
 id			#76 -- shortest common token; overflowed the candidate cap

@@ -110,16 +110,16 @@ QUERY compute the volume of a solid
   10    525.3  Autodesk.Revit.DB.BuiltInFailures.RoomFailures.RoomTagVolumeNotComputed
 
 QUERY copy elements between documents
-  01    461.8  Autodesk.Revit.DB.BuiltInFailures.CopyPasteFailures.CannotCopyNoParents
-  02    456.9  Autodesk.Revit.ApplicationServices.Application.Documents
-  03    454.0  Autodesk.Revit.DB.BuiltInFailures.CopyPasteFailures.CannotCopyBetweenFamilyAndProjectCorruption
-  04    454.0  Autodesk.Revit.DB.BuiltInFailures.CopyPasteFailures.CannotCopyBetweenFamilyAndProjectError
-  05    450.7  Autodesk.Revit.DB.BuiltInFailures.CuttingFailures.UnableToCopyElementsFromFile
-  06    450.0  Autodesk.Revit.DB.JoinGeometryUtils.UnjoinGeometry
-  07    450.0  Autodesk.Revit.DB.Analysis.EnergyDataSettings.GetFromDocument
-  08    448.9  Autodesk.Revit.DB.BuiltInFailures.CopyPasteFailures.CantCopyBetweenModelAndAnnotFam
-  09    448.1  Autodesk.Revit.UI.PostableCommand.Web
-  10    446.2  Autodesk.Revit.DB.Opening.BoundaryCurves
+  01    564.7  Autodesk.Revit.DB.BuiltInFailures.DisplacementElementFailures.CannotCopyDisplacementSetIntoOtherDocument
+  02    461.8  Autodesk.Revit.DB.BuiltInFailures.CopyPasteFailures.CannotCopyNoParents
+  03    456.9  Autodesk.Revit.ApplicationServices.Application.Documents
+  04    454.0  Autodesk.Revit.DB.BuiltInFailures.CopyPasteFailures.CannotCopyBetweenFamilyAndProjectCorruption
+  05    454.0  Autodesk.Revit.DB.BuiltInFailures.CopyPasteFailures.CannotCopyBetweenFamilyAndProjectError
+  06    450.7  Autodesk.Revit.DB.BuiltInFailures.CuttingFailures.UnableToCopyElementsFromFile
+  07    450.0  Autodesk.Revit.DB.JoinGeometryUtils.UnjoinGeometry
+  08    450.0  Autodesk.Revit.DB.Analysis.EnergyDataSettings.GetFromDocument
+  09    448.9  Autodesk.Revit.DB.BuiltInFailures.CopyPasteFailures.CantCopyBetweenModelAndAnnotFam
+  10    448.1  Autodesk.Revit.UI.PostableCommand.Web
 
 QUERY create a design option
   01    616.7  Autodesk.Revit.DB.Element.DesignOption
@@ -306,12 +306,12 @@ QUERY create an assembly from elements
   02    610.9  Autodesk.Revit.DB.DeleteElements.Create
   03    610.9  Autodesk.Revit.DB.DeleteElements.Create
   04    610.9  Autodesk.Revit.DB.DeleteElements.Create
-  05    603.4  Autodesk.Revit.DB.AssemblyInstance.AreElementsValidForAssembly
-  06    603.4  Autodesk.Revit.DB.AssemblyInstance.CanRemoveElementsFromAssembly
-  07    603.4  Autodesk.Revit.DB.BuiltInFailures.AssemblyFailures.IneligibleElementsInAssembly
-  08    591.8  Autodesk.Revit.UI.PostableCommand.CreateAssembly
-  09    586.3  Autodesk.Revit.DB.BuiltInFailures.AssemblyFailures.NoEligibleElementsInAssembly
-  10    576.9  Autodesk.Revit.DB.FailureResolutionType.CreateElements
+  05    610.9  Autodesk.Revit.DB.DisplacementElement.Create
+  06    603.4  Autodesk.Revit.DB.AssemblyInstance.AreElementsValidForAssembly
+  07    603.4  Autodesk.Revit.DB.AssemblyInstance.CanRemoveElementsFromAssembly
+  08    603.4  Autodesk.Revit.DB.BuiltInFailures.AssemblyFailures.IneligibleElementsInAssembly
+  09    591.8  Autodesk.Revit.DB.DirectShape.CreateElement
+  10    591.8  Autodesk.Revit.UI.PostableCommand.CreateAssembly
 
 QUERY create family instance
   01    663.1  Autodesk.Revit.Creation.Document.NewFamilyInstance
@@ -446,16 +446,16 @@ QUERY export to ifc
   10    623.8  Autodesk.Revit.DB.ExportIFCCategoryKey.ExportIFCCategoryKey
 
 QUERY filter elements by category
-  01    598.3  Autodesk.Revit.DB.ElementCategoryFilter.CategoryId
-  02    569.9  Autodesk.Revit.DB.ElementIntersectsFilter.IsCategorySupported
-  03    566.9  Autodesk.Revit.DB.ParameterFilterElement.GetElementFilterParametersForCategory
-  04    566.7  Autodesk.Revit.DB.BuiltInCategory.OST_DisplacementElements
-  05    561.9  Autodesk.Revit.DB.ElementMulticategoryFilter.GetCategoryIds
-  06    561.5  Autodesk.Revit.DB.FilterCategoryRule.AllCategoriesFilterable
-  07    561.4  Autodesk.Revit.DB.ScheduleDefinition.IsValidCategoryForFilterBySheet
-  08    555.7  Autodesk.Revit.DB.BuiltInCategory.OST_FabricationServiceElements
-  09    555.7  Autodesk.Revit.DB.BuiltInCategory.OST_IOSRegeneratedElements
-  10    550.3  Autodesk.Revit.DB.MultiReferenceAnnotationOptions.ElementsMatchReferenceCategory
+  01    724.6  Autodesk.Revit.DB.ElementCategoryFilter.ElementCategoryFilter
+  02    724.6  Autodesk.Revit.DB.ElementCategoryFilter.ElementCategoryFilter
+  03    724.6  Autodesk.Revit.DB.ElementCategoryFilter.ElementCategoryFilter
+  04    724.6  Autodesk.Revit.DB.ElementCategoryFilter.ElementCategoryFilter
+  05    686.4  Autodesk.Revit.DB.ElementCategoryFilter.CategoryId
+  06    659.2  Autodesk.Revit.DB.ParameterFilterElement.GetElementFilterParametersForCategory
+  07    658.2  Autodesk.Revit.DB.Element.Category
+  08    644.6  Autodesk.Revit.DB.ElementIntersectsFilter.IsCategorySupported
+  09    625.8  Autodesk.Revit.DB.ElementMulticategoryFilter.GetCategoryIds
+  10    620.2  Autodesk.Revit.DB.ElementMulticategoryFilter.ElementMulticategoryFilter
 
 QUERY find a material by name
   01    635.2  Autodesk.Revit.DB.FabricationConfiguration.GetMaterialName
@@ -482,16 +482,16 @@ QUERY find a shared parameter
   10    580.4  Autodesk.Revit.DB.Parameter.GetAssociatedGlobalParameter
 
 QUERY find linked documents
-  01    547.7  Autodesk.Revit.DB.ConnectorElement.GetLinkedConnectorElement
-  02    543.0  Autodesk.Revit.DB.ExternalFileReference.GetLinkedFileStatus
-  03    543.0  Autodesk.Revit.DB.RevitLinkType.GetLinkedFileStatus
-  04    515.3  Autodesk.Revit.DB.DocumentSet.GetEnumerator
-  05    456.9  Autodesk.Revit.ApplicationServices.Application.Documents
-  06    446.2  Autodesk.Revit.DB.Opening.BoundaryCurves
-  07    439.0  Autodesk.Revit.DB.BuiltInFailures.CopyPasteFailures.CannotCopyFamilyName
-  08    437.6  Autodesk.Revit.DB.PrintManager.Apply
-  09    437.1  Autodesk.Revit.DB.DirectShapeLibrary.FindDefinition
-  10    436.5  Autodesk.Revit.DB.MEPConnectorInfo.LinkedConnector
+  01    658.2  Autodesk.Revit.DB.Document.IsLinked
+  02    600.4  Autodesk.Revit.DB.Document.GetDocumentVersion
+  03    580.4  Autodesk.Revit.DB.Document.GetDocumentPreviewSettings
+  04    580.4  Autodesk.Revit.DB.Document.GetElement
+  05    580.4  Autodesk.Revit.DB.Document.GetElement
+  06    580.4  Autodesk.Revit.DB.Document.GetElement
+  07    580.4  Autodesk.Revit.DB.Document.GetSubelement
+  08    580.4  Autodesk.Revit.DB.Document.GetSubelement
+  09    580.4  Autodesk.Revit.DB.Document.GetSubelement
+  10    580.4  Autodesk.Revit.DB.Document.GetUnits
 
 QUERY find the level of an element
   01    610.9  Autodesk.Revit.DB.SpatialElement.Level
@@ -530,28 +530,28 @@ QUERY find the titleblock of a sheet
   10    551.2  Autodesk.Revit.DB.ViewSheet.GetCurrentRevision
 
 QUERY find the worksets in a model
-  01    583.3  Autodesk.Revit.DB.ModelPath.GetModelGUID
-  02    563.8  Autodesk.Revit.DB.ModelCurve.GetVisibility
-  03    563.8  Autodesk.Revit.DB.ModelText.GetVisibility
-  04    557.1  Autodesk.Revit.DB.RelinquishedItems.GetRelinquishedWorksets
-  05    554.2  Autodesk.Revit.DB.Document.GetCloudModelPath
-  06    554.2  Autodesk.Revit.DB.Document.GetCloudModelUrn
-  07    554.2  Autodesk.Revit.DB.View.GetModelToProjectionTransforms
-  08    554.2  Autodesk.Revit.DB.View.GetViewDisplayModel
-  09    553.9  Autodesk.Revit.DB.ModelCurveArray.GetEnumerator
-  10    551.2  Autodesk.Revit.DB.MEPModel.GetElectricalSystems
+  01    604.0  Autodesk.Revit.DB.WorksetTable.GetWorkset
+  02    604.0  Autodesk.Revit.DB.WorksetTable.GetWorkset
+  03    583.3  Autodesk.Revit.DB.ModelPath.GetModelGUID
+  04    571.9  Autodesk.Revit.DB.FilteredWorksetCollector.GetWorksetIterator
+  05    569.5  Autodesk.Revit.DB.WorksetTable.GetActiveWorksetId
+  06    567.7  Autodesk.Revit.DB.Document.GetWorksetId
+  07    567.7  Autodesk.Revit.DB.Document.GetWorksetTable
+  08    567.7  Autodesk.Revit.DB.View.GetWorksetVisibility
+  09    563.8  Autodesk.Revit.DB.ModelCurve.GetVisibility
+  10    563.8  Autodesk.Revit.DB.ModelText.GetVisibility
 
 QUERY get all walls in the document
   01    608.8  Autodesk.Revit.DB.Document.GetAllUnusedElements
-  02    548.4  Autodesk.Revit.UI.UIDocument.GetSketchGalleryOptions
-  03    538.4  Autodesk.Revit.DB.ExternalResourceBrowserData.GetCallingDocumentModelPath
-  04    538.4  Autodesk.Revit.DB.ExternalResourceLoadContext.GetCallingDocumentModelPath
-  05    519.4  Autodesk.Revit.DB.WallSweep.GetHostIds
-  06    518.2  Autodesk.Revit.DB.WallSweep.GetWallSweepInfo
-  07    516.6  Autodesk.Revit.DB.CompoundStructure.GetWallSweepsInfo
-  08    454.7  Autodesk.Revit.DB.Document.GetWorksetTable
-  09    454.5  Autodesk.Revit.DB.Wall.GetStackedWallMemberIds
-  10    453.2  Autodesk.Revit.DB.Document.OwnerFamily
+  02    569.6  Autodesk.Revit.DB.WallSweep.GetWallSweepInfo
+  03    567.4  Autodesk.Revit.DB.Wall.GetStackedWallMemberIds
+  04    563.8  Autodesk.Revit.DB.Wall.GetAttachmentIds
+  05    553.7  Autodesk.Revit.DB.WallSweep.GetHostIds
+  06    551.2  Autodesk.Revit.DB.Wall.GetWrappingLocationAsReferences
+  07    549.6  Autodesk.Revit.DB.CompoundStructure.GetWallSweepsInfo
+  08    548.4  Autodesk.Revit.UI.UIDocument.GetSketchGalleryOptions
+  09    544.5  Autodesk.Revit.DB.Analysis.ConceptualConstructionType.GetWallConstructionType
+  10    542.7  Autodesk.Revit.DB.Wall.GetValidWrappingLocationIndices
 
 QUERY get the bounding box of an element
   01    699.6  Autodesk.Revit.DB.ElementRecord.GetBoundingBox
@@ -650,16 +650,16 @@ QUERY import a cad file
   10    543.9  Autodesk.Revit.ApplicationServices.ControlledApplication.FileImporting
 
 QUERY intersect two solids
-  01    456.4  Autodesk.Revit.DB.BooleanOperationsType.Intersect
-  02    451.0  Autodesk.Revit.DB.BooleanOperationsUtils.ExecuteBooleanOperation
-  03    451.0  Autodesk.Revit.DB.BooleanOperationsUtils.ExecuteBooleanOperationModifyingOriginalSolid
-  04    449.5  Autodesk.Revit.DB.TessellatedBuildIssueType.IntersectingOriginalLoops
-  05    448.6  Autodesk.Revit.DB.BuiltInFailures.MassFailures.BooleanUnionFailed
-  06    444.7  Autodesk.Revit.DB.BuiltInFailures.SketchFailures.LoopIntersect
-  07    444.7  Autodesk.Revit.DB.BuiltInFailures.SketchFailures.LoopIntersectError
-  08    444.7  Autodesk.Revit.DB.BuiltInFailures.SketchFailures.LoopIntersectPath3d
-  09    444.5  Autodesk.Revit.DB.SolidGeometry.Polymesh
-  10    442.8  Autodesk.Revit.DB.BuiltInFailures.AnalyticalModelFailures.BoundaryLinesIntersect
+  01    605.6  Autodesk.Revit.DB.Solid.IntersectWithCurve
+  02    548.1  Autodesk.Revit.DB.ElementIntersectsSolidFilter.GetSolid
+  03    505.2  Autodesk.Revit.DB.Toposolid.GetIntersectingElementData
+  04    456.4  Autodesk.Revit.DB.BooleanOperationsType.Intersect
+  05    451.0  Autodesk.Revit.DB.BooleanOperationsUtils.ExecuteBooleanOperation
+  06    451.0  Autodesk.Revit.DB.BooleanOperationsUtils.ExecuteBooleanOperationModifyingOriginalSolid
+  07    449.5  Autodesk.Revit.DB.TessellatedBuildIssueType.IntersectingOriginalLoops
+  08    448.6  Autodesk.Revit.DB.BuiltInFailures.MassFailures.BooleanUnionFailed
+  09    444.7  Autodesk.Revit.DB.BuiltInFailures.SketchFailures.LoopIntersect
+  10    444.7  Autodesk.Revit.DB.BuiltInFailures.SketchFailures.LoopIntersectError
 
 QUERY is the element new
   01    631.2  Autodesk.Revit.Creation.Application.NewElementId
@@ -674,40 +674,40 @@ QUERY is the element new
   10    600.6  Autodesk.Revit.DB.LinePatternElement.Create
 
 QUERY join walls at corner
-  01    467.5  Autodesk.Revit.DB.Fabrication.FabricationAncillaryType.Corner
-  02    460.4  Autodesk.Revit.UI.PostableCommand.WallJoins
-  03    457.6  Autodesk.Revit.DB.WallUtils.DisallowWallJoinAtEnd
-  04    456.3  Autodesk.Revit.UI.PostableCommand.JoinOrUnjoinRoof
-  05    455.2  Autodesk.Revit.UI.PostableCommand.TrimOrExtendToCorner
-  06    452.2  Autodesk.Revit.DB.WallUtils.AllowWallJoinAtEnd
-  07    452.0  Autodesk.Revit.DB.BuiltInParameter.MULLION_CORNER_TYPE
-  08    451.5  Autodesk.Revit.DB.BuiltInParameter.AUTO_JOIN_CONDITION
-  09    450.7  Autodesk.Revit.DB.BuiltInParameter.CALLOUT_CORNER_SHEET_RADIUS
-  10    450.1  Autodesk.Revit.DB.BuiltInParameter.AUTO_JOIN_CONDITION_WALL
+  01    586.3  Autodesk.Revit.DB.WallUtils.AllowWallJoinAtEnd
+  02    586.3  Autodesk.Revit.DB.WallUtils.DisallowWallJoinAtEnd
+  03    586.3  Autodesk.Revit.DB.WallUtils.IsWallJoinAllowedAtEnd
+  04    576.4  Autodesk.Revit.DB.BuiltInFailures.CurtainWallFailures.DanglingCurtainWallCorner
+  05    572.6  Autodesk.Revit.DB.BuiltInFailures.WallJoinRoofFailures.NoFromRoofForWall
+  06    566.9  Autodesk.Revit.DB.BuiltInFailures.JoinElementsFailures.CannotKeepWallJoinToRoof
+  07    563.6  Autodesk.Revit.DB.BuiltInFailures.WallJoinRoofFailures.NoUptoRoofForWall
+  08    563.6  Autodesk.Revit.DB.BuiltInFailures.WallJoinRoofFailures.WallMeetsRoofTangentially
+  09    563.6  Autodesk.Revit.DB.BuiltInFailures.WallJoinRoofFailures.WallNotCoveredByRoof
+  10    561.4  Autodesk.Revit.DB.BuiltInParameter.AUTO_JOIN_CONDITION_WALL
 
 QUERY list the design options
-  01    591.8  Autodesk.Revit.UI.PostableCommand.DesignOptions
-  02    573.5  Autodesk.Revit.DB.BuiltInCategory.OST_DesignOptions
-  03    561.4  Autodesk.Revit.UI.PostableCommand.StatusBarDesignOptions
-  04    561.4  Autodesk.Revit.DB.BuiltInParameter.VIEW_DESIGN_OPTIONS_CONFIG
-  05    558.3  Autodesk.Revit.DB.BuiltInFailures.DesignOptionFailures.CannotAddToOptions
-  06    555.0  Autodesk.Revit.DB.BuiltInFailures.JoinElementsFailures.CannotJoinDesignOptions
-  07    550.1  Autodesk.Revit.DB.BuiltInFailures.DesignOptionFailures.BadReferenceBetweenOptions
-  08    550.1  Autodesk.Revit.DB.BuiltInFailures.DesignOptionFailures.CannotAddToOptionsWarn
-  09    550.1  Autodesk.Revit.DB.BuiltInFailures.DesignOptionFailures.DebugLevelsInOptionsError
-  10    550.1  Autodesk.Revit.DB.BuiltInFailures.DesignOptionFailures.DebugLevelsInOptionsWarn
+  01    616.7  Autodesk.Revit.DB.Element.DesignOption
+  02    600.1  Autodesk.Revit.DB.ElementDesignOptionFilter.DesignOptionId
+  03    598.3  Autodesk.Revit.DB.BuiltInFailures.DesignOptionFailures.NeverInOption
+  04    597.7  Autodesk.Revit.DB.BuiltInFailures.DesignOptionFailures.FabricationCannotBeInDesignOption
+  05    595.4  Autodesk.Revit.DB.DesignOption.GetActiveDesignOptionId
+  06    591.8  Autodesk.Revit.UI.PostableCommand.DesignOptions
+  07    585.6  Autodesk.Revit.DB.BuiltInFailures.DesignOptionFailures.ConfusingHostByElementsInDesignOption
+  08    585.6  Autodesk.Revit.DB.BuiltInFailures.DesignOptionFailures.ConfusingPadByElementsInDesignOption
+  09    585.6  Autodesk.Revit.DB.BuiltInFailures.DesignOptionFailures.ConfusingSweepByElementsInDesignOption
+  10    582.0  Autodesk.Revit.DB.BuiltInFailures.DesignOptionFailures.CannotAddToOptions
 
 QUERY list the parameters of a type
-  01    587.2  Autodesk.Revit.DB.Visual.AssetPropertyType.List
-  02    583.3  Autodesk.Revit.DB.PrintParameters.MarginType
-  03    583.3  Autodesk.Revit.DB.PrintParameters.ZoomType
-  04    583.3  Autodesk.Revit.DB.DirectContext3D.PrimitiveType.LineList
-  05    583.3  Autodesk.Revit.DB.DirectContext3D.PrimitiveType.PointList
-  06    583.3  Autodesk.Revit.DB.DirectContext3D.PrimitiveType.TriangleList
-  07    573.5  Autodesk.Revit.DB.FormattedText.GetListType
-  08    573.5  Autodesk.Revit.DB.FormattedText.SetListType
-  09    561.4  Autodesk.Revit.DB.BuiltInFailures.FamilyFailures.WhileScanningParametersForType
-  10    521.6  Autodesk.Revit.DB.Structure.RebarBendingDetailType.CreateRealistic
+  01    610.9  Autodesk.Revit.DB.CellType.Parameter
+  02    605.6  Autodesk.Revit.DB.Parameter.StorageType
+  03    587.2  Autodesk.Revit.DB.Visual.AssetPropertyType.List
+  04    586.3  Autodesk.Revit.DB.ParameterUtils.GetParameterTypeId
+  05    583.3  Autodesk.Revit.DB.ParameterValue.IsSameType
+  06    583.3  Autodesk.Revit.DB.PrintParameters.MarginType
+  07    583.3  Autodesk.Revit.DB.EvaluatedParameter.StorageType
+  08    583.3  Autodesk.Revit.DB.FamilyParameter.StorageType
+  09    583.3  Autodesk.Revit.DB.PrintParameters.ZoomType
+  10    583.3  Autodesk.Revit.DB.BuiltInParameter.AREA_TYPE
 
 QUERY load a family from a file
   01    616.7  Autodesk.Revit.DB.Document.LoadFamily
@@ -787,11 +787,11 @@ QUERY override graphics for an element
   03    541.1  Autodesk.Revit.DB.View.AreGraphicsOverridesAllowed
   04    541.1  Autodesk.Revit.DB.View.GetElementOverrides
   05    541.1  Autodesk.Revit.DB.View.SetElementOverrides
-  06    522.2  Autodesk.Revit.DB.BuiltInParameter.MEP_SYSTEM_FILL_GRAPHICS_OVERRIDES_PARAM
-  07    522.2  Autodesk.Revit.DB.BuiltInParameter.MEP_SYSTEM_LINE_GRAPHICS_OVERRIDES_PARAM
-  08    456.8  Autodesk.Revit.DB.GroupTypeId.Graphics
-  09    454.0  Autodesk.Revit.DB.Element.GetParameterFormatOptions
-  10    447.2  Autodesk.Revit.DB.PointClouds.PointCloudOverrides.SetPointCloudRegionOverrideSettings
+  06    531.3  Autodesk.Revit.DB.WorksharingDisplaySettings.GetGraphicOverrides
+  07    531.3  Autodesk.Revit.DB.WorksharingDisplaySettings.GetGraphicOverrides
+  08    531.3  Autodesk.Revit.DB.WorksharingDisplaySettings.GetGraphicOverrides
+  09    531.3  Autodesk.Revit.DB.WorksharingDisplaySettings.GetGraphicOverrides
+  10    531.3  Autodesk.Revit.DB.WorksharingDisplaySettings.SetGraphicOverrides
 
 QUERY place a family symbol
   01    658.2  Autodesk.Revit.DB.FamilySymbol.Family
