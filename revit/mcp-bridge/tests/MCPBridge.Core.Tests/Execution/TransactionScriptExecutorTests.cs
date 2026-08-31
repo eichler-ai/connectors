@@ -653,6 +653,69 @@ throw new System.TimeoutException(""cancellation was never observed"");";
         }
     }
 
+    /// <summary>
+    /// Issue #93: three members of the connector facade were forwarded but exercised only at tier 2, so
+    /// the mutation <c>ExportsDirectory =&gt; _runtime.ImportsDirectory</c> passed the entire tier-1 suite.
+    /// Forwarding is exactly the kind of thing that is boring to test and silently wrong when it breaks --
+    /// a transposed pair of one-line properties compiles, ships, and reads correctly.
+    ///
+    /// <para><c>OpenForWriting</c> stays tier-2 by construction (it needs a real second Revit document);
+    /// this covers the other two, plus the seam's cast, against the real script surface.</para>
+    /// </summary>
+    [Fact]
+    public async Task ExportsAndImportsDirectories_ForwardToTheirOwnValues_NotEachOther()
+    {
+        var executor = NewExecutor();
+        var document = new FakeDocumentAdapter();
+        var uiApp = new FakeUiApplicationAdapter();
+        var tempDir = CreateTempDir();
+        try
+        {
+            // Distinct directory names, so a transposed forward produces the WRONG string rather than a
+            // coincidentally-equal one. Asserting on both in a single script means the test fails if
+            // either is wired to the other.
+            var exportsDir = Path.Combine(tempDir, "exports");
+            var importsDir = Path.Combine(tempDir, "imports");
+            Directory.CreateDirectory(exportsDir);
+            Directory.CreateDirectory(importsDir);
+
+            var outcome = await executor.ExecuteAsync(
+                document, uiApp, null,
+                "return Connector.ExportsDirectory + \"|\" + Connector.ImportsDirectory;",
+                CancellationToken.None, exportsDir, importsDir, overwriteOutputFiles: false);
+
+            Assert.True(outcome.Success);
+            Assert.Equal($"{exportsDir}|{importsDir}", outcome.ReturnValue);
+        }
+        finally
+        {
+            Directory.Delete(tempDir, recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// Issue #93, same gap: <c>DialogResultOverrides</c> is the dictionary a script mutates to change how
+    /// a dialog is answered, and <c>TransactionScriptExecutor</c> hands that same instance to
+    /// <c>ActiveDialogContext</c>. Nothing at tier 1 proved a script's write actually lands there -- the
+    /// live dialog behaviour is tier-2, but the plumbing between the facade and the executor is not.
+    /// </summary>
+    [Fact]
+    public async Task DialogResultOverrides_WrittenByAScript_ReachesTheSameDictionaryTheExecutorPublishes()
+    {
+        var executor = NewExecutor();
+        var document = new FakeDocumentAdapter();
+        var uiApp = new FakeUiApplicationAdapter();
+
+        var outcome = await executor.ExecuteAsync(
+            document, uiApp, null,
+            "Connector.DialogResultOverrides[\"TaskDialog_Probe\"] = 1001; " +
+            "return Connector.DialogResultOverrides[\"TaskDialog_Probe\"];",
+            CancellationToken.None);
+
+        Assert.True(outcome.Success);
+        Assert.Equal(1001, outcome.ReturnValue);
+    }
+
     [Fact]
     public async Task ScriptThatDoesNotPublish_HasEmptyFilesArray_NoExportsDirectoryNeeded()
     {

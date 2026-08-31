@@ -450,6 +450,21 @@ try {
             continue
         }
 
+        # The connector's own script API ships its XML-doc sidecar beside its DLL, and the sidecar is
+        # LOAD-BEARING rather than cosmetic (issue #91): DiscoveryReflector treats a MISSING sidecar as
+        # "everything is documented", so a payload with the DLL and no .xml installs cleanly, reports
+        # nothing, and gives every agent a fully discoverable API with empty summaries. That is a worse
+        # product than not shipping the API at all, and nothing downstream would surface it.
+        #
+        # Today the .xml arrives via MSBuild's default related-file copying for a transitive
+        # ProjectReference. That is exactly the kind of default that changes silently under a toolchain
+        # upgrade, so it is asserted here rather than assumed. Fails the install loudly instead.
+        $connectorDll = Join-Path $payloadDir 'Eichler.Connectors.Revit.dll'
+        $connectorXml = Join-Path $payloadDir 'Eichler.Connectors.Revit.xml'
+        if ((Test-Path $connectorDll) -and -not (Test-Path $connectorXml)) {
+            throw "The Revit $version payload has Eichler.Connectors.Revit.dll but no matching .xml doc sidecar. Installing it would make the connector's own API discoverable with empty summaries. This is a packaging bug -- do not work around it by deleting the DLL."
+        }
+
         $proc = Get-RevitProcess $version
         if ($proc) {
             # Three ways this version can end up still running, all of which must reach the SAME

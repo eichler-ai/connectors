@@ -85,9 +85,16 @@ public sealed class XmlDocIndex
             // elements, so two consecutive <para> blocks -- which the raw XML separates with a newline
             // and indentation, and nothing else -- rendered with no separator at all. Found by reading
             // describe_function's actual output during the issue #91 audit: "...calling this on them
-            // fails.Order matters against Revit APIs...". Not specific to our own docs; Revit's XML uses
-            // <para> heavily, so this degraded its summaries the same way. Normalize() below already
-            // collapses the restored whitespace to a single space, so nothing else needs to change.
+            // fails.Order matters against Revit APIs...". Normalize() below already collapses the restored
+            // whitespace to a single space, so nothing else needs to change.
+            //
+            // MEASURED blast radius on the real corpus (issue #93), because an earlier version of this
+            // comment asserted "Revit's XML uses <para> heavily" without checking, and that was wrong:
+            // RevitAPI.xml 2027 has 32,977 summaries of which 12 contain ANY block element; 2025 has
+            // 31,216 of which 10 do. So this fix is overwhelmingly about OUR OWN doc comments, which are
+            // the agent-facing product and were visibly broken, and only incidentally about Revit's.
+            // Cost of the option on that 12.5MB file: 598ms/79MB -> 657ms/92MB, paid once per cold cache
+            // (Sync short-circuits on a SHA-256 match), so it is not worth streaming to avoid.
             var doc = XDocument.Load(stream, LoadOptions.PreserveWhitespace);
             var members = new Dictionary<string, XmlDocEntry>(StringComparer.Ordinal);
 
@@ -128,7 +135,18 @@ public sealed class XmlDocIndex
         }
     }
 
-    /// <summary>Collapses interior whitespace/newlines (XML doc comments are typically hand-indented multi-line text) into single spaces, trimmed.</summary>
+    /// <summary>
+    /// Collapses interior whitespace/newlines (XML doc comments are typically hand-indented multi-line
+    /// text) into single spaces, trimmed.
+    ///
+    /// <para>KNOWN LIMITATION, measured rather than assumed (issue #93): this also flattens the line
+    /// structure of a <c>&lt;code&gt;</c> sample, which is the one place whitespace carries meaning.
+    /// Left as-is because the real corpus has no instances -- RevitAPI.xml has <c>&lt;code&gt;</c> in
+    /// zero of 32,977 summaries (2027) and zero of 31,216 (2025), and the connector's own summaries use
+    /// inline <c>&lt;c&gt;</c>. If a multi-line sample is ever added to an agent-facing summary, this is
+    /// what will silently ruin it, and the fix is to special-case <c>&lt;code&gt;</c> in
+    /// <see cref="AppendText"/> rather than to weaken this.</para>
+    /// </summary>
     private static string Normalize(string text) => WhitespaceRun.Replace(text, " ").Trim();
 
     private static readonly Regex WhitespaceRun = new(@"\s+", RegexOptions.Compiled);
