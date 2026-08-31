@@ -73,9 +73,14 @@ either already has one open. This connector's ambient-transaction model (`OpenFo
 
 Not specific to `LoadFamily` — treat this as the general shape for any Document-argument API that
 throws a transaction/modifiability error, and check both documents' transaction state before assuming
-the API itself is broken. Live-confirmed members so far: `Document.LoadFamily` (needs BOTH source and
-target non-modifiable), `UIDocument.RequestViewChange`/`ActiveView`, and
-`UIApplication.OpenAndActivateDocument`.
+the API itself is broken. Members known to behave this way, with how each is known — the distinction
+matters, because only the first two are pinned by anything:
+
+| Member | Evidence |
+|---|---|
+| `Document.LoadFamily` (needs BOTH source and target non-modifiable) | Regression-pinned: `TestValidationCorpus_LoadFamilyAndPlaceInstance` |
+| `UIDocument.RequestViewChange` / `ActiveView` | Verified live against Revit 2027 (issue #115 triage); not yet pinned by a test |
+| `UIApplication.OpenAndActivateDocument` | **Not independently re-verified** — recorded in `Connector.cs`'s `<remarks>`, which states it was checked live. Treat as second-hand until something pins it |
 
 **The routing fix does NOT generalize to edit scopes, and that distinction is the whole of issue
 #115.** Routing solves "the target must not be modifiable when the call STARTS". `StairsEditScope`
