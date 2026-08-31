@@ -42,6 +42,11 @@ These are the rules that generalize. Each one exists because violating it cost r
 - **A test that cannot fail is not coverage.** After writing a test for a fix, revert the fix and
   confirm the test fails. Multi-targeting, doc markers, and "passing on both legs" have all been
   accepted here as coverage while proving nothing.
+- **Measure a change's blast radius at the depth a user sees, not the depth that is convenient.**
+  Diffing the top three results of a 79-query ranking corpus missed three degradations at ranks 2-10,
+  and two of them were reported as improvements. The snapshot holds ten. A change that fixes rank 1
+  while destroying ranks 4-10 is not an improvement, and a diff shallower than the page an agent
+  actually reads cannot tell the two apart.
 - **Never let the only copy of a result pass through a lossy filter.** Tee the complete output to a
   file and filter the file. A `tail`/`grep` chain has repeatedly destroyed the one line that
   mattered, and an empty filter result reads identically to a pass. In a background pipeline `grep`
