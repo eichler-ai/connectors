@@ -20,6 +20,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -38,6 +39,7 @@ import (
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/registry"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/singleton"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/transport"
+	"github.com/eichler-ai/connectors/revit/mcp-server/internal/updatecheck"
 )
 
 const serverName = "revit-mcp-server"
@@ -473,6 +475,14 @@ func runPrimary(ctx context.Context, bindAddr string, port int, dataDir string, 
 			}
 		}
 	}()
+
+	// Broker's own GitHub latest-release check (PRD §12): the broker, not
+	// the add-in, makes this outbound call — the add-in only ever reads the
+	// result back out of broker.json on its existing reconnect-loop poll.
+	// Injected client carries a real timeout; a zero-value http.Client has
+	// none, and a hung TCP connection to a broken proxy must never be able
+	// to block this goroutine (let alone startup) forever.
+	go updatecheck.Run(ctx, &http.Client{Timeout: 10 * time.Second}, dataDir, version, logger)
 
 	// The primary's own MCP session runs over its own stdio, exactly like
 	// every secondary's proxied session runs over TCP (PRD §05: "From the
