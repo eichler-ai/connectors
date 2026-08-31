@@ -79,14 +79,15 @@ public sealed class Connector
     /// nothing else will.</para>
     /// </summary>
     /// <remarks>
-    /// The headless behaviour is deliberate, not a gap. A script-created document with a real window would
-    /// steal focus from whatever a person has open, and Revit refuses to activate a document while the
-    /// active one is modifiable -- which the script's own target always is -- so a window could not be
-    /// opened from inside the creating call anyway. Making a created document visible is a separate,
-    /// deliberate act, and takes two further calls because SaveAs is blocked here for the same reason
-    /// Close is: SaveAs it from one later call, then OpenAndActivateDocument from another routed at a
-    /// different document. Verified live against Revit 2027; the raw NewProjectDocument path, having no
-    /// managed transaction, can SaveAs in its own run.
+    /// The headless behaviour is deliberate, not a gap: a script-created document with a real window would
+    /// steal focus from whatever a person has open, so making one visible should stay an explicit act.
+    /// It takes two further calls, and the binding constraint is SaveAs rather than activation --
+    /// OpenAndActivateDocument needs a path, and SaveAs is blocked in the creating run for the same reason
+    /// Close is. So SaveAs from one later call, then activate from another. Activation itself is refused
+    /// only while the ACTIVE document is modifiable, which is not a general bar: route that call at any
+    /// document other than the currently active one and it succeeds. All verified live against Revit 2027,
+    /// including the negative -- the raw NewProjectDocument path, having no managed transaction, can SaveAs
+    /// in its own run.
     /// </remarks>
     /// <param name="templatePath">Path to a project template. Defaults to the Revit install's own default
     /// project template, which is what a blank document needing no template asset should use.</param>

@@ -111,11 +111,12 @@ Autodesk.Revit.DB.Level.Create(doc, 10.0);       // just write to it — no tran
 ```
 
 **What you get is headless**: in memory, no window, no open view, never the active document — writable
-by *script*, not visible to the person, who sees nothing appear. To hand them something they can see,
-`SaveAs` it in one call, then `UIApplication.OpenAndActivateDocument(path)` from a **later** call routed
-at a *different* document (Revit refuses to activate while the active document is modifiable, and your
-own target always is). Note the ordering: a connector-created document cannot be saved in the run that
-created it either — see below.
+by *script*, not visible to the person, who sees nothing appear. Making it visible takes **three calls**,
+and the reason is `SaveAs`, not activation: `UIApplication.OpenAndActivateDocument` needs a path, and a
+connector-created document cannot be saved in the run that created it (below). So: create, `SaveAs` from
+a second call, activate from a third. Route that last one at any document **other than the currently
+active one** — activation is refused only while the *active* document is modifiable, and your call's own
+target always is.
 
 **The raw `UIApplication.Application.NewProjectDocument`/`NewFamilyDocument` still work but return a
 document nothing has opened for writing** — writing to it throws
@@ -147,9 +148,10 @@ returns, so the **next** call does both normally with `confirm_lifecycle_actions
 run `return doc.Title;` so the follow-up matches a title it actually saw:
 
 ```csharp
+var wanted = "Project7";         // whatever Title the creating call returned — don't guess one
 Autodesk.Revit.DB.Document scratch = null;
 foreach (Autodesk.Revit.DB.Document d in UIApplication.Application.Documents)
-    if (d.PathName == "" && d.Title == "Project7") { scratch = d; break; }
+    if (d.PathName == "" && d.Title == wanted) { scratch = d; break; }
 if (scratch == null) return "already gone";
 scratch.Close(false);            // false = discard; never prompts
 ```
@@ -163,8 +165,9 @@ scratch.Close(false);            // false = discard; never prompts
 disappear. `list_instances` lists unsaved ones as `tmp-` ids; those absent before your call are yours.
 
 Nothing tidies up for you, and a run of scratch documents will exhaust the memory of the Revit a person
-is working in. (Revit refuses to `Close` the *active* document — route a call at another document,
-activate that, then close.)
+is working in — which surfaces as a modal "Virtual Memory - High Usage" box that wedges Revit until a
+human clicks it. (Revit also refuses to `Close` the *active* document: from a call routed at anything
+except the active document, activate the one you want to keep, then close the other on the next call.)
 
 ### What you may not do without saying so
 

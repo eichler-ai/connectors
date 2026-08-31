@@ -259,10 +259,15 @@ func TestSkillFileDescribesCreatedDocumentLifecycleHonestly(t *testing.T) {
 	// stray "later" elsewhere in the section cannot satisfy it -- an earlier version of this check
 	// looked for "next"/"later" anywhere in the section and passed on an unrelated sentence three
 	// paragraphs up, guarding nothing while claiming to guard the whole close story.
+	// Located by the Close call it must contain, then widened to its fence, rather than by the
+	// block's first line -- anchoring on that made an ordinary edit to the snippet's first line
+	// read as "the recipe is gone".
 	recipe := ""
-	if a := strings.Index(section, "```csharp\nAutodesk.Revit.DB.Document scratch"); a >= 0 {
-		if b := strings.Index(section[a:], "```\n"); b > 0 {
-			recipe = section[a : a+b]
+	if c := strings.Index(section, "scratch.Close("); c >= 0 {
+		if a := strings.LastIndex(section[:c], "```csharp\n"); a >= 0 {
+			if b := strings.Index(section[c:], "```"); b > 0 {
+				recipe = section[a : c+b]
+			}
 		}
 	}
 	if recipe == "" {
