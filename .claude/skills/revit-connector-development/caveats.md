@@ -26,6 +26,7 @@ out — work down, don't guess.
 | 6 | An env var change didn't reach the process | The launcher agent holds a stale environment snapshot; restart the agent, not just Revit |
 | 7 | A shadow copy in Revit's install directory is winning | Log every loaded assembly's `.Location` early in `OnStartup` |
 | 8 | You deployed from the wrong checkout | `redeploy-and-verify.sh --share-name`; its identity guard refuses rather than reporting PASS |
+| 9 | The change was **broker-side** and only the add-in was redeployed | Ask the running broker, not the repo: `get_skills`' `build` field, or `<broker> -version`, names the revision compiled in. `skill.md`, every tool schema and every tool description live in the mcp-server binary; no add-in redeploy can move them, and `redeploy-and-verify.ps1` never builds Go at all (issue #116) |
 
 **Check for the log's startup line before reasoning about anything after it, in `connection.log`
 *and* `connection.log.old`.** A session opens with `RunConnectionLoop starting. Mode=... ConnectorRoot=...`

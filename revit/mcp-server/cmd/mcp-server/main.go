@@ -33,6 +33,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/broker"
+	"github.com/eichler-ai/connectors/revit/mcp-server/internal/buildinfo"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/discovery"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/execution"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/mcpserver"
@@ -44,8 +45,24 @@ import (
 
 const serverName = "revit-mcp-server"
 
-// version is overridable at build time via -ldflags.
+// version is overridable at build time via -ldflags. It identifies a RELEASE;
+// every local and CI build is "dev", so it says nothing about which source a
+// binary was actually built from. That question is answered by
+// internal/buildinfo, which needs no flags at all -- see versionLine.
 var version = "dev"
+
+// versionLine is what this binary says when asked who it is: the release
+// version (usually "dev") plus the source revision it was actually built from.
+//
+// Issue #116: the only drift a running broker can suffer is being older than
+// the source tree someone is reading, and nothing it served said which
+// revision it was. This one string is used everywhere that answer belongs --
+// -version, the startup log, and the version the MCP server advertises to its
+// client in initialize -- so the answer covers stale tool schemas and stale
+// broker logic, not just the stale skill.md that exposed the gap.
+func versionLine() string {
+	return version + " (" + buildinfo.Read().Summary() + ")"
+}
 
 // stdinRelay owns the single physical read of os.Stdin for the life of the
 // process. Reading os.Stdin can't be portably cancelled once a call is
@@ -244,9 +261,23 @@ func main() {
 	bindAddr := flag.String("bind", envOr("REVIT_MCP_BIND", ""), "non-loopback bind address, required when -mode=remote (e.g. the Parallels shared-network host adapter address)")
 	port := flag.Int("port", envIntOr("REVIT_MCP_PORT", 0), "TCP port for the add-in-facing listener; 0 picks an ephemeral port (discovered via broker.json)")
 	appDataDir := flag.String("app-data-dir", os.Getenv("REVIT_MCP_APPDATA"), "override the platform app-data directory (mainly for tests/dev); defaults to the PRD §09 convention")
+	// -version exists so anything holding a broker binary -- a dev-loop
+	// script, CI, a person -- can ask it which source it was built from
+	// without launching a session or having a Go toolchain to hand
+	// (issue #116).
+	showVersion := flag.Bool("version", false, "print this binary's version and the source revision it was built from, then exit")
 	flag.Parse()
 
+	if *showVersion {
+		fmt.Println(serverName + " " + versionLine())
+		return
+	}
+
 	logger := log.New(os.Stderr, "["+serverName+"] ", log.LstdFlags|log.Lmsgprefix)
+	// First line of every run: a stale broker is invisible until something
+	// says which revision is running, and the developer reading this log is
+	// the one who can act on it.
+	logger.Printf("starting %s", versionLine())
 
 	if err := run(*mode, *bindAddr, *port, *appDataDir, logger); err != nil {
 		logger.Fatalf("fatal: %v", err)
@@ -424,7 +455,7 @@ func runPrimary(ctx context.Context, bindAddr string, port int, dataDir string, 
 	}
 	logger.Printf("primary: listening on %s:%d, broker.json written to %s", bindAddr, tcpAddr.Port, dataDir)
 
-	mcpServer := mcp.NewServer(&mcp.Implementation{Name: serverName, Version: version}, nil)
+	mcpServer := mcp.NewServer(&mcp.Implementation{Name: serverName, Version: versionLine()}, nil)
 	execMgr := execution.NewManager()
 	mcpserver.Register(mcpServer, execMgr)
 	reg := registry.New()
@@ -432,7 +463,7 @@ func runPrimary(ctx context.Context, bindAddr string, port int, dataDir string, 
 	mcpserver.RegisterDiscovery(mcpServer, discoveryRouter)
 	mcpserver.RegisterInstances(mcpServer, reg, execMgr)
 	// No dependencies and no Revit needed: get_skills answers even with nothing connected.
-	mcpserver.RegisterSkills(mcpServer)
+	mcpserver.RegisterSkills(mcpServer, version)
 
 	b := &broker.Broker{
 		Token:     token,

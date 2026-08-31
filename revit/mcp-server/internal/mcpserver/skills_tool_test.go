@@ -3,6 +3,8 @@ package mcpserver
 import (
 	"strings"
 	"testing"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // The skill file is shipped content, not code, so these tests pin the
@@ -232,11 +234,81 @@ func TestSkillFileDoesNotHardcodeTheWorkspacePath(t *testing.T) {
 }
 
 func TestGetSkillsReturnsTheEmbeddedFile(t *testing.T) {
-	out := buildSkillsOut()
+	out := buildSkillsOut("dev")
 	if out.Skill != skillFile {
 		t.Error("get_skills returned something other than the embedded skill file verbatim")
 	}
 	if out.Format != "markdown" {
 		t.Errorf("format = %q, want %q", out.Format, "markdown")
+	}
+}
+
+// Issue #116: the served document was right in the repo and wrong in the
+// running binary, and nothing in the response let the reading agent tell those
+// apart. Every field below is what makes that distinguishable, so each is
+// pinned rather than left to prose.
+func TestGetSkillsReportsTheBuildThatServedIt(t *testing.T) {
+	out := buildSkillsOut("v1.2.3")
+
+	if out.Build.Version != "v1.2.3" {
+		t.Errorf("Build.Version = %q, want the broker's own version string passed through", out.Build.Version)
+	}
+	if out.Build.Revision == "" {
+		t.Error("Build.Revision is empty: an absent revision must read as \"unknown\", never as nothing at all")
+	}
+	if out.Build.Note == "" {
+		t.Error("Build.Note is empty: a revision a reader cannot compare against anything is decoration")
+	}
+	// Under `go test` the toolchain stamps no vcs info, so this is the
+	// degraded path -- and the degraded path must be honest.
+	if out.Build.Revision != "unknown" && len(out.Build.Revision) < 7 {
+		t.Errorf("Build.Revision = %q: neither a real revision nor an honest \"unknown\"", out.Build.Revision)
+	}
+}
+
+// The response an agent actually receives, end to end. The structured Build
+// field is invisible to a host that surfaces only text content -- which is how
+// the agent in issue #116 read this document -- so the markdown half must
+// carry the provenance too, and the document itself must still arrive intact.
+func TestGetSkillsCallResultCarriesTheDocumentAndItsProvenance(t *testing.T) {
+	res, out := skillsCallResult("v1.2.3")
+
+	if len(res.Content) != 1 {
+		t.Fatalf("got %d content items, want exactly the document", len(res.Content))
+	}
+	text, ok := res.Content[0].(*mcp.TextContent)
+	if !ok {
+		t.Fatalf("content is %T, want *mcp.TextContent", res.Content[0])
+	}
+	if !strings.HasPrefix(text.Text, skillFile) {
+		t.Error("text content no longer starts with the embedded document verbatim")
+	}
+	if !strings.Contains(text.Text, out.Build.Revision) {
+		t.Errorf("text content omits the build revision %q: a host that shows only text content "+
+			"would leave a reader unable to tell a stale broker from a wrong document", out.Build.Revision)
+	}
+	if !strings.Contains(text.Text, out.Build.Note) {
+		t.Error("text content omits the staleness check: the revision alone is decoration")
+	}
+	if !strings.Contains(text.Text, "v1.2.3") {
+		t.Error("text content omits the broker version it was served by")
+	}
+}
+
+// The footer's own contract, separate from the wiring above.
+func TestSkillFooterCarriesProvenanceIntoTheMarkdown(t *testing.T) {
+	footer := skillFooter(SkillBuild{Version: "v1.2.3", Revision: "34af007ca7da", Note: "rebuild and restart the broker"})
+
+	for _, want := range []string{"v1.2.3", "34af007ca7da", "rebuild and restart the broker"} {
+		if !strings.Contains(footer, want) {
+			t.Errorf("footer = %q, missing %q", footer, want)
+		}
+	}
+	// It is appended to a document that already sits within ~1% of its token
+	// budget and is charged to the same reader's context, so it must stay a
+	// footer rather than grow into a section.
+	const maxFooterBytes = 800
+	if len(footer) > maxFooterBytes {
+		t.Errorf("footer is %d bytes, over the %d-byte cap: it is charged to the same context budget as skill.md itself", len(footer), maxFooterBytes)
 	}
 }

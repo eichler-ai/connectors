@@ -21,6 +21,16 @@ Design rationale for all of it: [`PRD.md`](PRD.md) §06 (execution), §07 (dialo
 | `describe_function` | yes | full signature/params/docs for one member |
 | `get_skills` | no | the built-in agent guide for using all of the above |
 
+> **Everything above is compiled into the broker binary** — the guide, these schemas, the
+> descriptions. A broker left running from an older build therefore serves an older
+> connector, and until issue #116 nothing said so. Now `get_skills` returns a `build` field
+> (release version, source revision, commit time, and whether the tree was dirty) and repeats
+> it as a short footer on the guide itself; the same string is the version the server
+> advertises at `initialize`, the first line of its log, and the output of `mcp-server
+> -version`. If that revision is not your checkout's `HEAD`, rebuild and restart the broker
+> before trusting what it tells you. A binary built without VCS information reports the
+> revision as `unknown` rather than guessing.
+
 ### `execute_script`
 
 | Parameter | Default | Meaning |
