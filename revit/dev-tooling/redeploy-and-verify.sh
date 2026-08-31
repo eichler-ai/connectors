@@ -57,7 +57,10 @@
 #   --mac-bind IP            This Mac's address the VM can reach (default: auto-detected, first
 #                             10.211.55.x address from ifconfig -- override if that ever changes)
 #   --app-data-dir PATH      Shared broker app-data dir (default: <repo>/Connectors/Revit)
-#   --broker-exe PATH        Mac broker binary (default: <repo>/revit/mcp-server/mcp-server-mac)
+#   --broker-exe PATH        Mac broker binary (default: <repo>/revit/mcp-server/mcp-server-mac).
+#                             This is a BUILD OUTPUT, not just an input: unless --skip-broker-restart
+#                             is given, the broker is rebuilt from this checkout and written here,
+#                             overwriting whatever was at that path.
 #   --tfm TFM                Build output TFM to deploy (default: net10.0-windows)
 #   --revit-version VER      Addins\<VER> folder to deploy into (default: 2027)
 #   --doc-source PATH        VM-side pristine fixture .rvt to launch with (needs --doc-dest too)
@@ -275,18 +278,33 @@ if ! $SKIP_BROKER_RESTART; then
   # already correct, which read as a documentation bug for three separate diagnoses.
   #
   # Rebuild unconditionally rather than comparing revisions: `go build` is content-addressed and a
-  # no-op run costs well under a second, whereas a revision comparison has to be right about which
-  # checkout the toolchain stamped (it is NOT this one when building from a git worktree nested
-  # inside another checkout -- see internal/buildinfo's own note). Restart only when the BYTES
-  # changed, which keeps the ensure-not-churn property below: an unchanged binary never drops the
-  # add-in's live connection.
+  # no-op run costs well under a second, whereas a comparison would have to be right about which
+  # checkout produced the existing binary. Restart only when the BYTES changed, which keeps the
+  # ensure-not-churn property below: an unchanged binary never drops the add-in's live connection.
+  #
+  # The revision is STAMPED explicitly from $REPO_ROOT rather than left to the toolchain's automatic
+  # stamp. The toolchain finds a repository by walking up for a `.git` DIRECTORY, so a build made
+  # inside a git worktree -- which this project's own agent sessions use -- reports the ENCLOSING
+  # checkout's revision, and a reader comparing that against `git rev-parse HEAD` there would get a
+  # MATCH on a mismatched broker. Same shape in revit/install-mac.sh. "Modified" counts uncommitted
+  # changes to TRACKED files only; a stray untracked scratch file must not permanently light up a
+  # warning.
   if ! command -v go >/dev/null 2>&1; then
     echo "Go toolchain not found on PATH -- required to rebuild the broker (issue #116: a stale broker serves a stale skill.md and stale tool schemas)." >&2
     exit 1
   fi
+  buildinfo_pkg="github.com/eichler-ai/connectors/revit/mcp-server/internal/buildinfo"
+  broker_ldflags=()
+  if broker_rev="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null)"; then
+    broker_rev_time="$(git -C "$REPO_ROOT" show -s --format=%cI HEAD 2>/dev/null || true)"
+    if git -C "$REPO_ROOT" diff --quiet HEAD 2>/dev/null; then broker_dirty=false; else broker_dirty=true; fi
+    broker_ldflags=(-ldflags "-X $buildinfo_pkg.stampedRevision=$broker_rev -X $buildinfo_pkg.stampedRevisionTime=$broker_rev_time -X $buildinfo_pkg.stampedModified=$broker_dirty")
+  else
+    say "WARNING: $REPO_ROOT is not a git checkout -- the broker will report its revision as unknown"
+  fi
   broker_hash_before="$(shasum -a 256 "$BROKER_EXE" 2>/dev/null | awk '{print $1}')"
   say "rebuilding the Mac broker from this checkout -> $BROKER_EXE"
-  if ! ( cd "$REPO_ROOT/revit/mcp-server" && go build -o "$BROKER_EXE" ./cmd/mcp-server ); then
+  if ! ( cd "$REPO_ROOT/revit/mcp-server" && go build "${broker_ldflags[@]}" -o "$BROKER_EXE" ./cmd/mcp-server ); then
     echo "broker build FAILED -- refusing to continue against whatever binary is already there" >&2
     exit 1
   fi
@@ -306,7 +324,7 @@ if ! $SKIP_BROKER_RESTART; then
     say "restarting the standalone Mac broker (fresh primary, confirmed via broker.json)"
     restart_broker
   fi
-  say "broker now serving: $("$BROKER_EXE" -version 2>/dev/null || echo 'unknown -- -version not supported by this binary')"
+  say "broker now serving: $("$BROKER_EXE" -version)"
 fi
 
 PS_ARGS=(-SrcRoot "$UNC_ROOT\\revit\\mcp-bridge\\src" -Tfm "$TFM" -AddinsVersion "$REVIT_VERSION" -TimeoutSec "$TIMEOUT_SEC")

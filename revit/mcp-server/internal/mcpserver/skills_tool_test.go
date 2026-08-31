@@ -1,10 +1,16 @@
 package mcpserver
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"strings"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/eichler-ai/connectors/revit/mcp-server/internal/buildinfo"
 )
 
 // The skill file is shipped content, not code, so these tests pin the
@@ -56,7 +62,23 @@ func TestSkillFileStaysWithinItsLightweightBudget(t *testing.T) {
 	// removed, this branch goes silent and should be deleted rather than left as decoration.
 	const softBudgetTokens = ceilingTokens / 4
 
-	approxTokens := len(skillFile) / pessimisticBytesPerToken
+	// The footer get_skills appends at runtime is charged to the same reader's
+	// context as the file itself, so the budget measures what a caller
+	// actually receives, not what is on disk. Measured against the longest
+	// note the product produces rather than a nominal figure.
+	longestFooter := 0
+	for _, b := range []SkillBuild{
+		buildSkillsOut("dev", stampedInfo).Build,
+		buildSkillsOut("dev", buildinfo.Info{Revision: "34af007ca7daf0d4bce77ebb68d5041df17b9339"}).Build,
+		buildSkillsOut("dev", buildinfo.Info{}).Build,
+		buildSkillsOut("v1.2.3", stampedInfo).Build,
+	} {
+		if n := len(skillFooter(b)); n > longestFooter {
+			longestFooter = n
+		}
+	}
+
+	approxTokens := (len(skillFile) + longestFooter) / pessimisticBytesPerToken
 	if approxTokens > softBudgetTokens && approxTokens <= budgetTokens {
 		// Phrased as state, not as a change: this fires on every run of the package while the file
 		// sits in the window, including for someone who never opened skill.md.
@@ -233,8 +255,18 @@ func TestSkillFileDoesNotHardcodeTheWorkspacePath(t *testing.T) {
 	}
 }
 
+// stampedInfo is the provenance shape a REAL build produces. Tests must inject
+// it: a test binary carries no VCS stamps of its own, so a suite that let
+// buildSkillsOut read its own would only ever exercise the degraded path and
+// would pass with the production shape completely broken.
+var stampedInfo = buildinfo.Info{
+	Revision:     "34af007ca7daf0d4bce77ebb68d5041df17b9339",
+	RevisionTime: "2026-08-31T13:32:07Z",
+	Stamped:      true,
+}
+
 func TestGetSkillsReturnsTheEmbeddedFile(t *testing.T) {
-	out := buildSkillsOut("dev")
+	out := buildSkillsOut("dev", stampedInfo)
 	if out.Skill != skillFile {
 		t.Error("get_skills returned something other than the embedded skill file verbatim")
 	}
@@ -248,21 +280,76 @@ func TestGetSkillsReturnsTheEmbeddedFile(t *testing.T) {
 // apart. Every field below is what makes that distinguishable, so each is
 // pinned rather than left to prose.
 func TestGetSkillsReportsTheBuildThatServedIt(t *testing.T) {
-	out := buildSkillsOut("v1.2.3")
+	out := buildSkillsOut("dev", stampedInfo)
 
-	if out.Build.Version != "v1.2.3" {
+	if out.Build.Version != "dev" {
 		t.Errorf("Build.Version = %q, want the broker's own version string passed through", out.Build.Version)
 	}
-	if out.Build.Revision == "" {
-		t.Error("Build.Revision is empty: an absent revision must read as \"unknown\", never as nothing at all")
+	if out.Build.Revision != "34af007ca7da" {
+		t.Errorf("Build.Revision = %q, want the injected build's short revision", out.Build.Revision)
+	}
+	if out.Build.RevisionTime != stampedInfo.RevisionTime {
+		t.Errorf("Build.RevisionTime = %q, want %q", out.Build.RevisionTime, stampedInfo.RevisionTime)
 	}
 	if out.Build.Note == "" {
 		t.Error("Build.Note is empty: a revision a reader cannot compare against anything is decoration")
 	}
-	// Under `go test` the toolchain stamps no vcs info, so this is the
-	// degraded path -- and the degraded path must be honest.
-	if out.Build.Revision != "unknown" && len(out.Build.Revision) < 7 {
-		t.Errorf("Build.Revision = %q: neither a real revision nor an honest \"unknown\"", out.Build.Revision)
+
+	// The hash is computed here from the document itself, not read back from
+	// the field it is meant to verify -- asserting the field against itself
+	// would pass under any implementation, including one that hashed the
+	// wrong thing.
+	sum := sha256.Sum256([]byte(skillFile))
+	want := hex.EncodeToString(sum[:])[:12]
+	if out.Build.SkillHash != want {
+		t.Errorf("Build.SkillHash = %q, want %q (sha256 of the embedded document)", out.Build.SkillHash, want)
+	}
+	if !strings.Contains(out.Build.Note, want) {
+		t.Error("the note omits the document hash: it is the only check that stays valid when the " +
+			"revision is misattributed (git worktree) or absent")
+	}
+	if !strings.Contains(out.Build.Note, "shasum") {
+		t.Error("the note names a hash but no way to compute one to compare against")
+	}
+}
+
+// An unstamped revision is the toolchain's inference from whatever checkout it
+// found, which is the ENCLOSING one for a build made inside a git worktree.
+// Telling that reader to compare it against `git rev-parse HEAD` produces a
+// MATCH on a mismatched broker -- a confidently wrong answer, worse than none.
+func TestGetSkillsDoesNotOfferARevisionComparisonItCannotStandBehind(t *testing.T) {
+	inferred := buildinfo.Info{Revision: "34af007ca7daf0d4bce77ebb68d5041df17b9339", Stamped: false}
+	note := buildSkillsOut("dev", inferred).Build.Note
+
+	if strings.Contains(note, "git rev-parse HEAD") {
+		t.Errorf("note = %q: an inferred revision must not be presented as a comparison a reader can trust", note)
+	}
+	if !strings.Contains(note, "worktree") {
+		t.Errorf("note = %q: it must say why the revision is only a hint", note)
+	}
+	// The check that still works must still be offered.
+	if !strings.Contains(note, "shasum") {
+		t.Errorf("note = %q: the document-hash check is valid regardless of the revision and must survive", note)
+	}
+}
+
+// A release install has no repo, no checkout and no Go toolchain -- advice to
+// run git and rebuild from source is advice that reader cannot follow, and the
+// connector already tracks the answer they can use (broker.json's
+// latest_available_version, written by internal/updatecheck).
+func TestGetSkillsGivesAReleaseBuildAdviceItsReaderCanFollow(t *testing.T) {
+	note := buildSkillsOut("v1.2.3", stampedInfo).Build.Note
+
+	if !strings.Contains(note, "v1.2.3") {
+		t.Errorf("note = %q, want it to name the release the reader is running", note)
+	}
+	if !strings.Contains(note, "latest_available_version") {
+		t.Errorf("note = %q, want it to point at the freshness answer this reader actually has", note)
+	}
+	for _, forbidden := range []string{"git rev-parse", "shasum", "go build"} {
+		if strings.Contains(note, forbidden) {
+			t.Errorf("note = %q tells a release install to run %q, which needs a source checkout it does not have", note, forbidden)
+		}
 	}
 }
 
@@ -271,7 +358,7 @@ func TestGetSkillsReportsTheBuildThatServedIt(t *testing.T) {
 // the agent in issue #116 read this document -- so the markdown half must
 // carry the provenance too, and the document itself must still arrive intact.
 func TestGetSkillsCallResultCarriesTheDocumentAndItsProvenance(t *testing.T) {
-	res, out := skillsCallResult("v1.2.3")
+	res, out := skillsCallResult("v9.9.9", stampedInfo)
 
 	if len(res.Content) != 1 {
 		t.Fatalf("got %d content items, want exactly the document", len(res.Content))
@@ -283,32 +370,107 @@ func TestGetSkillsCallResultCarriesTheDocumentAndItsProvenance(t *testing.T) {
 	if !strings.HasPrefix(text.Text, skillFile) {
 		t.Error("text content no longer starts with the embedded document verbatim")
 	}
-	if !strings.Contains(text.Text, out.Build.Revision) {
-		t.Errorf("text content omits the build revision %q: a host that shows only text content "+
-			"would leave a reader unable to tell a stale broker from a wrong document", out.Build.Revision)
-	}
-	if !strings.Contains(text.Text, out.Build.Note) {
-		t.Error("text content omits the staleness check: the revision alone is decoration")
-	}
-	if !strings.Contains(text.Text, "v1.2.3") {
-		t.Error("text content omits the broker version it was served by")
+	// Deliberately distinctive values: "unknown" or a short hex string could
+	// be satisfied by skill.md's own prose, making the assertion pass while
+	// the footer carried nothing.
+	for _, want := range []string{"34af007ca7da", out.Build.Note, "v9.9.9"} {
+		if !strings.Contains(text.Text, want) {
+			t.Errorf("text content omits %q: a host that shows only text content would leave a reader "+
+				"unable to tell a stale broker from a wrong document", want)
+		}
 	}
 }
 
-// The footer's own contract, separate from the wiring above.
-func TestSkillFooterCarriesProvenanceIntoTheMarkdown(t *testing.T) {
-	footer := skillFooter(SkillBuild{Version: "v1.2.3", Revision: "34af007ca7da", Note: "rebuild and restart the broker"})
+// Through the registered tool, over a real MCP session -- the only thing that
+// proves the handler passes the broker's own version and provenance in, rather
+// than something the tests supply.
+func TestRegisteredGetSkillsToolServesTheDocumentAndAFooter(t *testing.T) {
+	server := mcp.NewServer(&mcp.Implementation{Name: "revit-mcp-server-test", Version: "0.0.0"}, nil)
+	RegisterSkills(server, "v4.5.6")
 
-	for _, want := range []string{"v1.2.3", "34af007ca7da", "rebuild and restart the broker"} {
-		if !strings.Contains(footer, want) {
-			t.Errorf("footer = %q, missing %q", footer, want)
+	clientTransport, serverTransport := mcp.NewInMemoryTransports()
+	ctx := context.Background()
+	if _, err := server.Connect(ctx, serverTransport, nil); err != nil {
+		t.Fatalf("server.Connect: %v", err)
+	}
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0.0.0"}, nil)
+	cs, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("client.Connect: %v", err)
+	}
+	defer cs.Close()
+
+	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "get_skills", Arguments: map[string]any{}})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	raw, err := json.Marshal(res.StructuredContent)
+	if err != nil {
+		t.Fatalf("marshal StructuredContent: %v", err)
+	}
+	var out GetSkillsOut
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatalf("unmarshal into GetSkillsOut: %v", err)
+	}
+
+	if out.Build.Version != "v4.5.6" {
+		t.Errorf("Build.Version = %q: the registration is not passing the broker's own version to the handler", out.Build.Version)
+	}
+	if out.Skill != skillFile {
+		t.Error("the registered tool did not serve the embedded document verbatim")
+	}
+	sum := sha256.Sum256([]byte(skillFile))
+	if want := hex.EncodeToString(sum[:])[:12]; out.Build.SkillHash != want {
+		t.Errorf("Build.SkillHash = %q, want %q", out.Build.SkillHash, want)
+	}
+	text, ok := res.Content[0].(*mcp.TextContent)
+	if !ok {
+		t.Fatalf("content is %T, want *mcp.TextContent", res.Content[0])
+	}
+	if !strings.Contains(text.Text, "**Provenance.**") {
+		t.Error("the registered tool served the document without its provenance footer")
+	}
+	if !strings.Contains(text.Text, "v4.5.6") {
+		t.Error("the footer does not name the version the handler was registered with")
+	}
+}
+
+// The footer's own contract, measured against the notes the product actually
+// produces rather than a synthetic short one -- a cap fed a 27-byte note
+// proves nothing about a 570-byte one.
+func TestSkillFooterStaysAFooterForEveryRealNote(t *testing.T) {
+	cases := map[string]SkillBuild{
+		"dev, stamped":  buildSkillsOut("dev", stampedInfo).Build,
+		"dev, inferred": buildSkillsOut("dev", buildinfo.Info{Revision: "34af007ca7daf0d4bce77ebb68d5041df17b9339"}).Build,
+		"dev, unknown":  buildSkillsOut("dev", buildinfo.Info{}).Build,
+		"release":       buildSkillsOut("v1.2.3", stampedInfo).Build,
+	}
+	// It is appended to a document already within ~1% of its token budget and
+	// is charged to the same reader's context, so it must stay a footer
+	// rather than grow into a section. The real notes run ~300-600 bytes.
+	const maxFooterBytes = 800
+	for name, b := range cases {
+		footer := skillFooter(b)
+		if len(footer) > maxFooterBytes {
+			t.Errorf("%s: footer is %d bytes, over the %d-byte cap -- it is charged to the same context "+
+				"budget as skill.md itself", name, len(footer), maxFooterBytes)
+		}
+		for _, want := range []string{b.Version, b.Revision, b.Note} {
+			if !strings.Contains(footer, want) {
+				t.Errorf("%s: footer = %q, missing %q", name, footer, want)
+			}
+		}
+		if strings.Contains(footer, "tree not clean") {
+			t.Errorf("%s: footer = %q warns about the tree for a clean build", name, footer)
 		}
 	}
-	// It is appended to a document that already sits within ~1% of its token
-	// budget and is charged to the same reader's context, so it must stay a
-	// footer rather than grow into a section.
-	const maxFooterBytes = 800
-	if len(footer) > maxFooterBytes {
-		t.Errorf("footer is %d bytes, over the %d-byte cap: it is charged to the same context budget as skill.md itself", len(footer), maxFooterBytes)
+
+	// A text-content reader never sees the structured `modified` field, so the
+	// footer has to carry it: a revision built from a dirty tree does not
+	// identify what is running and must not be presented as if it did.
+	dirty := stampedInfo
+	dirty.Modified = true
+	if footer := skillFooter(buildSkillsOut("dev", dirty).Build); !strings.Contains(footer, "tree not clean") {
+		t.Errorf("footer = %q: a build from an unclean tree must say so in the markdown too", footer)
 	}
 }
