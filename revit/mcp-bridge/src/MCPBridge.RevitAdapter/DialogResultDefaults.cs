@@ -20,14 +20,28 @@ namespace MCPBridge.RevitAdapter;
 /// reference, to avoid flipping MCPBridge.AddIn.csproj's UseWindowsForms back to true (currently false,
 /// deliberately, for the non-modal WPF status window).
 ///
-/// KNOWN LIMIT, NOT YET TESTED -- and the enum list above is what makes it worth naming. Cancel is only
-/// a meaningful answer for a dialog that OFFERS Cancel. A TaskDialog built with, say, only Close (8), or
-/// only Yes/No (6/7), has no Cancel to return, and what OverrideResult(2) does there is unverified: it
-/// may be ignored, leaving the dialog on screen and the UI thread blocked -- the exact failure
-/// DialogSuppressionHandler exists to prevent. That is a plausible mechanism for a modal that survives
-/// auto-answering, and it is worth establishing before the §15 phase-7 allowlist is built on top of this
-/// default. Testing it means deliberately showing such a dialog on a live instance, so it was not done
-/// opportunistically while another session was using the only Revit available.
+/// AN UNOFFERED RESULT IS STILL ACCEPTED -- tested, because the enum list above makes it look like it
+/// might not be. Cancel is only a meaningful ANSWER for a dialog that offers Cancel, so a TaskDialog
+/// built with only Close (8), or only Yes/No (6/7), might plausibly ignore OverrideResult(2) and display
+/// anyway, blocking the UI thread -- the exact failure this handler exists to prevent. It does not.
+/// Measured live, Revit 2027, three dialogs raised from a script and answered by this handler:
+///
+///   offers Cancel (control) -> handler sent 2 -> Show() returned Cancel(2), never displayed
+///   offers ONLY Close       -> handler sent 2 -> Show() returned Cancel(2), never displayed
+///   offers ONLY Yes/No      -> handler sent 2 -> Show() returned Cancel(2), never displayed
+///
+/// So OverrideResult is not validated against the dialog's button set: it suppresses the dialog and
+/// returns the value whether or not that button exists. TaskDialogCancel is therefore safe as a blanket
+/// default for every intercepted TaskDialog, which is what this type assumes and what
+/// DialogSuppressionHandler relies on. It also rules this out as the mechanism behind the non-framework
+/// modals that wedge an instance -- those are genuinely never intercepted (PRD §07's window-inventory
+/// fallback only fires when NO DialogBoxShowing event was raised), not intercepted and answered wrongly.
+///
+/// One thing the same runs incidentally showed, relevant to ScriptGlobals.DialogResultOverrides: a
+/// TaskDialog constructed by a script reports DialogId "" (empty). That dictionary is keyed by DialogId,
+/// so script-raised dialogs cannot be targeted individually through it -- only Revit's own dialogs, which
+/// carry real ids, can. Not a defect, but it means an override key of "" is meaningless rather than a
+/// wildcard.
 /// </summary>
 public static class DialogResultDefaults
 {
