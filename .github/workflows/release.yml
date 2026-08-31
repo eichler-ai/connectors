@@ -44,7 +44,11 @@ permissions:
 
 defaults:
   run:
-    shell: powershell
+    # Plain `shell: powershell` dot-sources the generated step script under this runner's default
+    # execution policy, which is Restricted (confirmed live: "running scripts is disabled on this
+    # system", PSSecurityException) -- not something to fix by mutating the VM's machine-wide policy
+    # for one workflow. -ExecutionPolicy Bypass scopes the relaxation to just this process.
+    shell: powershell -ExecutionPolicy Bypass -Command ". '{0}'"
 
 jobs:
   release:
