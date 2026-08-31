@@ -237,6 +237,11 @@ jobs:
         with:
           tag_name: ${{ env.RELEASE_TAG }}
           name: ${{ env.RELEASE_TAG }}
+          # GitHub's own auto-generated notes (merged-PR titles since the previous release tag,
+          # same as the "Generate release notes" button in the UI) -- no authoring step needed here
+          # or in the /release command, and it naturally degrades to "every PR ever" for a first
+          # release with no previous tag, which is the correct answer for that case too.
+          generate_release_notes: true
           files: |
             ${{ env.ZIP_PATH }}
             ${{ env.CHECKSUMS_PATH }}
