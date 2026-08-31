@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/eichler-ai/connectors/revit/test-harness/mcpclient"
 )
 
 // This file weaves live findings from an interactive test session (working
@@ -21,17 +23,59 @@ import (
 // below traces back to a specific numbered issue filed from that session;
 // see each issue for the full narrative.
 //
-// UPDATE: by the time this file was wired into a live run, issues #114,
-// #116, #117 and #118 had already been fixed and merged (see each test's own
-// comment for how that changed what it pins). #113's crash and #115's stairs
-// gap were still open as of this run.
+// UPDATE: by the time this file was wired into a live run, issues #113,
+// #114, #116, #117 and #118 had already been fixed and merged (see each
+// test's own comment for how that changed what it pins). #115's stairs gap
+// remains open.
 //
-// One live finding is deliberately NOT given a test here: issue #113 (a real
-// Revit fatal crash from reassigning a placed sheet's SheetTitleBlockId to a
-// symbol from a different Family). Reproducing a crash would take down the
-// shared, long-lived Revit session every other suite in this package runs
-// against. TestSheetTitleBlockRecreateWorkaroundIsSafe below pins the safe
-// alternative that was used to complete the task instead.
+// The crash-triggering MUTATION behind issue #113 (reassigning a placed
+// sheet's ViewSheet.SheetTitleBlockId to a symbol from a different Family)
+// is deliberately never exercised anywhere in this file. Reproducing a
+// crash would take down the shared, long-lived Revit session every other
+// suite in this package runs against. TestSheetTitleBlockRecreateWorkaroundIsSafe
+// below pins the safe alternative that was used to complete the task instead.
+
+// createAndAwaitDocumentID creates a blank project document and waits on
+// list_instances' live snapshot push (issue #30) for its routable tmp- id to
+// appear, returning both. Takes t explicitly rather than closing over an
+// enclosing test's *testing.T -- every caller here runs it from inside a
+// t.Run subtest goroutine, and a closure capturing the parent T would call
+// FailNow on the wrong goroutine (see git history: an earlier version of
+// this file did exactly that and produced "subtest may have called FailNow
+// on a parent test" instead of its own diagnostic, silently skipping every
+// subtest after the first failure).
+func createAndAwaitDocumentID(t *testing.T, c *mcpclient.Client, instanceID, documentID string) (title, tmpDocID string) {
+	t.Helper()
+	out := runScript(t, c, instanceID, documentID, `return Connector.CreateProjectDocument().Title;`)
+	if out.Status != "success" {
+		t.Fatalf("create failed: status=%q (%s)", out.Status, out.diag())
+	}
+	title = strings.TrimSpace(out.ReturnValue)
+	if title == "" {
+		t.Fatalf("created document reported no title; (%s)", out.diag())
+	}
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		raw, err := c.CallTool("list_instances", map[string]any{}, 10*time.Second)
+		if err != nil {
+			t.Fatalf("list_instances: %v", err)
+		}
+		instances := decodeToolResult[listInstancesOut](t, raw)
+		for _, inst := range instances.Instances {
+			if inst.InstanceID != instanceID {
+				continue
+			}
+			for _, d := range inst.Documents {
+				if d.Title == title {
+					return title, d.DocumentID
+				}
+			}
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	t.Fatalf("created document %q never appeared in list_instances", title)
+	return "", ""
+}
 
 // TestCreatedDocumentCloseRequiresRoutingAwayFromIt is the corrected, live-
 // re-verified understanding behind issue #114. The issue was originally
@@ -57,55 +101,39 @@ import (
 func TestCreatedDocumentCloseRequiresRoutingAwayFromIt(t *testing.T) {
 	c, instanceID, documentID := targetDocument(t)
 
-	// create returns the new document's Title and its tmp- document_id, waiting
-	// on list_instances' live snapshot push (issue #30) for the id to appear.
-	create := func() (title, tmpDocID string) {
-		out := runScript(t, c, instanceID, documentID, `return Connector.CreateProjectDocument().Title;`)
-		if out.Status != "success" {
-			t.Fatalf("create failed: status=%q %s", out.Status, out.diag())
-		}
-		title = strings.TrimSpace(out.ReturnValue)
-		if title == "" {
-			t.Fatalf("created document reported no title; %s", out.diag())
-		}
-		deadline := time.Now().Add(20 * time.Second)
-		for time.Now().Before(deadline) {
-			raw, err := c.CallTool("list_instances", map[string]any{}, 10*time.Second)
-			if err != nil {
-				t.Fatalf("list_instances: %v", err)
-			}
-			instances := decodeToolResult[listInstancesOut](t, raw)
-			for _, inst := range instances.Instances {
-				if inst.InstanceID != instanceID {
-					continue
-				}
-				for _, d := range inst.Documents {
-					if d.Title == title {
-						return title, d.DocumentID
-					}
-				}
-			}
-			time.Sleep(500 * time.Millisecond)
-		}
-		t.Fatalf("created document %q never appeared in list_instances", title)
-		return "", ""
-	}
-
 	t.Run("ClosingByRoutingAwayAndFindingByTitleWorks", func(t *testing.T) {
-		title, _ := create()
+		title, _ := createAndAwaitDocumentID(t, c, instanceID, documentID)
+		// Safety net if the close below fails partway through; guarded so the
+		// expected-success path doesn't also log a spurious "close-failed: not
+		// found" against a document this subtest already closed itself.
+		closed := false
+		t.Cleanup(func() {
+			if !closed {
+				closeDocumentByTitle(t, c, instanceID, documentID, title, "")
+			}
+		})
+
 		script := fixtureLookupPreamble(title) + `doc.Close(false); return "closed";`
 		out := decodeToolResult[executeScriptOut](t, callExecuteScriptWith(t, c, instanceID, documentID, script,
 			map[string]any{"confirm_lifecycle_actions": true}))
 		if out.Status != "success" || !strings.Contains(out.ReturnValue, "closed") {
-			t.Fatalf("closing a created document by routing elsewhere and finding it by Title should succeed; status=%q %s", out.Status, out.diag())
+			t.Fatalf("closing a created document by routing elsewhere and finding it by Title should succeed; status=%q (%s)", out.Status, out.diag())
 		}
+		closed = true
 	})
 
 	t.Run("ClosingByRoutingDirectlyAtItFailsForThatCallOnlyNotForever", func(t *testing.T) {
-		title, tmpDocID := create()
+		title, tmpDocID := createAndAwaitDocumentID(t, c, instanceID, documentID)
 		// Safety net regardless of what this subtest proves -- never leaves a
-		// created document open.
-		t.Cleanup(func() { closeDocumentByTitle(t, c, instanceID, documentID, title, "") })
+		// created document open. Guarded by closed so the (expected) success
+		// path below doesn't also log a spurious "close-failed: not found" from
+		// this cleanup running against an already-closed document.
+		closed := false
+		t.Cleanup(func() {
+			if !closed {
+				closeDocumentByTitle(t, c, instanceID, documentID, title, "")
+			}
+		})
 
 		blocked := decodeToolResult[executeScriptOut](t, callExecuteScriptWith(t, c, instanceID, tmpDocID, `
 try {
@@ -116,10 +144,10 @@ try {
 }
 `, map[string]any{"confirm_lifecycle_actions": true}))
 		if blocked.Status != "success" {
-			t.Fatalf("expected status=success, got %q %s", blocked.Status, blocked.diag())
+			t.Fatalf("expected status=success, got %q (%s)", blocked.Status, blocked.diag())
 		}
 		if !strings.Contains(blocked.ReturnValue, "refused:") {
-			t.Fatalf("routing document_id directly at a created document was expected to block Close for that call (a fresh per-call transaction wraps it); if this now succeeds, the footgun described in issue #114 may already be fixed; %s", blocked.diag())
+			t.Fatalf("routing document_id directly at a created document was expected to block Close for that call (a fresh per-call transaction wraps it); if this now succeeds, the footgun described in issue #114 may already be fixed; (%s)", blocked.diag())
 		}
 
 		// THE ASSERTION THAT WOULD HAVE CAUGHT THE ORIGINAL "permanently
@@ -129,25 +157,38 @@ try {
 			fixtureLookupPreamble(title)+`doc.Close(false); return "closed";`,
 			map[string]any{"confirm_lifecycle_actions": true}))
 		if recheck.Status != "success" || !strings.Contains(recheck.ReturnValue, "closed") {
-			t.Fatalf("a created document that failed to close via direct routing should still close cleanly via a later, separately-routed call -- if this now fails too, issue #114's ORIGINAL 'permanently unclosable' framing would actually be correct after all; status=%q %s", recheck.Status, recheck.diag())
+			t.Fatalf("a created document that failed to close via direct routing should still close cleanly via a later, separately-routed call -- if this now fails too, issue #114's ORIGINAL 'permanently unclosable' framing would actually be correct after all; status=%q (%s)", recheck.Status, recheck.diag())
 		}
+		closed = true
 	})
 }
 
 // TestStairsEditScopeBlockedByAmbientTransaction pins the structural gap
-// tracked as issue #115: StairsEditScope.Start() refuses to run while the
-// connector's own managed transaction is open around every execute_script
-// call, which is always the case for a synchronous script. There is
-// currently no script-reachable way around this (deferring past the
-// script's own execution via UIApplication.Idling gets Start() to succeed,
-// but StairsRun.CreateStraightRun() immediately fails with
+// tracked as issue #115: StairsEditScope.Start() refuses to run while a
+// managed transaction is open on its target document. Here that transaction
+// is the one Connector.OpenForWriting(doc) opens on the fixture document
+// (fixtureWritePreamble) -- the same class of restriction the ambient
+// per-call transaction on the routed document itself would produce, but not
+// literally the same transaction, so this pins "a managed transaction on the
+// target document blocks Start()" rather than "the ambient dispatcher
+// transaction specifically blocks it". There is currently no script-reachable
+// way around this in either case (deferring past the script's own execution
+// via UIApplication.Idling gets Start() to succeed, but
+// StairsRun.CreateStraightRun() immediately fails with
 // ModificationOutsideTransactionException, and opening a Transaction to
 // cover it is unconditionally denylisted -- see
 // TestDenylistRejectsOwnTransaction). This pins the first half of that dead
 // end, live, so it flips to a clear regression signal the moment #115 ships
 // a fix -- at which point this test should be REPLACED with a positive
 // assertion using whatever primitive #115 adds, not merely relaxed. Still
-// open as of this run (unlike #114/#116/#117/#118, all fixed already).
+// open as of this run (unlike #113/#114/#116/#117/#118, all fixed already).
+//
+// StairsEditScope's namespace is Autodesk.Revit.DB, not
+// Autodesk.Revit.DB.Architecture (unlike Stairs/StairsRun/StairsType) --
+// confirmed live via describe_function against the real Revit 2027 API
+// during the interactive session this test is drawn from, and confirmed
+// again by this test compiling and running to completion rather than
+// failing with a CS0234 "type or namespace not found".
 func TestStairsEditScopeBlockedByAmbientTransaction(t *testing.T) {
 	c, instanceID, documentID := targetDocument(t)
 	fixtureTitle := createBlankFixtureDocument(t, c, instanceID, documentID)
@@ -164,10 +205,10 @@ try {
 }
 `)
 	if out.Status != "success" {
-		t.Fatalf("expected status=success, got %q %s", out.Status, out.diag())
+		t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
 	}
 	if !strings.Contains(out.ReturnValue, "refused:") {
-		t.Fatalf("StairsEditScope.Start() was expected to be refused while the ambient transaction is open (issue #115) -- if this now succeeds, stairs creation may finally be reachable and this test should be replaced with a real stairs-creation assertion; %s", out.diag())
+		t.Fatalf("StairsEditScope.Start() was expected to be refused while a managed transaction is open on its target document (issue #115) -- if this now succeeds, stairs creation may finally be reachable and this test should be replaced with a real stairs-creation assertion; (%s)", out.diag())
 	}
 }
 
@@ -178,33 +219,45 @@ try {
 // constraint starts. Placing a room at that computation height can then find
 // ZERO boundary loops (not merely a wrong area) even though the surrounding
 // walls are geometrically closed and correctly flagged room-bounding --
-// confirmed against Autodesk's own KB on computation-height-at-the-boundary.
-// FIXED as a documentation correction (#118, landed alongside #114): this
-// trap and its recipe are now written down in skill.md/caveats.md rather
-// than the default behavior changing, so both subtests below assert the
-// SAME thing they always would have -- the gap still reproduces on the
-// naive path, and the known-good recipe still works. What changed is that
-// an agent hitting this now has a documented way out instead of discovering
-// it the hard way, as this session did.
+// confirmed against Autodesk's own KB on computation-height-at-the-boundary,
+// in the interactive session this test is drawn from. #118 FIXED this as a
+// documentation correction (landed alongside #114): the trap and its recipe
+// are now written down in skill.md/caveats.md rather than any default
+// behavior changing.
 //
-// NOT RELIABLY REPRODUCIBLE under this test's own construction, live-tested
-// the hard way -- worth being honest about rather than guessing at magic
-// numbers until one happens to fail. Two different elevations (6100.0 and
-// 10.0, the latter matching the original interactive session's exact value)
-// both came back properly enclosed (loops = 1) against a document built here
-// via createBlankFixtureDocument (Connector.CreateProjectDocument, which uses
-// Revit's own DefaultProjectTemplate). The one remaining difference from the
-// original repro not accounted for here: that session's document was created
-// via the RAW, unmanaged Application.NewProjectDocument(UnitSystem) path with
-// NO template at all, not the templated, managed path this fixture helper
-// uses -- not re-tested here, since a raw document is read-only and cannot
-// host Wall.Create/NewRoom without its own separate (and separately
-// footgun-prone) write path. So the subtest below is deliberately a PROBE,
-// not a pass/fail gate: it reports what it finds instead of asserting a
-// specific outcome, because this specific reproduction has not been pinned
-// down precisely enough yet to assert on with confidence. The known-good
-// recipe (explicit computation height) is still asserted as a hard PASS
-// below, since that half never depended on reproducing the failure first.
+// THE GAP DOES NOT RELIABLY REPRODUCE under THIS test's own construction,
+// live-tested against three different elevations (10.0, matching the
+// original session's exact value; 6100.0; 6200.0) -- all three came back
+// properly enclosed (loops = 1) against a document built here via
+// createBlankFixtureDocument (Connector.CreateProjectDocument, which uses
+// Revit's own DefaultProjectTemplate). At least one uncontrolled variable
+// from the original repro is not reproduced here: that session's document
+// was created via the RAW, unmanaged Application.NewProjectDocument(UnitSystem)
+// path with no template, not the templated, managed path this fixture
+// helper uses -- not re-tested here, since the un-saved intermediate from
+// that path is read-only (per get_skills) and would need its own separate
+// SaveAs/OpenAndActivateDocument write path to host Wall.Create/NewRoom.
+// The original repro also had a SECOND level above the room's level (this
+// fixture has only the one script-created level) and walls created with an
+// implicit default type height rather than an explicit one, either of which
+// could independently matter. So "the one remaining difference" would
+// overclaim; more than one variable differs, and which (if any) is load-
+// bearing has not been isolated.
+//
+// Given that, DefaultComputationHeightProbe below is deliberately a PROBE,
+// not a pass/fail gate: it reports what it finds rather than asserting a
+// specific outcome, because the reproduction has not been pinned down
+// precisely enough to assert on with confidence. SettingComputationHeightInsideTheWallBodyWorks
+// still asserts the known-good recipe produces a valid, non-zero-area room
+// as a hard PASS -- but since the probe above shows the room already comes
+// back enclosed even WITHOUT setting computation height under this
+// construction, that assertion is not currently a controlled negative-case
+// regression pin (it would not go red if LEVEL_ROOM_COMPUTATION_HEIGHT
+// stopped working here, since the room is enclosed either way). A true A/B
+// -- the same footprint, at the same elevation, once with and once without
+// the recipe, compared directly -- needs two levels Revit will accept at
+// the same elevation in one document, which was not solved here; tracked as
+// a known follow-up rather than attempted under time pressure.
 func TestRoomOnScriptCreatedLevelNeedsComputationHeight(t *testing.T) {
 	c, instanceID, documentID := targetDocument(t)
 	fixtureTitle := createBlankFixtureDocument(t, c, instanceID, documentID)
@@ -230,12 +283,12 @@ return "area = " + room.Area + "; loops = " + loops + ";";
 		out := runScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+
 			fmt.Sprintf(buildRoom, "10.0", ""))
 		if out.Status != "success" {
-			t.Fatalf("expected status=success, got %q %s", out.Status, out.diag())
+			t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
 		}
 		if strings.Contains(out.ReturnValue, "loops = 0;") {
-			t.Logf("reproduced the gap live: default computation height produced an unenclosed room (issue #118); %s", out.diag())
+			t.Logf("reproduced the gap live: default computation height produced an unenclosed room (issue #118); (%s)", out.diag())
 		} else {
-			t.Logf("did NOT reproduce the gap against a Connector.CreateProjectDocument-templated fixture (see this test's doc comment for the untested raw-document variable); %s", out.diag())
+			t.Logf("did NOT reproduce the gap against a Connector.CreateProjectDocument-templated fixture (see this test's doc comment for the uncontrolled variables); (%s)", out.diag())
 		}
 	})
 
@@ -244,10 +297,10 @@ return "area = " + room.Area + "; loops = " + loops + ";";
 		out := runScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+
 			fmt.Sprintf(buildRoom, "6200.0", setHeight))
 		if out.Status != "success" {
-			t.Fatalf("expected status=success, got %q %s", out.Status, out.diag())
+			t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
 		}
 		if strings.Contains(out.ReturnValue, "loops = 0;") {
-			t.Fatalf("the known-good recipe (computation height set inside the wall body) failed to produce an enclosed room; %s", out.diag())
+			t.Fatalf("the known-good recipe (computation height set inside the wall body) failed to produce an enclosed room; (%s)", out.diag())
 		}
 	})
 }
@@ -266,48 +319,42 @@ return "area = " + room.Area + "; loops = " + loops + ";";
 func TestCreatedProjectDocumentHasNoWindow(t *testing.T) {
 	c, instanceID, documentID := targetDocument(t)
 
-	created := runScript(t, c, instanceID, documentID, `return Connector.CreateProjectDocument().Title;`)
-	if created.Status != "success" {
-		t.Fatalf("create failed: status=%q %s", created.Status, created.diag())
-	}
-	title := strings.TrimSpace(created.ReturnValue)
+	title, tmpDocID := createAndAwaitDocumentID(t, c, instanceID, documentID)
 	t.Cleanup(func() { closeDocumentByTitle(t, c, instanceID, documentID, title, "") })
 
-	var tmpDocID string
-	deadline := time.Now().Add(20 * time.Second)
-	for time.Now().Before(deadline) && tmpDocID == "" {
-		raw, err := c.CallTool("list_instances", map[string]any{}, 10*time.Second)
-		if err != nil {
-			t.Fatalf("list_instances: %v", err)
+	// Re-check active:false from the same list_instances snapshot
+	// createAndAwaitDocumentID already confirmed the document in, rather than
+	// a second round trip -- both properties (routable id, not active) are
+	// asserted from data already in hand.
+	raw, err := c.CallTool("list_instances", map[string]any{}, 10*time.Second)
+	if err != nil {
+		t.Fatalf("list_instances: %v", err)
+	}
+	instances := decodeToolResult[listInstancesOut](t, raw)
+	var found bool
+	for _, inst := range instances.Instances {
+		if inst.InstanceID != instanceID {
+			continue
 		}
-		instances := decodeToolResult[listInstancesOut](t, raw)
-		for _, inst := range instances.Instances {
-			if inst.InstanceID != instanceID {
-				continue
-			}
-			for _, d := range inst.Documents {
-				if d.Title == title {
-					if d.Active {
-						t.Errorf("created document unexpectedly reported active:true in list_instances -- if CreateProjectDocument now opens a real window, issue #118 may already be addressed; this test should then assert active:true instead of failing")
-					}
-					tmpDocID = d.DocumentID
+		for _, d := range inst.Documents {
+			if d.DocumentID == tmpDocID {
+				found = true
+				if d.Active {
+					t.Errorf("created document unexpectedly reported active:true in list_instances -- if CreateProjectDocument now opens a real window, issue #118 may already be addressed; this test should then assert active:true instead of failing")
 				}
 			}
 		}
-		if tmpDocID == "" {
-			time.Sleep(500 * time.Millisecond)
-		}
 	}
-	if tmpDocID == "" {
-		t.Fatalf("created document %q never appeared in list_instances", title)
+	if !found {
+		t.Fatalf("created document %q (id %s) no longer appears in list_instances", title, tmpDocID)
 	}
 
 	out := runScript(t, c, instanceID, tmpDocID, `return UIDocument == null ? "no-window" : "has-window";`)
 	if out.Status != "success" {
-		t.Fatalf("expected status=success, got %q %s", out.Status, out.diag())
+		t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
 	}
 	if !strings.Contains(out.ReturnValue, "no-window") {
-		t.Errorf("expected UIDocument to be null for a document CreateProjectDocument produced -- if this now has a window, issue #118 may already be addressed; this test should then assert has-window instead; %s", out.diag())
+		t.Errorf("expected UIDocument to be null for a document CreateProjectDocument produced -- if this now has a window, issue #118 may already be addressed; this test should then assert has-window instead; (%s)", out.diag())
 	}
 }
 
@@ -332,17 +379,21 @@ func TestCreatedProjectDocumentHasNoWindow(t *testing.T) {
 // group rather than invoking members with irreversible real-world effects.
 // Instead, this pins that creating a NEW sheet with the desired title block
 // type from the start -- never touching a live instance's
-// SheetTitleBlockId -- works cleanly, which is the pattern that completed
-// the interactive session's task after the crash. Still open as of this run
-// (unlike #114/#116/#117/#118): #113 landed a documentation correction (the
-// title-block id trap, per its own commit) but the crash path itself was not
-// guarded in code, so this test's own reasoning for never exercising the
-// mutation still applies unchanged.
+// SheetTitleBlockId -- works cleanly and actually carries the requested
+// type, which is the pattern that completed the interactive session's task
+// after the crash. #113 landed a documentation correction (the title-block
+// id trap, per its own commit) but the crash path itself was not guarded in
+// code, so this test's own reasoning for never exercising the mutation
+// still applies unchanged even though the issue itself is closed.
 func TestSheetTitleBlockRecreateWorkaroundIsSafe(t *testing.T) {
 	c, instanceID, documentID := targetDocument(t)
 	fixtureTitle := createBlankFixtureDocument(t, c, instanceID, documentID)
 
 	out := runScript(t, c, instanceID, documentID, "using System.Linq;\n"+fixtureWritePreamble(fixtureTitle)+`
+// FloorPlan is a built-in ViewFamily every valid Revit install ships a
+// ViewFamilyType for, unlike a title block symbol (which depends on what the
+// project template happened to load) -- First() is fine here for exactly
+// the reason FirstOrDefault()+skip is used for tbType below.
 var vft = new Autodesk.Revit.DB.FilteredElementCollector(doc)
     .OfClass(typeof(Autodesk.Revit.DB.ViewFamilyType)).Cast<Autodesk.Revit.DB.ViewFamilyType>()
     .First(x => x.ViewFamily == Autodesk.Revit.DB.ViewFamily.FloorPlan);
@@ -357,19 +408,29 @@ if (!tbType.IsActive) { tbType.Activate(); }
 
 var sheet = Autodesk.Revit.DB.ViewSheet.Create(doc, tbType.Id);
 var viewport = Autodesk.Revit.DB.Viewport.Create(doc, sheet.Id, plan.Id, new Autodesk.Revit.DB.XYZ(0.5, 0.5, 0));
-return new { sheetCreated = sheet != null, viewportCreated = viewport != null };
+
+// The property the #113 workaround actually depends on: the sheet's placed
+// title block instance is the REQUESTED type, not merely some type. This is
+// what would silently regress if ViewSheet.Create ever stopped honoring the
+// symbol it was given.
+var placedTitleBlock = new Autodesk.Revit.DB.FilteredElementCollector(doc, sheet.Id)
+    .OfCategory(Autodesk.Revit.DB.BuiltInCategory.OST_TitleBlocks)
+    .FirstOrDefault();
+var placedTypeMatches = placedTitleBlock != null && placedTitleBlock.GetTypeId() == tbType.Id;
+
+return new { sheetCreated = sheet != null, viewportCreated = viewport != null, placedTypeMatches = placedTypeMatches };
 `)
 	if out.Status != "success" {
-		t.Fatalf("expected status=success, got %q %s", out.Status, out.diag())
+		t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
 	}
 	if strings.Contains(out.ReturnValue, "no-titleblock-loaded") {
 		t.Skip("no title block family loaded in the fixture document's default template on this machine")
 	}
 	// return_value is real JSON since issue #117 landed -- a serialized
 	// anonymous object, not the old "field = True" ToString() rendering.
-	for _, want := range []string{`"sheetCreated":true`, `"viewportCreated":true`} {
+	for _, want := range []string{`"sheetCreated":true`, `"viewportCreated":true`, `"placedTypeMatches":true`} {
 		if !strings.Contains(out.ReturnValue, want) {
-			t.Errorf("wanted %q in return_value; %s", want, out.diag())
+			t.Errorf("wanted %q in return_value; (%s)", want, out.diag())
 		}
 	}
 }
