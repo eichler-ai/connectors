@@ -45,6 +45,14 @@ public sealed class MCPBridgeStatusCommand : IExternalCommand
 
         var (buildTimestamp, gitCommit) = ReadBuildIdentity();
 
+        // Independent review finding: BridgeHost's version fields were previously only ever written
+        // once per TCP connection, so a Revit session that stayed connected for days would never see
+        // a release published mid-session until the connection happened to drop and reconnect. Force
+        // a fresh, connection-independent broker.json re-read on every click, before reading
+        // BrokerVersion/LatestAvailableVersion below, so the status window always shows a current
+        // comparison rather than a stale connect-time snapshot.
+        host?.RefreshVersionStatus();
+
         // PRD §12 Stage 3: broker.json's own Version/LatestAvailableVersion fields (Stage 1 plumbing,
         // Stage 2's periodic GitHub check) reached here via BridgeHost's existing volatile status
         // fields -- the same reconnect-loop poll path already used for IsConnected/BrokerAddress, no
@@ -74,6 +82,7 @@ public sealed class MCPBridgeStatusCommand : IExternalCommand
                 content,
                 actionLabel: "Update Now",
                 onAction: () => UpdateTrigger.TriggerUpdate(
+                    ownerHandle,
                     statusText => MCPBridgeStatusWindow.ShowOrActivate(ownerHandle, statusText)));
         }
         else

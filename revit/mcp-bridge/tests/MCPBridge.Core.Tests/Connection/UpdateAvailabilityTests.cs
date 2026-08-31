@@ -15,6 +15,8 @@ public class UpdateAvailabilityTests
     [InlineData("   ", "1.3.0", false)] // running whitespace-only -> no update
     [InlineData("1.2.3", "   ", false)] // latest whitespace-only -> no update
     [InlineData(null, null, false)] // both unknown -> no update
+    [InlineData("dev", "v1.0.0", false)] // running the unreleased "dev" sentinel -> never claim an update, even against a real tag
+    [InlineData("dev", "dev", false)] // redundant with the equality check above, but explicit: "dev" is guarded regardless of latest
     public void IsAvailable_ReturnsExpected(string? runningVersion, string? latestAvailableVersion, bool expected)
     {
         Assert.Equal(expected, UpdateAvailability.IsAvailable(runningVersion, latestAvailableVersion));

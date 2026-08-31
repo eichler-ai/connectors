@@ -26,6 +26,20 @@ public static class UpdateAvailability
             return false;
         }
 
+        // Blocker fix (PR #99 independent review): "dev" is the literal fallback value
+        // cmd/mcp-server/main.go's `var version = "dev"` ships until a release pipeline sets it via
+        // -ldflags -- so every broker in the field currently reports Version: "dev" in broker.json,
+        // forever, for now. Without this guard, a plain string-inequality check against any real
+        // release tag (e.g. "v0.1.0") always returns true, permanently -- the ribbon would claim an
+        // update is available on every single click, even seconds after a successful update, because
+        // there is no meaningful comparison to make against a real tag when the broker itself was
+        // never built from one. Ordinal/case-sensitive: "dev" is a known sentinel, not a real version
+        // string that happens to collide.
+        if (string.Equals(runningVersion, "dev", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
         return !string.Equals(runningVersion, latestAvailableVersion, StringComparison.Ordinal);
     }
 }

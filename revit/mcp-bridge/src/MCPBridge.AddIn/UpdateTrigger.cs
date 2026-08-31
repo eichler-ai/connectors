@@ -1,7 +1,9 @@
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.Reflection;
 using System.Windows;
+using System.Windows.Interop;
 
 namespace MCPBridge.AddIn;
 
@@ -30,42 +32,52 @@ namespace MCPBridge.AddIn;
 internal static class UpdateTrigger
 {
     /// <summary>
-    /// Locates the installed <c>install.ps1</c> self-copy (checking the User scope path, then the
-    /// AllUsers scope path -- either order, first found wins) and starts it with
+    /// Locates the installed <c>install.ps1</c> self-copy and starts it with
     /// <c>-Update -Silent -Scope &lt;User|AllUsers&gt;</c>, fire-and-forget (never awaited/waited-on).
     /// On success, updates the status window's text via <paramref name="onStarted"/> so stale
-    /// pre-update content doesn't linger. If neither candidate path exists, shows a MessageBox
+    /// pre-update content doesn't linger. If the candidate path doesn't exist, shows a MessageBox
     /// explaining that rather than silently doing nothing or throwing unhandled into Revit's UI
     /// thread.
+    ///
+    /// <paramref name="ownerHandle"/> is Revit's main window handle (from
+    /// <c>ExternalCommandData.Application.MainWindowHandle</c>, threaded through by
+    /// <see cref="MCPBridgeStatusCommand"/>) -- both error MessageBoxes below are given this as an
+    /// owner so they can never render behind Revit's main window, which would otherwise make Revit
+    /// look hung with no visible dialog (exactly the failure mode <see cref="MCPBridgeStatusWindow"/>'s
+    /// own class doc comment describes going non-modal to avoid).
     /// </summary>
-    public static void TriggerUpdate(Action<string> onStarted)
+    public static void TriggerUpdate(IntPtr ownerHandle, Action<string> onStarted)
     {
+        // Independent review finding: picking whichever of the User/AllUsers install.ps1 paths
+        // happens to exist first (existence-based inference) can invoke a stale copy from an old
+        // install scope no longer in use, on a machine that has both. Scope is instead determined
+        // DETERMINISTICALLY from which Addins folder actually loaded this running DLL -- there is
+        // exactly one true answer to "which scope is this session" and it's encoded in our own
+        // load path, not in which files happen to be present on disk. Matches install.ps1's own
+        // Get-AddinsDir exactly (install.ps1 ~line 75-83):
+        //   User scope:     %AppData%\Autodesk\Revit\Addins\<version>
+        //   AllUsers scope: C:\Program Files\Autodesk\Revit\Addins\<version>
+        var executingAssemblyLocation = Assembly.GetExecutingAssembly().Location;
+        var scope = executingAssemblyLocation.Contains(
+            @"\Program Files\Autodesk\Revit\Addins\", StringComparison.OrdinalIgnoreCase)
+            ? "AllUsers"
+            : "User";
+
         // Matches install.ps1's own Get-AppDir exactly (install.ps1 ~line 85):
         //   User scope:     %LocalAppData%\Programs\MCPBridge
         //   AllUsers scope: C:\Program Files\MCPBridge
         // install.ps1's own $selfCopyPath is Join-Path $appDir 'install.ps1'.
-        var userScopePath = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "MCPBridge", "install.ps1");
-        var allUsersScopePath = Path.Combine(@"C:\Program Files\MCPBridge", "install.ps1");
+        var installScriptPath = scope == "AllUsers"
+            ? Path.Combine(@"C:\Program Files\MCPBridge", "install.ps1")
+            : Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "MCPBridge", "install.ps1");
 
-        string installScriptPath;
-        string scope;
-        if (File.Exists(userScopePath))
+        if (!File.Exists(installScriptPath))
         {
-            installScriptPath = userScopePath;
-            scope = "User";
-        }
-        else if (File.Exists(allUsersScopePath))
-        {
-            installScriptPath = allUsersScopePath;
-            scope = "AllUsers";
-        }
-        else
-        {
-            MessageBox.Show(
-                $"Could not find an installed copy of install.ps1 at either:\n{userScopePath}\n{allUsersScopePath}\n\nUpdate Now requires MCP Bridge to have been installed via install.ps1.",
+            ShowOwnedMessageBox(
+                ownerHandle,
+                $"Could not find an installed copy of install.ps1 at:\n{installScriptPath}\n\nUpdate Now requires MCP Bridge to have been installed via install.ps1.",
                 "MCP Bridge - Update Now",
-                MessageBoxButton.OK,
                 MessageBoxImage.Warning);
             return;
         }
@@ -78,6 +90,12 @@ internal static class UpdateTrigger
             {
                 FileName = "powershell",
                 UseShellExecute = false,
+
+                // Independent review finding: install.ps1 itself uses -WindowStyle Hidden for its own
+                // background watcher (install.ps1 ~line 171) for the identical reason -- a -Silent
+                // operation triggered by a ribbon click must not pop a visible console window.
+                CreateNoWindow = true,
+                WindowStyle = ProcessWindowStyle.Hidden,
             };
             startInfo.ArgumentList.Add("-NoProfile");
             startInfo.ArgumentList.Add("-ExecutionPolicy");
@@ -91,15 +109,56 @@ internal static class UpdateTrigger
 
             Process.Start(startInfo); // fire-and-forget: never waited on.
 
-            onStarted("Update started -- Revit may close and reopen shortly.");
+            // Independent review finding: install.ps1's -Silent flag SKIPS Revit's automatic relaunch
+            // (install.ps1 ~line 564: `if (-not $Silent -and ...)`) -- under -Silent, Revit closes and
+            // does NOT reopen on its own, so the previous "may close and reopen shortly" wording was
+            // simply wrong about what happens next.
+            onStarted("Update started. Revit will close shortly to apply it; reopen it manually once the update finishes.");
         }
         catch (Exception ex)
         {
-            MessageBox.Show(
+            ShowOwnedMessageBox(
+                ownerHandle,
                 $"Failed to start the update: {ex.Message}",
                 "MCP Bridge - Update Now",
-                MessageBoxButton.OK,
                 MessageBoxImage.Error);
+        }
+    }
+
+    /// <summary>
+    /// Shows a modal <see cref="MessageBox"/> owned by Revit's main window, via the same
+    /// HWND-to-WPF-window technique <see cref="MCPBridgeStatusWindow"/> already uses
+    /// (<c>WindowInteropHelper</c> against a real <c>IntPtr</c> handle) -- an unowned
+    /// <c>MessageBox.Show</c> can render behind Revit's main window, making Revit look hung with no
+    /// visible dialog. The invisible owner window is a throwaway: sized to nothing, never shown in
+    /// the taskbar, never activated on its own, created solely to give the MessageBox a real owner
+    /// and closed immediately after.
+    /// </summary>
+    private static void ShowOwnedMessageBox(IntPtr ownerHandle, string text, string caption, MessageBoxImage icon)
+    {
+        if (ownerHandle == IntPtr.Zero)
+        {
+            MessageBox.Show(text, caption, MessageBoxButton.OK, icon);
+            return;
+        }
+
+        var owner = new Window
+        {
+            WindowStyle = WindowStyle.None,
+            ShowInTaskbar = false,
+            Width = 0,
+            Height = 0,
+            ShowActivated = false,
+        };
+        new WindowInteropHelper(owner).Owner = ownerHandle;
+        owner.Show();
+        try
+        {
+            MessageBox.Show(owner, text, caption, MessageBoxButton.OK, icon);
+        }
+        finally
+        {
+            owner.Close();
         }
     }
 }
