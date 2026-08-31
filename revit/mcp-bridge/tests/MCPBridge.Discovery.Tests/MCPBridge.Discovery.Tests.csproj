@@ -46,6 +46,15 @@
     <None Include="Fixtures\SampleDocs.xml">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <!-- The committed ranking regression corpus and its per-Revit-version snapshots (issue #82). Data,
+         not code, deliberately: a query set someone has to edit C# to extend is a query set that stops
+         being extended, and the snapshots exist to be read as a git diff when ranking moves. -->
+    <None Include="Fixtures\ranking-corpus.tsv">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="Fixtures\ranking-snapshot-*.txt">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
   </ItemGroup>
 
 </Project>
