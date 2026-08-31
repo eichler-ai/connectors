@@ -32,16 +32,16 @@ var levels = System.Linq.Enumerable.ToList(
 return levels;
 `)
 		if out.Status != "success" {
-			t.Fatalf("expected status=success, got %q (return_value: %s)", out.Status, out.ReturnValue)
+			t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
 		}
 		if strings.Contains(out.ReturnValue, "AnonymousType") || strings.Contains(out.ReturnValue, "System.Collections.Generic.List") {
-			t.Fatalf("the return value is still a type name rather than data: %s", out.ReturnValue)
+			t.Fatalf("the return value is still a type name rather than data: %s", out.diag())
 		}
 		// Every Revit project template ships at least one level, so this is a
 		// real array with real members, not an empty one that would pass the
 		// check above for the wrong reason.
 		if !strings.HasPrefix(strings.TrimSpace(out.ReturnValue), "[{") || !strings.Contains(out.ReturnValue, `"Name":`) || !strings.Contains(out.ReturnValue, `"Elevation":`) {
-			t.Fatalf("expected a JSON array of {Name, Elevation} objects; got: %s", out.ReturnValue)
+			t.Fatalf("expected a JSON array of {Name, Elevation} objects; got: %s", out.diag())
 		}
 	})
 
@@ -57,10 +57,10 @@ return System.Linq.Enumerable.First(
         new Autodesk.Revit.DB.FilteredElementCollector(Document).OfClass(typeof(Autodesk.Revit.DB.Level))));
 `)
 		if out.Status != "success" {
-			t.Fatalf("expected status=success, got %q (return_value: %s)", out.Status, out.ReturnValue)
+			t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
 		}
 		if !strings.Contains(out.ReturnValue, "no display form") || !strings.Contains(out.ReturnValue, "Autodesk.Revit.DB.Level") {
-			t.Fatalf("a returned Element must report that it has no display form and name its type; got: %s", out.ReturnValue)
+			t.Fatalf("a returned Element must report that it has no display form and name its type; got: %s", out.diag())
 		}
 	})
 
@@ -73,10 +73,10 @@ System.Console.WriteLine("harness-stdout-marker");
 return "harness-return-marker";
 `)
 		if out.Status != "success" {
-			t.Fatalf("expected status=success, got %q (return_value: %s)", out.Status, out.ReturnValue)
+			t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
 		}
 		if out.ReturnValue != "harness-return-marker" {
-			t.Errorf("return_value = %q, want exactly the returned string with nothing else folded in", out.ReturnValue)
+			t.Errorf("%s, want exactly the returned string with nothing else folded in", out.diag())
 		}
 		if !strings.Contains(out.Output, "harness-stdout-marker") {
 			t.Errorf("output = %q, want the captured stdout", out.Output)

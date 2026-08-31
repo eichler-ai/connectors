@@ -110,6 +110,59 @@ public class ReturnValueFormatterTests
     }
 
     /// <summary>
+    /// `elements.ToDictionary(e => e, ...)` is idiomatic, and every one of those keys formats to the same
+    /// "no display form" text. Plain assignment collapsed the whole dictionary to one member with nothing
+    /// saying so -- silent misrepresentation, which is the bug class this class exists to end.
+    /// </summary>
+    [Fact]
+    public void DictionaryKeysThatFormatIdentically_AreDisambiguated_NotDropped()
+    {
+        var value = new Dictionary<object, int> { [new OpaqueThing()] = 1, [new OpaqueThing()] = 2 };
+
+        var formatted = ReturnValueFormatter.Format(value);
+
+        Assert.Contains(":1", formatted);
+        Assert.Contains(":2", formatted);
+        Assert.Contains("#2", formatted);
+    }
+
+    [Fact]
+    public void DictionaryLongerThanMaxCollectionItems_IsTruncatedAndSaysSo()
+    {
+        var value = new Dictionary<int, int>();
+        for (var i = 0; i < ReturnValueFormatter.MaxCollectionItems + 10; i++)
+        {
+            value[i] = i;
+        }
+
+        var formatted = ReturnValueFormatter.Format(value);
+
+        Assert.Contains("more than " + ReturnValueFormatter.MaxCollectionItems + " entries", formatted);
+    }
+
+    [Fact]
+    public void DictionaryOfLargeStrings_StopsAtTheSharedCharacterBudget()
+    {
+        var value = new Dictionary<int, string>();
+        for (var i = 0; i < 100; i++)
+        {
+            value[i] = new string('q', 4096);
+        }
+
+        var formatted = ReturnValueFormatter.Format(value);
+
+        Assert.Contains("serialization budget ran out", formatted);
+        Assert.True(formatted.Length < CharacterCeiling, "got " + formatted.Length + " characters");
+    }
+
+    [Fact]
+    public void KeyValuePairAndTuple_SerializeAsObjects()
+    {
+        Assert.Contains("\"Key\":\"a\"", ReturnValueFormatter.Format(new KeyValuePair<string, int>("a", 1)));
+        Assert.Contains("\"Item1\":\"a\"", ReturnValueFormatter.Format(("a", 1)));
+    }
+
+    /// <summary>
     /// A type the SCRIPT declared, produced by really compiling one -- not a fixture class in this
     /// assembly, which would prove nothing here. IsReflectableShape selects script-defined types by their
     /// assembly having no on-disk location (a Roslyn submission is emitted to memory), and that is a claim
@@ -298,13 +351,14 @@ public class ReturnValueFormatterTests
     /// the bug being fixed, which merely printed a type name. If this test hangs, it has failed.
     /// </summary>
     [Fact]
-    public void InfiniteSequence_IsBoundedRatherThanEnumeratedToCompletion()
+    public async Task InfiniteSequence_IsBoundedRatherThanEnumeratedToCompletion()
     {
-        var formatted = "";
-        var finished = Task.Run(() => formatted = ReturnValueFormatter.Format(Forever())).Wait(TimeSpan.FromSeconds(20));
+        var work = Task.Run(() => ReturnValueFormatter.Format(Forever()));
+
+        var finished = await Task.WhenAny(work, Task.Delay(TimeSpan.FromSeconds(20))) == work;
 
         Assert.True(finished, "formatting an endless sequence must terminate; on Revit's UI thread this hangs the whole application");
-        Assert.Contains("<truncated", formatted);
+        Assert.Contains("<truncated", await work);
     }
 
     [Fact]
@@ -333,7 +387,47 @@ public class ReturnValueFormatterTests
 
         Assert.Contains("serialization budget ran out", formatted);
         // The budget is on VALUES, not characters, so assert the real property: the walk stopped early.
-        Assert.True(formatted.Length < 200_000, "expected the node budget to stop the walk long before the full 216,000-value graph was emitted; got " + formatted.Length + " characters");
+        Assert.True(formatted.Length < CharacterCeiling, "expected the node budget to stop the walk long before the full 216,000-value graph was emitted; got " + formatted.Length + " characters");
+    }
+
+    /// <summary>
+    /// The connector's own markers are charged to the character budget too. `return listOfElements;` is
+    /// the exact shape a script hits when it forgets to project, and every element produces a ~200-char
+    /// "no display form" marker -- so if markers bypassed the budget (they did, at first), 500 of them
+    /// blew past the documented 64 KB by an order of magnitude while every individual limit still held.
+    /// </summary>
+    [Fact]
+    public void ManyValuesWithNoDisplayForm_StopAtTheSharedCharacterBudget()
+    {
+        var value = Enumerable.Range(0, ReturnValueFormatter.MaxCollectionItems).Select(_ => new OpaqueThing()).ToList();
+
+        var formatted = ReturnValueFormatter.Format(value);
+
+        Assert.Contains("no display form", formatted);
+        Assert.True(
+            formatted.Length < CharacterCeiling,
+            "markers must be charged to the shared character budget; got " + formatted.Length + " characters");
+    }
+
+    /// <summary>
+    /// A cut between a surrogate pair leaves a lone high surrogate, which is not valid UTF-16 and which
+    /// Utf8JsonWriter rejects -- so the throw would escape Serialize, hit SafeFormatReturnValue's
+    /// last-resort catch, and lose the WHOLE return value to one emoji in one long string. The assertion
+    /// is that the result survives a real serialization round trip, not merely that it is non-empty.
+    /// </summary>
+    [Fact]
+    public void TruncatingAStringOfNonBmpCharacters_DoesNotSplitASurrogatePair()
+    {
+        // Each astral character is two UTF-16 code units, so the 8 KB cut lands mid-pair on odd offsets.
+        var astral = string.Concat(Enumerable.Repeat("\U0001F600", ReturnValueFormatter.MaxStringLength));
+        var value = new { Big = "x" + astral };
+
+        var formatted = ReturnValueFormatter.Format(value);
+
+        Assert.Contains("<truncated:", formatted);
+        // Round-trips: a lone surrogate would have thrown out of Format itself, and would throw here too.
+        using var parsed = System.Text.Json.JsonDocument.Parse(formatted);
+        Assert.NotNull(parsed.RootElement.GetProperty("Big").GetString());
     }
 
     [Fact]
@@ -345,8 +439,20 @@ public class ReturnValueFormatterTests
         var formatted = ReturnValueFormatter.Format(value);
 
         // 100 x 4096 = 409,600 characters of content against a 64 KB budget.
-        Assert.True(formatted.Length < ReturnValueFormatter.MaxCharacters * 2, "expected the shared character budget to bound the output; got " + formatted.Length + " characters");
+        Assert.True(formatted.Length < CharacterCeiling, "expected the shared character budget to bound the output; got " + formatted.Length + " characters");
     }
+
+    /// <summary>
+    /// The ceiling every character-budget test below asserts against, and the reason it is not simply
+    /// <see cref="ReturnValueFormatter.MaxCharacters"/>. Two things are legitimately not charged: JSON
+    /// structural punctuation (braces, commas, quotes) and the overshoot of the one value that crossed the
+    /// line, which is emitted whole rather than cut at exactly zero. So the honest guarantee is "64 KB of
+    /// content plus one value plus punctuation", and asserting a round 64 KB would fail for a correct
+    /// implementation. Independent review's point stands though: the earlier assertions were calibrated at
+    /// double the documented number and would have passed with the budget bypassed entirely.
+    /// </summary>
+    private static int CharacterCeiling =>
+        ReturnValueFormatter.MaxCharacters + ReturnValueFormatter.MaxStringLength + (4 * ReturnValueFormatter.MaxCollectionItems);
 
     // ------------------------------------------------------------------------------------------
     // Fixtures

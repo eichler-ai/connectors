@@ -74,15 +74,15 @@ var tag = doc.Create.NewRoomTag(linkId, new Autodesk.Revit.DB.UV(10, 10), view.I
 return new { roomCreated = room != null, area = room.Area, viewFound = view != null, tagCreated = tag != null };
 `)
 		if out.Status != "success" {
-			t.Fatalf("expected status=success, got %q (return_value: %s)", out.Status, out.ReturnValue)
+			t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
 		}
 		for _, want := range []string{"\"roomCreated\":true", "\"viewFound\":true", "\"tagCreated\":true"} {
 			if !strings.Contains(out.ReturnValue, want) {
-				t.Errorf("wanted %q in return_value: %s", want, out.ReturnValue)
+				t.Errorf("wanted %q in %s", want, out.diag())
 			}
 		}
 		if strings.Contains(out.ReturnValue, "\"area\":0") {
-			t.Errorf("room area should be positive (it's bounded by the four walls above); return_value: %s", out.ReturnValue)
+			t.Errorf("room area should be positive (it's bounded by the four walls above); %s", out.diag())
 		}
 	})
 
@@ -108,11 +108,11 @@ var door = doc.Create.NewFamilyInstance(midpoint, doorSymbol, hostWall, level, A
 return new { doorCreated = door != null, category = door.Category == null ? "null" : door.Category.Name, hostId = door.Host == null ? "null" : door.Host.Id.ToString() };
 `)
 		if out.Status != "success" {
-			t.Fatalf("expected status=success, got %q (return_value: %s)", out.Status, out.ReturnValue)
+			t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
 		}
 		for _, want := range []string{"\"doorCreated\":true", "\"category\":\"Doors\""} {
 			if !strings.Contains(out.ReturnValue, want) {
-				t.Errorf("wanted %q in return_value: %s", want, out.ReturnValue)
+				t.Errorf("wanted %q in %s", want, out.diag())
 			}
 		}
 	})
@@ -148,11 +148,11 @@ var dim = doc.Create.NewDimension(view, dimLine, refArray);
 return new { dimCreated = dim != null, viewFound = view != null, value = dim.Value };
 `)
 		if out.Status != "success" {
-			t.Fatalf("expected status=success, got %q (return_value: %s)", out.Status, out.ReturnValue)
+			t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
 		}
 		for _, want := range []string{"\"dimCreated\":true", "\"viewFound\":true"} {
 			if !strings.Contains(out.ReturnValue, want) {
-				t.Errorf("wanted %q in return_value: %s", want, out.ReturnValue)
+				t.Errorf("wanted %q in %s", want, out.diag())
 			}
 		}
 		// value should read comfortably between 19' and 20.9' (< 20' floor accounts for wall-face
@@ -169,7 +169,7 @@ return new { dimCreated = dim != null, viewFound = view != null, value = dim.Val
 			}
 		}
 		if !valueOK {
-			t.Errorf("dimension value outside the expected ~19-20.9' range for two walls 20' apart; return_value: %s", out.ReturnValue)
+			t.Errorf("dimension value outside the expected ~19-20.9' range for two walls 20' apart; %s", out.diag())
 		}
 	})
 
@@ -192,11 +192,11 @@ if (areaField != null) { schedule.Definition.AddField(areaField); }
 return new { scheduleCreated = schedule != null, name = schedule.Name, fieldAdded = areaField != null, fieldCount = schedule.Definition.GetFieldCount() };
 `)
 		if out.Status != "success" {
-			t.Fatalf("expected status=success, got %q (return_value: %s)", out.Status, out.ReturnValue)
+			t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
 		}
 		for _, want := range []string{"\"scheduleCreated\":true", "\"name\":\"Wall Schedule\"", "\"fieldAdded\":true", "\"fieldCount\":1"} {
 			if !strings.Contains(out.ReturnValue, want) {
-				t.Errorf("wanted %q in return_value: %s", want, out.ReturnValue)
+				t.Errorf("wanted %q in %s", want, out.diag())
 			}
 		}
 	})

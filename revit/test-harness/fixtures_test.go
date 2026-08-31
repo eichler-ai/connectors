@@ -40,11 +40,11 @@ func createBlankFixtureDocument(t *testing.T, c *mcpclient.Client, instanceID, d
 	t.Helper()
 	out := runScript(t, c, instanceID, documentID, `return Connector.CreateProjectDocument().Title;`)
 	if out.Status != "success" {
-		t.Fatalf("failed to create blank fixture document: status=%q return_value=%s", out.Status, out.ReturnValue)
+		t.Fatalf("failed to create blank fixture document: status=%q %s", out.Status, out.diag())
 	}
 	title := strings.TrimSpace(out.ReturnValue)
 	if title == "" {
-		t.Fatalf("blank fixture document reported an empty title; return_value=%q", out.ReturnValue)
+		t.Fatalf("blank fixture document reported an empty title; %s", out.diag())
 	}
 	t.Cleanup(func() { closeDocumentByTitle(t, c, instanceID, documentID, title, "") })
 	return title
@@ -142,11 +142,11 @@ doc.Close(false);
 		return
 	}
 	if out.Status != "success" {
-		t.Logf("cleanup: failed to close fixture document %q: status=%q return_value=%s", title, out.Status, out.ReturnValue)
+		t.Logf("cleanup: failed to close fixture document %q: status=%q %s", title, out.Status, out.diag())
 		return
 	}
 	if strings.Contains(out.ReturnValue, "close-failed:") {
-		t.Logf("cleanup: closing document %q reported: %s", title, strings.TrimSpace(out.ReturnValue))
+		t.Logf("cleanup: closing document %q reported: %s", title, out.diag())
 	}
 }
 

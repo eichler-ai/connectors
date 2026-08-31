@@ -57,15 +57,22 @@ running some other script (one at a time per instance, it's Revit's UI thread); 
 > captured while it ran. They are separate fields because `output` is not your script's alone —
 > Revit writes to the process console during a run (`PlayerServer:Warning:No subscriber
 > registered.`), and those lines used to appear ahead of the returned value in the same field.
-> A returned string comes back verbatim. Anything structural — a collection, a dictionary, an
-> anonymous type, a type your script declared — is serialized to JSON, so
-> `return levels.Select(l => new { l.Name, l.Elevation }).ToList();` gives you the data rather than
-> the collection's type name. A value the connector will not serialize and that has no display
-> form of its own (a Revit `Element`, say) comes back as an explicit
+> A returned **string** comes back verbatim and is **not truncated at all** — that is what makes
+> `return File.ReadAllText(path);` work, and it is the one way to get a multi-megabyte
+> `return_value`, so return a summary rather than a whole file unless you mean it. Anything
+> structural — a collection, a dictionary, an anonymous type, a type your script declared — is
+> serialized to JSON, so `return levels.Select(l => new { l.Name, l.Elevation }).ToList();` gives
+> you the data rather than the collection's type name. A value the connector will not serialize and
+> that has no display form of its own (a Revit `Element`, say) comes back as an explicit
 > `<Autodesk.Revit.DB.Level: no display form ...>` marker naming its type: never a type name
-> dressed up as data. Serialization is bounded (depth 6, 500 items per collection, 5,000 values,
-> 64 KB); every limit reports itself in place with a `<truncated: ...>` marker. For a large result,
-> return a projection of the fields you need, or write it to a file with `Connector.Publish`.
+> dressed up as data.
+>
+> Everything except that root string is bounded: nesting depth 6, 500 items per collection or
+> members per object, 5,000 values, about 64 KB of text, 8 KB per nested string, and a 2-second
+> formatting budget. Every limit announces itself in place — `<truncated: ...>`,
+> `<max depth 6 reached: ...>`, `<circular reference to ...>` — so a bounded result never reads as a
+> complete one. For a large result, return a projection of the fields you need, or write it to a
+> file with `Connector.Publish`.
 
 ### Discovery tools
 

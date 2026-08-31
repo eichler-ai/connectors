@@ -146,7 +146,7 @@ public class RequestDispatcherTests
     }
 
     [Fact]
-    public async Task ExecuteScript_Success_ReturnsSuccessResultWithOutput()
+    public async Task ExecuteScript_Success_ReturnsSuccessResultWithTheReturnValue()
     {
         var executionManager = NewExecutionManager();
         var bridge = new ExternalEventBridge<ScriptExecutionOutcome>(new FakeExternalEventRaiser());

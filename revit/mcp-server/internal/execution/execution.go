@@ -74,6 +74,15 @@ func IsTerminal(s Status) bool {
 // of the answer with nothing marking the boundary. The add-in's
 // ExecutionResultMessage is the other half of this change; keep the two in
 // step.
+//
+// Known asymmetry, stated rather than left to be discovered (independent
+// review): the add-in omits return_value only when it is null, so a script
+// that returns an empty string puts "return_value":"" on the wire — and
+// omitempty here drops it again, so the agent cannot tell `return "";` from
+// "returned nothing". Fixing it properly means *string on both structs,
+// which would ripple through ~170 harness assertion sites for a distinction
+// with no practical consequence (both mean "no useful value"). Left as-is
+// deliberately; revisit if a caller ever needs to tell them apart.
 type Result struct {
 	Status      Status        `json:"status"`
 	ExecutionID string        `json:"execution_id"`

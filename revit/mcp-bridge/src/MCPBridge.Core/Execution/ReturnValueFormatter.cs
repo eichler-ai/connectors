@@ -1,6 +1,7 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.Reflection;
 using System.Text.Encodings.Web;
@@ -43,6 +44,15 @@ namespace MCPBridge.Core.Execution;
 /// markers -- which is still strictly more information than the single type name it produced before,
 /// because the count and the element type are now visible.</para>
 ///
+/// <para><b>Markers are advisory, not authenticated.</b> They are ordinary JSON strings, so a script can
+/// produce one: <c>return "&lt;Autodesk.Revit.DB.Level: no display form ...&gt;";</c> is byte-identical to
+/// the real thing, and a returned string is passed through verbatim. That is deliberate rather than
+/// overlooked -- a distinguishable shape (an object with a reserved member, say) would make every ordinary
+/// result harder to read to defend against a case with no motive: nothing here is a security boundary, and
+/// a script that wants to lie about its own return value can simply return a lie. The property that
+/// matters is the one the issue asked for and this does provide: a value the connector could not render
+/// never SILENTLY arrives looking like data.</para>
+///
 /// <para><b>A root-level scalar stays raw, unquoted</b> -- <c>return Document.Title;</c> yields
 /// <c>MCPBridgeTest</c>, not <c>"MCPBridgeTest"</c>. That is both the pre-existing behaviour for the most
 /// common script shape and the more readable one; JSON quoting only buys something once there is structure
@@ -71,6 +81,13 @@ internal static class ReturnValueFormatter
 
     /// <summary>Longest single string value emitted, independent of how much of the shared budget is left.</summary>
     internal const int MaxStringLength = 8 * 1024;
+
+    /// <summary>
+    /// Wall-clock ceiling for one Format call. See <see cref="Budget"/> for why a time limit is not
+    /// redundant with the volume limits. Two seconds is deliberately generous -- a well-behaved graph
+    /// finishes in microseconds, so anything approaching this is already pathological.
+    /// </summary>
+    internal static readonly TimeSpan TimeLimit = TimeSpan.FromSeconds(2);
 
     private static readonly JsonSerializerOptions Json = new()
     {
@@ -130,7 +147,25 @@ internal static class ReturnValueFormatter
         public int NodesLeft = MaxNodes;
         public int CharsLeft = MaxCharacters;
 
-        public bool TakeNode() => NodesLeft-- > 0;
+        /// <summary>
+        /// A wall-clock ceiling alongside the volume ceilings, because they bound different things
+        /// (independent review). The node and character budgets bound how MUCH work this does; they say
+        /// nothing about how LONG it takes. Where the old one-liner ran a single ToString(), this can run
+        /// thousands of script-controlled property getters and MoveNext calls, on Revit's UI thread, after
+        /// the run is already complete and past any max_duration_ms cancellation. A thousand
+        /// slow-but-returning getters wedge Revit for as long as they take, and only a clock notices.
+        ///
+        /// <para>Honest about what this does NOT do: nothing here can preempt a SINGLE getter that blocks
+        /// or spins forever -- .NET has no safe way to abort one, and pretending otherwise would be worse
+        /// than saying so. It bounds the accumulation, which is the case bounded work makes reachable.</para>
+        /// </summary>
+        private readonly Stopwatch _clock = Stopwatch.StartNew();
+
+        public bool OutOfTime => _clock.Elapsed > TimeLimit;
+
+        public bool Exhausted => NodesLeft <= 0 || CharsLeft <= 0 || OutOfTime;
+
+        public bool TakeNode() => NodesLeft-- > 0 && !OutOfTime;
     }
 
     /// <summary>
@@ -148,7 +183,11 @@ internal static class ReturnValueFormatter
 
         if (!budget.TakeNode())
         {
-            return "<truncated: return value exceeded the connector's " + MaxNodes + "-value serialization budget>";
+            return Marker(
+                budget.OutOfTime
+                    ? "<truncated: formatting the return value exceeded the connector's " + TimeLimit.TotalSeconds + "s budget>"
+                    : "<truncated: return value exceeded the connector's " + MaxNodes + "-value serialization budget>",
+                budget);
         }
 
         switch (value)
@@ -176,7 +215,7 @@ internal static class ReturnValueFormatter
 
         if (depth >= MaxDepth)
         {
-            return "<max depth " + MaxDepth + " reached: " + value.GetType().Name + " not expanded>";
+            return Marker("<max depth " + MaxDepth + " reached: " + value.GetType().Name + " not expanded>", budget);
         }
 
         // Reference cycles: an anonymous-type graph cannot contain one, but a script-defined class can
@@ -186,7 +225,7 @@ internal static class ReturnValueFormatter
         {
             if (ReferenceEquals(ancestor, value))
             {
-                return "<circular reference to " + value.GetType().Name + ">";
+                return Marker("<circular reference to " + value.GetType().Name + ">", budget);
             }
         }
 
@@ -214,26 +253,26 @@ internal static class ReturnValueFormatter
             {
                 if (emitted >= MaxCollectionItems)
                 {
-                    result["<truncated>"] = "more than " + MaxCollectionItems + " entries; only the first " + MaxCollectionItems + " are shown";
+                    Put(result, "<truncated>", "more than " + MaxCollectionItems + " entries; only the first " + MaxCollectionItems + " are shown");
                     break;
                 }
 
                 // A key whose ToString() throws must not lose the whole dictionary; FormatScalar already
                 // owns that guarantee, so keys go through it rather than calling ToString() here.
                 var key = FormatScalar(entry.Key, budget);
-                result[key] = Convert(entry.Value, depth + 1, ancestors, budget);
+                Put(result, key, Convert(entry.Value, depth + 1, ancestors, budget));
                 emitted++;
 
-                if (budget.NodesLeft <= 0 || budget.CharsLeft <= 0)
+                if (budget.Exhausted)
                 {
-                    result["<truncated>"] = "the connector's serialization budget ran out after " + emitted + " entries";
+                    Put(result, "<truncated>", "the connector's serialization budget ran out after " + emitted + " entries");
                     break;
                 }
             }
         }
         catch (Exception ex)
         {
-            result["<enumeration failed>"] = ex.GetType().Name;
+            Put(result, "<enumeration failed>", ex.GetType().Name);
         }
         finally
         {
@@ -241,6 +280,34 @@ internal static class ReturnValueFormatter
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// Adds one member to an object being built, DISAMBIGUATING a name that is already there rather than
+    /// overwriting it.
+    ///
+    /// <para>Plain assignment was silent data loss, and the shape that triggers it is idiomatic
+    /// (independent review): <c>elements.ToDictionary(e =&gt; e, ...)</c> gives every key the SAME
+    /// "no display form" text, so a 400-entry dictionary collapsed to one member with nothing saying so.
+    /// A JSON object cannot hold duplicate names, so the honest options are to rename or to drop loudly;
+    /// renaming keeps the values. Also covers a script key that happens to spell one of this class's own
+    /// <c>&lt;truncated&gt;</c> markers, and a type whose <c>new</c>-shadowed property appears twice in
+    /// GetProperties.</para>
+    /// </summary>
+    private static void Put(Dictionary<string, object?> result, string name, object? value)
+    {
+        if (result.TryAdd(name, value))
+        {
+            return;
+        }
+
+        for (var suffix = 2; suffix < int.MaxValue; suffix++)
+        {
+            if (result.TryAdd(name + " #" + suffix, value))
+            {
+                return;
+            }
+        }
     }
 
     private static object ConvertEnumerable(IEnumerable enumerable, int depth, List<object> ancestors, Budget budget)
@@ -266,7 +333,7 @@ internal static class ReturnValueFormatter
 
                 items.Add(Convert(item, depth + 1, ancestors, budget));
 
-                if (budget.NodesLeft <= 0 || budget.CharsLeft <= 0)
+                if (budget.Exhausted)
                 {
                     budgetRanOut = true;
                     break;
@@ -303,12 +370,29 @@ internal static class ReturnValueFormatter
         ancestors.Add(value);
         try
         {
+            // Member count is capped by the same number as a collection's element count. A type with
+            // thousands of properties was otherwise bounded only by MaxNodes, which is the whole-graph
+            // budget -- one wide object could spend all of it.
+            var members = 0;
+
             foreach (var property in type.GetProperties(BindingFlags.Public | BindingFlags.Instance))
             {
                 if (!property.CanRead || property.GetIndexParameters().Length > 0 || property.GetMethod is null || !property.GetMethod.IsPublic)
                 {
                     continue;
                 }
+
+                if (members >= MaxCollectionItems)
+                {
+                    Put(result, "<truncated>", "more than " + MaxCollectionItems + " members; the rest are not shown");
+                    break;
+                }
+
+                members++;
+
+                // Member NAMES are charged too: they are as much of the emitted message as the values, and
+                // a type from a script can have arbitrarily long ones.
+                var name = Marker(property.Name, budget);
 
                 object? member;
                 try
@@ -320,12 +404,12 @@ internal static class ReturnValueFormatter
                     // Unwrap: reflection wraps whatever the getter threw in TargetInvocationException,
                     // whose own name says nothing about what actually went wrong.
                     var actual = (ex as TargetInvocationException)?.InnerException ?? ex;
-                    result[property.Name] = "<getter threw " + actual.GetType().Name + ">";
+                    Put(result, name, Marker("<getter threw " + actual.GetType().Name + ">", budget));
                     continue;
                 }
 
-                result[property.Name] = Convert(member, depth + 1, ancestors, budget);
-                if (budget.NodesLeft <= 0 || budget.CharsLeft <= 0)
+                Put(result, name, Convert(member, depth + 1, ancestors, budget));
+                if (budget.Exhausted)
                 {
                     break;
                 }
@@ -333,6 +417,15 @@ internal static class ReturnValueFormatter
 
             foreach (var field in type.GetFields(BindingFlags.Public | BindingFlags.Instance))
             {
+                if (members >= MaxCollectionItems)
+                {
+                    Put(result, "<truncated>", "more than " + MaxCollectionItems + " members; the rest are not shown");
+                    break;
+                }
+
+                members++;
+                var name = Marker(field.Name, budget);
+
                 object? member;
                 try
                 {
@@ -340,12 +433,12 @@ internal static class ReturnValueFormatter
                 }
                 catch (Exception ex)
                 {
-                    result[field.Name] = "<field read threw " + ex.GetType().Name + ">";
+                    Put(result, name, Marker("<field read threw " + ex.GetType().Name + ">", budget));
                     continue;
                 }
 
-                result[field.Name] = Convert(member, depth + 1, ancestors, budget);
-                if (budget.NodesLeft <= 0 || budget.CharsLeft <= 0)
+                Put(result, name, Convert(member, depth + 1, ancestors, budget));
+                if (budget.Exhausted)
                 {
                     break;
                 }
@@ -385,21 +478,40 @@ internal static class ReturnValueFormatter
             // guard against arbitrary script code straight back to arbitrary script code. GetType().Name
             // cannot run script code. (Carried over from the previous SafeFormatReturnValue -- a PR review
             // finding there, and equally true here.)
-            return "<" + type.FullName + ": ToString() threw " + ex.GetType().Name + ">";
+            return Marker("<" + type.FullName + ": ToString() threw " + ex.GetType().Name + ">", budget);
         }
 
         if (text is null)
         {
-            return "<" + type.FullName + ": ToString() returned null>";
+            return Marker("<" + type.FullName + ": ToString() returned null>", budget);
         }
 
         if (string.Equals(text, type.ToString(), StringComparison.Ordinal))
         {
-            return "<" + type.FullName + ": no display form -- this type neither overrides ToString() nor is one the connector serializes. " +
-                   "Return a projection of the values you need (e.g. new { x.Name, x.Id }) instead.>";
+            return Marker(
+                "<" + type.FullName + ": no display form -- this type neither overrides ToString() nor is one the connector serializes. " +
+                "Return a projection of the values you need (e.g. new { x.Name, x.Id }) instead.>",
+                budget);
         }
 
         return TakeString(text, budget);
+    }
+
+    /// <summary>
+    /// Emits one of this class's own <c>&lt;...&gt;</c> markers, charging it to the shared character
+    /// budget but never truncating it -- a half-written explanation is worse than none.
+    ///
+    /// <para>Charging matters and was a real gap: markers used to bypass the budget entirely, so
+    /// <c>return listOf500Elements;</c> -- 500 values with no display form, the exact shape a script hits
+    /// when it forgets to project -- emitted 500 unbudgeted ~200-character markers and blew past the
+    /// documented 64 KB by an order of magnitude. Charging them makes the collection loop's existing
+    /// <c>CharsLeft &lt;= 0</c> break fire, so the marker path is bounded by the same number as the data
+    /// path.</para>
+    /// </summary>
+    private static string Marker(string text, Budget budget)
+    {
+        budget.CharsLeft -= text.Length;
+        return text;
     }
 
     /// <summary>
@@ -416,8 +528,19 @@ internal static class ReturnValueFormatter
             return text;
         }
 
-        budget.CharsLeft -= limit;
-        return text.Substring(0, limit) + "<truncated: " + (text.Length - limit) + " more characters>";
+        // Never cut between a surrogate pair (independent review). The limit is a UTF-16 code-unit index,
+        // so a cut mid-pair leaves a lone high surrogate -- which is not valid UTF-16, which Utf8JsonWriter
+        // REJECTS. That would throw out of Serialize, hit SafeFormatReturnValue's last-resort catch, and
+        // lose the entire return value to one emoji in one long string. Any non-BMP character in a Revit
+        // parameter reaches this.
+        if (limit > 0 && char.IsHighSurrogate(text[limit - 1]))
+        {
+            limit--;
+        }
+
+        // Marker charges the whole thing, kept characters and suffix alike -- the suffix used to be free,
+        // which mattered because once CharsLeft hits 0 every subsequent string emits one.
+        return Marker(text.Substring(0, limit) + "<truncated: " + (text.Length - limit) + " more characters>", budget);
     }
 
     /// <summary>
@@ -432,8 +555,17 @@ internal static class ReturnValueFormatter
         }
 
         // A Roslyn script submission is emitted to memory, so any type the script itself declared -- a
-        // class or a record in the script text -- has no on-disk location. Nothing shipped with the
-        // connector or with Revit matches this, so it selects script-defined types and only those.
+        // class or a record in the script text -- has no on-disk location. That is what this selects.
+        //
+        // Stated honestly rather than as a guarantee (independent review): this is BROADER than
+        // "script-defined types and only those". Anything else in Revit's AppDomain that is dynamic or was
+        // loaded from bytes -- a Reflection.Emit proxy, a third-party add-in's Assembly.Load(byte[])
+        // assembly, a single-file-published assembly -- also has an empty Location and would be walked.
+        // The narrower rule is to match the submission assembly's own identity, which RoslynScriptRunner
+        // knows and this class does not; that plumbing is the real fix if one of those types ever shows up
+        // here. Nothing shipped with the connector or with Revit matches today (both are ordinary on-disk
+        // assemblies), so the exposure is a third-party add-in's in-memory type reaching a script's return
+        // value, and the blast radius is bounded reflection over it, not a capability leak.
         var assembly = type.Assembly;
         if (assembly.IsDynamic || string.IsNullOrEmpty(assembly.Location))
         {

@@ -47,7 +47,7 @@ return "cleaned";
 	// First publish: one files[] entry, status published, with a real path.
 	first := runScript(t, c, instanceID, documentID, publishScript)
 	if first.Status != "success" {
-		t.Fatalf("first publish run failed: status=%q return_value=%s", first.Status, first.ReturnValue)
+		t.Fatalf("first publish run failed: status=%q %s", first.Status, first.diag())
 	}
 	if len(first.Files) != 1 {
 		t.Fatalf("expected exactly one files[] entry, got %d: %+v", len(first.Files), first.Files)
@@ -65,7 +65,7 @@ return "cleaned";
 	// have allowed it -- the §01 remedy an agent keys on.
 	second := runScript(t, c, instanceID, documentID, publishScript)
 	if second.Status != "success" {
-		t.Fatalf("a publish collision must not fail the run itself (PRD §09): status=%q return_value=%s", second.Status, second.ReturnValue)
+		t.Fatalf("a publish collision must not fail the run itself (PRD §09): status=%q %s", second.Status, second.diag())
 	}
 	if len(second.Files) != 1 {
 		t.Fatalf("expected exactly one files[] entry on the collision, got %d: %+v", len(second.Files), second.Files)
@@ -81,7 +81,7 @@ return "cleaned";
 	third := decodeToolResult[executeScriptOut](t, callExecuteScriptWith(t, c, instanceID, documentID, publishScript,
 		map[string]any{"overwrite_output_files": true}))
 	if third.Status != "success" {
-		t.Fatalf("overwriting publish run failed: status=%q return_value=%s", third.Status, third.ReturnValue)
+		t.Fatalf("overwriting publish run failed: status=%q %s", third.Status, third.diag())
 	}
 	if len(third.Files) != 1 || third.Files[0].Status != "published" {
 		t.Fatalf("with overwrite_output_files the same publish must succeed, got: %+v", third.Files)
@@ -101,7 +101,7 @@ Connector.Publish(p);
 return "registered-in-place";
 `)
 	if inPlace.Status != "success" {
-		t.Fatalf("register-in-place run failed: status=%q return_value=%s", inPlace.Status, inPlace.ReturnValue)
+		t.Fatalf("register-in-place run failed: status=%q %s", inPlace.Status, inPlace.diag())
 	}
 	if len(inPlace.Files) != 1 || inPlace.Files[0].Status != "published" {
 		t.Fatalf("a direct-write-then-publish into exports/ must register in place as published (PRD §09), got: %+v", inPlace.Files)
@@ -123,7 +123,7 @@ func TestExecutionAuditTrail(t *testing.T) {
 	needle := fmt.Sprintf("audit-probe-%d", time.Now().UnixNano())
 	probe := runScript(t, c, instanceID, documentID, `return "`+needle+`";`)
 	if probe.Status != "success" {
-		t.Fatalf("probe run failed: status=%q return_value=%s", probe.Status, probe.ReturnValue)
+		t.Fatalf("probe run failed: status=%q %s", probe.Status, probe.diag())
 	}
 	if probe.ExecutionID == "" {
 		t.Fatal("probe run carried no execution_id to look for")
@@ -147,7 +147,7 @@ if (!logText.Contains("execution-audit") || !logText.Contains("\"status\":\"succ
 return "audit-ok";
 `)
 	if inspect.Status != "success" || inspect.ReturnValue != "audit-ok" {
-		t.Fatalf("audit trail verification failed: status=%q return_value=%s", inspect.Status, inspect.ReturnValue)
+		t.Fatalf("audit trail verification failed: status=%q %s", inspect.Status, inspect.diag())
 	}
 
 	// Cleanup discipline (this suite's own rule): delete the probe's audit pair rather than

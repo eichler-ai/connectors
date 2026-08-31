@@ -50,15 +50,15 @@ long size = exists ? new System.IO.FileInfo(dwgPath).Length : 0;
 return new { exported = ok, dwgExists = exists, dwgSize = size, exportName };
 `)
 	if out.Status != "success" {
-		t.Fatalf("expected status=success, got %q (return_value: %s)", out.Status, out.ReturnValue)
+		t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
 	}
 	for _, want := range []string{"\"exported\":true", "\"dwgExists\":true"} {
 		if !strings.Contains(out.ReturnValue, want) {
-			t.Errorf("wanted %q in return_value: %s", want, out.ReturnValue)
+			t.Errorf("wanted %q in %s", want, out.diag())
 		}
 	}
 	if strings.Contains(out.ReturnValue, "\"dwgSize\":0") {
-		t.Errorf("exported DWG must be non-empty (a False export or a zero-byte file both read as 'exists' but neither is a real export): %s", out.ReturnValue)
+		t.Errorf("exported DWG must be non-empty (a False export or a zero-byte file both read as 'exists' but neither is a real export): %s", out.diag())
 	}
 
 	// The exported .dwg (and Revit's own .pcp plot-color sidecar alongside it) are cleanup, not
@@ -130,11 +130,11 @@ var loopCloses =
 return new { wallTypeFound = wallType != null, wallCount = walls.Length, loopCloses, allEndsAllowJoin };
 `)
 	if out.Status != "success" {
-		t.Fatalf("expected status=success, got %q (return_value: %s)", out.Status, out.ReturnValue)
+		t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
 	}
 	for _, want := range []string{"\"wallTypeFound\":true", "\"wallCount\":4", "\"loopCloses\":true", "\"allEndsAllowJoin\":true"} {
 		if !strings.Contains(out.ReturnValue, want) {
-			t.Errorf("wanted %q in return_value: %s", want, out.ReturnValue)
+			t.Errorf("wanted %q in %s", want, out.diag())
 		}
 	}
 }
@@ -199,13 +199,13 @@ famDoc.Regenerate();
 return $"famTitle={famDoc.Title} extrusionCreated={extrusion != null}";
 `)
 	if build.Status != "success" {
-		t.Fatalf("family-build call: expected status=success, got %q (return_value: %s)", build.Status, build.ReturnValue)
+		t.Fatalf("family-build call: expected status=success, got %q (%s)", build.Status, build.diag())
 	}
 	if strings.Contains(build.ReturnValue, "no-template") {
 		t.Skip("no \"Generic Model.rft\" under Application.FamilyTemplatePath on this machine")
 	}
 	if !strings.Contains(build.ReturnValue, "extrusionCreated=True") {
-		t.Fatalf("extrusion was not created: %s", build.ReturnValue)
+		t.Fatalf("extrusion was not created: %s", build.diag())
 	}
 	famTitle := ""
 	for _, field := range strings.Split(build.ReturnValue, " ") {
@@ -214,7 +214,7 @@ return $"famTitle={famDoc.Title} extrusionCreated={extrusion != null}";
 		}
 	}
 	if famTitle == "" {
-		t.Fatalf("could not parse famTitle from build return_value: %s", build.ReturnValue)
+		t.Fatalf("could not parse famTitle from build %s", build.diag())
 	}
 
 	loadScript := fixtureLookupPreamble(fixtureTitle) + `
@@ -258,11 +258,11 @@ return new {
 	load := decodeToolResult[executeScriptOut](t, callExecuteScriptWith(t, c, instanceID, documentID, loadScript,
 		map[string]any{"confirm_lifecycle_actions": true}))
 	if load.Status != "success" {
-		t.Fatalf("load/place call: expected status=success, got %q (return_value: %s)", load.Status, load.ReturnValue)
+		t.Fatalf("load/place call: expected status=success, got %q (%s)", load.Status, load.diag())
 	}
 	for _, want := range []string{"\"familyLoaded\":true", "\"symbolFound\":true", "\"symbolActive\":true", "\"instanceCreated\":true", "\"placedCount\":1"} {
 		if !strings.Contains(load.ReturnValue, want) {
-			t.Errorf("wanted %q in return_value: %s", want, load.ReturnValue)
+			t.Errorf("wanted %q in %s", want, load.diag())
 		}
 	}
 }

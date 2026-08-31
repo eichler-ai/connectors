@@ -15,6 +15,7 @@ package harness_test
 import (
 	"encoding/json"
 	"flag"
+	"fmt"
 	"os"
 	"strconv"
 	"strings"
@@ -139,6 +140,13 @@ type executeScriptOut struct {
 	// still reads Output, which is now exactly and only the marker lines.
 	Output      string `json:"output"`
 	ReturnValue string `json:"return_value"`
+	// diag renders BOTH fields for a failure message. Independent review
+	// caught this: mechanically renaming the assertions to ReturnValue also
+	// renamed the diagnostics, and return_value is guaranteed empty for every
+	// non-terminal and non-success status (only MarkCompleted writes it),
+	// while stdout captured before the run stopped often is not. A failure
+	// message that can only ever print "" is worse than the one it replaced,
+	// and tier 2 is exactly where a failure has to explain itself.
 	// Notices carries the PRD §01 diagnostic records a run reports alongside
 	// its result — read here because issue #24's partial-commit reporting has
 	// no other observable: the run's status only says "failed", and which
@@ -158,6 +166,12 @@ type executeScriptOut struct {
 		Status  string `json:"status"`
 		Message string `json:"message"`
 	} `json:"files"`
+}
+
+// diag renders both halves of a run's output for a failure message. See the
+// comment on ReturnValue for why printing only one of them is a trap.
+func (o executeScriptOut) diag() string {
+	return fmt.Sprintf("return_value=%q output=%q", o.ReturnValue, o.Output)
 }
 
 // Note there is deliberately no Error field here. A script that fails to
@@ -362,7 +376,7 @@ return new { ok = after == before + 1, levelId = level.Id.Value, before, after }
 
 	out := runScript(t, c, instanceID, documentID, script)
 	if out.Status != "success" {
-		t.Fatalf("expected status=success, got %q (return_value: %s)", out.Status, out.ReturnValue)
+		t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
 	}
 
 	// Output is the script's anonymous object formatted via its default
@@ -372,7 +386,7 @@ return new { ok = after == before + 1, levelId = level.Id.Value, before, after }
 	// would make this test depend on how many levels the fixture document
 	// happens to have today.
 	if !strings.Contains(out.ReturnValue, "\"ok\":true") {
-		t.Fatalf("level was not created as expected; return_value: %s", out.ReturnValue)
+		t.Fatalf("level was not created as expected; %s", out.diag())
 	}
 }
 
@@ -402,7 +416,7 @@ return new {
 
 	out := runScript(t, c, instanceID, documentID, script)
 	if out.Status != "success" {
-		t.Fatalf("expected status=success, got %q (return_value: %s)", out.Status, out.ReturnValue)
+		t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
 	}
 	for _, want := range []string{
 		"\"docType\":\"Autodesk.Revit.DB.Document\"",
@@ -410,7 +424,7 @@ return new {
 		"\"uiDocType\":\"Autodesk.Revit.UI.UIDocument\"",
 	} {
 		if !strings.Contains(out.ReturnValue, want) {
-			t.Errorf("globals do not expose the real Revit types: wanted %q in return_value: %s", want, out.ReturnValue)
+			t.Errorf("globals do not expose the real Revit types: wanted %q in %s", want, out.diag())
 		}
 	}
 }
@@ -485,7 +499,7 @@ func TestDenylistRejectsOwnTransaction(t *testing.T) {
 	// back cleanly and the next script runs normally.
 	out := runScript(t, c, instanceID, documentID, `return Document.Title;`)
 	if out.Status != "success" {
-		t.Fatalf("instance unusable after denylist rejections: status=%q return_value=%s", out.Status, out.ReturnValue)
+		t.Fatalf("instance unusable after denylist rejections: status=%q %s", out.Status, out.diag())
 	}
 }
 
@@ -531,10 +545,10 @@ func TestLifecycleGateRequiresConfirmation(t *testing.T) {
 	out := decodeToolResult[executeScriptOut](t, callExecuteScriptWith(t, c, instanceID, documentID, script,
 		map[string]any{"confirm_lifecycle_actions": true}))
 	if out.Status != "success" {
-		t.Fatalf("confirmed lifecycle script did not run: status=%q return_value=%s", out.Status, out.ReturnValue)
+		t.Fatalf("confirmed lifecycle script did not run: status=%q %s", out.Status, out.diag())
 	}
 	if !strings.Contains(out.ReturnValue, "bound") {
-		t.Errorf("confirmed script ran but did not return its own result; return_value=%s", out.ReturnValue)
+		t.Errorf("confirmed script ran but did not return its own result; %s", out.diag())
 	}
 
 	// And the confirmation is per-request, not sticky: the same text, resent
@@ -588,7 +602,7 @@ func TestLifecycleGateCoversTheNewlyAddedMembers(t *testing.T) {
 			out := decodeToolResult[executeScriptOut](t, callExecuteScriptWith(t, c, instanceID, documentID, tc.script,
 				map[string]any{"confirm_lifecycle_actions": true}))
 			if out.Status != "success" || !strings.Contains(out.ReturnValue, "bound") {
-				t.Fatalf("confirmed script did not run: status=%q return_value=%s", out.Status, out.ReturnValue)
+				t.Fatalf("confirmed script did not run: status=%q %s", out.Status, out.diag())
 			}
 		})
 	}
@@ -649,13 +663,13 @@ return new {
 };
 `)
 		if out.Status != "success" {
-			t.Fatalf("expected status=success, got %q (return_value: %s)", out.Status, out.ReturnValue)
+			t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
 		}
 		// Matched with the closing quote so this cannot be satisfied by some
 		// longer type name that merely starts the same way. (It was a trailing
 		// comma before issue #117 made the return value JSON; same purpose.)
 		if !strings.Contains(out.ReturnValue, "\"appType\":\"Autodesk.Revit.ApplicationServices.Application\"") {
-			t.Fatalf("UIApplication.Application is not the real Application type; return_value: %s", out.ReturnValue)
+			t.Fatalf("UIApplication.Application is not the real Application type; %s", out.diag())
 		}
 		// DefaultProjectTemplate is what the three subtests below build on, and it
 		// is per-install: it can be blank, or name a template this machine never
@@ -666,7 +680,7 @@ return new {
 		// without a usable default project template is an environment precondition
 		// this harness does not own, not a regression in the capability under test.
 		if !strings.Contains(out.ReturnValue, "\"projectTemplateUsable\":true") {
-			t.Skipf("Application.DefaultProjectTemplate does not name a file that exists on this machine; return_value: %s", out.ReturnValue)
+			t.Skipf("Application.DefaultProjectTemplate does not name a file that exists on this machine; %s", out.diag())
 		}
 	})
 
@@ -689,7 +703,7 @@ return new {
 };
 `)
 		if out.Status != "success" {
-			t.Fatalf("expected status=success, got %q (return_value: %s)", out.Status, out.ReturnValue)
+			t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
 		}
 		registerCreatedDocumentCleanup(t, c, instanceID, documentID, out.Output)
 		for _, want := range []string{
@@ -699,7 +713,7 @@ return new {
 			"\"hasLevels\":true",
 		} {
 			if !strings.Contains(out.ReturnValue, want) {
-				t.Errorf("wanted %q in return_value: %s", want, out.ReturnValue)
+				t.Errorf("wanted %q in %s", want, out.diag())
 			}
 		}
 	})
@@ -730,11 +744,11 @@ try {
 }
 `)
 		if out.Status != "success" {
-			t.Fatalf("expected status=success, got %q (return_value: %s)", out.Status, out.ReturnValue)
+			t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
 		}
 		registerCreatedDocumentCleanup(t, c, instanceID, documentID, out.Output)
 		if !strings.Contains(out.ReturnValue, "outside-transaction") {
-			t.Fatalf("a freshly created document was writable without its own transaction -- if that is now genuinely true, this test and the corpus plan's fixture design both need revisiting; return_value: %s", out.ReturnValue)
+			t.Fatalf("a freshly created document was writable without its own transaction -- if that is now genuinely true, this test and the corpus plan's fixture design both need revisiting; %s", out.diag())
 		}
 	})
 
@@ -754,7 +768,7 @@ var app = UIApplication.Application;
 return app.NewProjectDocument(app.DefaultProjectTemplate).Title;
 `)
 		if created.Status != "success" {
-			t.Fatalf("expected status=success, got %q (return_value: %s)", created.Status, created.ReturnValue)
+			t.Fatalf("expected status=success, got %q (%s)", created.Status, created.diag())
 		}
 		title := strings.TrimSpace(created.ReturnValue)
 		if title == "" {
@@ -792,10 +806,10 @@ foreach (Autodesk.Revit.DB.Document d in UIApplication.Application.Documents) {
 return "matches = " + matches + ";";
 `)
 		if found.Status != "success" {
-			t.Fatalf("expected status=success, got %q (return_value: %s)", found.Status, found.ReturnValue)
+			t.Fatalf("expected status=success, got %q (%s)", found.Status, found.diag())
 		}
 		if !strings.Contains(found.ReturnValue, "matches = 1;") {
-			t.Fatalf("expected exactly one unsaved open document titled %q -- it was created by an earlier execute_script call, so if it is gone, nothing can address a fixture document across calls; return_value: %s", title, found.ReturnValue)
+			t.Fatalf("expected exactly one unsaved open document titled %q -- it was created by an earlier execute_script call, so if it is gone, nothing can address a fixture document across calls; %s", title, found.diag())
 		}
 	})
 
@@ -819,13 +833,13 @@ try {
 }
 `)
 		if out.Status != "success" {
-			t.Fatalf("expected status=success, got %q (return_value: %s)", out.Status, out.ReturnValue)
+			t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
 		}
 		if strings.Contains(out.ReturnValue, "unsaved-active-document") {
 			t.Skip("the active document has never been saved, so it has no path to re-activate by")
 		}
 		if !strings.Contains(out.ReturnValue, "refused:") {
-			t.Fatalf("OpenAndActivateDocument was not refused from inside the ambient transaction; if that is now genuinely allowed, PRD §14's account of fixture addressing needs revisiting; return_value: %s", out.ReturnValue)
+			t.Fatalf("OpenAndActivateDocument was not refused from inside the ambient transaction; if that is now genuinely allowed, PRD §14's account of fixture addressing needs revisiting; %s", out.diag())
 		}
 	})
 
@@ -862,7 +876,7 @@ return new {
 };
 `)
 		if out.Status != "success" {
-			t.Fatalf("expected status=success, got %q (return_value: %s)", out.Status, out.ReturnValue)
+			t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
 		}
 		if strings.Contains(out.ReturnValue, "no-template") {
 			t.Skip("no \"Generic Model.rft\" under Application.FamilyTemplatePath on this machine")
@@ -875,7 +889,7 @@ return new {
 			"\"hasTypes\":true",
 		} {
 			if !strings.Contains(out.ReturnValue, want) {
-				t.Errorf("wanted %q in return_value: %s", want, out.ReturnValue)
+				t.Errorf("wanted %q in %s", want, out.diag())
 			}
 		}
 	})
@@ -946,7 +960,7 @@ return new {
 };
 `)
 		if out.Status != "success" {
-			t.Fatalf("expected status=success, got %q (return_value: %s)", out.Status, out.ReturnValue)
+			t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
 		}
 		registerCreatedDocumentCleanup(t, c, instanceID, documentID, out.Output)
 		for _, want := range []string{
@@ -958,7 +972,7 @@ return new {
 			"\"created\":true",
 		} {
 			if !strings.Contains(out.ReturnValue, want) {
-				t.Errorf("wanted %q in return_value: %s", want, out.ReturnValue)
+				t.Errorf("wanted %q in %s", want, out.diag())
 			}
 		}
 	})
@@ -978,11 +992,11 @@ Autodesk.Revit.DB.Level.Create(doc, 4343.0);
 return doc.Title;
 `)
 		if created.Status != "success" {
-			t.Fatalf("expected status=success, got %q (return_value: %s)", created.Status, created.ReturnValue)
+			t.Fatalf("expected status=success, got %q (%s)", created.Status, created.diag())
 		}
 		title := strings.TrimSpace(created.ReturnValue)
 		if title == "" {
-			t.Fatalf("created document reported no title; return_value: %s", created.ReturnValue)
+			t.Fatalf("created document reported no title; %s", created.diag())
 		}
 		t.Cleanup(func() { closeDocumentByTitle(t, c, instanceID, documentID, title, "") })
 
@@ -998,10 +1012,10 @@ foreach (Autodesk.Revit.DB.Document d in UIApplication.Application.Documents) {
 return "matches = " + matches + ";";
 `)
 		if found.Status != "success" {
-			t.Fatalf("expected status=success, got %q (return_value: %s)", found.Status, found.ReturnValue)
+			t.Fatalf("expected status=success, got %q (%s)", found.Status, found.diag())
 		}
 		if !strings.Contains(found.ReturnValue, "matches = 1;") {
-			t.Fatalf("the level written to a created document did not survive the script that wrote it -- the connector's managed transaction for that document did not commit; return_value: %s", found.ReturnValue)
+			t.Fatalf("the level written to a created document did not survive the script that wrote it -- the connector's managed transaction for that document did not commit; %s", found.diag())
 		}
 	})
 
@@ -1045,10 +1059,10 @@ foreach (Autodesk.Revit.DB.Document d in UIApplication.Application.Documents) {
 return "matches = " + matches + ";";
 `)
 		if check.Status != "success" {
-			t.Fatalf("expected status=success, got %q (return_value: %s)", check.Status, check.ReturnValue)
+			t.Fatalf("expected status=success, got %q (%s)", check.Status, check.diag())
 		}
 		if !strings.Contains(check.ReturnValue, "matches = 0;") {
-			t.Fatalf("a throwing script left its write behind in a created document -- rollback does not cover every managed document; return_value: %s", check.ReturnValue)
+			t.Fatalf("a throwing script left its write behind in a created document -- rollback does not cover every managed document; %s", check.diag())
 		}
 	})
 
@@ -1076,7 +1090,7 @@ return new {
 };
 `)
 		if out.Status != "success" {
-			t.Fatalf("expected status=success, got %q (return_value: %s)", out.Status, out.ReturnValue)
+			t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
 		}
 		if strings.Contains(out.ReturnValue, "no-template") {
 			t.Skip("no \"Generic Model.rft\" under Application.FamilyTemplatePath on this machine")
@@ -1084,7 +1098,7 @@ return new {
 		registerCreatedDocumentCleanup(t, c, instanceID, documentID, out.Output)
 		for _, want := range []string{"\"isFamily\":true", "\"typeAdded\":true"} {
 			if !strings.Contains(out.ReturnValue, want) {
-				t.Errorf("wanted %q in return_value: %s", want, out.ReturnValue)
+				t.Errorf("wanted %q in %s", want, out.diag())
 			}
 		}
 	})
@@ -1114,11 +1128,11 @@ System.Console.WriteLine("cleanup-title=" + doc.Title + ";");
 return "ok:" + (doc != null);
 `)
 		if out.Status != "success" {
-			t.Fatalf("expected status=success, got %q (return_value: %s)", out.Status, out.ReturnValue)
+			t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
 		}
 		registerCreatedDocumentCleanup(t, c, instanceID, documentID, out.Output)
 		if !strings.Contains(out.ReturnValue, "ok:True") {
-			t.Fatalf("unexpected return_value: %s", out.ReturnValue)
+			t.Fatalf("unexpected %s", out.diag())
 		}
 	})
 
@@ -1134,11 +1148,11 @@ Autodesk.Revit.DB.Level.Create(b, `+elevB+`);
 return a.Title + "|" + b.Title;
 `)
 		if created.Status != "success" {
-			t.Fatalf("expected status=success, got %q (return_value: %s)", created.Status, created.ReturnValue)
+			t.Fatalf("expected status=success, got %q (%s)", created.Status, created.diag())
 		}
 		titles := strings.Split(strings.TrimSpace(created.ReturnValue), "|")
 		if len(titles) != 2 {
-			t.Fatalf("expected two document titles, got %q", created.ReturnValue)
+			t.Fatalf("expected two document titles, got %s", created.diag())
 		}
 		for _, title := range titles {
 			title := title
@@ -1172,10 +1186,10 @@ foreach (Autodesk.Revit.DB.Document d in UIApplication.Application.Documents) {
 return "a = " + a + "; b = " + b + ";";
 `)
 		if check.Status != "success" {
-			t.Fatalf("expected status=success, got %q (return_value: %s)", check.Status, check.ReturnValue)
+			t.Fatalf("expected status=success, got %q (%s)", check.Status, check.diag())
 		}
 		if !strings.Contains(check.ReturnValue, "a = 1;") || !strings.Contains(check.ReturnValue, "b = 1;") {
-			t.Fatalf("both created documents were supposed to commit their own write; return_value: %s", check.ReturnValue)
+			t.Fatalf("both created documents were supposed to commit their own write; %s", check.diag())
 		}
 	})
 
@@ -1205,11 +1219,11 @@ try { doc.Close(false); return "closed"; }
 catch (Autodesk.Revit.Exceptions.InvalidOperationException ex) { return "refused: " + ex.Message; }
 `, map[string]any{"confirm_lifecycle_actions": true}))
 		if out.Status != "success" {
-			t.Fatalf("expected status=success, got %q (return_value: %s)", out.Status, out.ReturnValue)
+			t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
 		}
 		registerCreatedDocumentCleanup(t, c, instanceID, documentID, out.Output)
 		if !strings.Contains(out.ReturnValue, "refused:") {
-			t.Fatalf("closing a created document was not refused; if Revit now allows this, the partial-commit reasoning in ManagedDocumentTransactions needs revisiting; return_value: %s", out.ReturnValue)
+			t.Fatalf("closing a created document was not refused; if Revit now allows this, the partial-commit reasoning in ManagedDocumentTransactions needs revisiting; %s", out.diag())
 		}
 	})
 
@@ -1228,7 +1242,7 @@ doc.Create.NewRoom(lvl, new Autodesk.Revit.DB.UV(5, 5));
 return "room-created";
 `)
 		if out.Status != "success" {
-			t.Fatalf("expected status=success, got %q (return_value: %s)", out.Status, out.ReturnValue)
+			t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
 		}
 		registerCreatedDocumentCleanup(t, c, instanceID, documentID, out.Output)
 		var found bool
@@ -1255,7 +1269,7 @@ Autodesk.Revit.DB.Level.Create(Document, `+elevAmbient+`);
 return "done";
 `)
 		if out.Status != "success" {
-			t.Fatalf("expected status=success, got %q (return_value: %s)", out.Status, out.ReturnValue)
+			t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
 		}
 		registerCreatedDocumentCleanup(t, c, instanceID, documentID, out.Output)
 
@@ -1268,10 +1282,10 @@ foreach (Autodesk.Revit.DB.Level lv in new Autodesk.Revit.DB.FilteredElementColl
 return "ambient = " + ambient + ";";
 `)
 		if check.Status != "success" {
-			t.Fatalf("expected status=success, got %q (return_value: %s)", check.Status, check.ReturnValue)
+			t.Fatalf("expected status=success, got %q (%s)", check.Status, check.diag())
 		}
 		if !strings.Contains(check.ReturnValue, "ambient = 1;") {
-			t.Fatalf("the ambient document's own write did not commit when the script also created a document; return_value: %s", check.ReturnValue)
+			t.Fatalf("the ambient document's own write did not commit when the script also created a document; %s", check.diag())
 		}
 	})
 }
@@ -1299,7 +1313,7 @@ func TestDialogsAreStillAutoSuppressed(t *testing.T) {
 Autodesk.Revit.UI.TaskDialog.Show("MCPBridge harness", "auto-suppression probe");
 return "returned from a modal dialog";`)
 	if out.Status != "success" {
-		t.Fatalf("a script raising a modal dialog did not complete: status=%q return_value=%s", out.Status, out.ReturnValue)
+		t.Fatalf("a script raising a modal dialog did not complete: status=%q %s", out.Status, out.diag())
 	}
 
 	var found bool
