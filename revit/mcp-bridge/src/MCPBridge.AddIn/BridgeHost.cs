@@ -67,6 +67,8 @@ internal sealed class BridgeHost
     // would have no business contending with a background thread over.
     private volatile bool _isConnected;
     private volatile string? _brokerAddress;
+    private volatile string? _brokerVersion;
+    private volatile string? _latestAvailableVersion;
     private long _connectedSinceUtcTicks;
 
     /// <summary>True once auth+register has succeeded on the current connection; false while disconnected/reconnecting.</summary>
@@ -74,6 +76,12 @@ internal sealed class BridgeHost
 
     /// <summary>The broker's "host:port" for the current (or most recent) connection, if one has ever succeeded.</summary>
     public string? BrokerAddress => _brokerAddress;
+
+    /// <summary>The connected broker's own self-reported running version (broker.json's Version field, PRD §12), if known.</summary>
+    public string? BrokerVersion => _brokerVersion;
+
+    /// <summary>The latest connector release version the broker's own periodic GitHub check has found (broker.json's LatestAvailableVersion field, PRD §12), if known.</summary>
+    public string? LatestAvailableVersion => _latestAvailableVersion;
 
     /// <summary>When the current connection's auth+register last succeeded, if <see cref="IsConnected"/>.</summary>
     public DateTimeOffset? ConnectedSince
@@ -304,6 +312,51 @@ internal sealed class BridgeHost
             state: null,
             dueTime: TimeoutCheckInterval,
             period: TimeoutCheckInterval);
+    }
+
+    /// <summary>
+    /// Fresh, connection-independent re-read of broker.json (PRD §12 Stage 3 review finding): the
+    /// Go broker's background check (Stage 2) updates broker.json's Version/LatestAvailableVersion
+    /// roughly every 6h, but <see cref="_brokerVersion"/>/<see cref="_latestAvailableVersion"/> are
+    /// otherwise only ever written once per TCP connection, inside <see cref="RunOneConnection"/>. A
+    /// Revit session that stays connected for days would never notice a release published mid-session
+    /// until the connection happened to drop and reconnect. Called synchronously from a ribbon click
+    /// (MCPBridgeStatusCommand.Execute()) so every click shows a fresh comparison -- broker.json is a
+    /// small local/UNC file read, not a network call, so this is safe to do on the UI thread.
+    ///
+    /// Reuses the exact discovery mechanism <see cref="RunConnectionLoop"/> already uses (a fresh
+    /// <see cref="BrokerDiscovery"/> against <see cref="_discoveryOptions"/>, then TryDiscover()) --
+    /// deliberately NOT TryDiscoverWithTimeout's bounded/threadpool variant, since this runs on Revit's
+    /// UI thread and must return promptly rather than hopping to a threadpool thread and back.
+    ///
+    /// Touches ONLY the version fields -- never <see cref="_isConnected"/>, <see cref="_brokerAddress"/>,
+    /// <see cref="_connectedSinceUtcTicks"/>, or <see cref="_activeStream"/>, all of which describe the
+    /// live TCP connection's own state and have nothing to do with what broker.json's version fields say.
+    ///
+    /// On a failed discovery (not found, unreadable, malformed -- see <see cref="BrokerDiscoveryResult"/>),
+    /// the existing values are left UNTOUCHED rather than cleared to null: the same "a failed check must
+    /// never look like no-update-available" principle Stage 2 already established for the background
+    /// broker-side check applies equally here on the add-in side.
+    /// </summary>
+    public void RefreshVersionStatus()
+    {
+        try
+        {
+            var discovery = new BrokerDiscovery(_discoveryOptions);
+            var result = discovery.TryDiscover();
+            if (result.Found && result.BrokerJson is not null)
+            {
+                _brokerVersion = result.BrokerJson.Version;
+                _latestAvailableVersion = result.BrokerJson.LatestAvailableVersion;
+            }
+        }
+        catch (Exception ex)
+        {
+            // Best-effort: a transient read failure (a flapping UNC share, a locked file) must leave
+            // the existing status fields untouched, not clear them -- see this method's own doc
+            // comment. Logged for observability (PRD §01) rather than silently swallowed.
+            LogConnectionDiagnostic($"RefreshVersionStatus discovery attempt failed (leaving prior version status untouched): {ex}");
+        }
     }
 
     public void Stop()
@@ -741,14 +794,17 @@ internal sealed class BridgeHost
         // returns (which happens on disconnect, the opposite condition). Same moment defines "connected"
         // for the ribbon status button.
         reconnectController.OnConnectSucceeded();
-        // _isConnected MUST be written last, after _brokerAddress/_connectedSinceUtcTicks (independent PR
-        // review confirmed this ordering is what makes the three safe to read together from another
-        // thread without a lock): _isConnected is the volatile "release" a UI-thread reader synchronizes
-        // on -- observing _isConnected == true is only meaningful as a guarantee that the writes before it
-        // are also visible if it's genuinely the LAST of the three to be written. Reordering these three
-        // lines would reopen a window where a status read could observe IsConnected=true alongside a
-        // stale/null BrokerAddress from a previous connection.
+        // _isConnected MUST be written last, after _brokerAddress/_brokerVersion/_latestAvailableVersion/
+        // _connectedSinceUtcTicks (independent PR review confirmed this ordering is what makes these safe
+        // to read together from another thread without a lock): _isConnected is the volatile "release" a
+        // UI-thread reader synchronizes on -- observing _isConnected == true is only meaningful as a
+        // guarantee that the writes before it are also visible if it's genuinely the LAST of them to be
+        // written. Reordering these lines would reopen a window where a status read could observe
+        // IsConnected=true alongside stale/null BrokerAddress/BrokerVersion/LatestAvailableVersion from a
+        // previous connection.
         _brokerAddress = $"{address.Host}:{address.Port}";
+        _brokerVersion = brokerJson.Version;
+        _latestAvailableVersion = brokerJson.LatestAvailableVersion;
         Interlocked.Exchange(ref _connectedSinceUtcTicks, DateTimeOffset.UtcNow.Ticks);
         _activeStream = stream; // published only once the connection is fully established (auth+register done)
         _isConnected = true;

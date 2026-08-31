@@ -25,11 +25,20 @@ namespace MCPBridge.AddIn;
 internal static class MCPBridgeStatusWindow
 {
     private static Window? _window;
+    private static TextBox? _textBox;
+    private static Button? _actionButton;
 
     /// <summary>True while the status window is currently open.</summary>
     public static bool IsOpen => _window is not null;
 
-    public static void ShowOrActivate(IntPtr ownerHandle, string content)
+    /// <summary>
+    /// Shows the status window (or refreshes/activates it if already open). <paramref name="actionLabel"/>
+    /// and <paramref name="onAction"/> are additive and optional -- pass both non-null to also show a
+    /// button below the status text (e.g. "Update Now"); pass null/null (the default) and the window
+    /// renders exactly as it always has, a bare read-only text box with no button. This is the important
+    /// backward-compatible default: callers that never pass an action see no behavior change.
+    /// </summary>
+    public static void ShowOrActivate(IntPtr ownerHandle, string content, string? actionLabel = null, Action? onAction = null)
     {
         // Independent PR review finding: this branch used to just Activate() the existing window without
         // ever updating its content, so a window left open across a reconnect/disconnect kept showing
@@ -38,14 +47,36 @@ internal static class MCPBridgeStatusWindow
         // refreshes the visible content, whether or not a window was already open.
         if (_window is { } existing)
         {
-            if (existing.Content is TextBox existingTextBox)
+            if (_textBox is not null)
             {
-                existingTextBox.Text = content;
+                _textBox.Text = content;
             }
 
+            UpdateActionButton(actionLabel, onAction);
             existing.Activate();
             return;
         }
+
+        // Content is small and fixed enough that a code-behind-only window is simpler than adding a XAML
+        // resource to this project for one screen (see class doc comment) -- the button below is added
+        // the same way, in code, not by introducing XAML.
+        var textBox = new TextBox
+        {
+            Text = content,
+            IsReadOnly = true,
+            TextWrapping = TextWrapping.Wrap,
+            AcceptsReturn = true,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            BorderThickness = new Thickness(0),
+            Padding = new Thickness(12),
+            FontFamily = new System.Windows.Media.FontFamily("Consolas"),
+        };
+
+        // DockPanel with LastChildFill (the default): an action button, when present, is inserted BEFORE
+        // the text box (see UpdateActionButton) so the text box -- always the last child -- keeps filling
+        // the remaining space exactly as it did when it was the window's sole Content.
+        var root = new DockPanel();
+        root.Children.Add(textBox);
 
         var window = new Window
         {
@@ -59,17 +90,7 @@ internal static class MCPBridgeStatusWindow
             Height = 260,
             ResizeMode = ResizeMode.CanResize,
             WindowStartupLocation = WindowStartupLocation.CenterOwner,
-            Content = new TextBox
-            {
-                Text = content,
-                IsReadOnly = true,
-                TextWrapping = TextWrapping.Wrap,
-                AcceptsReturn = true,
-                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-                BorderThickness = new Thickness(0),
-                Padding = new Thickness(12),
-                FontFamily = new System.Windows.Media.FontFamily("Consolas"),
-            },
+            Content = root,
         };
 
         // Associates this WPF window with Revit's own main window (a plain Win32 HWND, not WPF) so it
@@ -81,9 +102,56 @@ internal static class MCPBridgeStatusWindow
             new WindowInteropHelper(window).Owner = ownerHandle;
         }
 
-        window.Closed += (_, _) => _window = null;
+        window.Closed += (_, _) =>
+        {
+            _window = null;
+            _textBox = null;
+            _actionButton = null;
+        };
         _window = window;
+        _textBox = textBox;
+        UpdateActionButton(actionLabel, onAction);
         window.Show();
+    }
+
+    /// <summary>
+    /// Adds, updates, or removes the optional action button below the status text, keyed off whether
+    /// both <paramref name="actionLabel"/> and <paramref name="onAction"/> are non-null. Always rebuilds
+    /// the button (rather than mutating an existing one) -- simpler than diffing a label change against a
+    /// stale click handler closure, and this only runs on a ribbon click, never on a hot path.
+    /// </summary>
+    private static void UpdateActionButton(string? actionLabel, Action? onAction)
+    {
+        if (_window?.Content is not DockPanel root)
+        {
+            return;
+        }
+
+        if (_actionButton is not null)
+        {
+            root.Children.Remove(_actionButton);
+            _actionButton = null;
+        }
+
+        if (actionLabel is null || onAction is null)
+        {
+            return;
+        }
+
+        var button = new Button
+        {
+            Content = actionLabel,
+            Margin = new Thickness(12, 0, 12, 12),
+            Padding = new Thickness(16, 4, 16, 4),
+            HorizontalAlignment = HorizontalAlignment.Right,
+        };
+        button.Click += (_, _) => onAction();
+        DockPanel.SetDock(button, Dock.Bottom);
+
+        // Inserted before the text box (index 0) so the text box remains the DockPanel's last child and
+        // keeps filling the remaining space (LastChildFill) exactly as before this button existed.
+        root.Children.Insert(0, button);
+        _actionButton = button;
     }
 
     /// <summary>No-op if nothing is open. Exists specifically so a script (via execute_script) can close
