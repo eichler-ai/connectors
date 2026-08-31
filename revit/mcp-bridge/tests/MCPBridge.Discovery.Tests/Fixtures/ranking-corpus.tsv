@@ -20,6 +20,8 @@
 # Regression rows: each of these is a defect that was reported, fixed, and must not come back.
 # ---------------------------------------------------------------------------------------------------
 create sheet place view	Autodesk.Revit.DB.ViewSheet.Create	3	#65 -- reported query; "place" is also a prefix of "Placeholder"
+create an assembly from elements	Autodesk.Revit.DB.AssemblyInstance.Create	4	#86 -- a BuiltInFailures string held rank 1 until synonym credit was gated to leading word-parts. max_rank is 4, not 1: AssemblyInstance.Create ties at 610.9 with three DeleteElements.Create rows and wins rank 1 only on an alphabetical member-id tie-break, so asserting 1 would red the suite on any ULP-level change. 4 is the honest encoding of "the factory reached the top tie band"
+create a railing	Autodesk.Revit.DB.Architecture.Railing.Create	1	coverage, NOT a #86 regression guard: Railing.Create already held ranks 1-3 before that fix. What #86 changed here is only IsValidHostForNewRailing's SCORE (620.3 -> 550.3, rank 4 either way), which no expectation captures -- so reverting IdentifierRelevance would leave this row green
 create family instance	Autodesk.Revit.Creation.Document.NewFamilyInstance	3	#75 -- Revit's factory convention is NewXxx, not CreateXxx
 is the element new	Autodesk.Revit.DB.ElementOnPhaseStatus.New	5	#86 -- must survive any change to the create/new synonym group
 #
@@ -27,10 +29,8 @@ is the element new	Autodesk.Revit.DB.ElementOnPhaseStatus.New	5	#86 -- must surv
 # Open-defect rows: reported, NOT yet fixed. Snapshot-only on purpose -- an expectation here would be a
 # red suite pinned to a known bug. The expectation is added by the PR that fixes it.
 # ---------------------------------------------------------------------------------------------------
-create lineweight			#80 -- 16 rows tie at the tier-2 floor above every tier-3 match
-create an assembly from elements			#86 -- a BuiltInFailures string outranks AssemblyInstance.Create
-create a design option			#86 -- same shape
-create a railing			#86 -- IsValidHostForNewRailing outranks Railing members
+create lineweight			#80 -- FIXED; 16 rows tied at the tier-2 floor above every tier-3 match. Snapshot-only: the offenders sat at ranks 35-42, below this file's depth, so the invariant is asserted in TierBoundaryTests instead
+create a design option			#86 -- FIXED (CannotCreateNewDesignOption no longer rank 1); snapshot-only because Revit exposes no API to create a design option, so there is no defensible right answer to assert
 join walls at corner			#87 -- neither JoinGeometryUtils nor WallUtils appears on page 1
 change the width of a wall			#86 secondary -- ChangeRegionWidth demoted by the set/change group
 new wall			pre-#75 this ranked Visual.StoneBumpType.Stonewall first, via "sto(new)all"

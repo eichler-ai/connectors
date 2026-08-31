@@ -13,9 +13,10 @@ namespace MCPBridge.Discovery.Tests;
 /// <para>The clause was <c>ORDER BY (a.kind != 'core'), bm25(members_fts) LIMIT @limit</c>, which sorts by
 /// assembly kind BEFORE relevance under a limit. That makes kind a filter on candidate SELECTION rather
 /// than a preference applied to ranking: once core alone supplies the whole budget, no add-in row is
-/// considered at all, however much better its bm25. PRD §08 promises add-in APIs are "ranked below core,
-/// never suppressed"; the preference belongs in <c>CoreBoost</c>, which adds +0.5 to a core row's score
-/// after selection and suppresses nothing.</para>
+/// considered at all, however much better its bm25. Whatever preference core is owed belongs in
+/// <c>CoreBoost</c>, which adds +0.5 to a core row's score after selection and suppresses nothing.
+/// (PRD §08's "ranked below core" was measured to overstate that preference -- see issue #97 -- but the
+/// suppression this fixes was real either way.)</para>
 ///
 /// <para>It matters more since issue #91, because the connector's own script API is now indexed as an
 /// add-in, so an agent searching it by description takes exactly this path.</para>

@@ -239,10 +239,37 @@ internal static class IdentifierRelevance
     /// unexplained). Routing both loops through this one function is what keeps them in lockstep -- the
     /// discount below applies equally to both, for the same reason.</para>
     /// </summary>
-    private static double Credit(string token, string word)
+    private static double Credit(string token, string word, bool wordIsLeading)
     {
         var best = CreditDirect(token, word);
-        if (Synonyms.TryGetValue(token, out var synonyms))
+
+        // Synonym credit is awarded ONLY against the LEADING word-part of a name (issue #86). Revit's
+        // factory convention puts the verb first -- Document.NewFamilyInstance, NewLevel, NewGroup -- so a
+        // leading "New" really is the creation verb the query "create ..." is reaching for. A "New"
+        // anywhere else is almost always an adjective inside a sentence-shaped identifier:
+        // NoElementsAddedtoNewAssembly, CannotCreateNewDesignOption, IsValidHostForNewRailing,
+        // SaveAsNewCentral.
+        //
+        // Counted over the reflected corpus: 217 members carry "new" as a word-part; 176 have it leading,
+        // 41 do not, and not one of the 41 is a factory.
+        //
+        // SCOPE, stated because the evidence is narrower than the rule: that count is about "new" alone,
+        // and the factory-convention argument is specific to the create/new group. The gate nonetheless
+        // applies to every group -- delete/remove/erase, get/find/lookup, modify/set/change. Revit's
+        // verb-first house style makes that plausible rather than merely convenient, and the ranking
+        // corpus showed no regression across 79 queries, but four of the queries that reordered
+        // ("delete an element", "find the level of an element", "set a view template", "change the view
+        // scale") come from the other groups and carry no expectation. Snapshot-only, so a future
+        // regression there would show as a diff rather than a failure. Those 41 are worse than merely wrong -- their
+        // names are long, so they match MORE query tokens than the real factory does
+        // (NoElementsAddedtoNewAssembly supplies "elements", "assembly" and, via the synonym, "create",
+        // where AssemblyInstance.Create supplies only two of the three), and recall carried them past the
+        // method that actually does the job.
+        //
+        // Position is checked on the NAME side, which both of Score's loops pass in this argument -- the
+        // symmetry that doc comment describes is preserved, because the rule applies identically to
+        // recall and precision.
+        if (wordIsLeading && Synonyms.TryGetValue(token, out var synonyms))
         {
             foreach (var synonym in synonyms)
             {
@@ -308,14 +335,14 @@ internal static class IdentifierRelevance
         foreach (var token in queryTokens)
         {
             var best = 0.0;
-            foreach (var word in memberWords)
+            for (var i = 0; i < memberWords.Count; i++)
             {
-                best = Math.Max(best, Credit(token, word));
+                best = Math.Max(best, Credit(token, memberWords[i], wordIsLeading: i == 0));
             }
 
-            foreach (var word in typeWords)
+            for (var i = 0; i < typeWords.Count; i++)
             {
-                best = Math.Max(best, Credit(token, word) * TypeNameWeight);
+                best = Math.Max(best, Credit(token, typeWords[i], wordIsLeading: i == 0) * TypeNameWeight);
             }
 
             recallTotal += best;
@@ -330,8 +357,9 @@ internal static class IdentifierRelevance
         // material the caller actually typed. See StopWords for the measured case.
         var precisionTotal = 0.0;
         var precisionCount = 0;
-        foreach (var word in memberWords)
+        for (var i = 0; i < memberWords.Count; i++)
         {
+            var word = memberWords[i];
             if (StopWords.Contains(word))
             {
                 continue;
@@ -340,15 +368,16 @@ internal static class IdentifierRelevance
             var best = 0.0;
             foreach (var token in queryTokens)
             {
-                best = Math.Max(best, Credit(token, word));
+                best = Math.Max(best, Credit(token, word, wordIsLeading: i == 0));
             }
 
             precisionTotal += best;
             precisionCount++;
         }
 
-        foreach (var word in typeWords)
+        for (var i = 0; i < typeWords.Count; i++)
         {
+            var word = typeWords[i];
             if (StopWords.Contains(word))
             {
                 continue;
@@ -357,7 +386,7 @@ internal static class IdentifierRelevance
             var best = 0.0;
             foreach (var token in queryTokens)
             {
-                best = Math.Max(best, Credit(token, word));
+                best = Math.Max(best, Credit(token, word, wordIsLeading: i == 0));
             }
 
             precisionTotal += TypeNameWeight * best + (1.0 - TypeNameWeight);
