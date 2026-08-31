@@ -47,20 +47,32 @@ func TestSkillFileStaysWithinItsLightweightBudget(t *testing.T) {
 	// eventually evicts content an agent genuinely needs, and an agent that does not know about the
 	// confirmation-gated tier costs far more than the 1250 tokens saved by not telling it.
 	//
-	// Still derived from the host cap rather than picked: 30% of it, and still "orientation, not
+	// Raised again, 30% -> 35%, deliberately and on request rather than as a side effect (2026-08-31).
+	// The 30% figure had been consumed to ~1 token of headroom by two same-day PRs -- #121's
+	// created-document lifecycle correction (#114/#118) and #123's return_value split (#117) -- and a
+	// one-token margin is not a forcing function, it is a tripwire: the next edit fails CI on arrival
+	// regardless of merit, and the reflex under that pressure is to bump the number silently or to cut
+	// good content to fit. #123 already paid that tax, dropping the re-listing of timeout_ms /
+	// max_duration_ms / overwrite_output_files / confirm_lifecycle_actions to make room. That cut was
+	// independently right (the MCP tool schema hands an agent all four verbatim), but it was decided by
+	// the budget rather than on its merits, which is the failure this raise exists to stop repeating.
+	//
+	// Still derived from the host cap rather than picked: 35% of it, and still "orientation, not
 	// reference" by a wide margin. The 3-bytes/token measure above stays pessimistic on top of that.
-	const budgetTokens = ceilingTokens * 3 / 10
+	const budgetTokens = ceilingTokens * 35 / 100
 
-	// The old figure is kept as a SOFT line. Raising a ceiling removes the thing that made it useful
-	// -- the prompt to ask whether a paragraph earns its space -- and "we'll refactor it back down
-	// later" has no forcing function once the pressure is off.
+	// The previous CEILING becomes the soft line, which is this file's established convention (the
+	// 25% figure below held the same role after the last raise). Raising a ceiling removes the thing
+	// that made it useful -- the prompt to ask whether a paragraph earns its space -- and "we'll
+	// refactor it back down later" has no forcing function once the pressure is off. So the warning
+	// now fires from the old limit onward, and the file re-enters it immediately at ~7.5k.
 	//
 	// t.Logf alone would be dead code here: `go test` DISCARDS a passing package's output entirely --
 	// t.Logf, stdout and stderr alike -- so nothing below is visible under either the CI command or
 	// the `go test ./...` this repo's SKILL.md documents. The ci.yml step "skill.md budget headroom"
 	// re-runs this one test with -v for the sole purpose of surfacing it. If that step is ever
 	// removed, this branch goes silent and should be deleted rather than left as decoration.
-	const softBudgetTokens = ceilingTokens / 4
+	const softBudgetTokens = ceilingTokens * 3 / 10
 
 	// The footer get_skills appends at runtime is charged to the same reader's
 	// context as the file itself, so the budget measures what a caller
