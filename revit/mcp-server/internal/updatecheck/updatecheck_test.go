@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -94,7 +95,13 @@ func TestCheckLatestRelease(t *testing.T) {
 	}
 }
 
-func TestCheckLatestReleaseSendsNonEmptyUserAgent(t *testing.T) {
+func TestCheckLatestReleaseSendsExpectedUserAgent(t *testing.T) {
+	// Asserting a specific prefix, not merely non-empty: net/http's own Transport injects a default
+	// "Go-http-client/1.1" User-Agent whenever a request sets none at all, so a bare gotUA == ""
+	// check can never fail even if the explicit Header.Set call in checkLatestReleaseAt is deleted --
+	// independent review caught this live by deleting that call and watching the suite stay green.
+	// GitHub's real API rejects requests with no User-Agent, so this has to prove OUR header is the
+	// one that reached the server, not just that net/http supplied some default.
 	var gotUA string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotUA = r.Header.Get("User-Agent")
@@ -107,8 +114,9 @@ func TestCheckLatestReleaseSendsNonEmptyUserAgent(t *testing.T) {
 	if _, err := checkLatestReleaseAt(context.Background(), client, server.URL, "eichler-ai/connectors", "1.0.0"); err != nil {
 		t.Fatalf("checkLatestReleaseAt: %v", err)
 	}
-	if gotUA == "" {
-		t.Fatalf("request reached the server with an empty User-Agent header; GitHub's real API rejects this")
+	const wantPrefix = "eichler-connectors-revit-mcp-server/"
+	if !strings.HasPrefix(gotUA, wantPrefix) {
+		t.Fatalf("User-Agent = %q, want prefix %q (the request reaching the server with net/http's own default User-Agent, not ours, would still pass a bare non-empty check)", gotUA, wantPrefix)
 	}
 }
 
