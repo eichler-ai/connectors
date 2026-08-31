@@ -410,24 +410,67 @@ public class ReturnValueFormatterTests
     }
 
     /// <summary>
-    /// A cut between a surrogate pair leaves a lone high surrogate, which is not valid UTF-16 and which
-    /// Utf8JsonWriter rejects -- so the throw would escape Serialize, hit SafeFormatReturnValue's
-    /// last-resort catch, and lose the WHOLE return value to one emoji in one long string. The assertion
-    /// is that the result survives a real serialization round trip, not merely that it is non-empty.
+    /// Truncation cuts at a UTF-16 CODE UNIT index, so without a guard it lands between a surrogate pair
+    /// and leaves a lone high surrogate.
+    ///
+    /// <para>The independent review expected that to THROW out of Utf8JsonWriter and lose the whole
+    /// return value. Measured, it does not -- reverting the guard leaves every other assertion here
+    /// passing, so the dramatic claim is not what this test can pin. What IS observable is the cut
+    /// position itself: the guard backs the cut off by one code unit, so the reported remainder differs by
+    /// exactly one. Asserting the exact count is what makes this test fail when the guard is removed;
+    /// asserting "it round-trips" would have passed either way, which is the trap the house rule exists
+    /// to catch.</para>
     /// </summary>
     [Fact]
     public void TruncatingAStringOfNonBmpCharacters_DoesNotSplitASurrogatePair()
     {
-        // Each astral character is two UTF-16 code units, so the 8 KB cut lands mid-pair on odd offsets.
+        // Each astral character is two code units, and the leading "x" puts every high surrogate on an
+        // odd index -- so the 8 KB cut lands exactly mid-pair.
         var astral = string.Concat(Enumerable.Repeat("\U0001F600", ReturnValueFormatter.MaxStringLength));
         var value = new { Big = "x" + astral };
+        var total = 1 + (2 * ReturnValueFormatter.MaxStringLength);
 
         var formatted = ReturnValueFormatter.Format(value);
 
-        Assert.Contains("<truncated:", formatted);
-        // Round-trips: a lone surrogate would have thrown out of Format itself, and would throw here too.
+        // Kept MaxStringLength - 1 code units, not MaxStringLength: one fewer, because the last one would
+        // have been half a character.
+        Assert.Contains("<truncated: " + (total - (ReturnValueFormatter.MaxStringLength - 1)) + " more characters>", formatted);
         using var parsed = System.Text.Json.JsonDocument.Parse(formatted);
         Assert.NotNull(parsed.RootElement.GetProperty("Big").GetString());
+    }
+
+    /// <summary>
+    /// The volume bounds and the time bound are not the same bound (independent review). A sequence well
+    /// inside every count limit can still be slow per item -- a Revit property getter doing real work is
+    /// the live case -- and this runs on the UI thread after the run is already complete, past any
+    /// max_duration_ms cancellation. 300 items x 25 ms would be 7.5 seconds of wedged Revit.
+    /// </summary>
+    [Fact]
+    public void SlowButBoundedSequence_StopsAtTheTimeBudget()
+    {
+        var started = System.Diagnostics.Stopwatch.StartNew();
+
+        var formatted = ReturnValueFormatter.Format(SlowSequence(300, TimeSpan.FromMilliseconds(25)));
+
+        Assert.True(
+            started.Elapsed < ReturnValueFormatter.TimeLimit + TimeSpan.FromSeconds(3),
+            "formatting must stop at the time budget; took " + started.Elapsed);
+        Assert.Contains("<truncated", formatted);
+    }
+
+    /// <summary>
+    /// A per-object member cap, not just the whole-graph node budget: one very wide object could otherwise
+    /// spend the entire 5,000-value allowance by itself and leave nothing for the rest of the graph.
+    /// </summary>
+    [Fact]
+    public void ObjectWithMoreMembersThanTheCap_IsTruncatedAndSaysSo()
+    {
+        var properties = string.Join(" ", Enumerable.Range(0, ReturnValueFormatter.MaxCollectionItems + 5).Select(i => "public int P" + i + " { get; set; }"));
+        var value = RunScriptReturning("class Wide { " + properties + " } return new Wide();");
+
+        var formatted = ReturnValueFormatter.Format(value);
+
+        Assert.Contains("more than " + ReturnValueFormatter.MaxCollectionItems + " members", formatted);
     }
 
     [Fact]
@@ -499,6 +542,16 @@ public class ReturnValueFormatterTests
         Assert.True(outcome.Success, "the fixture script failed to run: " + outcome.Exception);
         Assert.NotNull(outcome.ReturnValue);
         return outcome.ReturnValue!;
+    }
+
+    /// <summary>Stands in for a collection whose per-item cost is real work -- a Revit property getter.</summary>
+    private static IEnumerable<int> SlowSequence(int count, TimeSpan perItem)
+    {
+        for (var i = 0; i < count; i++)
+        {
+            Thread.Sleep(perItem);
+            yield return i;
+        }
     }
 
     private static IEnumerable<int> Forever()
