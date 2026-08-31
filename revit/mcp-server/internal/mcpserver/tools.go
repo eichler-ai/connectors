@@ -30,6 +30,13 @@ const (
 	defaultMaxDurationMs = 600_000
 )
 
+// executeScriptDescription is a named constant so tools_test.go can assert on it without constructing a
+// server. See the comment at its use site in Register for why the globals are enumerated here.
+const executeScriptDescription = "Compile and run a C# script against an open Revit document. " +
+	"Returns the completed result if it finishes within timeout_ms, otherwise a pending/running/busy status with an execution_id to pass to poll_execution. " +
+	"The script's scope carries these connector-provided globals, case-sensitively: CancellationToken, CreateFamilyDocument, CreateProjectDocument, DialogResultOverrides, Document, ExportsDirectory, ImportsDirectory, OpenForWriting, Publish, UIApplication, UIDocument. " +
+	"Call get_skills for what each does and for the rules on transactions, document creation and file exchange; search_functions indexes Revit's own API and will never return these."
+
 // ExecuteScriptIn is the input schema for the execute_script tool.
 type ExecuteScriptIn struct {
 	InstanceID           string `json:"instance_id" jsonschema:"instance_id of the target Revit instance, from a prior register/list_instances"`
@@ -79,8 +86,18 @@ type ExecutionOut struct {
 // routed through mgr.
 func Register(s *mcp.Server, mgr *execution.Manager) {
 	mcp.AddTool(s, &mcp.Tool{
-		Name:        "execute_script",
-		Description: "Compile and run a C# script against an open Revit document. Returns the completed result if it finishes within timeout_ms, otherwise a pending/running/busy status with an execution_id to pass to poll_execution.",
+		Name: "execute_script",
+		// The globals are named here, in the tool description itself, because this is the only place an
+		// agent is guaranteed to read before writing its first script (issue #84). They are documented
+		// properly in get_skills -- with types, nullability and worked examples -- but get_skills has to be
+		// CALLED, and an agent that goes straight from "I need to export a view" to execute_script never
+		// calls it. Found live building validation-corpus case #1: a first script wrote `doc.Export(...)`
+		// and failed on CS0103, with no path from the error back to the real name. search_functions cannot
+		// close this gap either -- it indexes Revit's API, never the connector's own globals.
+		//
+		// Deliberately names them WITHOUT explaining them: a tool description competes for context with
+		// every other tool, so this is the index, and get_skills is the content.
+		Description: executeScriptDescription,
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in ExecuteScriptIn) (*mcp.CallToolResult, ExecutionOut, error) {
 		timeoutMs := in.TimeoutMs
 		if timeoutMs <= 0 {

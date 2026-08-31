@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using System.Text.Json;
 using System.Threading.Tasks;
 using MCPBridge.Core.Diagnostics;
@@ -202,6 +203,82 @@ public class RequestDispatcherTests
         // Unconditional refusal, so the remedy is "change the script", never "retry with a flag".
         Assert.Contains("no argument to execute_script permits it", json);
         Assert.DoesNotContain("confirm_lifecycle_actions", json);
+    }
+
+    /// <summary>
+    /// Issue #84, the reported case reproduced verbatim: a script that guesses `doc` for the document
+    /// global. Before this, the failure came back as the generic script-execution-failed with a null
+    /// remedy, so the only information an agent got was Roslyn's own "The name 'doc' does not exist in the
+    /// current context" -- true, unhelpful, and with no path to the name that DOES exist.
+    /// </summary>
+    [Fact]
+    public async Task ExecuteScript_UnknownName_NamesTheGlobalsThatDoExist()
+    {
+        var executionManager = NewExecutionManager();
+        var bridge = new ExternalEventBridge<ScriptExecutionOutcome>(new FakeExternalEventRaiser());
+        var dispatcher = new RequestDispatcher(executionManager, bridge, NewScriptExecutor());
+
+        var dispatchTask = dispatcher.DispatchAsync(ExecuteScriptRequest(1, "exec-1", "return doc.Title;"));
+        bridge.OnExecute(NewUiApp());
+
+        var json = await dispatchTask;
+
+        Assert.Contains("\"status\":\"error\"", json);
+        Assert.Contains("\"code\":\"script-compilation-failed\"", json);
+        Assert.DoesNotContain("\"code\":\"script-execution-failed\"", json);
+
+        // Asserted against the PARSED remedy, not the raw JSON: System.Text.Json's default encoder
+        // escapes an apostrophe to \u0027, so a raw Contains("'doc'") can never match however correct the
+        // remedy is. That cost a debugging round; the parsed form is also simply the stronger assertion,
+        // since it proves the text landed in the remedy field rather than anywhere in the envelope.
+        var remedy = string.Join(" ", ParseRemedy(json));
+
+        // The name the agent actually used, so the remedy is visibly about THIS script...
+        Assert.Contains("'doc'", remedy);
+        // ...and every name it could have used instead, from the reflected list rather than a copy.
+        foreach (var global in ScriptGlobals.GlobalNames)
+        {
+            Assert.Contains(global, remedy);
+        }
+
+        // Routes onward to the tool that explains them, and closes off the tool that never will.
+        Assert.Contains("get_skills", remedy);
+        Assert.Contains("search_functions", remedy);
+    }
+
+    /// <summary>The <c>result.error.remedy</c> array, or empty when the response carries no remedy.</summary>
+    private static string[] ParseRemedy(string json)
+    {
+        using var document = JsonDocument.Parse(json);
+        if (!document.RootElement.TryGetProperty("result", out var result)
+            || !result.TryGetProperty("error", out var error)
+            || !error.TryGetProperty("remedy", out var remedy))
+        {
+            return Array.Empty<string>();
+        }
+
+        return remedy.EnumerateArray().Select(e => e.GetString() ?? "").ToArray();
+    }
+
+    /// <summary>
+    /// The globals list is attached to CS0103 specifically, not to every compile failure. An ordinary
+    /// syntax error has nothing to do with globals, and eleven names on every such error is noise that
+    /// would train an agent to skip the remedy field.
+    /// </summary>
+    [Fact]
+    public async Task ExecuteScript_SyntaxError_ReportsCompilationFailedWithoutTheGlobalsList()
+    {
+        var executionManager = NewExecutionManager();
+        var bridge = new ExternalEventBridge<ScriptExecutionOutcome>(new FakeExternalEventRaiser());
+        var dispatcher = new RequestDispatcher(executionManager, bridge, NewScriptExecutor());
+
+        var dispatchTask = dispatcher.DispatchAsync(ExecuteScriptRequest(1, "exec-1", "return 1 +;"));
+        bridge.OnExecute(NewUiApp());
+
+        var json = await dispatchTask;
+
+        Assert.Contains("\"code\":\"script-compilation-failed\"", json);
+        Assert.Empty(ParseRemedy(json));
     }
 
     [Fact]

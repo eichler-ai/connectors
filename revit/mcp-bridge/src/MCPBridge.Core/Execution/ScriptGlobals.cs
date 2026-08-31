@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Reflection;
+using System.Linq;
 using System.Threading;
 using MCPBridge.RevitAdapter;
 
@@ -187,6 +189,30 @@ public sealed class ScriptGlobals
     /// don't need to pass one.
     /// </summary>
     public string? ExportsDirectory { get; }
+
+    /// <summary>
+    /// The names a script can bind in its own scope, sorted, for reporting back to an agent that used one
+    /// that doesn't exist (issue #84).
+    ///
+    /// <para>REFLECTED rather than listed by hand, and that is the whole point: a hand-maintained copy of
+    /// this list would drift the first time a global was added, and the failure mode of a stale list here
+    /// is the exact failure it exists to fix -- an agent told authoritatively that a name it needs does not
+    /// exist. Reflection cannot go stale.</para>
+    ///
+    /// <para>Deliberately NOT a substitute for <c>get_skills</c>, which documents what each of these DOES,
+    /// with worked examples. This is a bare name list for the one moment a name list is what's needed: a
+    /// CS0103 "does not exist in the current context" on a guessed identifier.</para>
+    /// </summary>
+    public static IReadOnlyList<string> GlobalNames { get; } =
+        typeof(ScriptGlobals)
+            .GetMembers(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly)
+            .Where(m => m.MemberType is MemberTypes.Property or MemberTypes.Method)
+            // Property accessors surface as get_X/set_X methods; the property itself is already listed.
+            .Where(m => m is not MethodInfo method || !method.IsSpecialName)
+            .Select(m => m.Name)
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(n => n, StringComparer.Ordinal)
+            .ToArray();
 
     private readonly bool _overwriteOutputFiles;
     private readonly List<PublishedFileRecord> _publishedFiles = new();
