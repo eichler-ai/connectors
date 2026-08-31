@@ -32,7 +32,7 @@ func TestOpenForWritingSafety(t *testing.T) {
 
 		_ = runRejectedScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+fmt.Sprintf(`
 Autodesk.Revit.DB.Level.Create(doc, %s);
-throw new System.Exception("deliberate failure after OpenForWriting write, to prove rollback");
+throw new System.Exception("deliberate failure after Connector.OpenForWriting write, to prove rollback");
 `, distinctiveElevation))
 
 		check := runScript(t, c, instanceID, documentID, fixtureLookupPreamble(fixtureTitle)+fmt.Sprintf(`
@@ -57,7 +57,7 @@ return new { survived = survived > 0 };
 	// from a second Transaction.Start().
 	t.Run("OnTheAmbientDocument_FailsCleanly", func(t *testing.T) {
 		rejection := runRejectedScript(t, c, instanceID, documentID, `
-OpenForWriting(Document);
+Connector.OpenForWriting(Document);
 return "unreachable";
 `)
 		if !strings.Contains(rejection.Error.Message, "already open") {
@@ -69,7 +69,7 @@ return "unreachable";
 	// document this run already adopted earlier via OpenForWriting.
 	t.Run("CalledTwiceOnTheSameDocument_FailsCleanly", func(t *testing.T) {
 		rejection := runRejectedScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+`
-OpenForWriting(doc);
+Connector.OpenForWriting(doc);
 return "unreachable";
 `)
 		if !strings.Contains(rejection.Error.Message, "already open") {

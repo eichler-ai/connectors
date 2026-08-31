@@ -390,6 +390,23 @@ internal sealed class BridgeHost
         var coreAssemblies = new[] { typeof(Autodesk.Revit.DB.Document).Assembly, typeof(UIApplication).Assembly };
         var assemblies = new List<(string Kind, Assembly Assembly)>(coreAssemblies.Select(a => ("core", a)));
 
+        // The connector's OWN script API, indexed as an "addin" (issue #91) -- because that is exactly
+        // what it is. PRD §08 already says add-in APIs stay fully searchable and ranked below core, and a
+        // script can call ours as validly as any other add-in's. The only reason it was invisible before
+        // is that we excluded ourselves from the mechanism we offer everyone else.
+        //
+        // Added EXPLICITLY rather than left to the scan below, for two independent reasons:
+        //  (a) The scan reports only assemblies the CLR has already loaded, and it loads lazily. Discovery
+        //      syncs at startup, before any script has run, so nothing may have touched Connector yet.
+        //      The typeof() here forces the load; without it the connector's API would sync or not
+        //      depending on timing, which is worse than not syncing at all.
+        //  (b) It states the intent. The alternative is relying on "Eichler.Connectors.Revit" not
+        //      matching the MCPBridge. prefix in excludedPrefixes below -- i.e. on a list not mentioning
+        //      us, which is not something a future rename would preserve.
+        // Only Connector is publicly visible in that assembly, and DiscoveryReflector indexes publicly
+        // visible types only, so this contributes exactly one type and its seven members -- not Core's 71.
+        assemblies.Add(("addin", typeof(Eichler.Connectors.Revit.Connector).Assembly));
+
         var revitInstallDir = Path.GetDirectoryName(coreAssemblies[0].Location);
         var excludedPrefixes = new[] { "System.", "Microsoft.", "MCPBridge.", "mscorlib", "netstandard", "WindowsBase", "PresentationCore", "PresentationFramework" };
         var excludedByInstallDir = new List<string>();
@@ -407,9 +424,13 @@ internal sealed class BridgeHost
                 continue;
             }
 
-            if (coreAssemblies.Any(core => string.Equals(core.Location, assembly.Location, StringComparison.OrdinalIgnoreCase)))
+            // Checked against everything added above, not just the core pair: the connector's own script-API
+            // assembly is added explicitly there, and it would otherwise ALSO match the scan (it is not in
+            // Revit's install directory and deliberately does not carry the MCPBridge. prefix), producing a
+            // duplicate entry for the one assembly this method names by hand.
+            if (assemblies.Any(added => string.Equals(added.Assembly.Location, assembly.Location, StringComparison.OrdinalIgnoreCase)))
             {
-                continue; // already added above as "core".
+                continue; // already added above.
             }
 
             if (revitInstallDir is not null && string.Equals(Path.GetDirectoryName(assembly.Location), revitInstallDir, StringComparison.OrdinalIgnoreCase))

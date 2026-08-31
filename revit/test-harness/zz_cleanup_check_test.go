@@ -55,7 +55,7 @@ func TestZZDocumentCleanupRoundTrip(t *testing.T) {
 
 	baseline := countDocuments()
 
-	created := runScript(t, c, instanceID, documentID, `return CreateProjectDocument().Title;`)
+	created := runScript(t, c, instanceID, documentID, `return Connector.CreateProjectDocument().Title;`)
 	if created.Status != "success" {
 		t.Fatalf("create failed: status=%q output=%s", created.Status, created.Output)
 	}

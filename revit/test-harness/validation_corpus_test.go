@@ -16,11 +16,12 @@ import (
 // DWGExportOptions) at rank 6 of the first page and DWGExportOptions itself at rank 1; no
 // reformulation was needed.
 //
-// One real discovery-tool GAP found in that same research, worth recording even though it isn't a
-// blocker: `Publish`/`ExportsDirectory` (this connector's own script globals, PRD §09) are invisible
-// to list_functions/search_functions entirely -- those tools only reflect the RevitAPI corpus, not
-// ScriptGlobals itself, so an agent has no discovery path to them at all short of already knowing they
-// exist (from get_skills, or from a prior script's own compile error naming `doc` as undefined, as
+// One real discovery-tool GAP found in that same research -- SINCE CLOSED by issue #91, and kept here
+// as the record of why the connector's API moved behind `Connector`. At the time,
+// `Publish`/`ExportsDirectory` (this connector's own script globals, PRD §09) were invisible to
+// list_functions/search_functions entirely -- those tools only reflected the RevitAPI corpus, not
+// ScriptGlobals itself, so an agent had no discovery path to them at all short of already knowing they
+// existed (from get_skills, or from a prior script's own compile error naming `doc` as undefined, as
 // happened live during this case's own research -- ScriptGlobals.Document is the real global, `doc` is
 // a fixture-only local alias this file's OWN preambles define, not a name to write freehand elsewhere).
 // Filed as a discovery-coverage gap, not fixed here: PRD §13's grading protocol says a rough discovery
@@ -41,8 +42,8 @@ doc.Regenerate();
 var options = new Autodesk.Revit.DB.DWGExportOptions();
 var views = new System.Collections.Generic.List<Autodesk.Revit.DB.ElementId> { view.Id };
 var exportName = "validation-case01-" + System.Guid.NewGuid().ToString("N");
-var ok = doc.Export(ExportsDirectory, exportName, views, options);
-var dwgPath = System.IO.Path.Combine(ExportsDirectory, exportName + ".dwg");
+var ok = doc.Export(Connector.ExportsDirectory, exportName, views, options);
+var dwgPath = System.IO.Path.Combine(Connector.ExportsDirectory, exportName + ".dwg");
 var exists = System.IO.File.Exists(dwgPath);
 long size = exists ? new System.IO.FileInfo(dwgPath).Length : 0;
 
@@ -65,7 +66,7 @@ return new { exported = ok, dwgExists = exists, dwgSize = size, exportName };
 	// exports directory, but their presence/absence has already been checked above.
 	t.Cleanup(func() {
 		cleanup := `
-var dir = ExportsDirectory;
+var dir = Connector.ExportsDirectory;
 foreach (var f in System.IO.Directory.GetFiles(dir, "validation-case01-*")) {
   try { System.IO.File.Delete(f); } catch {}
 }
@@ -176,7 +177,7 @@ foreach (var f in System.IO.Directory.EnumerateFiles(app.FamilyTemplatePath, "Ge
 }
 if (template.Length == 0) return "no-template";
 
-var famDoc = CreateFamilyDocument(template);
+var famDoc = Connector.CreateFamilyDocument(template);
 var plane = Autodesk.Revit.DB.Plane.CreateByNormalAndOrigin(Autodesk.Revit.DB.XYZ.BasisZ, Autodesk.Revit.DB.XYZ.Zero);
 var sketchPlane = Autodesk.Revit.DB.SketchPlane.Create(famDoc, plane);
 
@@ -226,7 +227,7 @@ if (famDoc == null) { throw new System.Exception("family document not found by t
 var family = famDoc.LoadFamily(doc);
 famDoc.Close(false);
 
-OpenForWriting(doc);
+Connector.OpenForWriting(doc);
 
 Autodesk.Revit.DB.FamilySymbol symbol = null;
 foreach (Autodesk.Revit.DB.ElementId symId in family.GetFamilySymbolIds()) {

@@ -355,27 +355,64 @@ func TestExecuteScriptToolForwardsConfirmLifecycleActions(t *testing.T) {
 // writing its first script, so the globals are named there. The list is maintained by hand in Go and
 // reflected in C# (ScriptGlobals.GlobalNames); the C# side carries the tripwire that fails when the two
 // drift (ScriptGlobalsDiscoverabilityTests). This test guards the Go half: that the names are present at
-// all, and that the description routes onward to get_skills rather than trying to explain them here.
-func TestExecuteScriptDescription_NamesTheScriptGlobalsAndPointsAtGetSkills(t *testing.T) {
+// all, and that the description routes an agent onward rather than trying to explain them here.
+//
+// Issue #91 cut this to five names. The seven connector-provided functions are deliberately NOT asserted
+// on -- they are not in the description any more, and putting them back would recreate exactly the
+// hand-maintained Go copy that drifted three ways before #91. Their names now reach an agent through
+// describe_function, from XML doc comments beside their own code.
+func TestExecuteScriptDescription_NamesTheScriptGlobalsAndRoutesOnward(t *testing.T) {
 	desc := executeScriptDescription
 
-	for _, name := range []string{
-		"CancellationToken", "CreateFamilyDocument", "CreateProjectDocument", "DialogResultOverrides",
-		"Document", "ExportsDirectory", "ImportsDirectory", "OpenForWriting", "Publish",
-		"UIApplication", "UIDocument",
+	// Asserted on the DELIMITED prose, not on the bare names, because two of the bare-name checks could
+	// not fail (review finding, and the "assertion cannot fail" row in caveats.md): "Connector" is a
+	// substring of both "Eichler.Connectors.Revit" and "Connector.Publish", and "Document" is a substring
+	// of "UIDocument" -- all of which are separately asserted below. Deleting either global from the
+	// description left the old loop green.
+	for _, phrase := range []string{
+		"Document, UIApplication, UIDocument and CancellationToken",
+		"plus Connector,",
 	} {
-		if !strings.Contains(desc, name) {
-			t.Errorf("execute_script description does not name the %q global; an agent has no way to "+
-				"discover it (issue #84)", name)
+		if !strings.Contains(desc, phrase) {
+			t.Errorf("execute_script description no longer contains %q; an agent has no way to discover "+
+				"the globals it names (issue #84)", phrase)
 		}
 	}
 
-	if !strings.Contains(desc, "get_skills") {
-		t.Error("execute_script description must point at get_skills, which documents what the globals do")
+	// The connector's own functions must be findable, and the description's job is to say WHERE rather
+	// than to list them. Without the namespace an agent has a name it cannot look up.
+	if !strings.Contains(desc, "Eichler.Connectors.Revit") {
+		t.Error("execute_script description must name the connector's namespace, so an agent can find " +
+			"its functions through search_functions/describe_function (issue #91)")
 	}
-	// The reason the names are here at all: search_functions cannot answer this, and saying so stops an
-	// agent burning a call on it.
-	if !strings.Contains(desc, "search_functions") {
-		t.Error("execute_script description should say search_functions will not return these")
+	if !strings.Contains(desc, "Connector.Publish") {
+		t.Error("execute_script description must show the calling form; a qualified path an agent " +
+			"cannot compile is worse than no path at all (issue #91 D2)")
+	}
+	if !strings.Contains(desc, "get_skills") {
+		t.Error("execute_script description must point at get_skills, which carries the transaction, " +
+			"document-creation and file-exchange rules")
+	}
+
+	// Guards the specific staleness #91 introduced the risk of: the pre-#91 text told an agent that
+	// search_functions "will never return these", which is now false -- the connector's API is indexed
+	// as an add-in API. An agent that believes the old claim will not look.
+	if strings.Contains(desc, "never return these") {
+		t.Error("execute_script description still claims search_functions will never return the " +
+			"connector's globals; since issue #91 they are indexed as an add-in API")
+	}
+
+	// Connector members are documented by describe_function now, not here. If one of these reappears,
+	// the Go copy is back and so is the drift.
+	// All six of the connector members that must NOT reappear. `Publish` is deliberately absent from this
+	// list: it legitimately appears as part of the `Connector.Publish(path)` calling form asserted above.
+	for _, name := range []string{
+		"CreateProjectDocument", "CreateFamilyDocument", "OpenForWriting",
+		"ExportsDirectory", "ImportsDirectory", "DialogResultOverrides",
+	} {
+		if strings.Contains(desc, name) {
+			t.Errorf("execute_script description enumerates the connector member %q again; since "+
+				"issue #91 it names only the Connector entry point, so this list cannot drift", name)
+		}
 	}
 }

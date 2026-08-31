@@ -36,7 +36,7 @@ func TestOpenForWritingMemoryCycles(t *testing.T) {
 
 	for i := 0; i < cycles; i++ {
 		func() {
-			created := runScript(t, c, instanceID, documentID, `return CreateProjectDocument().Title;`)
+			created := runScript(t, c, instanceID, documentID, `return Connector.CreateProjectDocument().Title;`)
 			if created.Status != "success" {
 				t.Fatalf("cycle %d: create failed: status=%q output=%s", i, created.Status, created.Output)
 			}

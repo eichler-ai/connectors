@@ -56,6 +56,11 @@
 
   <ItemGroup>
     <ProjectReference Include="..\MCPBridge.RevitAdapter\MCPBridge.RevitAdapter.csproj" />
+    <!-- The connector's own script-facing API (issue #91). A ONE-DIRECTIONAL reference: that assembly
+         knows nothing of Core, which is what lets ScriptGlobals implement its IConnectorRuntime seam
+         without a cycle. See Eichler.Connectors.Revit.csproj for why it is a separate assembly at all
+         (short version: DiscoveryReflector syncs publicly visible types, and Core has 71 of them). -->
+    <ProjectReference Include="..\Eichler.Connectors.Revit\Eichler.Connectors.Revit.csproj" />
   </ItemGroup>
 
   <!--

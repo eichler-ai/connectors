@@ -30,7 +30,7 @@ Design rationale for all of it: [`PRD.md`](PRD.md) §06 (execution), §07 (dialo
 | `script` | required | C# script body; `return` a value to get it back as `output` |
 | `timeout_ms` | 30000 | how long the call waits before returning a non-terminal `pending`/`running` status with an `execution_id` to poll |
 | `max_duration_ms` | 600000 | hard runtime ceiling; on lapse the broker auto-issues cancellation |
-| `overwrite_output_files` | `false` | whether `Publish` may replace an existing file in `exports/` (per-file failure otherwise) |
+| `overwrite_output_files` | `false` | whether `Connector.Publish` may replace an existing file in `exports/` (per-file failure otherwise) |
 | `confirm_lifecycle_actions` | `false` | opt-in for the confirmation-gated members below; per-request, never cached |
 
 > **Routing.** `document_id` genuinely routes: the script runs against the open document
@@ -83,12 +83,21 @@ fully-qualify Revit types or add `using` directives):
 | `UIApplication` | `Autodesk.Revit.UI.UIApplication` (`UIApplication.Application` reaches the top-level `Application`) |
 | `UIDocument` | `Autodesk.Revit.UI.UIDocument`, may be null |
 | `CancellationToken` | check it in loops; `cancel_execution` signals it |
-| `ImportsDirectory` / `ExportsDirectory` | absolute paths of this document's file-exchange workspace (PRD §09). The workspace also carries a per-run audit trail beside them — `scripts/` (verbatim script per run) and `logs/` (per-run NDJSON diagnostics), aged out after 14 days |
-| `Publish(path, name?)` | copy a file into `exports/` and report it in the result's `files[]`, per-file status |
-| `DialogResultOverrides` | per-dialog auto-answer override: `DialogResultOverrides["TaskDialog_X"] = 1001;` |
-| `CreateProjectDocument(templatePath?)` | create a new, **writable** project document (connector manages its transaction) |
-| `CreateFamilyDocument(templatePath)` | family-document counterpart; template path required |
-| `OpenForWriting(document)` | open a managed transaction on an existing document found via `Application.Documents` — e.g. one a *prior* call created |
+| `Connector` | the connector's own API, `Eichler.Connectors.Revit.Connector` — see below |
+
+### The `Connector` global
+
+The four globals above are Revit's own objects. `Connector` is everything this connector adds on top,
+and it is **not part of the Revit API** — `Connector.Publish(path)`, `Connector.OpenForWriting(doc)`,
+and so on.
+
+Its members are deliberately **not enumerated here**, and that is the point of issue #91: they are
+indexed as an add-in API under the `Eichler.Connectors.Revit` namespace, so `list_functions`,
+`search_functions` and `describe_function` return them with live signatures and summaries, generated
+from the XML doc comments beside the code. Five hand-maintained copies of this list existed before, and
+three of them were wrong. The file-exchange workspace (PRD §09) that `Connector` exposes the
+imports and exports directories of also carries a per-run audit trail beside them — `scripts/`
+(verbatim script per run) and `logs/` (per-run NDJSON diagnostics), aged out after 14 days.
 
 **Transactions are never yours to open.** Every script runs inside a connector-managed
 `Transaction`/`TransactionGroup`: changes commit when the script returns and roll back if it

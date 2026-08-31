@@ -93,33 +93,28 @@ return Document.Title;
 | `UIApplication` | `Autodesk.Revit.UI.UIApplication` |
 | ↳ `UIApplication.Application` | reached *through* the above, not its own global: `Autodesk.Revit.ApplicationServices.Application` |
 | `CancellationToken` | check it in loops (see below) |
-| `ExportsDirectory`, `ImportsDirectory` | absolute paths, see "Exchanging files" |
-| `Publish(path, name?)` | copy a file into `exports/` and report it back; `name` renames it |
-| `DialogResultOverrides` | per-dialog answer override, e.g. `DialogResultOverrides["TaskDialog_X"] = 1001` |
-| `CreateProjectDocument(template?)`, `CreateFamilyDocument(template)` | create a **writable** new document — see "Creating documents" |
+| `Connector` | **this connector's own functions, not Revit's** — `Connector.Publish(path)` and the rest, indexed under `Eichler.Connectors.Revit` (see "Discovering the API") |
 | the .NET BCL | `System.IO`, `System.Linq`, etc. — fully usable |
 
 Only `System` is imported by default, so use fully-qualified names (`Autodesk.Revit.DB.Wall`,
 `System.IO.File.ReadAllText`) or you'll get `CS0246`. Use `using` *directives* freely at the top of
 your script if you'd rather: `using Autodesk.Revit.DB;`.
 
-**Creating documents — use `CreateProjectDocument` / `CreateFamilyDocument`.** These script globals
-create the document *and* open a transaction the connector manages for it, so you can write to it
+**Creating documents — use `Connector.CreateProjectDocument` / `Connector.CreateFamilyDocument`.**
+These create the document *and* open a transaction the connector manages for it, so you can write to it
 immediately; it commits when your script returns and rolls back if it throws, exactly like the active
 document. No confirmation needed — nothing persists until you save, which is gated separately.
 
 ```csharp
-var doc = CreateProjectDocument();               // blank, writable, from Revit's default template
+var doc = Connector.CreateProjectDocument();     // blank, writable, from Revit's default template
 Autodesk.Revit.DB.Level.Create(doc, 10.0);       // just write to it — no transaction of your own
 ```
 
-`CreateProjectDocument()` defaults to the install's default project template; pass a path for another.
-`CreateFamilyDocument(path)` needs a path — there is no default family template.
 
-**The raw `UIApplication.Application.NewProjectDocument`/`NewFamilyDocument` still work and are
-READ-ONLY** — the only difference between the two paths. Nothing opens a transaction for what they
-return, and you may not open one yourself (see below), so writing throws
-`ModificationOutsideTransactionException`. Use them only to inspect.
+**The raw `UIApplication.Application.NewProjectDocument`/`NewFamilyDocument` still work but return a
+document nothing has opened for writing** — writing to it throws
+`ModificationOutsideTransactionException`. Pass it to `Connector.OpenForWriting` first, or just use the
+`Connector` calls above, which do both in one step.
 
 Ask Revit for template paths rather than guessing: `Application.DefaultProjectTemplate` is a full `.rte`
 path, and `Application.FamilyTemplatePath` is the **root of the family-template tree**, not a flat
@@ -128,8 +123,8 @@ folder of `.rft` files — templates sit in subdirectories, so search recursivel
 
 However you made it, a created document **has no `document_id`** — it never appears in `list_instances`
 and you cannot point a later call at it. It stays open for the session, so a later script finds it by
-walking `UIApplication.Application.Documents` and matching `Title` or `PathName` — to **read** only: a
-created document is writable only inside the script that created it.
+walking `UIApplication.Application.Documents` and matching `Title` or `PathName`. It comes back
+read-only; `Connector.OpenForWriting(doc)` makes it writable again for that script.
 
 **With several documents in play**, all of them commit after your script returns — created ones first,
 the active one last. If one commit fails the rest are rolled back, but a commit that already succeeded
@@ -155,7 +150,7 @@ Your script is already inside one, and Revit allows only one open transaction pe
 can never work. There is no flag for this. Just make your changes directly; they commit on success and
 roll back on failure. The error record's `code` is `script-api-denied`. The refusal ignores *which*
 document you meant it for, including one you just created. That is not a gap to work around: use
-`CreateProjectDocument`/`CreateFamilyDocument` above and the connector owns that document's transaction
+`Connector.CreateProjectDocument`/`Connector.CreateFamilyDocument` above and the connector owns that document's transaction
 for you, so there is never a reason to construct one.
 
 **2. Allowed, but only if you confirm — the document-lifecycle and worksharing calls.**
@@ -225,7 +220,7 @@ Every failure uses one shape. Read `message` for what happened, `remedy` for wha
 - **`remedy` is actionable.** Follow it before retrying.
 - **`notices[]` on a *successful* result** means something was auto-resolved for you. Dialogs your
   script triggers are auto-answered with the safe option and reported here (override per dialog with
-  `DialogResultOverrides`). It worked — check what was papered over. A dialog already on screen when
+  `Connector.DialogResultOverrides`). It worked — check what was papered over. A dialog already on screen when
   your script arrives is a different thing: it blocks Revit's UI thread and needs a human.
 - `status: "cancelled"` is not an error; you asked for it.
 
@@ -237,31 +232,35 @@ filesystem, not through MCP, so size is not a constraint. **Never hard-code the 
 from the globals; the workspace root has changed before. Beside them, per-run audit files:
 `scripts/` (verbatim script) and `logs/` (NDJSON diagnostics), swept after 14 days.
 
-**Revit → you.** Write the file, then `Publish` it. Published files come back in `files[]`, each
+**Revit → you.** Write the file, then `Connector.Publish` it. Published files come back in `files[]`, each
 with its own `status`; publishing onto an existing name **fails that file** unless you pass
 `overwrite_output_files: true`. Paths are Windows-native; in remote mode map them through the
 shared folder yourself (path rewriting isn't built).
 
 ```csharp
-var p = System.IO.Path.Combine(ExportsDirectory, "rooms.csv");
+var p = System.IO.Path.Combine(Connector.ExportsDirectory, "rooms.csv");
 System.IO.File.WriteAllText(p, "Name,Area\n");
-Publish(p);
+Connector.Publish(p);
 return "ok";
 ```
 
 **You → Revit.** Put the file in `imports/` and read it with ordinary `System.IO`:
 
 ```csharp
-return System.IO.File.ReadAllText(System.IO.Path.Combine(ImportsDirectory, "rooms.csv"));
+return System.IO.File.ReadAllText(System.IO.Path.Combine(Connector.ImportsDirectory, "rooms.csv"));
 ```
 
-Don't know the path yet? Run `return ImportsDirectory;` first, then write your file there.
+Don't know the path yet? Run `return Connector.ImportsDirectory;` first, then write your file there.
 
 ## Discovering the API
 
 Reflect over Revit's real installed assemblies rather than guessing names. What you find here is
 directly callable from a script against the `Document` global — look up exact signatures and
 overloads before writing one, cheaper than a round trip through a `CS1503`.
+
+This covers **this connector's own functions too**, indexed like any add-in's and ranked below Revit's.
+Anything under `Eichler.Connectors.Revit` is reached through the `Connector` global —
+`Eichler.Connectors.Revit.Connector.Publish` is written `Connector.Publish(path)`.
 
 - **`search_functions`** — start here when you know *what* you want, not the name.
   `{"query": "create wall"}` → ranked matches with summaries.

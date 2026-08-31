@@ -83,7 +83,11 @@ case but filed separately: this connector's own script globals (`Document`, `Exp
 `Publish`, ...) are completely invisible to `list_functions`/`search_functions` -- they only reflect
 the RevitAPI corpus, never `ScriptGlobals` itself -- so a script only discovers `Document` is the real
 global (not `doc`, which is a fixture-local alias, not a global) via a compile error, not via search.
-See issue #84. Regression replay: `revit/test-harness/validation_corpus_test.go`,
+See issue #84. **Closed by [issue #91](https://github.com/eichler-ai/connectors/issues/91)**: the
+connector's own API is now indexed as an add-in API under `Eichler.Connectors.Revit`, so
+`list_functions`/`describe_function` return it beside Revit's. The finding above is kept as the
+historical record of why -- do not read it as current behaviour. (Search by *intent* is still weak for
+it, per #80/#87; search by exact name and browsing both work.) Regression replay: `revit/test-harness/validation_corpus_test.go`,
 `TestValidationCorpus_ExportViewToDwg`.
 
 **#2 (pass).** First query (`search_functions("join walls at corner")`) found nothing usable --
@@ -107,5 +111,5 @@ instead -- still a genuine, complete exercise of `Document.LoadFamily` + `Family
 `caveats.md`'s new "must not be modifiable" section: the call's source document needs its managed
 transaction already closed (a second `execute_script` call, same shape as `OpenForWriting`'s own
 two-call precedent), and separately, the TARGET document must also have no open transaction at the
-moment of the call -- `OpenForWriting(doc)` has to come AFTER `LoadFamily`, not before. Regression
+moment of the call -- `Connector.OpenForWriting(doc)` has to come AFTER `LoadFamily`, not before. Regression
 replay: `TestValidationCorpus_LoadFamilyAndPlaceInstance`.

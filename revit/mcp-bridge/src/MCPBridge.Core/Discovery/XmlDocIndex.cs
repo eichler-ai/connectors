@@ -80,7 +80,15 @@ public sealed class XmlDocIndex
     {
         try
         {
-            var doc = XDocument.Load(stream);
+            // PreserveWhitespace is LOAD-BEARING, and its absence was a real defect in shipped
+            // agent-facing text. XDocument's default drops whitespace-only text nodes between sibling
+            // elements, so two consecutive <para> blocks -- which the raw XML separates with a newline
+            // and indentation, and nothing else -- rendered with no separator at all. Found by reading
+            // describe_function's actual output during the issue #91 audit: "...calling this on them
+            // fails.Order matters against Revit APIs...". Not specific to our own docs; Revit's XML uses
+            // <para> heavily, so this degraded its summaries the same way. Normalize() below already
+            // collapses the restored whitespace to a single space, so nothing else needs to change.
+            var doc = XDocument.Load(stream, LoadOptions.PreserveWhitespace);
             var members = new Dictionary<string, XmlDocEntry>(StringComparer.Ordinal);
 
             foreach (var member in doc.Root?.Element("members")?.Elements("member") ?? Enumerable.Empty<XElement>())
@@ -155,6 +163,21 @@ public sealed class XmlDocIndex
                     break;
                 case XElement el when el.Name.LocalName is "paramref" or "typeparamref":
                     sb.Append((string?)el.Attribute("name") ?? "");
+                    break;
+                // BLOCK-LEVEL elements get an explicit separator, and this is not redundant with
+                // LoadOptions.PreserveWhitespace above -- the two fix different halves of the same defect
+                // and neither subsumes the other. PreserveWhitespace restores the newline the SOURCE FILE
+                // puts between two </para><para> pairs, which is what compiler-emitted XML always has. But
+                // a tool-generated sidecar may emit <para>A</para><para>B</para> on one line, with no
+                // whitespace to restore, and that would still render "AB". Injecting here is
+                // formatting-independent. Conversely, injection alone would not separate whitespace-only
+                // gaps between INLINE siblings (`<see cref="X"/>\n<see cref="Y"/>` -> "XY"), which
+                // PreserveWhitespace does handle. Normalize() collapses the doubled spaces either way.
+                case XElement el when el.Name.LocalName
+                    is "para" or "list" or "item" or "description" or "term" or "code" or "br":
+                    sb.Append(' ');
+                    AppendText(el, sb);
+                    sb.Append(' ');
                     break;
                 case XElement el:
                     AppendText(el, sb); // unrecognized nested element -- still walk into it for its own text.

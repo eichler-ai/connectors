@@ -4,6 +4,7 @@ using System.IO;
 using System.Reflection;
 using System.Linq;
 using System.Threading;
+using Eichler.Connectors.Revit;
 using MCPBridge.RevitAdapter;
 
 namespace MCPBridge.Core.Execution;
@@ -42,8 +43,25 @@ namespace MCPBridge.Core.Execution;
 /// so this type has to name the real types. MCPBridge.Core.csproj's RevitAPI/RevitAPIUI
 /// references exist for this file alone -- do not reach for them from anywhere else in Core;
 /// add an adapter interface instead, the way every other Revit-touching concern here does.
+///
+/// ISSUE #91 splits this type's audience in two, which is why the seven connector-provided members below
+/// are now `internal` and reached by a script through <see cref="Connector"/> instead. The problem was
+/// never that they were in the wrong place -- it was that nothing told an agent they are OURS and not
+/// Autodesk's, and that one doc comment per member was trying to serve both an agent (who needs to know
+/// what the thing does) and a maintainer (who needs to know why it works this way). Eichler.Connectors.
+/// Revit.Connector now carries the agent-facing half, is the only public type in an assembly discovery
+/// syncs as an add-in, and therefore appears in list_functions/search_functions/describe_function beside
+/// Autodesk's own API under a namespace that says whose it is. The implementations and their maintainer
+/// commentary stay right here; this type implements IConnectorRuntime to supply them.
+///
+/// The four REVIT entry points -- Document, UIApplication, UIDocument, CancellationToken -- deliberately
+/// stay bare globals and do NOT move under Connector. They are values handed into scope, not connector
+/// functions: Document IS Autodesk.Revit.DB.Document, and filing it under a connector namespace would
+/// assert the exact opposite of what issue #91 exists to signal. PRD §06 also publishes those three names
+/// as an external contract, and Roslyn binds globals by member name on this type, so a name cannot be
+/// both bound bare and reached through Connector.
 /// </summary>
-public sealed class ScriptGlobals
+public sealed class ScriptGlobals : IConnectorRuntime
 {
     private readonly IDocumentAdapter _documentAdapter;
     private readonly IUiApplicationAdapter _uiApplicationAdapter;
@@ -83,6 +101,52 @@ public sealed class ScriptGlobals
     public CancellationToken CancellationToken { get; }
 
     /// <summary>
+    /// The connector's own API, as a script reaches it: `Connector.Publish(path)` (issue #91).
+    ///
+    /// A PROPERTY on this type rather than a static or a namespace an agent could write out in full,
+    /// because every member behind it needs state scoped to THIS run -- the workspace directories, this
+    /// run's <see cref="ManagedDocumentTransactions"/>, this run's published-file list. A static entry
+    /// point would need ambient context to reach that state, which is the ActiveDialogContext shape
+    /// denylist round 3 found live-exploitable. Staying an instance keeps the per-run state travelling by
+    /// reference, unreachable from any static.
+    ///
+    /// This also narrows an existing (accepted) leak rather than widening it: the delegate-Target trick
+    /// documented on <see cref="RoslynScriptRunner"/> now yields the Connector facade, which holds one
+    /// private IConnectorRuntime reference, where before the same trick handed a script the live
+    /// ScriptGlobals directly.
+    /// </summary>
+    public Connector Connector { get; }
+
+    // IConnectorRuntime, implemented EXPLICITLY on purpose. Explicit implementations are not public
+    // members of this type, so they neither reappear in a script's scope as bare globals (which would
+    // recreate both spellings and the drift issue #91 exists to end) nor in GlobalNames below. The seven
+    // implementations they forward to are `internal`: still reachable from TransactionScriptExecutor and
+    // MCPBridge.Core.Tests, no longer reachable from script scope except through Connector.
+    string? IConnectorRuntime.ImportsDirectory => ImportsDirectory;
+
+    string? IConnectorRuntime.ExportsDirectory => ExportsDirectory;
+
+    IDictionary<string, int> IConnectorRuntime.DialogResultOverrides => DialogResultOverrides;
+
+    void IConnectorRuntime.Publish(string sourcePath, string? name) => Publish(sourcePath, name);
+
+    // Typed `object`, not Document, and NOT a convenience: the CLR resolves every signature of every
+    // interface a type implements when it LOADS that type, so a Document in IConnectorRuntime makes
+    // ScriptGlobals unloadable anywhere RevitAPI.dll cannot load -- i.e. the entire tier-1 test host.
+    // Measured: 114 of 423 tier-1 tests failed with "Could not load file or assembly 'RevitAPI'" when
+    // this interface named Document. The bodies below still traffic in real Documents; a method BODY is
+    // JIT-resolved only when called, which is the same mechanism that lets the Document-typed properties
+    // above exist in this class at all. Connector casts back on the far side.
+    object IConnectorRuntime.CreateProjectDocument(string? templatePath) =>
+        CreateProjectDocument(templatePath);
+
+    object IConnectorRuntime.CreateFamilyDocument(string templatePath) =>
+        CreateFamilyDocument(templatePath);
+
+    object IConnectorRuntime.OpenForWriting(object document) =>
+        OpenForWriting((Autodesk.Revit.DB.Document)document);
+
+    /// <summary>
     /// Creates a NEW, blank, WRITABLE project document (issue #24) -- the connector opens and manages a
     /// Transaction/TransactionGroup for it in the same step, so the script can modify it immediately.
     ///
@@ -100,7 +164,7 @@ public sealed class ScriptGlobals
     /// rest of the session, which is how a later execute_script call addresses it (by Title -- there is
     /// no document_id for a created document, PRD §14).
     /// </summary>
-    public Autodesk.Revit.DB.Document CreateProjectDocument(string? templatePath = null) =>
+    internal Autodesk.Revit.DB.Document CreateProjectDocument(string? templatePath = null) =>
         Raw<IRawDocumentSource>(
             RequireDocumentTransactions(nameof(CreateProjectDocument)).CreateAndOpenProjectDocument(templatePath),
             nameof(CreateProjectDocument)).RawDocument;
@@ -110,7 +174,7 @@ public sealed class ScriptGlobals
     /// writable-vs-read-only distinction against the raw Application members. Unlike a project document
     /// there is no install-wide default family template, so <paramref name="templatePath"/> is required.
     /// </summary>
-    public Autodesk.Revit.DB.Document CreateFamilyDocument(string templatePath) =>
+    internal Autodesk.Revit.DB.Document CreateFamilyDocument(string templatePath) =>
         Raw<IRawDocumentSource>(
             RequireDocumentTransactions(nameof(CreateFamilyDocument)).CreateAndOpenFamilyDocument(templatePath),
             nameof(CreateFamilyDocument)).RawDocument;
@@ -134,7 +198,7 @@ public sealed class ScriptGlobals
     /// second Transaction on a document that already has one open is not a state ManagedDocumentTransactions
     /// can safely track or Revit's own API allows.
     /// </summary>
-    public Autodesk.Revit.DB.Document OpenForWriting(Autodesk.Revit.DB.Document document) =>
+    internal Autodesk.Revit.DB.Document OpenForWriting(Autodesk.Revit.DB.Document document) =>
         Raw<IRawDocumentSource>(
             RequireDocumentTransactions(nameof(OpenForWriting)).OpenExisting(document),
             nameof(OpenForWriting)).RawDocument;
@@ -178,7 +242,7 @@ public sealed class ScriptGlobals
     /// consume via ordinary System.IO. Null when no workspace is known for this execution (matches
     /// ExportsDirectory's null-ability below; see its doc comment for why that can happen).
     /// </summary>
-    public string? ImportsDirectory { get; }
+    internal string? ImportsDirectory { get; }
 
     /// <summary>
     /// This document's exports/ directory (PRD §09) -- the destination <see cref="Publish"/> copies
@@ -188,7 +252,7 @@ public sealed class ScriptGlobals
     /// this stays nullable purely so existing tests that don't care about file exchange at all
     /// don't need to pass one.
     /// </summary>
-    public string? ExportsDirectory { get; }
+    internal string? ExportsDirectory { get; }
 
     /// <summary>
     /// The names a script can bind in its own scope, sorted, for reporting back to an agent that used one
@@ -202,6 +266,14 @@ public sealed class ScriptGlobals
     /// <para>Deliberately NOT a substitute for <c>get_skills</c>, which documents what each of these DOES,
     /// with worked examples. This is a bare name list for the one moment a name list is what's needed: a
     /// CS0103 "does not exist in the current context" on a guessed identifier.</para>
+    ///
+    /// <para>Since issue #91 this is FIVE names, not eleven -- the four Revit entry points plus
+    /// <see cref="Connector"/> -- because the seven connector members went internal and are reached
+    /// through Connector. That shrinkage is the point, not a side effect: this list, execute_script's tool
+    /// description and skill.md's table all stop enumerating connector members, so the one surface that
+    /// drifted (five places disagreed, three of them wrongly) no longer exists to drift. What each
+    /// connector member does is now an XML doc comment beside its facade, shipped by describe_function.
+    /// Explicit IConnectorRuntime implementations are not public members, so they do not appear here.</para>
     /// </summary>
     public static IReadOnlyList<string> GlobalNames { get; } =
         typeof(ScriptGlobals)
@@ -233,7 +305,7 @@ public sealed class ScriptGlobals
     /// triggering the dialog, e.g. `DialogResultOverrides["TaskDialog_Some_Id"] = 1001;`. Deliberately a
     /// flat dictionary, not a richer typed API -- OverrideResult(int) already takes exactly this shape.
     /// </summary>
-    public IDictionary<string, int> DialogResultOverrides { get; } = new Dictionary<string, int>();
+    internal IDictionary<string, int> DialogResultOverrides { get; } = new Dictionary<string, int>();
 
     /// <summary>
     /// INTERNAL, though the CLASS stays public. Roslyn needs the globals TYPE public so a script can bind
@@ -261,6 +333,10 @@ public sealed class ScriptGlobals
         ExportsDirectory = exportsDirectoryPath;
         ImportsDirectory = importsDirectoryPath;
         _overwriteOutputFiles = overwriteOutputFiles;
+        // Constructed here, not lazily: Connector is a bare global a script binds by name, so it must
+        // never be null in script scope. `this` is fully initialized by this point -- Connector only
+        // stores the reference and calls nothing during construction.
+        Connector = new Connector(this);
     }
 
     /// <summary>
@@ -283,7 +359,7 @@ public sealed class ScriptGlobals
     /// "this lands in THIS document's exports directory"). A name that reduces to nothing (e.g. a
     /// bare "..\" or a trailing separator) fails rather than silently falling back to some other name.
     /// </summary>
-    public void Publish(string sourcePath, string? name = null)
+    internal void Publish(string sourcePath, string? name = null)
     {
         if (ExportsDirectory is null)
         {

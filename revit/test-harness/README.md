@@ -154,18 +154,18 @@ the way to target one bundle/subtest during focused iteration, same as always; `
   verifies the cleanup discipline itself, baseline-relative (create → appears in `list_instances`
   via the snapshot push → `closeDocumentByTitle` → disappears).
 - `fixtures_test.go` — the fixture-system helpers PRD §13's coverage-plan corpus bundles share:
-  `createBlankFixtureDocument` (creates one blank, writable document via `CreateProjectDocument`,
+  `createBlankFixtureDocument` (creates one blank, writable document via `Connector.CreateProjectDocument`,
   returns its Title; registers a `t.Cleanup` that closes it via `closeDocumentByTitle` when the
   bundle finishes), `closeDocumentByTitle` (the shared confirm-gated close-and-optionally-delete
   cleanup every document-creating case registers), `cleanupTitles`/`registerCreatedDocumentCleanup`
   (extract the `cleanup-title=` stdout markers scripts print when their return value is spoken
   for), `fixtureLookupPreamble` (the by-Title re-find every subtest needs), and
-  `fixtureWritePreamble` (that plus `OpenForWriting(doc)` -- use this one instead whenever a subtest
+  `fixtureWritePreamble` (that plus `Connector.OpenForWriting(doc)` -- use this one instead whenever a subtest
   WRITES to the fixture document; without it every write throws "Attempt to modify the model outside
   of transaction", since a created document's managed transaction commits and closes the moment the
   call that created it returns). Call `createBlankFixtureDocument` ONCE per bundle, not once per
   subtest.
-- `open_for_writing_test.go` — `TestOpenForWritingSafety`: the `OpenForWriting` global's
+- `open_for_writing_test.go` — `TestOpenForWritingSafety`: `Connector.OpenForWriting`'s
   headline rollback-on-throw guarantee plus its two negative paths ("adopt the ambient
   document", "adopt the same document twice"), added after an independent review round found
   the adopted-document origin had zero coverage at any tier.
@@ -230,7 +230,7 @@ room, etc.) was blocked on there being no *sanctioned* way for scripts to reach 
 elements; that is resolved (PRD §14, "Real Revit API access from scripts"), so the corpus is now
 buildable, just not built. What the suite actually covers today — registration, error shapes,
 the sanctioned script globals, the denylist/lifecycle-gate rejections, core CRUD + query, and
-the `OpenForWriting` safety cases — is a genuine regression suite in its own right and doesn't
+the `Connector.OpenForWriting` safety cases — is a genuine regression suite in its own right and doesn't
 need that structure; a data-driven corpus format is worth introducing once there are enough
 cases for one to earn its keep, not before. `poll_execution`/`cancel_execution` and the
 `Publish`/`files[]` path are covered end to end (`execution_lifecycle_test.go`,

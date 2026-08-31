@@ -239,7 +239,7 @@ public class TransactionScriptExecutorTests
             var exportsDir = Path.Combine(tempDir, "exports");
             Directory.CreateDirectory(exportsDir);
 
-            var script = $"Publish(@\"{sourcePath}\");";
+            var script = $"Connector.Publish(@\"{sourcePath}\");";
             var outcome = await executor.ExecuteAsync(document, uiApp, null, script, CancellationToken.None, exportsDir, overwriteOutputFiles: false);
 
             Assert.True(outcome.Success);
@@ -269,7 +269,7 @@ public class TransactionScriptExecutorTests
             var destinationPath = Path.Combine(exportsDir, "source.txt");
             File.WriteAllText(destinationPath, "existing");
 
-            var script = $"Publish(@\"{sourcePath}\");";
+            var script = $"Connector.Publish(@\"{sourcePath}\");";
             var outcome = await executor.ExecuteAsync(document, uiApp, null, script, CancellationToken.None, exportsDir, overwriteOutputFiles: false);
 
             Assert.True(outcome.Success); // a publish failure never rolls back or fails the script's own outcome
@@ -300,7 +300,7 @@ public class TransactionScriptExecutorTests
             var destinationPath = Path.Combine(exportsDir, "source.txt");
             File.WriteAllText(destinationPath, "existing");
 
-            var script = $"Publish(@\"{sourcePath}\");";
+            var script = $"Connector.Publish(@\"{sourcePath}\");";
             var outcome = await executor.ExecuteAsync(document, uiApp, null, script, CancellationToken.None, exportsDir, overwriteOutputFiles: true);
 
             Assert.True(outcome.Success);
@@ -329,7 +329,7 @@ public class TransactionScriptExecutorTests
             var exportsDir = Path.Combine(tempDir, "exports");
             Directory.CreateDirectory(exportsDir);
 
-            var script = $"Publish(@\"{sourcePath}\"); throw new System.InvalidOperationException(\"boom\");";
+            var script = $"Connector.Publish(@\"{sourcePath}\"); throw new System.InvalidOperationException(\"boom\");";
             var outcome = await executor.ExecuteAsync(document, uiApp, null, script, CancellationToken.None, exportsDir, overwriteOutputFiles: false);
 
             Assert.False(outcome.Success);
@@ -370,7 +370,7 @@ public class TransactionScriptExecutorTests
             // marker appears -- deterministically after the publish, with no timing race.
             var publishedMarker = Path.Combine(tempDir, "published.marker");
             using var cts = new CancellationTokenSource();
-            var script = $@"Publish(@""{sourcePath}"");
+            var script = $@"Connector.Publish(@""{sourcePath}"");
 System.IO.File.WriteAllText(@""{publishedMarker}"", ""x"");
 var sw = System.Diagnostics.Stopwatch.StartNew();
 while (!CancellationToken.IsCancellationRequested && sw.ElapsedMilliseconds < 30000) System.Threading.Thread.Sleep(5);
@@ -421,7 +421,7 @@ throw new System.TimeoutException(""cancellation was never observed"");";
             Directory.CreateDirectory(exportsDir);
             File.WriteAllText(Path.Combine(exportsDir, "a.txt"), "existing"); // collides with sourceA's publish
 
-            var script = $"Publish(@\"{sourceA}\"); Publish(@\"{sourceB}\");";
+            var script = $"Connector.Publish(@\"{sourceA}\"); Connector.Publish(@\"{sourceB}\");";
             var outcome = await executor.ExecuteAsync(document, uiApp, null, script, CancellationToken.None, exportsDir, overwriteOutputFiles: false);
 
             Assert.True(outcome.Success);
@@ -451,7 +451,7 @@ throw new System.TimeoutException(""cancellation was never observed"");";
             Directory.CreateDirectory(exportsDir);
             var alreadyThere = Path.Combine(exportsDir, "already-there.txt");
 
-            var script = $"System.IO.File.WriteAllText(@\"{alreadyThere}\", \"hi\"); Publish(@\"{alreadyThere}\");";
+            var script = $"System.IO.File.WriteAllText(@\"{alreadyThere}\", \"hi\"); Connector.Publish(@\"{alreadyThere}\");";
             var outcome = await executor.ExecuteAsync(document, uiApp, null, script, CancellationToken.None, exportsDir, overwriteOutputFiles: false);
 
             Assert.True(outcome.Success);
@@ -479,7 +479,7 @@ throw new System.TimeoutException(""cancellation was never observed"");";
             var exportsDir = Path.Combine(tempDir, "exports");
             Directory.CreateDirectory(exportsDir);
 
-            var script = $"Publish(@\"{sourcePath}\", \"renamed.png\");";
+            var script = $"Connector.Publish(@\"{sourcePath}\", \"renamed.png\");";
             var outcome = await executor.ExecuteAsync(document, uiApp, null, script, CancellationToken.None, exportsDir, overwriteOutputFiles: false);
 
             Assert.True(outcome.Success);
@@ -512,7 +512,7 @@ throw new System.TimeoutException(""cancellation was never observed"");";
             Directory.CreateDirectory(exportsDir);
             var escapeAttempt = Path.Combine("..", "..", "evil.txt");
 
-            var script = $"Publish(@\"{sourcePath}\", @\"{escapeAttempt}\");";
+            var script = $"Connector.Publish(@\"{sourcePath}\", @\"{escapeAttempt}\");";
             var outcome = await executor.ExecuteAsync(document, uiApp, null, script, CancellationToken.None, exportsDir, overwriteOutputFiles: false);
 
             Assert.True(outcome.Success);
@@ -541,7 +541,7 @@ throw new System.TimeoutException(""cancellation was never observed"");";
             Directory.CreateDirectory(exportsDir);
             var missingSource = Path.Combine(tempDir, "does-not-exist.txt");
 
-            var script = $"Publish(@\"{missingSource}\");";
+            var script = $"Connector.Publish(@\"{missingSource}\");";
             var outcome = await executor.ExecuteAsync(document, uiApp, null, script, CancellationToken.None, exportsDir, overwriteOutputFiles: false);
 
             Assert.True(outcome.Success); // Publish never throws -- the script itself doesn't fail
@@ -569,7 +569,7 @@ throw new System.TimeoutException(""cancellation was never observed"");";
             var directoryAsSource = Path.Combine(tempDir, "a-directory");
             Directory.CreateDirectory(directoryAsSource);
 
-            var script = $"Publish(@\"{directoryAsSource}\");";
+            var script = $"Connector.Publish(@\"{directoryAsSource}\");";
             var outcome = await executor.ExecuteAsync(document, uiApp, null, script, CancellationToken.None, exportsDir, overwriteOutputFiles: false);
 
             Assert.True(outcome.Success); // Publish never throws -- the script itself doesn't fail
@@ -603,7 +603,7 @@ throw new System.TimeoutException(""cancellation was never observed"");";
             var sourcePathWithTrailingSeparator = Path.Combine(tempDir, "a-directory") + Path.DirectorySeparatorChar;
             Directory.CreateDirectory(Path.Combine(tempDir, "a-directory"));
 
-            var script = $"Publish(@\"{sourcePathWithTrailingSeparator}\");";
+            var script = $"Connector.Publish(@\"{sourcePathWithTrailingSeparator}\");";
             var outcome = await executor.ExecuteAsync(document, uiApp, null, script, CancellationToken.None, exportsDir, overwriteOutputFiles: false);
 
             Assert.True(outcome.Success); // Publish never throws -- the script itself doesn't fail
@@ -637,7 +637,7 @@ throw new System.TimeoutException(""cancellation was never observed"");";
             Directory.CreateDirectory(importsDir);
             File.WriteAllText(Path.Combine(importsDir, "seed.txt"), "hello from imports");
 
-            var script = "Publish(System.IO.Path.Combine(ImportsDirectory, \"seed.txt\"), \"from-imports.txt\");";
+            var script = "Connector.Publish(System.IO.Path.Combine(Connector.ImportsDirectory, \"seed.txt\"), \"from-imports.txt\");";
             var outcome = await executor.ExecuteAsync(document, uiApp, null, script, CancellationToken.None, exportsDir, importsDir, overwriteOutputFiles: false);
 
             Assert.True(outcome.Success);
@@ -687,7 +687,7 @@ throw new System.TimeoutException(""cancellation was never observed"");";
         var uiApp = new FakeUiApplicationAdapter();
 
         var outcome = await executor.ExecuteAsync(
-            document, uiApp, null, "CreateProjectDocument();", CancellationToken.None);
+            document, uiApp, null, "Connector.CreateProjectDocument();", CancellationToken.None);
 
         Assert.IsNotType<ScriptApiDenylistViolationException>(outcome.Exception);
         // ALSO not a compile error, or this assertion would pass vacuously (independent PR review
@@ -707,7 +707,7 @@ throw new System.TimeoutException(""cancellation was never observed"");";
         var uiApp = new FakeUiApplicationAdapter();
 
         var outcome = await executor.ExecuteAsync(
-            document, uiApp, null, "CreateFamilyDocument(@\"C:\\t.rft\");", CancellationToken.None);
+            document, uiApp, null, "Connector.CreateFamilyDocument(@\"C:\\t.rft\");", CancellationToken.None);
 
         Assert.IsNotType<ScriptApiDenylistViolationException>(outcome.Exception);
         Assert.IsNotType<CompilationErrorException>(outcome.Exception);
@@ -750,7 +750,7 @@ throw new System.TimeoutException(""cancellation was never observed"");";
             document,
             uiApp,
             null,
-            "var d = CreateProjectDocument(); new Autodesk.Revit.DB.Transaction(d, \"x\");",
+            "var d = Connector.CreateProjectDocument(); new Autodesk.Revit.DB.Transaction(d, \"x\");",
             CancellationToken.None);
 
         Assert.False(outcome.Success);

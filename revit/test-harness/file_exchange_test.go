@@ -32,12 +32,12 @@ func TestPublishFileExchange(t *testing.T) {
 	publishScript := `
 var src = System.IO.Path.Combine(System.IO.Path.GetTempPath(), ` + strconv.Quote(fileName) + `);
 System.IO.File.WriteAllText(src, "harness file-exchange probe");
-Publish(src);
+Connector.Publish(src);
 return "published-call-made";
 `
 	t.Cleanup(func() {
 		cleanup := `
-try { System.IO.File.Delete(System.IO.Path.Combine(ExportsDirectory, ` + strconv.Quote(fileName) + `)); } catch {}
+try { System.IO.File.Delete(System.IO.Path.Combine(Connector.ExportsDirectory, ` + strconv.Quote(fileName) + `)); } catch {}
 try { System.IO.File.Delete(System.IO.Path.Combine(System.IO.Path.GetTempPath(), ` + strconv.Quote(fileName) + `)); } catch {}
 return "cleaned";
 `
@@ -95,9 +95,9 @@ return "cleaned";
 	// is already there and just registers it"), not a gate bypass: the gate
 	// governs Publish's own copy, and here the script itself owned the write.
 	inPlace := runScript(t, c, instanceID, documentID, `
-var p = System.IO.Path.Combine(ExportsDirectory, `+strconv.Quote(fileName)+`);
+var p = System.IO.Path.Combine(Connector.ExportsDirectory, `+strconv.Quote(fileName)+`);
 System.IO.File.WriteAllText(p, "rewritten in place by the script itself");
-Publish(p);
+Connector.Publish(p);
 return "registered-in-place";
 `)
 	if inPlace.Status != "success" {
@@ -133,7 +133,7 @@ func TestExecutionAuditTrail(t *testing.T) {
 	// this follow-up run can read it with no wait. ExportsDirectory's parent
 	// is the document workspace root; logs/ and scripts/ are its siblings.
 	inspect := runScript(t, c, instanceID, documentID, `
-var root = System.IO.Path.GetDirectoryName(ExportsDirectory);
+var root = System.IO.Path.GetDirectoryName(Connector.ExportsDirectory);
 var logs = System.IO.Path.Combine(root, "logs");
 var scripts = System.IO.Path.Combine(root, "scripts");
 var logMatches = System.IO.Directory.Exists(logs) ? System.IO.Directory.GetFiles(logs, "*`+probe.ExecutionID+`.ndjson") : new string[0];
@@ -156,7 +156,7 @@ return "audit-ok";
 	// the steady state, not growth. Registered as t.Cleanup so a mid-test failure still cleans.
 	t.Cleanup(func() {
 		cleanup := `
-var root = System.IO.Path.GetDirectoryName(ExportsDirectory);
+var root = System.IO.Path.GetDirectoryName(Connector.ExportsDirectory);
 foreach (var dir in new[] { System.IO.Path.Combine(root, "logs"), System.IO.Path.Combine(root, "scripts") }) {
     if (!System.IO.Directory.Exists(dir)) continue;
     foreach (var f in System.IO.Directory.GetFiles(dir, "*` + probe.ExecutionID + `*")) {
