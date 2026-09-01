@@ -54,6 +54,7 @@ Every script call targets `{instance_id, document_id}`. Get both from `list_inst
 ```json
 {"instances": [{
   "instance_id": "eb81f92b-...", "revit_version": "2027", "pid": 10652, "status": "idle",
+  "memory": {"private_mb": 4096, "working_set_mb": 1800, "managed_mb": 520},
   "documents": [{"document_id": "doc-B2C2...", "title": "Tower", "workshared": false, "active": true}]
 }]}
 ```
@@ -63,6 +64,10 @@ Every script call targets `{instance_id, document_id}`. Get both from `list_inst
   `tmp-<guid>` for an unsaved one (session-only; don't persist it).
 - `status` is `idle` / `pending` / `busy` / `unresponsive` / `unrecoverable`. Only `idle` starts work
   immediately. `unrecoverable` means that instance needs Revit restarted — nothing you send will run.
+- `memory` (MB, updated each heartbeat) reports the Revit process's own use; `private_mb` is the one
+  to watch. It climbs across create/write/close cycles — mostly Revit's own document memory, which is
+  not released until the process exits — so on a long session, restart Revit if `private_mb` grows into
+  the multi-GB range rather than waiting for a slowdown.
 
 **Several Revit versions can be connected at once**, and 2025 and 2027 have genuinely different API
 surfaces. Scripts are always explicitly targeted, so they're unaffected. Discovery is not — see below.

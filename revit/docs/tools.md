@@ -12,7 +12,7 @@ Design rationale for all of it: [`PRD.md`](PRD.md) §06 (execution), §07 (dialo
 
 | Tool | Needs a live Revit? | Purpose |
 |---|---|---|
-| `list_instances` | no | connected Revit instances + their document snapshots |
+| `list_instances` | no | connected Revit instances + their document snapshots and process memory |
 | `execute_script` | yes | compile & run C# in a Revit instance |
 | `poll_execution` | yes | wait on / re-check a long-running execution |
 | `cancel_execution` | yes | cooperative cancellation of a running script |
