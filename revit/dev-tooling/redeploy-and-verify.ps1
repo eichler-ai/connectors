@@ -126,11 +126,21 @@ function Copy-WithRetry([string]$Src, [string]$Dst, [int]$MaxAttempts = 8) {
 # "verifying you're actually debugging the binary you just built" trap: an incremental build that
 # silently no-ops, or a redeploy that races a build still in flight, produces a stale DLL with a
 # fresh timestamp and no other symptom.
+# Both byte alignments for UTF-16 (the `#US` heap stores string LITERALS there, at arbitrary offsets),
+# AND a UTF-8 pass, because metadata NAMES -- types, methods, fields -- live in the `#Strings` heap as
+# UTF-8 and were invisible to a UTF-16-only search. That gap produced a false "deploy likely stale" on a
+# genuinely fresh deploy three times in a row: the marker was a method name, present in the DLL the whole
+# time, and the check could not see it. A freshness guard that cries stale on a good deploy trains you to
+# stop passing -Marker, which is worse than not having it.
+#
+# A marker still has to be something the COMPILER emits. A comment is not: it survives in source and
+# nowhere else, which was the first of those three failures.
 function Test-MarkerPresent([string]$DllPath, [string]$MarkerText) {
     $bytes = [System.IO.File]::ReadAllBytes($DllPath)
-    $s0 = [System.Text.Encoding]::Unicode.GetString($bytes)
-    $s1 = [System.Text.Encoding]::Unicode.GetString($bytes, 1, $bytes.Length - 1)
-    return ($s0.Contains($MarkerText) -or $s1.Contains($MarkerText))
+    $u16a = [System.Text.Encoding]::Unicode.GetString($bytes)
+    $u16b = [System.Text.Encoding]::Unicode.GetString($bytes, 1, $bytes.Length - 1)
+    $utf8 = [System.Text.Encoding]::UTF8.GetString($bytes)
+    return ($u16a.Contains($MarkerText) -or $u16b.Contains($MarkerText) -or $utf8.Contains($MarkerText))
 }
 
 # Waits for a fresh "connected: auth+register" line, reacting to actual file-append events
@@ -406,7 +416,7 @@ if (-not $SkipRelaunch) {
 
     Say "FAIL: no matching registration within ${TimeoutSec}s. Last log lines:"
     Get-Content $connectionLog -Tail 5 -ErrorAction SilentlyContinue | ForEach-Object { Say "  $_" }
-    Say "If a document was expected and registration shows 0, a blocking dialog (e.g. the trial splash) may be wedging Revit's idle loop -- capture the VM screen from the Mac side (prlctl capture) to check."
+    Say "If a document was expected and registration shows 0, a MODAL dialog may be wedging Revit's idle loop -- a memory warning, a file-version refusal, a link-reload prompt. Capture the VM screen (prlctl capture), but note the non-modal trial splash covers whatever is really blocking, so move it or read the timeout notice's window inventory instead of trusting the screenshot alone."
     Write-Output "REDEPLOY_RESULT: FAIL"
     exit 1
 }

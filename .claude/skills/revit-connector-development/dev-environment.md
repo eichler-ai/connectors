@@ -155,14 +155,20 @@ Two things that bite immediately:
   `C:\dev\fixtures\work.rvt` is 2027-saved, so a 2025 run needs a separate document saved by 2025 —
   and there is no way to produce one without a human, because a harness run needs a document open
   before it can create anything.
-- **Revit's trial splash blocks the idle loop at LAUNCH** ("24 DAYS LEFT / Dig into your trial"). Worse
-  than the memory warning, which needs a session to age first: this one is up before the first test
-  runs, so an automated sweep against a freshly relaunched Revit fails in its entirety with every case
-  reporting `pending`. It needs a human click today. **Dead end so far:** `prlctl exec` runs as SYSTEM
-  and cannot touch the interactive session's windows, so it cannot dismiss it. The launcher agent
-  *could* (it runs in that session, and `*.runexe` accepts an arbitrary exe), which is the route to try
-  — enumerate `Revit.exe`'s top-level windows first and match class+title exactly, since a stray
-  `WM_CLOSE` would hit Revit's main window. Tracked as issue #134.
+- **Revit's trial splash is NOT modal — it does not block anything, and it HIDES what does.** The
+  "24 DAYS LEFT / Dig into your trial" panel floats; the idle loop keeps running behind it. It is
+  large and opaque, so the real modal — a memory warning, a file-version refusal, a link-reload
+  prompt — sits underneath and is invisible in a screenshot. Attributing a `pending` execution to the
+  splash is a misdiagnosis that costs a whole cycle, and it was made repeatedly in one session:
+  a Revit 2025 launch registering 0 documents was blamed on the splash when the actual blocker
+  beneath it was *"The file work.rvt was saved in a later version of Revit and cannot be retrieved
+  in this version."*
+
+  **So do not diagnose a block from a screenshot alone.** §07's v1 window inventory — already in the
+  timeout notice's `detail.windows` — enumerates every top-level window the Revit process owns
+  regardless of z-order, so it lists the hidden modal the screenshot cannot show. Read that first;
+  use the screenshot to confirm, not to conclude. If you only have a screenshot, move or dismiss the
+  splash and look again before believing what you saw.
 
 ## Deployment
 

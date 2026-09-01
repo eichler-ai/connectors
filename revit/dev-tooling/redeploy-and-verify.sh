@@ -379,7 +379,8 @@ else
   echo
   echo "==> FAILED -- see the PowerShell output above." >&2
   echo "    If it registered 0 documents with no refresh following and a document was expected, a blocking dialog" >&2
-  echo "    (e.g. Revit's trial splash) may be wedging the idle loop -- check the screen:" >&2
+  echo "    may be wedging the idle loop. The non-modal trial splash COVERS whatever is really" >&2
+  echo "    blocking, so do not stop at seeing it -- check the screen, moving it if present:" >&2
   echo "    prlctl capture \"$VM_NAME\" --file /tmp/vm-screen.png" >&2
   exit "$status"
 fi
