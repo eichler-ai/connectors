@@ -310,6 +310,11 @@ public sealed class RequestDispatcher
     /// </summary>
     internal static long ComputeInventoryBudgetMs(long handlerElapsedMs, long timeoutMs)
     {
+        // ClampTimeoutMs floors at 0, so this over-estimates the real budget only if the broker ever sent a
+        // NEGATIVE timeout_ms -- which it does not: timeout_ms is a non-negative wait, and the broker's own
+        // budget is `timeout_ms + 5s` off the same value. Every other input is safe: a huge timeout_ms is
+        // clamped before it can inflate the budget, and a budget already blown yields a negative result,
+        // which the caller reads as "skip". So the estimate is conservative wherever it matters.
         var wireBudgetMs = ClampTimeoutMs(timeoutMs) + WireResponseBufferMs;
         var remainingMs = wireBudgetMs - handlerElapsedMs - InventoryResponseWriteReserveMs;
         return Math.Min(InventoryHardCapMs, remainingMs);
@@ -318,10 +323,10 @@ public sealed class RequestDispatcher
     /// <summary>
     /// #136: runs <see cref="BuildWindowInventoryNotices"/> but bounds how long the pending response
     /// will wait for it to the slice of the broker's wire budget still unspent, so the diagnostic can
-    /// never blow the very wire call it annotates. The inventory Task is allowed to keep running to
-    /// completion even when the response stops waiting -- its blocking Win32 reads are already
-    /// self-limited (Win32WindowInventory's own OverallBudgetMs), and letting it finish is what still
-    /// logs its true, uncapped elapsed for diagnosis.
+    /// never blow the very wire call it annotates. When the budget wins, the response returns without the
+    /// notice, and the inventory Task is left to finish on its own -- its blocking Win32 reads are already
+    /// self-limited (Win32WindowInventory's own OverallBudgetMs) -- so that its true, uncapped elapsed
+    /// gets logged for diagnosis (the very question #136 turned on: how long is the §07 pass really taking).
     /// </summary>
     private async Task<IReadOnlyList<DiagnosticRecord>?> BuildWindowInventoryNoticesWithinWireBudget(
         System.Diagnostics.Stopwatch handlerSw, long timeoutMs)
@@ -343,6 +348,7 @@ public sealed class RequestDispatcher
         // Real Task.Delay, not the injectable _delay: this bound protects a real wall-clock wire deadline,
         // so it must elapse in real time even under a test clock. (_delay stays the seam for the poll-loop
         // WAIT, which is logical time.)
+        var inventorySw = System.Diagnostics.Stopwatch.StartNew();
         var inventoryTask = Task.Run(BuildWindowInventoryNotices);
         var winner = await Task.WhenAny(inventoryTask, Task.Delay(TimeSpan.FromMilliseconds(budgetMs))).ConfigureAwait(false);
         if (winner == inventoryTask)
@@ -351,19 +357,28 @@ public sealed class RequestDispatcher
         }
 
         // Budget won: send the pending status without the diagnostic rather than hold the wire call.
-        // Report the drop (§01 observability-over-silence) so a missing window inventory on a timeout is a
-        // stated outcome, not an unexplained gap -- it means a script is holding the UI thread long enough
+        // Report the drop now (§01 observability-over-silence) so a missing window inventory on a timeout is
+        // a stated outcome, not an unexplained gap -- it means a script is holding the UI thread long enough
         // that reading the windows' text would have risked the response's own wire budget.
         _auditTrailTrace?.Invoke(
             $"[#136] window inventory dropped from this response after its {budgetMs}ms wire-budget slice " +
-            "elapsed (a script is holding the UI thread); the pending status is returned without it.");
+            "elapsed (a script is holding the UI thread); the pending status is returned without it. Its " +
+            "true elapsed will follow when the abandoned pass finishes.");
 
-        // inventoryTask is left to finish on its own; observe it so a fault never surfaces as an
-        // unobserved-task exception.
+        // Observe the abandoned Task so a fault never surfaces as an unobserved-task exception, and log its
+        // true uncapped elapsed on completion either way -- that number is what says whether the cap is
+        // sized right (and is exactly the signal #136 lacked).
         _ = inventoryTask.ContinueWith(
-            t => _auditTrailTrace?.Invoke($"[#136] abandoned window inventory faulted: {t.Exception?.GetBaseException().Message}"),
+            t =>
+            {
+                inventorySw.Stop();
+                var faulted = t.IsFaulted ? $"; faulted: {t.Exception?.GetBaseException().Message}" : "";
+                _auditTrailTrace?.Invoke(
+                    $"[#136] abandoned window inventory finished after {inventorySw.ElapsedMilliseconds}ms " +
+                    $"(budget was {budgetMs}ms){faulted}");
+            },
             CancellationToken.None,
-            TaskContinuationOptions.OnlyOnFaulted,
+            TaskContinuationOptions.None,
             TaskScheduler.Default);
         return null;
     }
