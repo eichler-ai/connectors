@@ -269,7 +269,23 @@ internal sealed class BridgeHost
         // Revit API context, WarmupCompile swallows every failure by contract, and nothing awaits
         // it: a warmup that loses the race to a real first script is merely useless, never harmful
         // (the compilation cache is thread-safe and the runner serializes nothing else).
-        Task.Run(scriptExecutor.WarmupCompile);
+        //
+        // COMPLETION IS LOGGED, and that is what makes "ready" checkable rather than assumed. The
+        // warmup is silent by contract, registration happens on a different thread and usually
+        // lands first, so redeploy-and-verify's PASS -- which matches on registration -- has always
+        // meant "connected", never "able to run a script promptly". A harness sweep started in that
+        // window has its FIRST case race the cold start and fail on a wire timeout, which reads as a
+        // regression and costs a re-diagnosis every time; it happened three times in one session
+        // before this line existed. The duration is included because it is the number that tells you
+        // whether the window is milliseconds or seconds on a given machine.
+        Task.Run(() =>
+        {
+            var startedAt = DateTime.UtcNow;
+            scriptExecutor.WarmupCompile();
+            LogConnectionDiagnostic(
+                $"script pipeline warm: Roslyn cold start absorbed in {(int)(DateTime.UtcNow - startedAt).TotalMilliseconds}ms; " +
+                "execute_script is ready");
+        });
 
         // Second live-wiring review finding: ExecutionManager.CheckMaxDuration/CheckGraceExpiry
         // (ExecutionManager.cs's own doc comment: "a caller (the AddIn wiring) is expected to drive

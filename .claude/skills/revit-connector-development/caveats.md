@@ -55,7 +55,7 @@ reports zero.
 | The client's deadline is shorter than the server's | Compare them. A client giving up early is indistinguishable from a hung script from the outside |
 | A modal dialog has stopped the idle loop | Screenshot. `list_instances` still answers, `execute_script` doesn't |
 | Genuinely long work | Revit slows as a session accumulates documents; creating documents is slow |
-| The run started seconds after a Revit **restart**, so the first `execute_script` is racing Roslyn's cold start | Re-run the failing case on the now-warm session. If it passes unchanged, it was cold start, not a regression — `redeploy-and-verify` reports `PASS` on *registration*, which lands well before the compile pipeline is warm, so "ready" is optimistic by design |
+| The run started seconds after a Revit **restart**, so the first `execute_script` raced Roslyn's cold start (measured: **~6.9s**) | Mostly fixed at source — the add-in logs `script pipeline warm: … execute_script is ready` and `redeploy-and-verify` now waits for it before reporting `PASS`. If you still see this, you either launched Revit outside that script or it printed the `WARNING: no 'script pipeline warm' line` fallback. Re-run the failing case warm: passing unchanged means cold start, not a regression |
 
 ## Symptom: a script throws "The document must not be modifiable" (or similar) calling a Document-level API
 

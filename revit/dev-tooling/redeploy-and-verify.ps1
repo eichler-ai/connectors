@@ -144,6 +144,45 @@ function Test-MarkerPresent([string]$DllPath, [string]$MarkerText) {
 # what should be a simple question -- "did a NEW matching line show up". Tracking the log file's
 # byte length before this call, then inspecting only the bytes APPENDED after that point, answers
 # that question directly: anything found there is unambiguously new, no clock math involved at all.
+function Wait-ForLogLine([string]$LogPath, [string]$Pattern, [int]$TimeoutSec, [long]$FromOffset) {
+    # READS FROM AN OFFSET, and that is the whole correctness of this function: connection.log persists
+    # across launches, so a whole-file search would match the PREVIOUS session's line and report success
+    # instantly, every time. The caller captures the length before dropping the launch signal.
+    #
+    # Deliberately NOT reusing Wait-ForFreshConnection's FileSystemWatcher machinery: this wait is short
+    # and its failure is a warning rather than a FAIL, so that bookkeeping would be cost without benefit.
+    # It does keep that function's hard-won discipline of performing one more content check AFTER the
+    # deadline passes -- a line landing in the final beat used to be missed entirely.
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ($true) {
+        $timedOut = (Get-Date) -ge $deadline
+
+        if (Test-Path $LogPath) {
+            $length = (Get-Item $LogPath).Length
+            # Rotation at 5MB (issue #11) means the file is not monotonically growing; a shrink means a
+            # fresh log, so every byte in it is new.
+            $offset = if ($length -lt $FromOffset) { 0 } else { $FromOffset }
+            try {
+                # ReadWrite share -- the add-in holds this file open for writing.
+                $fs = [IO.File]::Open($LogPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+                try {
+                    $fs.Seek($offset, [IO.SeekOrigin]::Begin) | Out-Null
+                    $reader = New-Object IO.StreamReader($fs)
+                    $text = $reader.ReadToEnd()
+                } finally { $fs.Dispose() }
+
+                $hit = $text -split "`n" | Where-Object { $_ -match $Pattern } | Select-Object -Last 1
+                if ($hit) { return $hit.Trim() }
+            } catch {
+                # A transient sharing/IO error is not an answer; keep waiting.
+            }
+        }
+
+        if ($timedOut) { return $null }
+        Start-Sleep -Milliseconds 500
+    }
+}
+
 function Wait-ForFreshConnection([string]$LogPath, [int]$MinDocuments, [int]$TimeoutSec) {
     $startLength = 0
     if (Test-Path $LogPath) { $startLength = (Get-Item $LogPath).Length }
@@ -327,6 +366,10 @@ if (-not $SkipRelaunch) {
     } else {
         Say "launching $which with no document"
     }
+    # Captured BEFORE the launch so the warm-line wait below cannot match a previous session's.
+    $logOffsetBeforeLaunch = 0
+    if (Test-Path $connectionLog) { $logOffsetBeforeLaunch = (Get-Item $connectionLog).Length }
+
     Drop-Signal -Extension 'launch' -Lines $lines
 
     Say "waiting for a fresh registration (>= $MinDocuments document(s), timeout ${TimeoutSec}s)"
@@ -334,6 +377,29 @@ if (-not $SkipRelaunch) {
 
     if ($matchedLine) {
         Say "PASS: $matchedLine"
+
+        # REGISTRATION IS NOT READINESS. The add-in registers on its connection thread while Roslyn's
+        # cold start (assembly JIT + reference-metadata load, seconds) is still running on a
+        # threadpool thread, so a harness sweep started the instant this said PASS had its FIRST case
+        # race that warmup and fail on a wire timeout -- three times in one session, each time read as
+        # a regression and re-diagnosed from scratch. The add-in now logs when the pipeline is warm;
+        # wait for it.
+        #
+        # A WARNING, NOT A FAILURE, when it does not appear: WarmupCompile is best-effort and silent by
+        # contract, so a warmup that failed logs nothing and the first script simply pays the cold start
+        # as it always did. Failing the deploy over that would turn a performance nicety into a
+        # deployment gate, which it is not -- but saying nothing would put us back to guessing.
+        $warmSeconds = 60
+        Say "waiting for the script pipeline to warm (timeout ${warmSeconds}s)"
+        $warmLine = Wait-ForLogLine -LogPath $connectionLog -Pattern 'script pipeline warm' -TimeoutSec $warmSeconds -FromOffset $logOffsetBeforeLaunch
+        if ($warmLine) {
+            Say "warm: $warmLine"
+        } else {
+            Say "WARNING: no 'script pipeline warm' line within ${warmSeconds}s. The add-in is connected and"
+            Say "         usable, but the first execute_script may pay Roslyn's cold start -- if a harness"
+            Say "         run's first case fails on a wire timeout, re-run it before believing it."
+        }
+
         Write-Output "REDEPLOY_RESULT: PASS"
         exit 0
     }
