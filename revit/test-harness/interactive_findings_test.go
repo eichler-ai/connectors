@@ -262,11 +262,23 @@ class Preproc : Autodesk.Revit.DB.IFailuresPreprocessor {
 //     for the rest of the run. Here the second WithTransaction (block 2) runs
 //     immediately after block 1 threw; secondBlockThrew must be false. Remove
 //     `entry.Transaction = null` from RunBody's catch and this flips true.
+//
 //  2. NO SILENT COMMIT OF FAILED WORK. The partial writes of a body that threw
-//     must be rolled back, not carried in an open transaction that CommitAll (or
-//     a later Settle(keep:true)) then makes permanent -- while Connector's own
-//     summary promises it "commits when the block ends". atThrown must be 0.
-//     Remove the RollBack from RunBody's catch and this flips to 1.
+//     must not become permanent -- carried in an open transaction that CommitAll
+//     (or a later Settle(keep:true)) makes permanent, while Connector's own
+//     summary promises it "commits when the block ends". atThrown must be 0: the
+//     thrown block's level is absent from the model.
+//
+//     This leg pins that END STATE, and deliberately does not claim a per-line
+//     mutation the way (1) does. Removing ONLY RunBody's explicit SafeRollBack
+//     would NOT flip it: the SafeDispose a line later disposes a still-open Revit
+//     transaction, which Revit itself rolls back, so the level is absent either
+//     way (confirmed against RevitTransactionAdapter.Dispose -> Transaction.Dispose).
+//     The mutation that truly reintroduces a silent commit -- leaving the
+//     transaction open AND registered so CommitAll commits it -- trips (1)'s wedge
+//     as well, and (1) is where the clean per-line evidence lives. atThrown is
+//     kept because "failed work is absent" is a real invariant worth asserting
+//     directly, independent of which line achieves it.
 //
 // atSurvivor==1 is the third leg: recovery is not merely "no crash" but a fully
 // usable document -- block 2's write commits normally. All three come from one
