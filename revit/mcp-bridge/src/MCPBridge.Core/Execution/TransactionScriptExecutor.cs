@@ -117,7 +117,7 @@ internal sealed class TransactionScriptExecutor
                 // content, not their existence, so they stay open in the session. This is the error path the
                 // #114 leak came from: without a handle, an agent that threw mid-script cannot match them by
                 // Title (it never saw one). Report them so it can.
-                var createdOnFailure = CreatedDocumentsNotice(transactions.CreatedDocuments);
+                var createdOnFailure = CreatedDocumentsNotice(transactions.CreatedDocuments, orphanedByFailure: true);
                 if (createdOnFailure is not null)
                 {
                     dialogNotices.Add(createdOnFailure);
@@ -145,7 +145,7 @@ internal sealed class TransactionScriptExecutor
             notices.AddRange(settlements.Select(SettleNotice));
             // #122: report created documents on the success path too -- they remain open and unsaved, and a
             // script that created them on purpose still needs their handle to close or save them next.
-            var createdOnSuccess = CreatedDocumentsNotice(transactions.CreatedDocuments);
+            var createdOnSuccess = CreatedDocumentsNotice(transactions.CreatedDocuments, orphanedByFailure: false);
             if (createdOnSuccess is not null)
             {
                 notices.Add(createdOnSuccess);
@@ -222,10 +222,17 @@ internal sealed class TransactionScriptExecutor
     /// document that outlives its run never does so silently (PRD §01 observability-over-silence). Null --
     /// no notice -- when nothing was created, which is the common case. No new <c>Connector</c> member and
     /// no mid-run transaction-release: the identities are already tracked by ManagedDocumentTransactions,
-    /// and this only surfaces them. Info severity: it is a handle, not a fault -- the document is intact,
-    /// just still open.
+    /// and this only surfaces them.
+    ///
+    /// Severity splits by <paramref name="orphanedByFailure"/>, mirroring the Info-vs-Warning line
+    /// <see cref="SettleNotice"/> draws (independent PR review finding). On a SUCCEEDED run a created
+    /// document is Info -- an intentional result, here is its handle. On a FAILED run it is a Warning: the
+    /// script threw without returning, so it is an ORPHAN the agent never got to name -- exactly the #114
+    /// leak -- which is precisely the state §01 wants flagged, not merely noted.
     /// </summary>
-    internal static DiagnosticRecord? CreatedDocumentsNotice(IReadOnlyList<ManagedDocumentTransactions.CreatedDocumentRecord> created)
+    internal static DiagnosticRecord? CreatedDocumentsNotice(
+        IReadOnlyList<ManagedDocumentTransactions.CreatedDocumentRecord> created,
+        bool orphanedByFailure)
     {
         if (created.Count == 0)
         {
@@ -233,13 +240,18 @@ internal sealed class TransactionScriptExecutor
         }
 
         var named = string.Join(", ", created.Select(d => $"'{d.Title}' ({d.DocumentId})"));
+        var message = orphanedByFailure
+            ? $"This run FAILED after creating {created.Count} document(s): {named}. The rollback undid their " +
+              "content but not their existence, so -- unless the script closed one explicitly -- each is still open " +
+              "and unsaved, orphaned with no returned result to have named it. Match it by document_id to close or save it."
+            : $"This run created {created.Count} document(s): {named}. Unless the script closed one explicitly, each " +
+              "remains open and unsaved; match it by document_id to close or save it.";
+
         return DiagnosticRecord.Create(
-            DiagnosticSeverity.Info,
+            orphanedByFailure ? DiagnosticSeverity.Warning : DiagnosticSeverity.Info,
             "script-created-documents",
             DiagnosticSource.Execution,
-            $"This run created {created.Count} document(s) that remain open and unsaved in the Revit session: {named}. " +
-            "They outlive this run -- if the script failed, its rollback undid their contents but not their existence -- " +
-            "so they are yours to close or save; match them by the document_id (or Title) in detail.created_documents.",
+            message,
             detail: new Dictionary<string, object?>
             {
                 ["created_documents"] = created

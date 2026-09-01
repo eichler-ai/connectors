@@ -743,11 +743,10 @@ throw new System.TimeoutException(""cancellation was never observed"");";
             new ManagedDocumentTransactions.CreatedDocumentRecord("Family1", "tmp-Family1"),
         };
 
-        var notice = TransactionScriptExecutor.CreatedDocumentsNotice(created);
+        var notice = TransactionScriptExecutor.CreatedDocumentsNotice(created, orphanedByFailure: false);
 
         Assert.NotNull(notice);
         Assert.Equal("script-created-documents", notice!.Code);
-        Assert.Equal(DiagnosticSeverity.Info, notice.Severity);
         Assert.Contains("Project1", notice.Message);
         Assert.Contains("Family1", notice.Message);
 
@@ -761,11 +760,28 @@ throw new System.TimeoutException(""cancellation was never observed"");";
         Assert.Contains(notice.Remedy, r => r.Contains("confirm_lifecycle_actions"));
     }
 
+    [Theory]
+    // #122 (review): a created document is Info on a succeeded run (an intentional result) but a Warning
+    // on a FAILED run (an orphan the agent never got to name -- the #114 leak), mirroring SettleNotice.
+    [InlineData(false, DiagnosticSeverity.Info)]
+    [InlineData(true, DiagnosticSeverity.Warning)]
+    public void CreatedDocumentsNotice_SeverityReflectsWhetherTheRunFailed(bool orphanedByFailure, DiagnosticSeverity expected)
+    {
+        var created = new[] { new ManagedDocumentTransactions.CreatedDocumentRecord("Project1", "tmp-Project1") };
+
+        var notice = TransactionScriptExecutor.CreatedDocumentsNotice(created, orphanedByFailure);
+
+        Assert.NotNull(notice);
+        Assert.Equal(expected, notice!.Severity);
+        // The failure wording names the orphan situation; the success wording does not.
+        Assert.Equal(orphanedByFailure, notice.Message.Contains("orphaned"));
+    }
+
     [Fact]
     public void CreatedDocumentsNotice_ReturnsNull_WhenNothingWasCreated()
     {
         // The common case: no created documents -> no notice, so ordinary runs are not spammed.
-        Assert.Null(TransactionScriptExecutor.CreatedDocumentsNotice(System.Array.Empty<ManagedDocumentTransactions.CreatedDocumentRecord>()));
+        Assert.Null(TransactionScriptExecutor.CreatedDocumentsNotice(System.Array.Empty<ManagedDocumentTransactions.CreatedDocumentRecord>(), orphanedByFailure: false));
     }
 
     [Fact]

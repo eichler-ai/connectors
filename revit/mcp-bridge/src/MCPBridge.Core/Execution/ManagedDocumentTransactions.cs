@@ -252,7 +252,10 @@ internal sealed class ManagedDocumentTransactions
         // every run even after CommitAll/RollBackAll has dropped the entry. Mirrors _settlements.
         // Title is read best-effort (a live Revit call that can throw for a document mid-transition -- the
         // same reason Describe routes through SafeDescribe); DocumentId is safe, it was just read above.
-        if (origin == DocumentOrigin.CreatedThisRun)
+        // De-duped by document_id: a created document that is Settle'd (which empties _entries, so the
+        // duplicate-open guard above no longer fires) and then re-Opened -- via a fresh WithTransaction or
+        // OpenForWriting -- would otherwise be captured twice (independent PR review finding).
+        if (origin == DocumentOrigin.CreatedThisRun && !_createdDocuments.Any(d => d.DocumentId == document.DocumentId))
         {
             string title;
             try
