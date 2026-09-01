@@ -1216,8 +1216,13 @@ public class ManagedDocumentTransactionsTests
 
         set.SettleCore(scratch, keep: false);
 
+        // tx.Dispose IS expected, and its absence here was a pinned defect (found by review): the
+        // discard path rolled the transaction back and dropped the reference without disposing it, so
+        // the native handle reverted to finalizer timing (issue #34) on the SUCCESS path. The sibling
+        // keep:true test always contained tx.Dispose -- it routes through CloseTransaction -- so the
+        // asymmetry sat in two adjacent assertions and read as intentional.
         Assert.Equal(
-            new[] { "scratch:tx.RollBack", "scratch:group.RollBack", "scratch:group.Dispose" },
+            new[] { "scratch:tx.RollBack", "scratch:tx.Dispose", "scratch:group.RollBack", "scratch:group.Dispose" },
             journal);
         Assert.Equal(1, set.Count);
     }
@@ -1422,5 +1427,124 @@ public class ManagedDocumentTransactionsTests
         // And it is still DESCRIBED as the active document, which is what a partial-commit or settle
         // notice would name back to the agent.
         Assert.Contains("ambient (active document)", string.Join("|", result.CommittedDocuments));
+    }
+
+    [Fact]
+    public void WithoutTransaction_DoesNotLetAFailedReopenMaskTheScriptsOwnException()
+    {
+        // The reopen happens in a finally, and an exception thrown from a finally REPLACES the in-flight
+        // one -- so a reopen failure would hand the agent a transaction-start error instead of the error
+        // that actually happened. Untested until review pointed out that ThrowOnStartTransaction, which
+        // makes this reachable, was used by exactly one pre-existing test and none of the scope tests:
+        // reverting SafeReopenAfterScope to a bare ReopenTransaction left the whole suite green.
+        var journal = new List<string>();
+        var set = NewSet();
+        var document = new JournalingDocumentAdapter("ambient", journal);
+        set.Open(document, isAmbient: true);
+
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            set.RunWithoutTransactionCore(document, () =>
+            {
+                document.ThrowOnStartTransaction = true;   // the reopen in the finally will now fail
+                throw new InvalidOperationException("the script's own failure");
+            }));
+
+        Assert.Equal("the script's own failure", ex.Message);
+    }
+
+    [Fact]
+    public void ReopenTransaction_DisposesTheAdapterWhenStartThrows()
+    {
+        // Same care Open takes for the same failure (issue #34). Also untested until review: deleting
+        // ReopenTransaction's catch reintroduced the leak with the suite still green, because the PR's
+        // mutation evidence ("remove ReopenTransaction -> 5 fail") measured the METHOD's existence, not
+        // either guard inside it.
+        var journal = new List<string>();
+        var set = NewSet();
+        var document = new JournalingDocumentAdapter("ambient", journal);
+        set.Open(document, isAmbient: true);
+        // Inside a WithoutTransaction scope, so the document has NO open transaction -- otherwise
+        // RunWithTransactionCore refuses for nesting before it ever reaches ReopenTransaction, and the
+        // test passes for the wrong reason.
+        set.RunWithoutTransactionCore(document, () =>
+        {
+            journal.Clear();
+            document.ThrowOnStartTransaction = true;
+            Assert.Throws<InvalidOperationException>(() => set.RunWithTransactionCore(document, () => { }));
+
+            // The adapter that failed to start is disposed rather than abandoned to a finalizer.
+            Assert.Contains("ambient:tx.Dispose", journal);
+            document.ThrowOnStartTransaction = false;   // let the scope's own reopen succeed
+        });
+    }
+
+    [Fact]
+    public void Settle_PreservesFailuresAccumulatedBeforeItForTheRunsNotices()
+    {
+        // A settled document leaves the entry set, and CommitAll -- the only reader of
+        // AccumulatedFailures -- walks that set. So every Revit warning the document raised before being
+        // settled silently never reached notices[]. Found by review; deleting the preservation changes
+        // nothing else green.
+        var journal = new List<string>();
+        var set = NewSet();
+        var ambient = new JournalingDocumentAdapter("ambient", journal);
+        var scratch = new JournalingDocumentAdapter("scratch", journal)
+        {
+            FailuresToReport = new[] { Warning("off axis in the scratch document") },
+        };
+        set.Open(ambient, isAmbient: true);
+        set.OpenAdoptedForTesting(scratch);
+
+        set.SettleCore(scratch, keep: true);
+        var result = set.CommitAll();
+
+        Assert.True(result.Success);
+        Assert.Contains(result.CommitFailures, f => f.Message == "off axis in the scratch document");
+    }
+
+    [Fact]
+    public void SettlingInsideAWithTransactionBlockThatThenThrows_DoesNotUnwindTheSettledGroup()
+    {
+        // RunBody's openedGroupHere unwind used to assume its entry was still registered. Settle
+        // assimilates, disposes and deregisters -- so the unwind rolled back an ALREADY-ASSIMILATED,
+        // already-disposed group, the exact invalid case SettleCore's own comment names. The Safe*
+        // wrappers swallow it, so the symptom was a defeated invariant rather than a crash.
+        var journal = new List<string>();
+        var set = NewSet();
+        var ambient = new JournalingDocumentAdapter("ambient", journal);
+        var fresh = new JournalingDocumentAdapter("fresh", journal);
+        set.Open(ambient, isAmbient: true);
+        journal.Clear();
+
+        Assert.Throws<InvalidOperationException>(() =>
+            set.RunWithTransactionCore(fresh, () =>
+            {
+                set.SettleCore(fresh, keep: true);
+                throw new InvalidOperationException("after settling");
+            }));
+
+        // Exactly ONE group.RollBack must never appear for `fresh`: it was assimilated, not rolled back.
+        Assert.DoesNotContain("fresh:group.RollBack", journal);
+        Assert.Contains("fresh:group.Assimilate", journal);
+        Assert.Equal(1, set.Count);   // only the ambient document
+    }
+
+    [Fact]
+    public void OpenForWriting_AfterSettlingTheAmbientDocument_KeepsItsOriginalTier()
+    {
+        // The origin fix was applied to RunWithTransactionCore only, while OpenExisting -- the adapter
+        // half of Connector.OpenForWriting, and the route OpenForWriting's own XML text sends people
+        // down after a settle -- still hardcoded AdoptedExisting. Found by review.
+        var journal = new List<string>();
+        var set = NewSet();
+        var ambient = new JournalingDocumentAdapter("ambient", journal);
+        set.Open(ambient, isAmbient: true);
+        set.SettleCore(ambient, keep: true);
+
+        // Asserts the DECISION rather than the wiring: OpenExisting needs a real
+        // Autodesk.Revit.DB.Document, so it is tier-2 only, but the tier it chooses is what regressed
+        // and both re-acquisition points now route through this one rule.
+        Assert.Equal(ManagedDocumentTransactions.DocumentOrigin.Ambient, set.OriginForTesting(ambient.DocumentId));
+        Assert.Equal(ManagedDocumentTransactions.DocumentOrigin.AdoptedExisting, set.OriginForTesting("tmp-never-seen"));
     }
 }

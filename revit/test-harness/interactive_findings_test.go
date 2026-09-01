@@ -773,9 +773,21 @@ return "requested " + target.Id.Value;
 	})
 }
 
-// TestStairsEditScopeCannotCommitWhileAConnectorTransactionIsOpen pins the part
-// of issue #115 that is a REAL capability gap, and corrects where that gap
-// actually sits.
+// TestStairsEditScopeCannotCommitWhileAConnectorTransactionIsOpen is KEPT now that
+// settle-on-request has shipped, and its job has changed: it no longer records a
+// dead end, it pins the reason the fix has the shape it does.
+//
+// What it asserts is still true and still matters -- WITHOUT the connector closing
+// the transaction, an edit scope cannot commit, however well Start() and the write
+// went. That is exactly the property Connector.WithTransaction's closing edge
+// exists to satisfy, so this is the negative half of
+// TestStairsAreCreatableWithSettleOnRequest above: remove that closing edge and
+// this test still passes while the positive one fails, which is what makes the
+// pair diagnostic rather than merely green.
+//
+// Do NOT relax or delete it on the grounds that stairs now work. Its start-edge
+// twin was removed because the primitive made ITS claim false; this one's claim is
+// unchanged by the primitive.
 //
 // #115 states the dead end as "no script-reachable code path satisfies both 'no
 // ambient transaction to start the edit scope' and 'a transaction open to write
@@ -797,12 +809,9 @@ return "requested " + target.Id.Value;
 // yet). That distinction is what makes #115's fix a callback whose transaction
 // CLOSES before the scope commits, rather than merely a way to start the scope.
 //
-// This test is a companion to TestStairsEditScopeBlockedByAmbientTransaction
-// above, not a replacement: that one pins the START edge (a managed transaction
-// opened BEFORE Start()), this one pins the COMMIT edge (a managed transaction
-// opened AFTER it). Both must be replaced with a positive stairs-creation
-// assertion when #115's second PR ships the primitive -- relaxing either one
-// instead would leave the suite claiming stairs are unreachable after they are.
+// It pins the COMMIT edge specifically: a managed transaction opened AFTER Start(),
+// via OpenForWriting from inside the scope. The START edge had its own test until
+// the primitive shipped and made that test's claim false.
 func TestStairsEditScopeCannotCommitWhileAConnectorTransactionIsOpen(t *testing.T) {
 	c, instanceID, documentID := targetDocument(t)
 	fixtureTitle := createBlankFixtureDocument(t, c, instanceID, documentID)
@@ -852,7 +861,7 @@ class Preproc : Autodesk.Revit.DB.IFailuresPreprocessor {
 		}
 	}
 	if !strings.Contains(probe.ReturnValue, "EditScope cannot be closed") {
-		t.Fatalf("EditScope.Commit() was expected to be refused while the connector holds a transaction on the document (issue #115). If it now COMMITS, stairs are reachable and this test must be replaced with a positive stairs-creation assertion -- along with TestStairsEditScopeBlockedByAmbientTransaction -- not merely relaxed; (%s)", probe.diag())
+		t.Fatalf("EditScope.Commit() was expected to be refused while the connector holds a transaction on the document (issue #115). This is the property Connector.WithTransaction's closing edge exists to satisfy: if a scope now commits with a transaction still open, that closing edge is no longer load-bearing and TestStairsAreCreatableWithSettleOnRequest is passing for a reason other than the one it claims; (%s)", probe.diag())
 	}
 
 	// THE PART THAT MAKES THIS A SILENT failure, and the reason both skill.md

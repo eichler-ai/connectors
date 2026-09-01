@@ -100,7 +100,10 @@ internal sealed class TransactionScriptExecutor
                 // A settle on a FAILED run is the case that matters most (issue #132): the rollback
                 // below cannot undo it, so "the script failed" would otherwise imply nothing survived
                 // when something permanently did.
-                dialogNotices = dialogNotices.Concat(transactions.Settlements.Select(SettleNotice)).ToList();
+                dialogNotices = dialogNotices
+                    .Concat(transactions.SettledFailures.Select(ToDiagnosticRecord))
+                    .Concat(transactions.Settlements.Select(SettleNotice))
+                    .ToList();
                 if (dialogNotices.Count == 0 && publishedFiles.Count == 0)
                 {
                     return outcome;

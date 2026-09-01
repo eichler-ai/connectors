@@ -7,13 +7,14 @@ namespace Eichler.Connectors.Revit;
 /// them from a script through the <c>Connector</c> global, e.g. <c>Connector.Publish(path)</c>.
 ///
 /// <para>Use these for what a script cannot do with Revit's API alone here: create a document it can
-/// immediately write to, make an already-open document writable again, exchange files with the caller, and
-/// override how a dialog is answered. Revit's own objects arrive as separate globals -- <c>Document</c>,
-/// <c>UIApplication</c>, <c>UIDocument</c> -- and are used exactly as Autodesk documents them.</para>
+/// immediately write to, make one writable again, move a document between transaction states, exchange
+/// files with the caller, and override how a dialog is answered. Revit's own objects --
+/// <c>Document</c>, <c>UIApplication</c>, <c>UIDocument</c> -- arrive as separate globals.</para>
 ///
-/// <para>Every document this connector opens for writing is committed when the script returns normally
-/// and rolled back if it throws. A script never opens a Revit <c>Transaction</c> itself; attempting to
-/// is refused before the script runs.</para>
+/// <para>Every document this connector opens for writing is committed when the script returns normally and
+/// rolled back if it throws -- until <see cref="Settle"/>, which finishes one document early and
+/// permanently. A script never opens a Revit <c>Transaction</c> itself; attempting to is refused before
+/// the script runs.</para>
 /// </summary>
 /// <remarks>
 /// MAINTAINERS: the summaries in this file are the agent-facing product, shipped verbatim by
@@ -81,9 +82,9 @@ public sealed class Connector
     /// <remarks>
     /// The headless behaviour is deliberate, not a gap: a script-created document with a real window would
     /// steal focus from whatever a person has open, so making one visible should stay an explicit act.
-    /// It takes two further calls, and the binding constraint is SaveAs rather than activation --
-    /// OpenAndActivateDocument needs a path, and SaveAs is blocked in the creating run for the same reason
-    /// Close is. So SaveAs from one later call, then activate from another. Activation itself is refused
+    /// It takes one further call now, not two: SaveAs is reachable in the creating run once
+    /// <see cref="Settle"/> has finished the document, so only OpenAndActivateDocument -- which needs a
+    /// path -- has to wait for a later call. Activation itself is refused
     /// only while the ACTIVE document is modifiable, which is not a general bar: route that call at any
     /// document other than the currently active one and it succeeds. All verified live against Revit 2027,
     /// including the negative -- the raw NewProjectDocument path, having no managed transaction, can SaveAs
@@ -151,15 +152,15 @@ public sealed class Connector
     /// <summary>
     /// Runs your code with a transaction the connector opens for this document and commits when the block
     /// ends. Use it inside <see cref="WithoutTransaction"/> when something there needs to write — an edit
-    /// scope is the case this exists for: <c>StairsEditScope</c> needs no transaction to start, a
-    /// transaction to build its runs, and no transaction again to commit.
+    /// scope is the case this exists for: <c>StairsEditScope</c> needs no transaction to start, one to
+    /// build its runs, and none again to commit.
     ///
     /// <para>Closing at the end of the block is the point, not tidiness: an edit scope cannot commit while
-    /// a transaction is open on its document.</para>
+    /// a transaction is open on its document. Your changes still roll back if the script throws.</para>
     ///
-    /// <para>Nesting this on the same document is refused — inside the block the document is already
-    /// writable, so write directly. Your changes still roll back if the script throws, because the
-    /// document's transaction group stays open until the run ends.</para>
+    /// <para>Nesting on the same document is refused — inside the block it is already writable, so write
+    /// directly. On a document this run does not already manage, this adopts it for the rest of the run,
+    /// as <see cref="OpenForWriting"/> would.</para>
     /// </summary>
     /// <param name="document">The document to write to.</param>
     /// <param name="body">Your code. Runs once, immediately.</param>

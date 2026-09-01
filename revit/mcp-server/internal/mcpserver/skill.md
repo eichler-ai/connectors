@@ -205,7 +205,7 @@ Connector.WithoutTransaction(doc, () => {
 scope on the *same* document is refused, so nest by document, not by helper method.
 
 **To `Close`, `Save` or `SaveAs` a document in the run that touched it**, finish it first with
-`Connector.Settle(doc, keep:)` — Revit refuses those while the connector holds anything open.
+`Connector.Settle(doc, keep:)` (itself gated on `confirm_lifecycle_actions`, like the members it enables) — Revit refuses those while the connector holds anything open.
 `keep: true` makes everything written to that document so far **permanent immediately**: a later failure
 will no longer undo it. `keep: false` discards it, which is what you want before closing a scratch
 document. Either way you get a notice saying so. Writing again afterwards is fine and rolls back as
@@ -239,6 +239,7 @@ for you, so there is never a reason to construct one.
 | `UIDocument.SaveAndClose` | the filesystem, then that person's session |
 | `UIApplication.PostCommand` | anything, after your script's transaction has already closed |
 | `WorksharingUtils.RelinquishOwnership` | another user's ability to edit |
+| `Connector.Settle` | this run's own rollback guarantee for that document — see above |
 
 **Why these and nothing else:** everything else you change is covered by the transaction wrapped around
 your script, so if the script throws, your changes are undone automatically. These are not — they act

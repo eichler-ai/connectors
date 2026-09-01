@@ -66,7 +66,7 @@ internal sealed class ManagedDocumentTransactions
     /// commit FIRST, alongside genuinely-throwaway created ones, exposing it to exactly the fallout the
     /// ordering exists to avoid. Three states, ordered by how safe committing them early is.
     /// </summary>
-    private enum DocumentOrigin
+    internal enum DocumentOrigin
     {
         /// <summary>A document THIS run created via CreateProjectDocument/CreateFamilyDocument -- unsaved, in-memory, safest to commit first.</summary>
         CreatedThisRun,
@@ -300,7 +300,15 @@ internal sealed class ManagedDocumentTransactions
 
         var source = RequireExistingDocumentSource();
         var adapter = source.WrapExisting(rawDocument);
-        Open(adapter, DocumentOrigin.AdoptedExisting);
+
+        // The remembered tier wins when this run has seen the document before -- the same rule
+        // RunWithTransactionCore applies, and this is the route the docs actually send people down
+        // ("one this run already Settled is the exception, and works again"). Hardcoding
+        // AdoptedExisting here re-tiered a settled AMBIENT document as adopted, so the human's real
+        // open model could commit before another saved model and would be named "(adopted via
+        // OpenForWriting)" in a partial-commit notice. Fixing only the other call site left the
+        // documented path broken.
+        Open(adapter, OriginFor(adapter.DocumentId, DocumentOrigin.AdoptedExisting));
         return adapter;
     }
 
@@ -348,6 +356,16 @@ internal sealed class ManagedDocumentTransactions
     private readonly List<SettlementRecord> _settlements = new();
 
     /// <summary>
+    /// Failures accumulated by documents that have since been SETTLED and deregistered. Without this they
+    /// vanished: <see cref="Entry.AccumulatedFailures"/> exists precisely so a document committing N times
+    /// keeps all N failure sets, but <see cref="CommitAll"/> is its only reader and walks <c>_entries</c> --
+    /// which a settled document has left. Every Revit warning it raised, including ones from earlier
+    /// WithTransaction blocks, silently never reached notices[] (PRD §07/§01). Error-severity failures
+    /// survived only incidentally, because CloseTransaction throws and Settle wraps the message.
+    /// </summary>
+    private readonly List<FailureSummary> _settledFailures = new();
+
+    /// <summary>
     /// The tier each document was FIRST opened under, kept for the life of the run so a settle-then-write
     /// cycle cannot change it. Without this, re-opening after a settle guessed
     /// <see cref="DocumentOrigin.AdoptedExisting"/> -- so a settled AMBIENT document would come back
@@ -359,6 +377,12 @@ internal sealed class ManagedDocumentTransactions
 
     /// <summary>Every Settle performed this run, in order. Read by the executor after the script finishes.</summary>
     public IReadOnlyList<SettlementRecord> Settlements => _settlements;
+
+    /// <summary>
+    /// See <see cref="_settledFailures"/>. Read by the executor on the FAILED path, where CommitAll never
+    /// runs and would otherwise be the only thing that surfaced them.
+    /// </summary>
+    public IReadOnlyList<FailureSummary> SettledFailures => _settledFailures;
 
     /// <summary>
     /// Runs <paramref name="body"/> with this document NOT modifiable: the connector commits and closes
@@ -437,9 +461,7 @@ internal sealed class ManagedDocumentTransactions
             // The tier comes from _originHistory when this run has seen the document before, NOT from a
             // fresh guess: a settled ambient document re-opened as AdoptedExisting would stop committing
             // last, which is the ordering guarantee CommitAll exists to provide.
-            Open(document, _originHistory.TryGetValue(document.DocumentId, out var known)
-                ? known
-                : DocumentOrigin.AdoptedExisting);
+            Open(document, OriginFor(document.DocumentId, DocumentOrigin.AdoptedExisting));
             RunBody(FindEntry(document)!, body, openedGroupHere: true);
             return;
         }
@@ -493,7 +515,12 @@ internal sealed class ManagedDocumentTransactions
                 SafeDispose(transaction, null);
             }
 
-            if (openedGroupHere)
+            // MEMBERSHIP RE-CHECKED, not assumed from openedGroupHere: the body may have SETTLED this
+            // document, which assimilates, disposes and deregisters it. Rolling back then would be
+            // RollBack() on an assimilated group -- the invalid case SettleCore's own comment names --
+            // on an already-disposed handle. The Safe* wrappers would swallow it, so the symptom is a
+            // defeated invariant rather than a crash, which is worse.
+            if (openedGroupHere && _entries.Contains(entry))
             {
                 SafeRollBack(entry.Group.RollBack);
                 SafeDispose(null, entry.Group);
@@ -554,7 +581,16 @@ internal sealed class ManagedDocumentTransactions
             {
                 if (entry.Transaction is not null)
                 {
+                    // DISPOSED, not merely dropped (issue #34). Every other terminal path in this file
+                    // pairs rollback with disposal, and Dispose is NOT implied by RollBack() nor by
+                    // disposing the group -- so nulling the reference here leaked the native
+                    // Autodesk.Revit.DB.Transaction back to finalizer timing, on the SUCCESS path, in the
+                    // exact call skill.md tells an agent to make before closing a scratch document.
+                    // Found by review; the keep:true branch was already correct because it routes through
+                    // CloseTransaction, which made the asymmetry visible in two adjacent test journals
+                    // and it still went unnoticed.
                     SafeRollBack(entry.Transaction.RollBack);
+                    SafeDispose(entry.Transaction, null);
                     entry.Transaction = null;
                 }
 
@@ -578,6 +614,7 @@ internal sealed class ManagedDocumentTransactions
         }
 
         SafeDispose(null, entry.Group);
+        _settledFailures.AddRange(entry.AccumulatedFailures);
         _entries.Remove(entry);
         _settlements.Add(new SettlementRecord(description, keep));
     }
@@ -634,6 +671,23 @@ internal sealed class ManagedDocumentTransactions
 
         return RequireExistingDocumentSource().WrapExisting(rawDocument);
     }
+
+    /// <summary>
+    /// The tier to re-open a document under. Shared by BOTH re-acquisition points on purpose: the fix
+    /// was first applied only to RunWithTransactionCore, leaving OpenExisting -- the adapter half of
+    /// Connector.OpenForWriting, and the route that member's own documentation sends people down after a
+    /// settle -- still hardcoding AdoptedExisting. One rule, one place.
+    /// </summary>
+    private DocumentOrigin OriginFor(string documentId, DocumentOrigin fallback) =>
+        _originHistory.TryGetValue(documentId, out var known) ? known : fallback;
+
+    /// <summary>
+    /// Test seam for <see cref="OriginFor"/>. OpenExisting itself needs a real Autodesk.Revit.DB.Document
+    /// and so is tier-2 only; the DECISION it makes is what actually regressed, and this makes that
+    /// decision assertable without one.
+    /// </summary>
+    internal DocumentOrigin OriginForTesting(string documentId) =>
+        OriginFor(documentId, DocumentOrigin.AdoptedExisting);
 
     private Entry? FindEntry(IDocumentAdapter document) =>
         _entries.FirstOrDefault(e => e.Document.DocumentId == document.DocumentId);
@@ -802,7 +856,7 @@ internal sealed class ManagedDocumentTransactions
             .Concat(_entries.Where(e => e.Origin == DocumentOrigin.Ambient))
             .ToList();
 
-        var result = CommitInOrder(order);
+        var result = CommitInOrder(order, _settledFailures);
 
         // CLEARED HERE, AFTER the work, and DELIBERATELY NOT IN A `finally` (independent PR review
         // finding). Reaching this line means every document above was closed one way or another, so the
@@ -836,9 +890,11 @@ internal sealed class ManagedDocumentTransactions
     /// documents committed. All three now route through SafeDescribe, which is what makes the
     /// "never throws" contract on <see cref="CommitAll"/> actually true rather than merely intended.
     /// </summary>
-    private static ManagedDocumentCommitResult CommitInOrder(List<Entry> order)
+    private static ManagedDocumentCommitResult CommitInOrder(List<Entry> order, List<FailureSummary> settledFailures)
     {
-        var failures = new List<FailureSummary>();
+        // SEEDED with what settled documents accumulated before they left the set -- they are gone from
+        // `order`, so this is the only way their Failures-API results reach notices[].
+        var failures = new List<FailureSummary>(settledFailures);
         var committed = new List<string>();
         var rolledBack = new List<string>();
         var unknownState = new List<string>();
