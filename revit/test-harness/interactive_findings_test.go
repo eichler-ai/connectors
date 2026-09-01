@@ -4,7 +4,6 @@ package harness_test
 
 import (
 	"fmt"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -519,14 +518,28 @@ try {
 	})
 
 	t.Run("AndTheViewActuallyChangesWhenRoutedAway", func(t *testing.T) {
+		// IDENTITY, NOT NAME, throughout -- and that is a correction rather than a
+		// preference. The first live run of this subtest failed, reporting the view
+		// change as "accepted and then dropped". It had not been dropped: the target
+		// picked below is the first non-template ViewPlan whose Id differs from the
+		// active view, and in the real fixture model that is "L1 - Architectural"
+		// (CeilingPlan, id 36) -- a genuinely different view that happens to share
+		// its NAME with the active "L1 - Architectural" (FloorPlan, id 32). The
+		// change worked; comparing names could not see it.
+		//
+		// That is caveats.md's "the test faithfully checks a PROXY for the property,
+		// not the property" -- and it survived manual verification precisely because
+		// the by-hand probe excluded candidates by name, so it happened to pick "L2"
+		// and agreed with itself. A view's identity is its ElementId; its name is not
+		// unique across view types in any real model.
 		before := runScript(t, c, instanceID, fixtureDocID,
-			`return UIApplication.ActiveUIDocument.ActiveView.Name;`)
+			`return UIApplication.ActiveUIDocument.ActiveView.Id.Value.ToString();`)
 		if before.Status != "success" {
 			t.Fatalf("reading the active view: status=%q (%s)", before.Status, before.diag())
 		}
-		originalView := strings.TrimSpace(before.ReturnValue)
-		if originalView == "" {
-			t.Fatalf("active view reported an empty name; (%s)", before.diag())
+		originalViewID := strings.TrimSpace(before.ReturnValue)
+		if originalViewID == "" {
+			t.Fatalf("active view reported an empty id; (%s)", before.diag())
 		}
 		// Restore whatever the shared session was looking at, whichever way this
 		// subtest ends. Routed at the fixture document for the same reason the
@@ -534,14 +547,13 @@ try {
 		t.Cleanup(func() {
 			restore := runScript(t, c, instanceID, fixtureDocID, `
 var uidoc = UIApplication.ActiveUIDocument;
-foreach (Autodesk.Revit.DB.Element e in new Autodesk.Revit.DB.FilteredElementCollector(uidoc.Document).OfClass(typeof(Autodesk.Revit.DB.ViewPlan))) {
-  var v = (Autodesk.Revit.DB.View)e;
-  if (!v.IsTemplate && v.Name == `+strconv.Quote(originalView)+`) { uidoc.RequestViewChange(v); return "restored"; }
-}
-return "original view not found";
+var back = uidoc.Document.GetElement(new Autodesk.Revit.DB.ElementId(`+originalViewID+`L)) as Autodesk.Revit.DB.View;
+if (back == null) { return "original view not found"; }
+uidoc.RequestViewChange(back);
+return "restored";
 `)
 			if !strings.Contains(restore.ReturnValue, "restored") {
-				t.Logf("WARNING: could not restore the session's original active view %q; (%s)", originalView, restore.diag())
+				t.Logf("WARNING: could not restore the session's original active view (id %s); (%s)", originalViewID, restore.diag())
 			}
 		})
 
@@ -554,7 +566,7 @@ foreach (Autodesk.Revit.DB.Element e in new Autodesk.Revit.DB.FilteredElementCol
 }
 if (target == null) { return "no-other-view"; }
 uidoc.RequestViewChange(target);
-return "requested " + target.Name;
+return "requested " + target.Id.Value;
 `)
 		if changed.Status != "success" {
 			t.Fatalf("RequestViewChange from a run routed AWAY from the active document was expected to succeed (issue #115 triage verified this live); status=%q (%s)", changed.Status, changed.diag())
@@ -563,16 +575,29 @@ return "requested " + target.Name;
 			t.Skip("active document has fewer than two non-template plan views; nothing to switch between")
 		}
 
-		// RequestViewChange applies only once the API context ends, so the proof
-		// is necessarily a SECOND call -- asserting on the first would pass even
-		// if the request were silently dropped.
-		after := runScript(t, c, instanceID, fixtureDocID,
-			`return UIApplication.ActiveUIDocument.ActiveView.Name;`)
-		if after.Status != "success" {
-			t.Fatalf("re-reading the active view: status=%q (%s)", after.Status, after.diag())
+		// RequestViewChange applies only once the API context ends, so the proof is
+		// necessarily a SECOND call -- asserting on the first would pass even if the
+		// request were silently dropped. Polled rather than read once, because the
+		// change lands on Revit's idle loop some time after our script returns and a
+		// single immediate re-read races it.
+		deadline := time.Now().Add(20 * time.Second)
+		lastID := originalViewID
+		switched := false
+		for time.Now().Before(deadline) {
+			after := runScript(t, c, instanceID, fixtureDocID,
+				`return UIApplication.ActiveUIDocument.ActiveView.Id.Value.ToString();`)
+			if after.Status != "success" {
+				t.Fatalf("re-reading the active view: status=%q (%s)", after.Status, after.diag())
+			}
+			lastID = strings.TrimSpace(after.ReturnValue)
+			if lastID != originalViewID {
+				switched = true
+				break
+			}
+			time.Sleep(500 * time.Millisecond)
 		}
-		if strings.TrimSpace(after.ReturnValue) == originalView {
-			t.Fatalf("RequestViewChange reported success but the active view is still %q -- the request was accepted and then dropped, which is worse than a refusal because a script cannot detect it; (%s)", originalView, after.diag())
+		if !switched {
+			t.Fatalf("RequestViewChange reported success but the active view is still id %s after 20s -- the request was accepted and then dropped, which is worse than a refusal because a script cannot detect it", lastID)
 		}
 	})
 }
