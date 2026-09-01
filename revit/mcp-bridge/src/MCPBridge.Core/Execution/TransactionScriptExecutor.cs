@@ -243,9 +243,10 @@ internal sealed class TransactionScriptExecutor
         var message = orphanedByFailure
             ? $"This run FAILED after creating {created.Count} document(s): {named}. The rollback undid their " +
               "content but not their existence, so -- unless the script closed one explicitly -- each is still open " +
-              "and unsaved, orphaned with no returned result to have named it. Match it by document_id to close or save it."
+              "and unsaved, orphaned with no returned result to have named it. See the remedy to close one, or route " +
+              "more work at it by document_id."
             : $"This run created {created.Count} document(s): {named}. Unless the script closed one explicitly, each " +
-              "remains open and unsaved; match it by document_id to close or save it.";
+              "remains open and unsaved. See the remedy to close or save one, or route more work at it by document_id.";
 
         return DiagnosticRecord.Create(
             orphanedByFailure ? DiagnosticSeverity.Warning : DiagnosticSeverity.Info,
@@ -264,8 +265,12 @@ internal sealed class TransactionScriptExecutor
             },
             remedy: new[]
             {
-                "To close or save one, target it by its document_id in a follow-up execute_script call with " +
-                "confirm_lifecycle_actions: true (e.g. Document.Close(false), or SaveAs to keep it). Leaving it open is fine too.",
+                "To close a scratch document, run a follow-up execute_script routed at a DIFFERENT open document " +
+                "(not this one) and reach it through UIApplication.Application.Documents, matching its Title AND " +
+                "PathName == \"\" (so a saved file of the same name is never closed), then call Document.Close(false) " +
+                "-- or SaveAs to keep it -- with confirm_lifecycle_actions: true. Routing the call AT this document " +
+                "instead makes the connector open a transaction on it, which Revit refuses to Close; see get_skills " +
+                "for the full scratch-document recipe. Leaving it open is fine too.",
             });
     }
 
