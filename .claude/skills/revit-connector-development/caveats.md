@@ -67,12 +67,39 @@ either already has one open. This connector's ambient-transaction model (`OpenFo
 
 | Cause | Definitive check |
 |---|---|
+| The document is the one the call is ROUTED at, so the ambient managed transaction covers it for the whole run | Route the call at a **different** open document and reach this one through `UIApplication` — `ActiveUIDocument`, or `Application.Documents` by `Title`. Nothing else lifts it; there is no per-call opt-out |
 | The call's own document was created earlier in the SAME script call, so its managed transaction is still open | Split into two calls: create/edit in one, let it return (commits the transaction), call the API from a separate call that finds the document fresh |
 | `OpenForWriting` was called on the TARGET document before the API call, not after | Reorder: make the call first, `OpenForWriting` afterward, if the call's own result is what you need to keep editing |
 
 Not specific to `LoadFamily` — treat this as the general shape for any Document-argument API that
 throws a transaction/modifiability error, and check both documents' transaction state before assuming
-the API itself is broken.
+the API itself is broken. Members known to behave this way, with how each is known — the distinction
+matters, because only the first two are pinned by anything:
+
+| Member | Evidence |
+|---|---|
+| `Document.LoadFamily` (needs BOTH source and target non-modifiable) | Regression-pinned: `TestValidationCorpus_LoadFamilyAndPlaceInstance` |
+| `UIDocument.RequestViewChange` / `ActiveView` | Verified live against Revit 2027 (issue #115 triage); not yet pinned by a test |
+| `UIApplication.OpenAndActivateDocument` | **Not independently re-verified** — recorded in `Connector.cs`'s `<remarks>`, which states it was checked live. Treat as second-hand until something pins it |
+
+**The routing fix does NOT generalize to edit scopes, and that distinction is the whole of issue
+#115.** Routing solves "the target must not be modifiable when the call STARTS". `StairsEditScope`
+adds a second requirement at the other end: no transaction may be open when the scope **commits**.
+Live trace, on a document nothing manages:
+
+```
+1: scope.Start() OK, IsInEditMode=True
+2: Connector.OpenForWriting(d) INSIDE the edit scope OK; IsModifiable=True
+3: StairsRun.CreateStraightRun OK
+4: scope.Commit() -> InvalidOperationException: "EditScope cannot be closed, for there is a
+   transaction or transaction group still open in the document."   (Cancel() fails identically)
+```
+
+Note what the error says versus what is true: with the connector's **transaction** committed but its
+**group** still open, `EditScope.Commit()` succeeds — the group is not the bar, the open transaction
+is. So the missing capability is closing a connector-owned transaction mid-script, which no script can
+do. Worse, the run above returns `status: "success"` having created nothing, so this fails **silently**
+— check `Document.IsInEditMode()` before believing an edit-scope result.
 
 ## Symptom: tests are green but prove nothing
 

@@ -170,6 +170,27 @@ is working in — which surfaces as a modal "Virtual Memory - High Usage" box th
 human clicks it. (Revit also refuses to `Close` the *active* document: from a call routed at anything
 except the active document, activate the one you want to keep, then close the other on the next call.)
 
+### Calls that need their target *not* modifiable
+
+Some Revit APIs manage their own transaction and refuse to run while one is open on the document they
+act on: `UIDocument.RequestViewChange`/`ActiveView`, `Document.LoadFamily`,
+`UIApplication.OpenAndActivateDocument`. **The document your call is routed at is modifiable for the
+whole run**, so against it they always fail ("must not be modifiable", "cannot change the active view
+of a modifiable document"). Route the call at a *different* open document:
+
+```csharp
+// routed at any OTHER open document
+UIApplication.ActiveUIDocument.RequestViewChange(someView);   // applies once your script returns
+```
+
+`LoadFamily` needs **both** documents non-modifiable, so call it *before* `Connector.OpenForWriting`
+on the target, not after.
+
+**Stairs are a known dead end.** `StairsEditScope` starts fine on an
+unmanaged document, but then neither commits nor cancels ("EditScope cannot be closed, for there is a
+transaction or transaction group still open"), and a script cannot close the connector's transaction
+mid-run. Issue #115; no workaround today.
+
 ### What you may not do without saying so
 
 Two different things here, and the difference matters. Both are caught **before your script runs**, by a
