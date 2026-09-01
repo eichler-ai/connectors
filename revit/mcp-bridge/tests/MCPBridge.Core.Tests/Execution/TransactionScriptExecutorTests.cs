@@ -731,6 +731,60 @@ throw new System.TimeoutException(""cancellation was never observed"");";
     }
 
     [Fact]
+    public void CreatedDocumentsNotice_NamesEachCreatedDocumentWithItsIdAndACleanupRemedy()
+    {
+        // #122: the executor surfaces the ManagedDocumentTransactions identities as a §01 notice so a
+        // created document that outlives its run never does so silently. (The full script->notice path
+        // needs the real Revit Document type and is proven live in revit/test-harness; the notice shape and
+        // the exposure are what tier 1 pins.)
+        var created = new[]
+        {
+            new ManagedDocumentTransactions.CreatedDocumentRecord("Project1", "tmp-Project1"),
+            new ManagedDocumentTransactions.CreatedDocumentRecord("Family1", "tmp-Family1"),
+        };
+
+        var notice = TransactionScriptExecutor.CreatedDocumentsNotice(created, orphanedByFailure: false);
+
+        Assert.NotNull(notice);
+        Assert.Equal("script-created-documents", notice!.Code);
+        Assert.Contains("Project1", notice.Message);
+        Assert.Contains("Family1", notice.Message);
+
+        // The machine-readable handles the caller matches on.
+        var docs = (System.Collections.Generic.Dictionary<string, object?>[])notice.Detail["created_documents"]!;
+        Assert.Equal(2, docs.Length);
+        Assert.Contains(docs, d => (string?)d["document_id"] == "tmp-Project1" && (string?)d["title"] == "Project1");
+        Assert.Contains(docs, d => (string?)d["document_id"] == "tmp-Family1");
+
+        // A handle is only useful with the way to act on it.
+        Assert.Contains(notice.Remedy, r => r.Contains("confirm_lifecycle_actions"));
+    }
+
+    [Theory]
+    // #122 (review): a created document is Info on a succeeded run (an intentional result) but a Warning
+    // on a FAILED run (an orphan the agent never got to name -- the #114 leak), mirroring SettleNotice.
+    [InlineData(false, DiagnosticSeverity.Info)]
+    [InlineData(true, DiagnosticSeverity.Warning)]
+    public void CreatedDocumentsNotice_SeverityReflectsWhetherTheRunFailed(bool orphanedByFailure, DiagnosticSeverity expected)
+    {
+        var created = new[] { new ManagedDocumentTransactions.CreatedDocumentRecord("Project1", "tmp-Project1") };
+
+        var notice = TransactionScriptExecutor.CreatedDocumentsNotice(created, orphanedByFailure);
+
+        Assert.NotNull(notice);
+        Assert.Equal(expected, notice!.Severity);
+        // The failure wording names the orphan situation; the success wording does not.
+        Assert.Equal(orphanedByFailure, notice.Message.Contains("orphaned"));
+    }
+
+    [Fact]
+    public void CreatedDocumentsNotice_ReturnsNull_WhenNothingWasCreated()
+    {
+        // The common case: no created documents -> no notice, so ordinary runs are not spammed.
+        Assert.Null(TransactionScriptExecutor.CreatedDocumentsNotice(System.Array.Empty<ManagedDocumentTransactions.CreatedDocumentRecord>(), orphanedByFailure: false));
+    }
+
+    [Fact]
     public async Task ScriptThatDoesNotPublish_HasEmptyFilesArray_NoExportsDirectoryNeeded()
     {
         // exportsDirectoryPath omitted entirely -- existing callers/tests that don't pass one must

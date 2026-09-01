@@ -106,15 +106,23 @@ internal sealed class TransactionScriptExecutor
                 // headline case -- a script stuck behind a dialog gets auto-cancelled by max_duration_ms).
                 // Same reasoning applies to files[] (PRD §09): a script may have published a file before
                 // it threw/was cancelled, and that publication must still be reported here.
-                var dialogNotices = ActiveDialogContext.DrainRecorded();
+                var dialogNotices = new List<DiagnosticRecord>(ActiveDialogContext.DrainRecorded());
                 var publishedFiles = globals.PublishedFiles;
                 // A settle on a FAILED run is the case that matters most (issue #132): the rollback
                 // below cannot undo it, so "the script failed" would otherwise imply nothing survived
                 // when something permanently did.
-                dialogNotices = dialogNotices
-                    .Concat(transactions.SettledFailures.Select(ToDiagnosticRecord))
-                    .Concat(transactions.Settlements.Select(SettleNotice))
-                    .ToList();
+                dialogNotices.AddRange(transactions.SettledFailures.Select(ToDiagnosticRecord));
+                dialogNotices.AddRange(transactions.Settlements.Select(SettleNotice));
+                // #122: documents this run CREATED outlive the failure -- the rollback above undid their
+                // content, not their existence, so they stay open in the session. This is the error path the
+                // #114 leak came from: without a handle, an agent that threw mid-script cannot match them by
+                // Title (it never saw one). Report them so it can.
+                var createdOnFailure = CreatedDocumentsNotice(transactions.CreatedDocuments, orphanedByFailure: true);
+                if (createdOnFailure is not null)
+                {
+                    dialogNotices.Add(createdOnFailure);
+                }
+
                 if (dialogNotices.Count == 0 && publishedFiles.Count == 0)
                 {
                     return outcome;
@@ -135,6 +143,13 @@ internal sealed class TransactionScriptExecutor
             var commit = transactions.CommitAll();
             var notices = CombinedNotices(commit.CommitFailures);
             notices.AddRange(settlements.Select(SettleNotice));
+            // #122: report created documents on the success path too -- they remain open and unsaved, and a
+            // script that created them on purpose still needs their handle to close or save them next.
+            var createdOnSuccess = CreatedDocumentsNotice(transactions.CreatedDocuments, orphanedByFailure: false);
+            if (createdOnSuccess is not null)
+            {
+                notices.Add(createdOnSuccess);
+            }
 
             if (!commit.Success)
             {
@@ -201,6 +216,63 @@ internal sealed class TransactionScriptExecutor
             remedy: settlement.Kept
                 ? new[] { "If this was not intended, the changes cannot be rolled back -- inspect the document and correct it explicitly." }
                 : null);
+
+    /// <summary>
+    /// #122: reports the documents THIS run created, on EVERY run (success and failure), so a created
+    /// document that outlives its run never does so silently (PRD §01 observability-over-silence). Null --
+    /// no notice -- when nothing was created, which is the common case. No new <c>Connector</c> member and
+    /// no mid-run transaction-release: the identities are already tracked by ManagedDocumentTransactions,
+    /// and this only surfaces them.
+    ///
+    /// Severity splits by <paramref name="orphanedByFailure"/>, mirroring the Info-vs-Warning line
+    /// <see cref="SettleNotice"/> draws (independent PR review finding). On a SUCCEEDED run a created
+    /// document is Info -- an intentional result, here is its handle. On a FAILED run it is a Warning: the
+    /// script threw without returning, so it is an ORPHAN the agent never got to name -- exactly the #114
+    /// leak -- which is precisely the state §01 wants flagged, not merely noted.
+    /// </summary>
+    internal static DiagnosticRecord? CreatedDocumentsNotice(
+        IReadOnlyList<ManagedDocumentTransactions.CreatedDocumentRecord> created,
+        bool orphanedByFailure)
+    {
+        if (created.Count == 0)
+        {
+            return null;
+        }
+
+        var named = string.Join(", ", created.Select(d => $"'{d.Title}' ({d.DocumentId})"));
+        var message = orphanedByFailure
+            ? $"This run FAILED after creating {created.Count} document(s): {named}. The rollback undid their " +
+              "content but not their existence, so -- unless the script closed one explicitly -- each is still open " +
+              "and unsaved, orphaned with no returned result to have named it. See the remedy to close one, or route " +
+              "more work at it by document_id."
+            : $"This run created {created.Count} document(s): {named}. Unless the script closed one explicitly, each " +
+              "remains open and unsaved. See the remedy to close or save one, or route more work at it by document_id.";
+
+        return DiagnosticRecord.Create(
+            orphanedByFailure ? DiagnosticSeverity.Warning : DiagnosticSeverity.Info,
+            "script-created-documents",
+            DiagnosticSource.Execution,
+            message,
+            detail: new Dictionary<string, object?>
+            {
+                ["created_documents"] = created
+                    .Select(d => new Dictionary<string, object?>
+                    {
+                        ["title"] = d.Title,
+                        ["document_id"] = d.DocumentId,
+                    })
+                    .ToArray(),
+            },
+            remedy: new[]
+            {
+                "To close a scratch document, run a follow-up execute_script routed at a DIFFERENT open document " +
+                "(not this one) and reach it through UIApplication.Application.Documents, matching its Title AND " +
+                "PathName == \"\" (so a saved file of the same name is never closed), then call Document.Close(false) " +
+                "-- or SaveAs to keep it -- with confirm_lifecycle_actions: true. Routing the call AT this document " +
+                "instead makes the connector open a transaction on it, which Revit refuses to Close; see get_skills " +
+                "for the full scratch-document recipe. Leaving it open is fine too.",
+            });
+    }
 
     private static DiagnosticRecord ToDiagnosticRecord(FailureSummary failure) => DiagnosticRecord.Create(
         failure.IsError ? DiagnosticSeverity.Error : DiagnosticSeverity.Warning,

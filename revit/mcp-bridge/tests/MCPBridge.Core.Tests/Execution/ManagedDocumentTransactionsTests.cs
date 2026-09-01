@@ -169,6 +169,80 @@ public class ManagedDocumentTransactionsTests
     }
 
     [Fact]
+    public void CreatedDocuments_ReportsOnlyDocumentsCreatedThisRun_NotAmbientOrAdopted()
+    {
+        // #122: only CreatedThisRun documents outlive the run with no other handle. The ambient document
+        // and an OpenForWriting-adopted one existed before the run, so they must NOT be reported as created.
+        var journal = new List<string>();
+        var set = NewSet();
+        set.Open(new JournalingDocumentAdapter("work", journal), isAmbient: true);          // Ambient
+        set.OpenAdoptedForTesting(new JournalingDocumentAdapter("existing", journal));       // AdoptedExisting
+        set.Open(new JournalingDocumentAdapter("Project1", journal));                        // CreatedThisRun
+        set.Open(new JournalingDocumentAdapter("Family1", journal));                         // CreatedThisRun
+
+        var created = set.CreatedDocuments;
+
+        Assert.Equal(2, created.Count);
+        Assert.Contains(created, d => d.Title == "Project1" && d.DocumentId == "tmp-Project1");
+        Assert.Contains(created, d => d.Title == "Family1" && d.DocumentId == "tmp-Family1");
+        Assert.DoesNotContain(created, d => d.Title == "work");      // ambient excluded
+        Assert.DoesNotContain(created, d => d.Title == "existing");  // adopted excluded
+    }
+
+    [Fact]
+    public void CreatedDocuments_SurvivesRollBackAll_SoAFailedRunCanStillReportThem()
+    {
+        // The heart of #122: a script that creates documents then throws rolls back, and RollBackAll drops
+        // the entry set -- but the created documents STILL EXIST (rollback undoes content, not existence).
+        // The captured identities must survive that drop, or the error path has no handle to report. This
+        // fails if CreatedDocuments read the entry set instead of a persistent capture.
+        var journal = new List<string>();
+        var set = NewSet();
+        set.Open(new JournalingDocumentAdapter("work", journal), isAmbient: true);
+        set.Open(new JournalingDocumentAdapter("Project1", journal));  // CreatedThisRun
+
+        set.RollBackAll();
+
+        Assert.Equal(0, set.Count); // the entry set is gone...
+        var created = set.CreatedDocuments;
+        Assert.Single(created);     // ...but the created-document identity survived.
+        Assert.Equal("Project1", created[0].Title);
+        Assert.Equal("tmp-Project1", created[0].DocumentId);
+    }
+
+    [Fact]
+    public void CreatedDocuments_CapturesADocumentWhoseTitleThrows_WithoutLettingTheThrowEscapeOpen()
+    {
+        // #122 (review): Title is a live Revit call that can throw for a document mid-transition (the same
+        // reason Describe routes through SafeDescribe). Capturing it must degrade to a placeholder, never
+        // escape Open -- the document_id is still a usable handle for a later close/save.
+        var journal = new List<string>();
+        var set = NewSet();
+
+        set.Open(new ThrowingTitleDocumentAdapter("created", journal)); // must not throw from the Title read
+
+        var created = Assert.Single(set.CreatedDocuments);
+        Assert.Equal("tmp-created", created.DocumentId); // the real handle survived
+        Assert.Contains("unavailable", created.Title);   // Title degraded to the placeholder
+    }
+
+    [Fact]
+    public void CreatedDocuments_DoesNotDoubleCapture_WhenACreatedDocumentIsReopenedAfterItsEntryWasDropped()
+    {
+        // #122 (review): a created document that is settled (which empties the entry set) and then re-Opened
+        // -- via a fresh WithTransaction/OpenForWriting -- passes the duplicate-open guard (its entry is gone)
+        // but must not be captured twice. RollBackAll drops the entry set the same way a settle does, so
+        // re-Opening after it exercises the de-dup path deterministically.
+        var journal = new List<string>();
+        var set = NewSet();
+        set.Open(new JournalingDocumentAdapter("Project1", journal)); // CreatedThisRun -- captured
+        set.RollBackAll();                                            // drops _entries, keeps the capture
+        set.Open(new JournalingDocumentAdapter("Project1", journal)); // same document_id, entry gone -> no guard
+
+        Assert.Single(set.CreatedDocuments); // de-duped by document_id, still exactly one
+    }
+
+    [Fact]
     public void Open_RollsBackTheGroup_WhenStartingTheTransactionThrows()
     {
         // Otherwise the group is started, untracked, and never closed -- an open TransactionGroup
