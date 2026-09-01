@@ -44,7 +44,6 @@ public sealed class Win32WindowInventory : IWindowInventory
     {
         var currentProcessId = (uint)Environment.ProcessId;
         var results = new List<WindowInfo>();
-        var dismissed = new List<DismissedDialog>();
         var budget = System.Diagnostics.Stopwatch.StartNew();
         var truncated = false;
 
@@ -72,16 +71,16 @@ public sealed class Win32WindowInventory : IWindowInventory
             var className = GetClassNameOf(hWnd);
 
             // §07 v2: consult the Core-owned allowlist. A match is CLOSED (fire-and-forget WM_CLOSE) and
-            // recorded as dismissed instead of being listed as a present window -- it is on its way out, so
-            // reporting it as still-present would be misleading. Only the plain title is used to match, so
-            // a match with a timed-out title never happens (the placeholder never matches the allowlist).
+            // handed to onDismissed instead of being listed as a present window -- it is on its way out, so
+            // reporting it as still-present would be misleading. onDismissed (not the snapshot) is the
+            // reporting channel, so the dismissal survives the caller's #138 wire-budget abandon. Only the
+            // plain title is used to match, so a match with a timed-out title never happens (the placeholder
+            // never matches the allowlist).
             if (shouldDismiss(className, title))
             {
                 if (TryPostClose(hWnd))
                 {
-                    var dd = new DismissedDialog(className, title);
-                    dismissed.Add(dd);
-                    onDismissed(dd); // side channel that survives the caller's #138 wire-budget abandon
+                    onDismissed(new DismissedDialog(className, title));
                     return true;
                 }
 
@@ -104,12 +103,13 @@ public sealed class Win32WindowInventory : IWindowInventory
         {
             // Diagnosis-only feature: an empty inventory is a safe, honest degrade -- never worth
             // risking the caller's own poll/execute response over. Truncated, though: an exception
-            // mid-pass means an unknown amount was never enumerated. Any dismissals already posted
-            // before the fault stand -- WM_CLOSE was already sent -- so report them.
-            return new WindowInventorySnapshot(Array.Empty<WindowInfo>(), Truncated: true, dismissed);
+            // mid-pass means an unknown amount was never enumerated. Any dismissals already posted before
+            // the fault stand -- WM_CLOSE was sent and onDismissed already fired for each, independent of
+            // this return value.
+            return new WindowInventorySnapshot(Array.Empty<WindowInfo>(), Truncated: true);
         }
 
-        return new WindowInventorySnapshot(results, truncated, dismissed);
+        return new WindowInventorySnapshot(results, truncated);
     }
 
     // §07 v2 auto-dismiss action: PostMessage (asynchronous, fire-and-forget) NOT SendMessage -- a

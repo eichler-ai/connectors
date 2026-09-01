@@ -10,8 +10,9 @@ public sealed class FakeWindowInventory : IWindowInventory
     public bool Truncated { get; set; }
     public bool ThrowOnEnumerate { get; set; }
 
-    // §07 v2: a test can configure the auto-dismissed dialogs the real adapter would report (the fake does
-    // not itself run the P/Invoke WM_CLOSE), and inspect which predicate the caller passed in.
+    // §07 v2: a test configures the dialogs the real adapter would auto-dismiss (the fake does not run the
+    // P/Invoke WM_CLOSE); each is delivered through onDismissed, the same side channel the real adapter uses.
+    // Inspect LastShouldDismiss to assert which predicate the caller passed in.
     public IReadOnlyList<DismissedDialog> Dismissed { get; set; } = Array.Empty<DismissedDialog>();
     public Func<string, string, bool>? LastShouldDismiss { get; private set; }
 
@@ -52,6 +53,6 @@ public sealed class FakeWindowInventory : IWindowInventory
             throw new InvalidOperationException("simulated EnumWindows failure");
         }
 
-        return new WindowInventorySnapshot(Windows, Truncated, Dismissed);
+        return new WindowInventorySnapshot(Windows, Truncated);
     }
 }

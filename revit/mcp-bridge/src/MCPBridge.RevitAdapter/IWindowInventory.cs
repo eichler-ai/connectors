@@ -13,9 +13,9 @@ public interface IWindowInventory
 {
     /// <summary>
     /// Enumerates this process's owned top-level windows. For each one, <paramref name="shouldDismiss"/>
-    /// (className, title) is consulted: a match is dismissed via a fire-and-forget WM_CLOSE and reported
-    /// on <see cref="WindowInventorySnapshot.Dismissed"/> INSTEAD of appearing among the present Windows;
-    /// a non-match is inventoried exactly as in v1. The predicate lives in MCPBridge.Core
+    /// (className, title) is consulted: a match is dismissed via a fire-and-forget WM_CLOSE and handed to
+    /// <paramref name="onDismissed"/> INSTEAD of appearing among the snapshot's present Windows; a non-match
+    /// is inventoried exactly as in v1. The predicate lives in MCPBridge.Core
     /// (DialogAutoDismissPolicy) so the allowlist DECISION stays unit-testable while this P/Invoke ACTION
     /// does not depend on Core.
     ///
@@ -37,22 +37,14 @@ public interface IWindowInventory
 /// would have an agent -- or a human triaging a stuck dialog -- conclude a window doesn't exist
 /// when it merely wasn't reached. When Truncated is true, the §07 fallback notice says so.
 /// </summary>
-public sealed record WindowInventorySnapshot(
-    IReadOnlyList<WindowInfo> Windows,
-    bool Truncated,
-    IReadOnlyList<DismissedDialog> Dismissed)
-{
-    /// <summary>Convenience for the no-dismissal case: Dismissed defaults to empty.</summary>
-    public WindowInventorySnapshot(IReadOnlyList<WindowInfo> Windows, bool Truncated)
-        : this(Windows, Truncated, Array.Empty<DismissedDialog>())
-    {
-    }
-}
+public sealed record WindowInventorySnapshot(IReadOnlyList<WindowInfo> Windows, bool Truncated);
 
 /// <summary>
 /// A window the §07 v2 allowlist matched and this pass posted WM_CLOSE to (best-effort). Carries only
 /// its class+title -- string identifiers, no window handle -- so this public, script-reachable type
-/// exposes no capability. Reported as a §01 notice by the caller so an auto-dismiss is never silent.
+/// exposes no capability. Delivered through EnumerateOwnedTopLevelWindows's onDismissed callback (NOT on
+/// the snapshot) so the caller can report it as a §01 notice even when the pass's return value is
+/// discarded by the #138 wire-budget cap; a dismissal is an action already taken and must never be silent.
 /// </summary>
 public sealed record DismissedDialog(string ClassName, string Title);
 

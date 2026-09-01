@@ -378,8 +378,9 @@ public sealed class RequestDispatcher
 
             // Observe the abandoned Task so a fault never surfaces as an unobserved-task exception, and log
             // its true uncapped elapsed on completion either way -- that number is what says whether the cap
-            // is sized right (#136). Also log any dismissal it recorded that arrived AFTER the snapshot below,
-            // so a late auto-dismiss is at least never fully silent (§01).
+            // is sized right (#136). The TOTAL dismissal count is logged here too: if it exceeds what the
+            // response below reported (a dismissal that landed after the response's snapshot), that late
+            // auto-dismiss is at least never fully silent (§01), it is in the log.
             _ = inventoryTask.ContinueWith(
                 t =>
                 {
