@@ -35,6 +35,19 @@ type Document struct {
 	Active     bool   `json:"active"`
 }
 
+// MemorySample is one reading of a Revit process's own memory, sampled in-process
+// by the add-in (issue #31) and pushed on the heartbeat ping. PrivateMB (committed)
+// is the headline signal for the document-model growth #31 tracks; WorkingSetMB is
+// OS-trimmed and noisy; ManagedMB (the CLR heap) separates the connector's own
+// managed footprint from Revit's native document memory. It rides the ping rather
+// than `register` so it keeps updating on the background connection thread even while
+// a script is running or the UI thread is wedged.
+type MemorySample struct {
+	PrivateMB    int64 `json:"private_mb"`
+	WorkingSetMB int64 `json:"working_set_mb"`
+	ManagedMB    int64 `json:"managed_mb"`
+}
+
 // Instance is the broker's live record of one connected Revit MCP Bridge,
 // populated from its `register` notification (PRD §05).
 type Instance struct {
@@ -43,6 +56,10 @@ type Instance struct {
 	RevitVersion   string     `json:"revit_version"`
 	Documents      []Document `json:"documents"`
 	ConnectedSince time.Time  `json:"connected_since"`
+	// Memory is the latest heartbeat memory sample (issue #31), merged in by List()
+	// from a separate map so a doc-event re-register (which REPLACES the Instance)
+	// doesn't wipe it. Nil until the first ping carrying a sample has arrived.
+	Memory *MemorySample `json:"memory,omitempty"`
 }
 
 // Registry is the broker's thread-safe, in-memory instance table, keyed by
@@ -51,6 +68,12 @@ type Registry struct {
 	mu         sync.RWMutex
 	instances  map[string]*Instance
 	lastPingAt map[string]time.Time
+	// memory holds each instance's latest heartbeat memory sample (issue #31),
+	// keyed by instance_id and kept SEPARATE from the Instance record on purpose:
+	// Register replaces the Instance outright on every doc-event re-register, and
+	// memory continuity for a live process must survive that. Merged into the
+	// returned Instances by List(); cleaned up wherever an instance is dropped.
+	memory map[string]*MemorySample
 
 	// epochs tracks a monotonically-increasing registration epoch per
 	// instance_id, minted by Register and consumed by RemoveIfEpoch — see
@@ -64,6 +87,7 @@ func New() *Registry {
 	return &Registry{
 		instances:  make(map[string]*Instance),
 		lastPingAt: make(map[string]time.Time),
+		memory:     make(map[string]*MemorySample),
 		epochs:     make(map[string]uint64),
 	}
 }
@@ -137,6 +161,7 @@ func (r *Registry) RemoveIfEpoch(instanceID string, epoch uint64) {
 	}
 	delete(r.instances, instanceID)
 	delete(r.lastPingAt, instanceID)
+	delete(r.memory, instanceID)
 	delete(r.epochs, instanceID)
 }
 
@@ -145,22 +170,30 @@ func (r *Registry) List() []*Instance {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	out := make([]*Instance, 0, len(r.instances))
-	for _, inst := range r.instances {
-		out = append(out, cloneInstance(inst))
+	for id, inst := range r.instances {
+		cp := cloneInstance(inst)
+		cp.Memory = r.memory[id] // nil-safe; shares the immutable sample pointer
+		out = append(out, cp)
 	}
 	return out
 }
 
 // RecordPing updates instanceID's last-seen timestamp (PRD §05 heartbeat)
-// to now. A no-op if the instance isn't registered — a ping racing a Remove
-// (or one that never registered at all) has nothing to record against.
-func (r *Registry) RecordPing(instanceID string, now time.Time) {
+// to now, and, when mem is non-nil, its latest memory sample (issue #31). A
+// no-op if the instance isn't registered — a ping racing a Remove (or one that
+// never registered at all) has nothing to record against. mem is stored by
+// pointer; the add-in mints a fresh sample per ping and never mutates a sent
+// one, so callers must not either.
+func (r *Registry) RecordPing(instanceID string, now time.Time, mem *MemorySample) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, ok := r.instances[instanceID]; !ok {
 		return
 	}
 	r.lastPingAt[instanceID] = now.UTC()
+	if mem != nil {
+		r.memory[instanceID] = mem
+	}
 }
 
 // IsResponsive reports whether instanceID has been heard from recently
@@ -204,6 +237,7 @@ func (r *Registry) PruneStale(now time.Time) []string {
 	for _, id := range pruned {
 		delete(r.instances, id)
 		delete(r.lastPingAt, id)
+		delete(r.memory, id)
 		delete(r.epochs, id)
 	}
 	return pruned

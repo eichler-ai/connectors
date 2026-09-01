@@ -33,12 +33,17 @@ type InstanceDocument struct {
 // InstanceEntry is one instance's entry in the list_instances response,
 // matching the PRD §05 field table exactly.
 type InstanceEntry struct {
-	InstanceID     string             `json:"instance_id"`
-	RevitVersion   string             `json:"revit_version"`
-	PID            int                `json:"pid"`
-	ConnectedSince time.Time          `json:"connected_since"`
-	Status         string             `json:"status"`
-	Documents      []InstanceDocument `json:"documents"`
+	InstanceID     string    `json:"instance_id"`
+	RevitVersion   string    `json:"revit_version"`
+	PID            int       `json:"pid"`
+	ConnectedSince time.Time `json:"connected_since"`
+	Status         string    `json:"status"`
+	// Memory is the instance's latest heartbeat memory sample (issue #31), or
+	// nil until its first ping carrying one has arrived. Passed straight through
+	// from the registry, which merges it in from a map kept separate from the
+	// Instance record so a doc-event re-register doesn't wipe it.
+	Memory    *registry.MemorySample `json:"memory,omitempty"`
+	Documents []InstanceDocument     `json:"documents"`
 }
 
 // ListInstancesOut is the output schema for the list_instances tool.
@@ -61,6 +66,7 @@ func RegisterInstances(s *mcp.Server, reg *registry.Registry, mgr *execution.Man
 				PID:            inst.PID,
 				ConnectedSince: inst.ConnectedSince,
 				Status:         string(mergedStatus(reg, mgr, inst.InstanceID)),
+				Memory:         inst.Memory,
 				Documents:      instanceDocuments(inst.Documents),
 			})
 		}

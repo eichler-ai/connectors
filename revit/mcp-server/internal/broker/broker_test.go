@@ -635,3 +635,72 @@ func TestReconnectOverlapKeepsLiveInstanceRegistered(t *testing.T) {
 	}
 	t.Fatal("instance should deregister when its live connection closes cleanly")
 }
+
+// TestPingCarriesMemorySampleToRegistry locks in the broker's ping-handler decode
+// for issue #31: a ping's memory params flow through serveAddIn into the registry
+// (surfaced by List()'s merge), a bare ping records liveness without a sample, and
+// a later bare ping preserves the last sample (RecordPing replaces only when a
+// sample is present). The registry test covers the storage; this covers the wire
+// decode in the dispatch layer, which the registry test cannot reach.
+func TestPingCarriesMemorySampleToRegistry(t *testing.T) {
+	b, ln := newTestBroker(t)
+	conn, br, resp := dialAndAuth(t, ln.Addr().String(), testToken, RoleAddIn)
+	defer conn.Close()
+	if resp.Error != nil {
+		t.Fatalf("auth failed: %+v", resp.Error)
+	}
+
+	addinConn := transport.NewConn(&tail{r: br, conn: conn})
+	addinConn.SetRequestHandler(func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
+		return map[string]any{"status": "success"}, nil
+	})
+	go addinConn.Serve()
+
+	if err := addinConn.Notify("register", registerParams{InstanceID: "inst-mem"}); err != nil {
+		t.Fatalf("Notify register: %v", err)
+	}
+	if !waitFor(2*time.Second, func() bool { _, ok := b.Registry.Get("inst-mem"); return ok }) {
+		t.Fatal("register never reached the registry")
+	}
+
+	sampleOf := func() *registry.MemorySample {
+		for _, inst := range b.Registry.List() {
+			if inst.InstanceID == "inst-mem" {
+				return inst.Memory
+			}
+		}
+		return nil
+	}
+
+	// A bare ping records liveness but carries no sample.
+	if err := addinConn.Notify("ping", struct{}{}); err != nil {
+		t.Fatalf("Notify bare ping: %v", err)
+	}
+	if !waitFor(2*time.Second, func() bool { return b.Registry.IsResponsive("inst-mem", time.Now()) }) {
+		t.Fatal("bare ping never recorded liveness")
+	}
+	if m := sampleOf(); m != nil {
+		t.Fatalf("bare ping should leave Memory nil, got %+v", m)
+	}
+
+	// A ping carrying a sample flows through the handler's decode into the registry.
+	if err := addinConn.Notify("ping", pingParams{Memory: &registry.MemorySample{PrivateMB: 4096, WorkingSetMB: 1200, ManagedMB: 512}}); err != nil {
+		t.Fatalf("Notify memory ping: %v", err)
+	}
+	if !waitFor(2*time.Second, func() bool { m := sampleOf(); return m != nil && m.PrivateMB == 4096 }) {
+		t.Fatal("memory ping never surfaced in the registry")
+	}
+	if m := sampleOf(); m.WorkingSetMB != 1200 || m.ManagedMB != 512 {
+		t.Fatalf("memory sample decoded wrong: %+v", m)
+	}
+
+	// A later bare ping keeps the last sample -- RecordPing replaces only when present.
+	if err := addinConn.Notify("ping", struct{}{}); err != nil {
+		t.Fatalf("Notify bare ping 2: %v", err)
+	}
+	// Nothing to wait on (the value must NOT change); give the notification a beat to be processed.
+	time.Sleep(100 * time.Millisecond)
+	if m := sampleOf(); m == nil || m.PrivateMB != 4096 {
+		t.Fatalf("a later bare ping wiped the retained sample: %+v", m)
+	}
+}

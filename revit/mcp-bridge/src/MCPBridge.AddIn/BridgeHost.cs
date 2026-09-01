@@ -875,7 +875,15 @@ internal sealed class BridgeHost
             {
                 try
                 {
-                    WriteLine(stream, PingMessage.ToJson());
+                    // Issue #31: carry a memory sample on the heartbeat. Sampling is wrapped so a
+                    // failure to read process memory NEVER costs the liveness beat -- fall back to the
+                    // bare ping, which is all the broker needs to keep the instance out of the prune
+                    // sweep. Capture() runs on this timer's own thread-pool thread, off the UI thread,
+                    // which is exactly why the report keeps flowing while a script is running.
+                    string ping;
+                    try { ping = PingMessage.ToJson(MemorySnapshot.Capture()); }
+                    catch { ping = PingMessage.ToJson(); }
+                    WriteLine(stream, ping);
                 }
                 catch
                 {

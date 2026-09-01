@@ -136,7 +136,7 @@ func TestIsResponsiveFallsBackToConnectedSinceBeforeFirstPing(t *testing.T) {
 func TestIsResponsiveTracksMostRecentPing(t *testing.T) {
 	r := New()
 	r.Register(&Instance{InstanceID: "inst-1"}, time.Now())
-	r.RecordPing("inst-1", time.Now())
+	r.RecordPing("inst-1", time.Now(), nil)
 
 	if !r.IsResponsive("inst-1", time.Now().Add(UnresponsiveThreshold-time.Second)) {
 		t.Errorf("instance pinged recently should be responsive")
@@ -148,7 +148,7 @@ func TestIsResponsiveTracksMostRecentPing(t *testing.T) {
 
 func TestRecordPingNoOpForUnregisteredInstance(t *testing.T) {
 	r := New()
-	r.RecordPing("does-not-exist", time.Now()) // must not panic
+	r.RecordPing("does-not-exist", time.Now(), nil) // must not panic
 	if len(r.List()) != 0 {
 		t.Errorf("a ping for an unregistered instance must not create a registry entry")
 	}
@@ -159,7 +159,7 @@ func TestRegisterResetsLivenessOnReconnect(t *testing.T) {
 	clock := time.Now()
 
 	r.Register(&Instance{InstanceID: "inst-1"}, clock)
-	r.RecordPing("inst-1", clock)
+	r.RecordPing("inst-1", clock, nil)
 
 	// Advance the clock well past the old ping's staleness threshold, then
 	// reconnect (re-register) — if reset didn't clear the old ping, a
@@ -185,7 +185,7 @@ func TestPruneStaleRemovesInstancesPastTheSilenceThreshold(t *testing.T) {
 	// artificially compared against a shifted query time.
 	clock = clock.Add(PruneAfterSilence / 2)
 	r.Register(&Instance{InstanceID: "fresh"}, clock)
-	r.RecordPing("fresh", clock)
+	r.RecordPing("fresh", clock, nil)
 
 	clock = clock.Add(PruneAfterSilence/2 + time.Second)
 	pruned := r.PruneStale(clock)
@@ -244,4 +244,55 @@ func TestRemoveIfEpochIgnoresStaleEpoch(t *testing.T) {
 	// Removing an already-removed (or never-registered) id is a no-op.
 	r.RemoveIfEpoch("inst-1", epochB)
 	r.RemoveIfEpoch("never-registered", 42)
+}
+
+// TestMemorySamplePersistsAcrossReRegisterAndSurfacesInList covers issue #31's
+// heartbeat-memory path: a ping's sample surfaces in List(), a bare ping leaves
+// it nil, a doc-event re-register (which REPLACES the Instance) does NOT wipe it,
+// and removal cleans it up.
+func TestMemorySamplePersistsAcrossReRegisterAndSurfacesInList(t *testing.T) {
+	find := func(list []*Instance, id string) *Instance {
+		for _, inst := range list {
+			if inst.InstanceID == id {
+				return inst
+			}
+		}
+		return nil
+	}
+
+	r := New()
+	epoch := r.Register(&Instance{InstanceID: "inst-1"}, time.Now())
+
+	// A bare ping (no sample) records liveness but leaves Memory nil.
+	r.RecordPing("inst-1", time.Now(), nil)
+	if got := find(r.List(), "inst-1"); got == nil || got.Memory != nil {
+		t.Fatalf("bare ping: want registered instance with nil Memory, got %+v", got)
+	}
+
+	// A ping carrying a sample surfaces it in List().
+	r.RecordPing("inst-1", time.Now(), &MemorySample{PrivateMB: 1234, WorkingSetMB: 567, ManagedMB: 89})
+	if got := find(r.List(), "inst-1"); got == nil || got.Memory == nil || got.Memory.PrivateMB != 1234 {
+		t.Fatalf("sample not surfaced in List: %+v", got)
+	}
+
+	// KEY PROPERTY: a doc-event re-register replaces the Instance outright but must
+	// NOT wipe the memory sample -- it lives in a separate map keyed by instance_id.
+	epoch = r.Register(&Instance{InstanceID: "inst-1", RevitVersion: "2025"}, time.Now())
+	if got := find(r.List(), "inst-1"); got == nil || got.Memory == nil || got.Memory.PrivateMB != 1234 {
+		t.Fatalf("re-register wiped the memory sample: %+v", got)
+	}
+
+	// A ping for an unregistered instance stores nothing (no leak).
+	r.RecordPing("ghost", time.Now(), &MemorySample{PrivateMB: 9})
+	if find(r.List(), "ghost") != nil {
+		t.Fatalf("ping for an unregistered instance created an entry")
+	}
+
+	// Removal (with the CURRENT epoch) cleans up the sample; re-registering the
+	// same id then starts fresh with nil Memory.
+	r.RemoveIfEpoch("inst-1", epoch)
+	r.Register(&Instance{InstanceID: "inst-1"}, time.Now())
+	if got := find(r.List(), "inst-1"); got == nil || got.Memory != nil {
+		t.Fatalf("memory sample survived removal: %+v", got)
+	}
 }
