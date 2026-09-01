@@ -238,17 +238,20 @@ public class RequestDispatcherTests
     // is the thing that was wrong; asserting the message alone is what let it pass unnoticed.
 
     [Fact]
-    public async Task ExecuteScript_DeniedByTheDenylist_ReportsItsOwnCodeAndRemedy()
+    public async Task ExecuteScript_DeniedByTheDenylist_RejectedWithoutRaisingTheEvent()
     {
         var executionManager = NewExecutionManager();
-        var bridge = new ExternalEventBridge<ScriptExecutionOutcome>(new FakeExternalEventRaiser());
+        var raiser = new FakeExternalEventRaiser();
+        var bridge = new ExternalEventBridge<ScriptExecutionOutcome>(raiser);
         var dispatcher = new RequestDispatcher(executionManager, bridge, NewScriptExecutor());
 
-        var dispatchTask = dispatcher.DispatchAsync(
-            ExecuteScriptRequest(1, "exec-1", "new Autodesk.Revit.DB.Transaction(Document, \"x\");"));
-        bridge.OnExecute(NewUiApp());
-
-        var json = await dispatchTask;
+        // #67: a denylisted script is a pure compile-time property, so it is rejected on the connection
+        // thread BEFORE the ExternalEvent is raised -- note there is no bridge.OnExecute(...) call here, and
+        // the rejection still comes back. Pre-fix (rejection computed inside the UI-thread work item), this
+        // dispatch would instead have raised the event, waited out timeout_ms with no OnExecute, and
+        // returned a non-terminal `running`. The small timeout_ms keeps that regression cheap to observe.
+        var json = await dispatcher.DispatchAsync(
+            ExecuteScriptRequest(1, "exec-1", "new Autodesk.Revit.DB.Transaction(Document, \"x\");", timeoutMs: 1000));
 
         Assert.Contains("\"status\":\"error\"", json);
         Assert.Contains($"\"code\":\"{ScriptApiDenylistViolationException.DeniedCode}\"", json);
@@ -256,6 +259,9 @@ public class RequestDispatcherTests
         // Unconditional refusal, so the remedy is "change the script", never "retry with a flag".
         Assert.Contains("no argument to execute_script permits it", json);
         Assert.DoesNotContain("confirm_lifecycle_actions", json);
+        // The #67 guarantee: the rejection never went through the UI-thread work item -- the event that
+        // would queue behind a congested UI thread was never raised at all.
+        Assert.Equal(0, raiser.RaiseCallCount);
     }
 
     /// <summary>

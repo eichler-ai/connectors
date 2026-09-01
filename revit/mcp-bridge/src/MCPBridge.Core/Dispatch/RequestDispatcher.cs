@@ -262,6 +262,20 @@ public sealed class RequestDispatcher
                 return ExecutionResultMessage.FromInstanceUnrecoverable(request.Id, outcome.Diagnostic!);
         }
 
+        // #67: compile + denylist-check on THIS (connection) thread, before raising the ExternalEvent. A
+        // compile-time rejection -- bad C#, a denylisted member, an unconfirmed lifecycle call -- is a pure
+        // property of the script text, needing nothing from Revit's UI thread. Rejecting it here makes the
+        // rejection immediate and DETERMINISTIC: it can no longer queue behind a congested UI thread and be
+        // reported as `running` with the instance left busy for a script that never runs (the exact #67
+        // symptom). The record is settled as a terminal error without the ExternalEvent ever being raised;
+        // on success the compile is left warm in the cache, so the UI-thread run reuses it with no recompile.
+        var preflightRejection = _scriptExecutor.TryPreflight(script, confirmLifecycleActions);
+        if (preflightRejection is not null)
+        {
+            CompleteExecutionAsError(executionId, preflightRejection);
+            return ExecutionResultMessage.FromRecord(request.Id, _executionManager.Poll(executionId)!);
+        }
+
         var workTask = RunScriptWorkItemAsync(executionId, script, documentId, overwriteOutputFiles, confirmLifecycleActions);
 
         // PRD §06: a script finishing inside timeout_ms returns the completed result inline; one that
@@ -692,26 +706,7 @@ public sealed class RequestDispatcher
         }
         else
         {
-            var (code, remedy) = FailureCodeAndRemedy(outcome.Exception);
-            var diagnostic = DiagnosticRecord.Create(
-                DiagnosticSeverity.Error,
-                code,
-                DiagnosticSource.Execution,
-                outcome.Exception?.Message ?? $"execution {executionId} failed with no exception detail.",
-                // exception_type: PRD §01 requires the wrapped exception's message AND type, and the
-                // type genuinely disambiguates -- §14 records that Autodesk's and System's
-                // InvalidOperationException share a short name, so a message alone can send a reader
-                // to the wrong catch clause (v1 integrated review). Omitted, not null, when there is
-                // no exception object at all.
-                detail: outcome.Exception is null
-                    ? new Dictionary<string, object?> { ["execution_id"] = executionId }
-                    : new Dictionary<string, object?>
-                    {
-                        ["execution_id"] = executionId,
-                        ["exception_type"] = outcome.Exception.GetType().FullName,
-                    },
-                remedy: remedy);
-            _executionManager.CompleteError(executionId, _now(), diagnostic, outcome.StdOut, outcome.Notices, outcome.Files);
+            CompleteExecutionAsError(executionId, outcome);
         }
 
         // The §09 audit trail (issue #13): the verbatim script and a per-run NDJSON log land in the
@@ -764,6 +759,37 @@ public sealed class RequestDispatcher
             // code calling arbitrary script code. GetType().Name cannot run script code.
             return $"<return value of type {value.GetType().FullName} -- formatting threw {ex.GetType().Name}>";
         }
+    }
+
+    /// <summary>
+    /// Settles <paramref name="executionId"/>'s record as a terminal error from a failed
+    /// <see cref="ScriptExecutionOutcome"/>, mapping the exception to its §01 code/remedy
+    /// (<see cref="FailureCodeAndRemedy"/>). Shared by the UI-thread work item's failure branch and #67's
+    /// connection-thread pre-flight rejection, so both report an invalid script identically -- the only
+    /// difference is that the pre-flight path never raised the ExternalEvent.
+    /// </summary>
+    private void CompleteExecutionAsError(string executionId, ScriptExecutionOutcome outcome)
+    {
+        var (code, remedy) = FailureCodeAndRemedy(outcome.Exception);
+        var diagnostic = DiagnosticRecord.Create(
+            DiagnosticSeverity.Error,
+            code,
+            DiagnosticSource.Execution,
+            outcome.Exception?.Message ?? $"execution {executionId} failed with no exception detail.",
+            // exception_type: PRD §01 requires the wrapped exception's message AND type, and the
+            // type genuinely disambiguates -- §14 records that Autodesk's and System's
+            // InvalidOperationException share a short name, so a message alone can send a reader
+            // to the wrong catch clause (v1 integrated review). Omitted, not null, when there is
+            // no exception object at all.
+            detail: outcome.Exception is null
+                ? new Dictionary<string, object?> { ["execution_id"] = executionId }
+                : new Dictionary<string, object?>
+                {
+                    ["execution_id"] = executionId,
+                    ["exception_type"] = outcome.Exception.GetType().FullName,
+                },
+            remedy: remedy);
+        _executionManager.CompleteError(executionId, _now(), diagnostic, outcome.StdOut, outcome.Notices, outcome.Files);
     }
 
     /// <summary>

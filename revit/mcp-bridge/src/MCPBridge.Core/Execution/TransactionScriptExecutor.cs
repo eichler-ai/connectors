@@ -53,6 +53,13 @@ internal sealed class TransactionScriptExecutor
     /// this executor).</summary>
     internal void WarmupCompile() => _runner.WarmupCompile();
 
+    /// <summary>#67: see <see cref="RoslynScriptRunner.TryPreflight"/>. Exposed here (like WarmupCompile)
+    /// so the dispatcher, which holds only this executor, can compile + denylist-check a script on the
+    /// connection thread before raising the ExternalEvent and reject an invalid one immediately. No
+    /// transaction is opened and no Revit object is touched -- this is a pure compile-time check.</summary>
+    internal ScriptExecutionOutcome? TryPreflight(string scriptText, bool confirmLifecycleActions = false)
+        => _runner.TryPreflight(scriptText, confirmLifecycleActions);
+
     public TransactionScriptExecutor(RoslynScriptRunner runner)
     {
         _runner = runner;
