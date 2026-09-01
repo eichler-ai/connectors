@@ -27,6 +27,7 @@ public sealed class Win32WindowInventory : IWindowInventory
     // The overall budget caps the whole pass regardless; a truncated inventory is an honest
     // degrade for a diagnosis-only feature, and the caller's wire deadline stays comfortably met.
     private const uint WM_GETTEXT = 0x000D;
+    private const uint WM_CLOSE = 0x0010;
     private const uint SMTO_BLOCK = 0x0001;
     private const uint SMTO_ABORTIFHUNG = 0x0008;
     private const uint PerWindowTextTimeoutMs = 100;
@@ -37,7 +38,9 @@ public sealed class Win32WindowInventory : IWindowInventory
     /// <summary>Placeholder for a title whose WM_GETTEXT read timed out -- reported, not dropped (PRD §01).</summary>
     internal const string TextUnavailablePlaceholder = "<text unavailable within budget>";
 
-    public WindowInventorySnapshot EnumerateOwnedTopLevelWindows()
+    public WindowInventorySnapshot EnumerateOwnedTopLevelWindows(
+        Func<string, string, bool> shouldDismiss,
+        Action<DismissedDialog> onDismissed)
     {
         var currentProcessId = (uint)Environment.ProcessId;
         var results = new List<WindowInfo>();
@@ -66,6 +69,26 @@ public sealed class Win32WindowInventory : IWindowInventory
             }
 
             var className = GetClassNameOf(hWnd);
+
+            // §07 v2: consult the Core-owned allowlist. A match is CLOSED (fire-and-forget WM_CLOSE) and
+            // handed to onDismissed instead of being listed as a present window -- it is on its way out, so
+            // reporting it as still-present would be misleading. onDismissed (not the snapshot) is the
+            // reporting channel, so the dismissal survives the caller's #138 wire-budget abandon. Only the
+            // plain title is used to match, so a match with a timed-out title never happens (the placeholder
+            // never matches the allowlist).
+            if (shouldDismiss(className, title))
+            {
+                if (TryPostClose(hWnd))
+                {
+                    onDismissed(new DismissedDialog(className, title));
+                    return true;
+                }
+
+                // Post failed: degrade to "not dismissed" and fall through to inventory it as present,
+                // so a benign but un-closable dialog is still surfaced for manual triage (same best-effort
+                // posture as the rest of this class).
+            }
+
             var childText = CollectChildText(hWnd, budget, ref truncated);
 
             results.Add(new WindowInfo(title, className, childText));
@@ -80,11 +103,30 @@ public sealed class Win32WindowInventory : IWindowInventory
         {
             // Diagnosis-only feature: an empty inventory is a safe, honest degrade -- never worth
             // risking the caller's own poll/execute response over. Truncated, though: an exception
-            // mid-pass means an unknown amount was never enumerated.
+            // mid-pass means an unknown amount was never enumerated. Any dismissals already posted before
+            // the fault stand -- WM_CLOSE was sent and onDismissed already fired for each, independent of
+            // this return value.
             return new WindowInventorySnapshot(Array.Empty<WindowInfo>(), Truncated: true);
         }
 
         return new WindowInventorySnapshot(results, truncated);
+    }
+
+    // §07 v2 auto-dismiss action: PostMessage (asynchronous, fire-and-forget) NOT SendMessage -- a
+    // blocking send would re-introduce the very UI-thread block #138 removed by capping the pass. WM_CLOSE
+    // asks the dialog to close as if its X were clicked; it does NOT tick "do not show again" and does NOT
+    // click any button. try/catch so a dismiss failure degrades to "not dismissed", never throwing out of
+    // enumeration.
+    private static bool TryPostClose(IntPtr hWnd)
+    {
+        try
+        {
+            return PostMessage(hWnd, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private static IReadOnlyList<string> CollectChildText(IntPtr parent, System.Diagnostics.Stopwatch budget, ref bool truncated)
@@ -191,6 +233,9 @@ public sealed class Win32WindowInventory : IWindowInventory
 
     [DllImport("user32.dll")]
     private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool PostMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern IntPtr SendMessageTimeoutW(IntPtr hWnd, uint msg, IntPtr wParam, StringBuilder lParam, uint fuFlags, uint uTimeout, out IntPtr lpdwResult);

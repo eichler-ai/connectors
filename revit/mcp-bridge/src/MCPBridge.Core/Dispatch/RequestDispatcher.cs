@@ -345,42 +345,72 @@ public sealed class RequestDispatcher
             return null;
         }
 
+        // §07 v2 dismissals flow out through this side channel, not the (abandonable) return value: a
+        // dismissal is an action already taken and MUST be reported even when the pass is abandoned below.
+        // The target modal is dismissed early in the pass (it is topmost and pumps its own loop, so its
+        // read is fast), so the snapshot taken after the race captures it in the common case.
+        var dismissedSideChannel = new System.Collections.Concurrent.ConcurrentQueue<DismissedDialog>();
+
         // Real Task.Delay, not the injectable _delay: this bound protects a real wall-clock wire deadline,
         // so it must elapse in real time even under a test clock. (_delay stays the seam for the poll-loop
         // WAIT, which is logical time.)
         var inventorySw = System.Diagnostics.Stopwatch.StartNew();
-        var inventoryTask = Task.Run(BuildWindowInventoryNotices);
+        var inventoryTask = Task.Run(() => BuildWindowInventoryNotices(dismissedSideChannel.Enqueue));
         var winner = await Task.WhenAny(inventoryTask, Task.Delay(TimeSpan.FromMilliseconds(budgetMs))).ConfigureAwait(false);
+
+        IReadOnlyList<DiagnosticRecord>? inventoryNotices;
         if (winner == inventoryTask)
         {
-            return await inventoryTask.ConfigureAwait(false);
+            inventoryNotices = await inventoryTask.ConfigureAwait(false);
+        }
+        else
+        {
+            inventoryNotices = null;
+
+            // Budget won: send the pending status without the diagnostic rather than hold the wire call.
+            // Report the drop now (§01 observability-over-silence) so a missing window inventory on a timeout
+            // is a stated outcome, not an unexplained gap -- it means a script is holding the UI thread long
+            // enough that reading the windows' text would have risked the response's own wire budget.
+            _auditTrailTrace?.Invoke(
+                $"[#136] window inventory dropped from this response after its {budgetMs}ms wire-budget slice " +
+                "elapsed (a script is holding the UI thread); the pending status is returned without it. Its " +
+                "true elapsed will follow when the abandoned pass finishes.");
+
+            // Observe the abandoned Task so a fault never surfaces as an unobserved-task exception, and log
+            // its true uncapped elapsed on completion either way -- that number is what says whether the cap
+            // is sized right (#136). The TOTAL dismissal count is logged here too: if it exceeds what the
+            // response below reported (a dismissal that landed after the response's snapshot), that late
+            // auto-dismiss is at least never fully silent (§01), it is in the log.
+            _ = inventoryTask.ContinueWith(
+                t =>
+                {
+                    inventorySw.Stop();
+                    var faulted = t.IsFaulted ? $"; faulted: {t.Exception?.GetBaseException().Message}" : "";
+                    _auditTrailTrace?.Invoke(
+                        $"[#136] abandoned window inventory finished after {inventorySw.ElapsedMilliseconds}ms " +
+                        $"(budget was {budgetMs}ms); {dismissedSideChannel.Count} dialog(s) auto-dismissed in total{faulted}");
+                },
+                CancellationToken.None,
+                TaskContinuationOptions.None,
+                TaskScheduler.Default);
         }
 
-        // Budget won: send the pending status without the diagnostic rather than hold the wire call.
-        // Report the drop now (§01 observability-over-silence) so a missing window inventory on a timeout is
-        // a stated outcome, not an unexplained gap -- it means a script is holding the UI thread long enough
-        // that reading the windows' text would have risked the response's own wire budget.
-        _auditTrailTrace?.Invoke(
-            $"[#136] window inventory dropped from this response after its {budgetMs}ms wire-budget slice " +
-            "elapsed (a script is holding the UI thread); the pending status is returned without it. Its " +
-            "true elapsed will follow when the abandoned pass finishes.");
+        // A dismissal is an action already taken, so report it whether or not the diagnostic inventory
+        // survived the cap: merge the §07 v2 auto-dismiss notice (from the side channel) with the v1
+        // inventory notice (present only if the pass completed within budget).
+        var dismissalNotice = BuildDialogAutoDismissedNotice(dismissedSideChannel.ToArray());
+        if (dismissalNotice is null)
+        {
+            return inventoryNotices;
+        }
 
-        // Observe the abandoned Task so a fault never surfaces as an unobserved-task exception, and log its
-        // true uncapped elapsed on completion either way -- that number is what says whether the cap is
-        // sized right (and is exactly the signal #136 lacked).
-        _ = inventoryTask.ContinueWith(
-            t =>
-            {
-                inventorySw.Stop();
-                var faulted = t.IsFaulted ? $"; faulted: {t.Exception?.GetBaseException().Message}" : "";
-                _auditTrailTrace?.Invoke(
-                    $"[#136] abandoned window inventory finished after {inventorySw.ElapsedMilliseconds}ms " +
-                    $"(budget was {budgetMs}ms){faulted}");
-            },
-            CancellationToken.None,
-            TaskContinuationOptions.None,
-            TaskScheduler.Default);
-        return null;
+        var merged = new List<DiagnosticRecord> { dismissalNotice };
+        if (inventoryNotices is not null)
+        {
+            merged.AddRange(inventoryNotices);
+        }
+
+        return merged;
     }
 
     /// <summary>
@@ -390,7 +420,7 @@ public sealed class RequestDispatcher
     /// data, not part of the execution's permanent history. Best-effort: any failure (including
     /// _windowInventory being unset) degrades to no extra notice, never to a failed response.
     /// </summary>
-    private IReadOnlyList<DiagnosticRecord>? BuildWindowInventoryNotices()
+    private IReadOnlyList<DiagnosticRecord>? BuildWindowInventoryNotices(Action<DismissedDialog> onDismissed)
     {
         if (_windowInventory is null)
         {
@@ -400,7 +430,13 @@ public sealed class RequestDispatcher
         WindowInventorySnapshot snapshot;
         try
         {
-            snapshot = _windowInventory.EnumerateOwnedTopLevelWindows();
+            // §07 v2: the enumeration also auto-dismisses allowlisted raw Win32 (#32770) dialogs the
+            // Revit-framework suppressor cannot see. The allowlist DECISION lives in Core
+            // (DialogAutoDismissPolicy) and is passed in as a pure predicate; the ACTION (WM_CLOSE) stays
+            // in the adapter. Dismissals are NOT reported from here: this method's return value is subject
+            // to #138's wire-budget abandon, and a dismissal (an action already taken) must be reported
+            // regardless -- so it flows out through onDismissed, which the caller captures even on abandon.
+            snapshot = _windowInventory.EnumerateOwnedTopLevelWindows(DialogAutoDismissPolicy.ShouldDismiss, onDismissed);
         }
         catch
         {
@@ -451,6 +487,48 @@ public sealed class RequestDispatcher
                 detail: detail,
                 remedy: new[] { "Check Revit's screen for a modal dialog and dismiss it manually." }),
         };
+    }
+
+    /// <summary>
+    /// PRD §07 v2: reports allowlisted raw Win32 (#32770) dialogs that this pass auto-dismissed
+    /// (DialogAutoDismissPolicy + Win32WindowInventory's WM_CLOSE). §01 observability-over-silence: an
+    /// action taken on the agent's behalf MUST be stated, never silent. Returns null when nothing was
+    /// dismissed, so the default (no-match) behavior is unchanged.
+    /// </summary>
+    private static DiagnosticRecord? BuildDialogAutoDismissedNotice(IReadOnlyList<DismissedDialog> dismissed)
+    {
+        if (dismissed.Count == 0)
+        {
+            return null;
+        }
+
+        var named = string.Join(
+            ", ",
+            dismissed.Select(d => $"\"{d.Title}\" (class {d.ClassName})"));
+
+        var message = $"Auto-dismissed {dismissed.Count} allowlisted dialog(s) on the agent's behalf per " +
+            $"the PRD §07 auto-dismiss allowlist: {named}. These are known-benign, informational Win32 " +
+            "dialogs that the Revit-framework dialog suppressor cannot see; each was closed with WM_CLOSE " +
+            "(no button clicked, no \"do not show again\" set).";
+
+        var detail = new Dictionary<string, object?>
+        {
+            ["dismissed"] = dismissed
+                .Select(d => new Dictionary<string, object?>
+                {
+                    ["title"] = d.Title,
+                    ["class_name"] = d.ClassName,
+                })
+                .ToArray(),
+        };
+
+        return DiagnosticRecord.Create(
+            DiagnosticSeverity.Info,
+            "dialog-auto-dismissed",
+            DiagnosticSource.Dialogs,
+            message,
+            detail: detail,
+            remedy: new[] { "None -- the dialog was informational and has been dismissed automatically." });
     }
 
     private Task RunScriptWorkItemAsync(string executionId, string scriptText, string requestedDocumentId, bool overwriteOutputFiles, bool confirmLifecycleActions)

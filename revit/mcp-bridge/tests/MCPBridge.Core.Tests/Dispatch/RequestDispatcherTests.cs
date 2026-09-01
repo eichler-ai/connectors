@@ -683,6 +683,82 @@ public class RequestDispatcherTests
         Assert.DoesNotContain("window-inventory-timeout-fallback", json);
     }
 
+    [Fact]
+    public async Task PollExecution_DeadlineElapsedWithAllowlistedDialogDismissed_AttachesDialogAutoDismissedNotice()
+    {
+        var executionManager = NewExecutionManager();
+        var bridge = new ExternalEventBridge<ScriptExecutionOutcome>(new FakeExternalEventRaiser());
+        var now = DateTimeOffset.UtcNow;
+        // §07 v2: the adapter auto-dismissed an allowlisted #32770 dialog; the fake reports it on Dismissed
+        // (no present windows), and the timeout branch must surface it as a dialog-auto-dismissed notice.
+        var windowInventory = new FakeWindowInventory
+        {
+            Dismissed = new[] { new DismissedDialog("#32770", "Virtual Memory - High Usage") },
+        };
+        var dispatcher = new RequestDispatcher(
+            executionManager,
+            bridge,
+            NewScriptExecutor(),
+            now: () => now,
+            delay: _ => { now = now.AddMilliseconds(200); return Task.CompletedTask; },
+            windowInventory: windowInventory);
+
+        executionManager.Start("exec-1", "1 + 1", 600_000, now);
+
+        var json = await dispatcher.DispatchAsync(PollRequest(1, "exec-1", timeoutMs: 500));
+
+        Assert.Contains("\"status\":\"pending\"", json);
+        Assert.Contains("\"code\":\"dialog-auto-dismissed\"", json);
+        Assert.Contains("Virtual Memory - High Usage", json);
+        // The dispatcher must consult the Core allowlist policy, not some ad-hoc predicate.
+        Assert.NotNull(windowInventory.LastShouldDismiss);
+        Assert.True(windowInventory.LastShouldDismiss!("#32770", "Virtual Memory - High Usage"));
+        Assert.False(windowInventory.LastShouldDismiss!("#32770", "Something Else"));
+    }
+
+    [Fact]
+    public async Task PollExecution_AllowlistedDialogDismissed_ReportedEvenWhenInventoryAbandonedByWireBudget()
+    {
+        var executionManager = NewExecutionManager();
+        var bridge = new ExternalEventBridge<ScriptExecutionOutcome>(new FakeExternalEventRaiser());
+        var now = DateTimeOffset.UtcNow;
+        // The whole point of the side channel: the inventory pass is abandoned by the #138 wire-budget cap
+        // (its window-inventory-timeout-fallback notice is dropped), but the auto-dismiss happened early in
+        // the pass, and §01 requires that action still be reported. A gate makes the abandon DETERMINISTIC
+        // regardless of thread-pool contention: the pass fires its dismissal, then blocks on the gate so the
+        // wire-budget Task.Delay always wins the race; the fake surfaces the dismissal through the side
+        // channel before blocking.
+        using var gate = new System.Threading.ManualResetEventSlim(false);
+        var windowInventory = new FakeWindowInventory
+        {
+            Dismissed = new[] { new DismissedDialog("#32770", "Virtual Memory - High Usage") },
+            Gate = gate,
+        };
+        var dispatcher = new RequestDispatcher(
+            executionManager,
+            bridge,
+            NewScriptExecutor(),
+            now: () => now,
+            delay: _ => { now = now.AddMilliseconds(200); return Task.CompletedTask; },
+            windowInventory: windowInventory);
+
+        executionManager.Start("exec-1", "1 + 1", 600_000, now);
+
+        try
+        {
+            var json = await dispatcher.DispatchAsync(PollRequest(1, "exec-1", timeoutMs: 500));
+
+            Assert.Contains("\"status\":\"pending\"", json);
+            // The dismissal survived the abandon; the diagnostic inventory notice did not.
+            Assert.Contains("\"code\":\"dialog-auto-dismissed\"", json);
+            Assert.DoesNotContain("window-inventory-timeout-fallback", json);
+        }
+        finally
+        {
+            gate.Set(); // release the still-blocked inventory pass so its thread is freed
+        }
+    }
+
     // #136: the §07 window inventory reads window text via a blocking Win32 call against the very UI thread
     // it inspects, so under a long-running script it can take seconds -- and it ran SYNCHRONOUSLY on the
     // pending-response path, intermittently blowing the broker's timeout_ms + 5s wire budget: the diagnostic

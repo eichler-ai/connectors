@@ -164,8 +164,8 @@ scratch.Close(false);            // false = discard; never prompts
 disappear. `list_instances` lists unsaved ones as `tmp-` ids; those absent before your call are yours.
 
 Nothing tidies up for you, and a run of scratch documents will exhaust the memory of the Revit a person
-is working in — which surfaces as a modal "Virtual Memory - High Usage" box that wedges Revit until a
-human clicks it. (Revit also refuses to `Close` the *active* document: from a call routed at anything
+is working in — which surfaces as a modal "Virtual Memory - High Usage" box; the connector now
+auto-dismisses that specific one and reports it in `notices[]`. (Revit also refuses to `Close` the *active* document: from a call routed at anything
 except the active document, activate the one you want to keep, then close the other on the next call.)
 
 ### Calls that need their target *not* modifiable
