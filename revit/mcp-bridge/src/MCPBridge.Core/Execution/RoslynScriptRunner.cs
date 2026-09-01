@@ -453,12 +453,23 @@ internal sealed class RoslynScriptRunner
         {
             var compiled = GetOrCompile("/* mcpbridge warmup */ 1 + 1");
             compiled.GetOrEmitPeImage(EmitToPeImage);
+            // #67: only once Roslyn has JITed and a first script has compiled+emitted is a subsequent
+            // compile cheap enough (~ms) to sit on the response path. The dispatcher gates its pre-flight on
+            // this so a cold compile (the cost this method exists to pay off-line) is never on that path.
+            _isWarm = true;
         }
         catch
         {
-            // Best-effort by contract; the first real script simply pays the cold start as before.
+            // Best-effort by contract; the first real script simply pays the cold start as before, and
+            // IsWarm stays false so the dispatcher keeps compiling in the work item until a warmup succeeds.
         }
     }
+
+    /// <summary>#67: true once <see cref="WarmupCompile"/> has completed a first compile+emit, so a further
+    /// compile is fast enough to run on the response path. False until then (and if warmup faulted).</summary>
+    internal bool IsWarm => _isWarm;
+
+    private volatile bool _isWarm;
 
     private static void RejectTopLevelAwait(Script<object> script)
     {

@@ -60,6 +60,10 @@ internal sealed class TransactionScriptExecutor
     internal ScriptExecutionOutcome? TryPreflight(string scriptText, bool confirmLifecycleActions = false)
         => _runner.TryPreflight(scriptText, confirmLifecycleActions);
 
+    /// <summary>#67: see <see cref="RoslynScriptRunner.IsWarm"/>. The dispatcher gates its pre-flight on
+    /// this so a cold compile never lands on the response path.</summary>
+    internal bool IsWarm => _runner.IsWarm;
+
     public TransactionScriptExecutor(RoslynScriptRunner runner)
     {
         _runner = runner;
