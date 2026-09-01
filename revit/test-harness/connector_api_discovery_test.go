@@ -45,6 +45,9 @@ var connectorMembers = []string{
 	"ImportsDirectory",
 	"OpenForWriting",
 	"Publish",
+	"Settle",
+	"WithTransaction",
+	"WithoutTransaction",
 }
 
 type searchFunctionsResult struct {

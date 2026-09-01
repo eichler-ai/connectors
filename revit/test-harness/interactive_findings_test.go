@@ -163,53 +163,186 @@ try {
 	})
 }
 
-// TestStairsEditScopeBlockedByAmbientTransaction pins the structural gap
-// tracked as issue #115: StairsEditScope.Start() refuses to run while a
-// managed transaction is open on its target document. Here that transaction
-// is the one Connector.OpenForWriting(doc) opens on the fixture document
-// (fixtureWritePreamble) -- the same class of restriction the ambient
-// per-call transaction on the routed document itself would produce, but not
-// literally the same transaction, so this pins "a managed transaction on the
-// target document blocks Start()" rather than "the ambient dispatcher
-// transaction specifically blocks it". There is currently no script-reachable
-// way around this in either case (deferring past the script's own execution
-// via UIApplication.Idling gets Start() to succeed, but
-// StairsRun.CreateStraightRun() immediately fails with
-// ModificationOutsideTransactionException, and opening a Transaction to
-// cover it is unconditionally denylisted -- see
-// TestDenylistRejectsOwnTransaction). This pins the first half of that dead
-// end, live, so it flips to a clear regression signal the moment #115 ships
-// a fix -- at which point this test should be REPLACED with a positive
-// assertion using whatever primitive #115 adds, not merely relaxed. Still
-// open as of this run (unlike #113/#114/#116/#117/#118, all fixed already).
+// TestStairsAreCreatableWithSettleOnRequest is the positive assertion that
+// replaces the two negative stairs tests this file used to carry, and replacing
+// them was mandatory rather than optional: both said so in their own comments,
+// because relaxing them instead would leave the suite claiming stairs are
+// unreachable after they became reachable.
 //
-// StairsEditScope's namespace is Autodesk.Revit.DB, not
-// Autodesk.Revit.DB.Architecture (unlike Stairs/StairsRun/StairsType) --
-// confirmed live via describe_function against the real Revit 2027 API
-// during the interactive session this test is drawn from, and confirmed
-// again by this test compiling and running to completion rather than
-// failing with a CS0234 "type or namespace not found".
-func TestStairsEditScopeBlockedByAmbientTransaction(t *testing.T) {
+// What they pinned, and why both were needed: issue #115 stated its dead end as
+// "no script-reachable path satisfies both no-ambient-transaction-to-start and a
+// transaction-to-write". That was wrong, and proving it took two tests -- one for
+// the START edge (a managed transaction on the target blocks StairsEditScope.Start)
+// and one for the COMMIT edge (with the transaction supplied via OpenForWriting
+// INSIDE the scope, Start and CreateStraightRun both succeed and scope.Commit()
+// then refuses: "EditScope cannot be closed, for there is a transaction or
+// transaction group still open in the document"). The real blocker was a third
+// condition nobody had named -- no transaction may be open when the scope COMMITS
+// -- and closing a connector-owned transaction mid-run is the one thing no script
+// could do.
+//
+// settle-on-request (#132, PRD §06) supplies exactly that, and this test is the
+// whole feature in one script: WithoutTransaction closes the connector's
+// transaction so Start() is legal, WithTransaction opens one INSIDE the scope so
+// the run can be built, and its closing edge -- not tidiness, the load-bearing
+// part -- is what makes scope.Commit() legal a line later.
+//
+// Note the mutation evidence behind the causal claim, recorded when the negative
+// test was retired: removing the transaction entirely flipped commitOutcome to
+// "committed", so the refusal really was caused by the connector holding one.
+func TestStairsAreCreatableWithSettleOnRequest(t *testing.T) {
 	c, instanceID, documentID := targetDocument(t)
 	fixtureTitle := createBlankFixtureDocument(t, c, instanceID, documentID)
 
 	out := runScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+`
-var l1 = Autodesk.Revit.DB.Level.Create(doc, 6000.0);
-var l2 = Autodesk.Revit.DB.Level.Create(doc, 6010.0);
-try {
-  var scope = new Autodesk.Revit.DB.StairsEditScope(doc, "harness probe");
-  scope.Start(l1.Id, l2.Id);
-  return "started";
-} catch (Autodesk.Revit.Exceptions.InvalidOperationException ex) {
-  return "refused: " + ex.Message;
+var l1 = Autodesk.Revit.DB.Level.Create(doc, 0.0);
+var l2 = Autodesk.Revit.DB.Level.Create(doc, 12.0);
+doc.Regenerate();
+
+long stairsId = -1;
+int runCount = -1;
+int risers = -1;
+
+Connector.WithoutTransaction(doc, () => {
+  var scope = new Autodesk.Revit.DB.StairsEditScope(doc, "harness settle-on-request stairs");
+  var newStairsId = scope.Start(l1.Id, l2.Id);
+  stairsId = newStairsId.Value;
+
+  Connector.WithTransaction(doc, () => {
+    var line = Autodesk.Revit.DB.Line.CreateBound(
+      new Autodesk.Revit.DB.XYZ(0, 0, 0), new Autodesk.Revit.DB.XYZ(20, 0, 0));
+    Autodesk.Revit.DB.Architecture.StairsRun.CreateStraightRun(
+      doc, newStairsId, line, Autodesk.Revit.DB.Architecture.StairsRunJustification.Center);
+  });
+
+  scope.Commit(new Preproc());
+});
+
+// Back inside a transaction here -- WithoutTransaction reopens one in the same group.
+var stairs = doc.GetElement(new Autodesk.Revit.DB.ElementId(stairsId)) as Autodesk.Revit.DB.Architecture.Stairs;
+if (stairs != null) { runCount = stairs.GetStairsRuns().Count; risers = stairs.ActualRisersNumber; }
+var stairsInModel = new Autodesk.Revit.DB.FilteredElementCollector(doc)
+  .OfClass(typeof(Autodesk.Revit.DB.Architecture.Stairs)).GetElementCount();
+
+return new { stairsId, runCount, risers, stairsInModel, inEditMode = doc.IsInEditMode() };
+
+class Preproc : Autodesk.Revit.DB.IFailuresPreprocessor {
+  public Autodesk.Revit.DB.FailureProcessingResult PreprocessFailures(Autodesk.Revit.DB.FailuresAccessor a) {
+    a.DeleteAllWarnings();
+    return Autodesk.Revit.DB.FailureProcessingResult.Continue;
+  }
 }
 `)
 	if out.Status != "success" {
-		t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
+		t.Fatalf("stairs creation was expected to SUCCEED via settle-on-request (#132) -- this is the assertion that proves the feature works end to end; status=%q (%s)", out.Status, out.diag())
 	}
-	if !strings.Contains(out.ReturnValue, "refused:") {
-		t.Fatalf("StairsEditScope.Start() was expected to be refused while a managed transaction is open on its target document (issue #115) -- if this now succeeds, stairs creation may finally be reachable and this test should be replaced with a real stairs-creation assertion; (%s)", out.diag())
+	for _, want := range []string{`"runCount":1`, `"stairsInModel":1`, `"inEditMode":false`} {
+		if !strings.Contains(out.ReturnValue, want) {
+			t.Errorf("wanted %q in the result; (%s)", want, out.diag())
+		}
 	}
+	// Risers are the load-bearing proof that the run was really BUILT rather than an
+	// empty stairs element being created and committed: an empty stairs has none.
+	if strings.Contains(out.ReturnValue, `"risers":0`) || strings.Contains(out.ReturnValue, `"risers":-1`) {
+		t.Errorf("the stairs element exists but has no risers, so the run was never built -- an empty stairs would still satisfy every other assertion here; (%s)", out.diag())
+	}
+}
+
+// TestSettleMakesLifecycleActionsReachableInTheSameRun pins the capability
+// Connector.Settle exists for, and the notice PRD §01 requires alongside it.
+//
+// THE GAP IT CLOSES. Revit refuses Close/Save/SaveAs while ANY transaction or
+// transaction GROUP is open on the document -- probed live during #115's triage,
+// and unlike the EditScope case the group really is the bar there. Under
+// always-open that made a document unclosable and unsaveable for the whole run
+// that touched it, which is where issue #114's five orphaned documents came from.
+// Settle ends the group in the direction the SCRIPT states, and the direction has
+// to be stated rather than inferred: the connector cannot see doc.Close() at all
+// (ScriptApiDenylist is a compile-time walk that gates but cannot intercept), and
+// neither DocumentSavingAs nor DocumentClosing fires while a group is open,
+// because Revit's transaction-phase check precedes event dispatch.
+//
+// WHY THIS IS TIER 2 AND NOT TIER 1. Reaching Settle from a script needs
+// IExistingDocumentSource, which only the live adapter implements, so tier 1 can
+// cover the state machine and the notice's WORDING but structurally cannot prove
+// either that Revit then permits the lifecycle call or that the notice reaches
+// the caller. Both of those are asserted here and nowhere else.
+func TestSettleMakesLifecycleActionsReachableInTheSameRun(t *testing.T) {
+	c, instanceID, documentID := targetDocument(t)
+
+	t.Run("DiscardThenCloseInTheSameRun", func(t *testing.T) {
+		title, _ := createAndAwaitDocumentID(t, c, instanceID, documentID)
+		closed := false
+		t.Cleanup(func() {
+			if !closed {
+				closeDocumentByTitle(t, c, instanceID, documentID, title, "")
+			}
+		})
+
+		out := decodeToolResult[executeScriptOut](t, callExecuteScriptWith(t, c, instanceID, documentID,
+			fixtureWritePreamble(title)+`
+Autodesk.Revit.DB.Level.Create(doc, 30.0);
+Connector.Settle(doc, false);
+doc.Close(false);
+return "closed";
+`, map[string]any{"confirm_lifecycle_actions": true}))
+		if out.Status != "success" || !strings.Contains(out.ReturnValue, "closed") {
+			t.Fatalf("Settle(discard) then Close in the SAME run was expected to succeed (#132) -- this is the capability that did not exist under always-open; status=%q (%s)", out.Status, out.diag())
+		}
+		closed = true
+
+		// §01: settling is invisible to the script but changes what the run means,
+		// so it must be reported. Asserted on the CODE, not the prose -- a message
+		// substring would keep passing if the record's code were wrong on the wire,
+		// which is the failure mode rejectedScript's own comment records.
+		if !hasNoticeCode(out, "document-settled-discarded") {
+			t.Errorf("no `document-settled-discarded` notice reached the caller; notices: %+v", out.Notices)
+		}
+	})
+
+	t.Run("KeepThenSaveAsInTheSameRun", func(t *testing.T) {
+		const savedPath = `C:\dev\fixtures\settle-saveas-probe.rvt`
+		const savedTitle = "settle-saveas-probe"
+		title, _ := createAndAwaitDocumentID(t, c, instanceID, documentID)
+		// After SaveAs the document is known by the FILE's basename, not its old
+		// tmp- title, so cleanup has to chase the new one -- and delete the file.
+		t.Cleanup(func() { closeDocumentByTitle(t, c, instanceID, documentID, savedTitle, savedPath) })
+
+		out := decodeToolResult[executeScriptOut](t, callExecuteScriptWith(t, c, instanceID, documentID,
+			fixtureWritePreamble(title)+`
+try { System.IO.File.Delete(@"C:\dev\fixtures\settle-saveas-probe.rvt"); } catch {}
+Autodesk.Revit.DB.Level.Create(doc, 40.0);
+Connector.Settle(doc, true);
+doc.SaveAs(@"C:\dev\fixtures\settle-saveas-probe.rvt");
+return new {
+  saved = System.IO.File.Exists(@"C:\dev\fixtures\settle-saveas-probe.rvt"),
+  title = doc.Title
+};
+`, map[string]any{"confirm_lifecycle_actions": true}))
+		if out.Status != "success" {
+			t.Fatalf("Settle(keep) then SaveAs in the SAME run was expected to succeed (#132); status=%q (%s)", out.Status, out.diag())
+		}
+		if !strings.Contains(out.ReturnValue, `"saved":true`) {
+			t.Fatalf("SaveAs reported no error but wrote no file; (%s)", out.diag())
+		}
+		if !hasNoticeCode(out, "document-settled-kept") {
+			t.Errorf("no `document-settled-kept` notice reached the caller -- settling with keep:true makes prior writes permanent and §01 does not permit that silently; notices: %+v", out.Notices)
+		}
+	})
+}
+
+// hasNoticeCode reports whether the run carried a §01 notice with this code.
+// Matching on `code` rather than on message text is deliberate: the codes are the
+// part skill.md tells an agent to branch on, and a message-substring assertion
+// keeps passing while the code on the wire is wrong -- the exact hole
+// rejectedScript's own comment records finding in this suite before.
+func hasNoticeCode(out executeScriptOut, code string) bool {
+	for _, n := range out.Notices {
+		if n.Code == code {
+			return true
+		}
+	}
+	return false
 }
 
 // TestRoomOnScriptCreatedLevelNeedsComputationHeight pins the live-confirmed

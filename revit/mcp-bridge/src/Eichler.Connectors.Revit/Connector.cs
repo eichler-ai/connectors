@@ -73,10 +73,10 @@ public sealed class Connector
     /// nothing has opened for writing and would need <see cref="OpenForWriting"/> as a separate step.</para>
     ///
     /// <para>Being unsaved, it gets a session-only <c>tmp-</c> document id that <c>list_instances</c>
-    /// reports, so a later execute_script call can target it directly. This call holds its transaction
-    /// open, so Revit refuses both <c>Close</c> and <c>SaveAs</c> on it for the rest of this script; any
-    /// later call does either, with <c>confirm_lifecycle_actions</c>. Close your scratch documents —
-    /// nothing else will.</para>
+    /// reports, so a later execute_script call can target it directly. To <c>Close</c> or <c>SaveAs</c> it
+    /// in THIS script, finish it first with <see cref="Settle"/>; from a later call it is already
+    /// unmanaged and needs no such step. Either way you need <c>confirm_lifecycle_actions</c>. Close your
+    /// scratch documents — nothing else will.</para>
     /// </summary>
     /// <remarks>
     /// The headless behaviour is deliberate, not a gap: a script-created document with a real window would
@@ -101,8 +101,8 @@ public sealed class Connector
     /// family template, so a template path is required.
     ///
     /// <para>Headless and session-lived exactly as <see cref="CreateProjectDocument"/> describes: no
-    /// window, never active, no <c>Close</c> or <c>SaveAs</c> during the run that creates it, and yours to
-    /// close from a later execute_script call with <c>confirm_lifecycle_actions</c> once you are done.</para>
+    /// window, never active, and yours to close once you are done — via <see cref="Settle"/> in this same
+    /// script, or directly from a later one, with <c>confirm_lifecycle_actions</c> either way.</para>
     /// </summary>
     /// <param name="templatePath">Path to a family template (.rft).</param>
     /// <returns>The new family document, open for writing.</returns>
@@ -118,10 +118,10 @@ public sealed class Connector
     /// <para>Not needed for the script's own <c>Document</c> or one created earlier in this same script --
     /// both are already open for writing, and calling this on them fails.</para>
     ///
-    /// <para>Revit APIs that manage their own transactions, such as <c>Document.LoadFamily</c>, must be
-    /// called BEFORE their document is opened for writing. The script's own <c>Document</c> has a
-    /// transaction open for the whole run, so such a call against it belongs in a separate execute_script
-    /// call.</para>
+    /// <para>Revit APIs that manage their own transactions, such as <c>Document.LoadFamily</c>, refuse to
+    /// run while a document is open for writing. Either call them before this, or wrap them in
+    /// <see cref="WithoutTransaction"/> — which also works for the script's own <c>Document</c>, whose
+    /// transaction is open for the whole run.</para>
     /// </summary>
     /// <param name="document">A document found in this Revit session that is not already open for writing.</param>
     /// <returns>The same document, now open for writing. Callers already holding it can ignore this.</returns>
