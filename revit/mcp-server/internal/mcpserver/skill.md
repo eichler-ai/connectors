@@ -112,10 +112,9 @@ Autodesk.Revit.DB.Level.Create(doc, 10.0);       // just write to it — no tran
 ```
 
 **What you get is headless**: in memory, no window, no open view, never the active document — writable
-by *script*, not visible to the person, who sees nothing appear. Making it visible takes **three calls**,
-and the reason is `SaveAs`, not activation: `UIApplication.OpenAndActivateDocument` needs a path, and a
-connector-created document cannot be saved in the run that created it (below). So: create, `SaveAs` from
-a second call, activate from a third. Route that last one at any document **other than the currently
+by *script*, not visible to the person, who sees nothing appear. Making it visible takes **two calls**:
+`UIApplication.OpenAndActivateDocument` needs a path, so `Connector.Settle(doc, true)` then `SaveAs` in
+the creating run, then activate from a second call routed at any document **other than the currently
 active one** — activation is refused only while the *active* document is modifiable, and your call's own
 target always is.
 
@@ -210,7 +209,9 @@ scope on the *same* document is refused, so nest by document, not by helper meth
 `keep: true` makes everything written to that document so far **permanent immediately**: a later failure
 will no longer undo it. `keep: false` discards it, which is what you want before closing a scratch
 document. Either way you get a notice saying so. Writing again afterwards is fine and rolls back as
-usual; nothing settled comes back.
+usual — but the document is unmanaged after a settle, so write through
+`Connector.WithTransaction(doc, () => { ... })` rather than directly, or you get
+`script-write-outside-transaction`. Nothing settled comes back.
 
 ### What you may not do without saying so
 

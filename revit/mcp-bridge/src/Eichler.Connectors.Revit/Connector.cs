@@ -116,12 +116,12 @@ public sealed class Connector
     /// writable: the call that created it closed its transaction when it returned.
     ///
     /// <para>Not needed for the script's own <c>Document</c> or one created earlier in this same script --
-    /// both are already open for writing, and calling this on them fails.</para>
+    /// both are already open for writing, and calling this on them fails. One this run already
+    /// <see cref="Settle"/>d is the exception, and works again.</para>
     ///
-    /// <para>Revit APIs that manage their own transactions, such as <c>Document.LoadFamily</c>, refuse to
-    /// run while a document is open for writing. Either call them before this, or wrap them in
-    /// <see cref="WithoutTransaction"/> — which also works for the script's own <c>Document</c>, whose
-    /// transaction is open for the whole run.</para>
+    /// <para>Revit APIs that manage their own transaction, such as <c>Document.LoadFamily</c>, refuse to
+    /// run against a document open for writing -- call them before this, or inside
+    /// <see cref="WithoutTransaction"/>.</para>
     /// </summary>
     /// <param name="document">A document found in this Revit session that is not already open for writing.</param>
     /// <returns>The same document, now open for writing. Callers already holding it can ignore this.</returns>
@@ -171,13 +171,14 @@ public sealed class Connector
     /// <c>SaveAs</c> and <c>SynchronizeWithCentral</c> on it — all of which refuse while the connector
     /// holds anything open. Call it before those, in the same script.
     ///
-    /// <para><c>keep: true</c> makes everything written to this document so far PERMANENT, immediately and
-    /// irreversibly: a later failure in this script will no longer undo it. <c>keep: false</c> discards
-    /// that work, which is what you want before closing a scratch document. Either way the choice is
-    /// yours to state — the connector cannot tell what you are about to do.</para>
+    /// <para><c>keep: true</c> makes everything written to this document so far PERMANENT immediately: a
+    /// later failure will no longer undo it. <c>keep: false</c> discards that work, which is what you
+    /// want before closing a scratch document. The choice is yours to state — the connector cannot tell
+    /// what you are about to do.</para>
     ///
-    /// <para>Writing to the document again afterwards is allowed and starts fresh: those later changes roll
-    /// back on failure as usual, but nothing settled can be recovered.</para>
+    /// <para>Needs <c>confirm_lifecycle_actions</c>, like the members it exists to enable. To write to
+    /// the document again afterwards, go through <see cref="WithTransaction"/> — it is no longer open for
+    /// writing, and nothing settled can be recovered.</para>
     /// </summary>
     /// <param name="document">The document to finish.</param>
     /// <param name="keep">True to keep this document's changes permanently; false to discard them.</param>

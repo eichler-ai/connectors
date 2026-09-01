@@ -113,12 +113,14 @@ internal sealed class TransactionScriptExecutor
 
             // The script's own code has already finished at this point -- with one document or with N,
             // every commit happens here, in the executor, never in the script.
-            // Read BEFORE CommitAll: that call clears the entry set, and the settlement log lives
-            // alongside it. Cheap to get wrong, and the failure would be a silently missing notice.
-            var settlements = transactions.Settlements.ToList();
+            // Read before CommitAll purely for readability. An earlier comment here claimed CommitAll
+            // clears the settlement log along with the entry set -- it does not; nothing clears
+            // _settlements at all -- so the ordering is not load-bearing, and the claim would have sent a
+            // future reader chasing a hazard that does not exist.
+            var settlements = transactions.Settlements;
             var commit = transactions.CommitAll();
             var notices = CombinedNotices(commit.CommitFailures);
-            notices.AddRange(settlements.Select(SettleNotice).ToList());
+            notices.AddRange(settlements.Select(SettleNotice));
 
             if (!commit.Success)
             {

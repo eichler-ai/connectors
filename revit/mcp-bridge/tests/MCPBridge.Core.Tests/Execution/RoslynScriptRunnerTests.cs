@@ -773,4 +773,45 @@ public class RoslynScriptRunnerTests
         Assert.True(outcome.Success);
         Assert.Equal(5, outcome.ReturnValue);
     }
+
+    [Fact]
+    public async Task RunAsync_ConnectorSettle_RequiresConfirmation()
+    {
+        // Issue #132, and the first entry in check 2's table that is OUR OWN member rather than Revit's.
+        // Settle belongs there by the table's own governing test -- "does a thrown exception actually
+        // undo this?" -- and the answer is no by construction: Settle(keep: true) assimilates the
+        // document's group, making every write to it so far permanent immediately.
+        //
+        // Ungated it was a NON-REFLECTION route to commit/rollback authority over the ambient document,
+        // which ScriptApiDenylist's own class comment says is accepted only via reflection and must be
+        // closed structurally wherever such a route appears. Found by independent review, not by me.
+        var runner = NewRunner();
+        const string script = "Connector.Settle(Document, true);";
+
+        var unconfirmed = await runner.RunAsync(script, NewGlobals(), CancellationToken.None);
+
+        var ex = Assert.IsType<ScriptApiDenylistViolationException>(unconfirmed.Exception);
+        Assert.Equal(ScriptApiDenylistViolationException.ConfirmationRequiredCode, ex.Code);
+        Assert.Contains("Settle", ex.DeniedMember);
+    }
+
+    [Fact]
+    public async Task RunAsync_ConnectorWithTransactionAndWithoutTransaction_AreNotGated()
+    {
+        // The other two scopes must NOT be gated, and asserting it is not redundant: gating the whole
+        // Connector type rather than the single member would have been the easy mistake, and it would
+        // have made every stairs script -- the feature's headline case -- require a flag it has no
+        // reason to need. Neither leaves anything permanent; the group still covers rollback.
+        var runner = NewRunner();
+
+        foreach (var script in new[]
+                 {
+                     "Connector.WithTransaction(Document, () => { });",
+                     "Connector.WithoutTransaction(Document, () => { });",
+                 })
+        {
+            var outcome = await runner.RunAsync(script, NewGlobals(), CancellationToken.None);
+            Assert.IsNotType<ScriptApiDenylistViolationException>(outcome.Exception);
+        }
+    }
 }

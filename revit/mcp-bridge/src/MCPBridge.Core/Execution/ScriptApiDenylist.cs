@@ -89,6 +89,14 @@ namespace MCPBridge.Core.Execution;
 /// it, is any route that reaches those internals WITHOUT reflection -- a public type that is, hands
 /// out, or is itself such machinery (three live instances found and closed by review, all now pinned
 /// in revit/test-harness/denylist_bypass_test.go).
+///
+/// ONE SUCH ROUTE IS NOW DELIBERATE, AND IT IS GATED RATHER THAN ACCEPTED (issue #132).
+/// <c>Connector.Settle</c> is exactly the commit/rollback authority described above, reachable with no
+/// reflection at all -- that is its purpose, since Revit refuses Close/Save/SaveAs while the connector
+/// holds anything open on the document. It is therefore an entry in check 2's table, the first one that
+/// is our own member rather than Revit's: the capability is first-class, and the REQUEST must opt into
+/// it with confirm_lifecycle_actions like every other member that escapes the rollback boundary. The
+/// paragraph above still describes every route that is NOT gated.
 /// </summary>
 internal static class ScriptApiDenylist
 {
@@ -139,6 +147,22 @@ internal static class ScriptApiDenylist
             // Document is IDisposable and disposing one closes it, so this is Close under another
             // spelling; the same "no exception undoes it" answer applies.
             "Dispose",
+        },
+        ["Eichler.Connectors.Revit.Connector"] = new HashSet<string>
+        {
+            // OUR OWN member, not Revit's, and the first entry here that is (issue #132). It belongs by
+            // this list's own governing test -- "does a thrown exception actually undo this?" -- and the
+            // answer is no by construction: Settle(keep: true) assimilates the document's transaction
+            // group, making every write to it so far permanent immediately, and Settle(keep: false)
+            // discards them just as irreversibly. Ungated, a script could permanently commit to the
+            // AMBIENT document -- a real model a person has open -- with no request-level opt-in, which
+            // is exactly the authority this file's class comment says is accepted only via reflection
+            // and must be closed structurally wherever a non-reflection route appears.
+            //
+            // Gating costs the feature nothing: Settle exists to make Close/Save/SaveAs/
+            // SynchronizeWithCentral legal in the same run, and every one of those already requires the
+            // flag, so any script with a real use for Settle is already sending it.
+            "Settle",
         },
         ["Autodesk.Revit.DB.PrintManager"] = new HashSet<string>
         {

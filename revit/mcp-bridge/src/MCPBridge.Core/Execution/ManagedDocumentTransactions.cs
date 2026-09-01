@@ -245,6 +245,7 @@ internal sealed class ManagedDocumentTransactions
         }
 
         _entries.Add(new Entry(document, group, transaction, origin));
+        _originHistory[document.DocumentId] = origin;
     }
 
     /// <summary>
@@ -346,6 +347,16 @@ internal sealed class ManagedDocumentTransactions
 
     private readonly List<SettlementRecord> _settlements = new();
 
+    /// <summary>
+    /// The tier each document was FIRST opened under, kept for the life of the run so a settle-then-write
+    /// cycle cannot change it. Without this, re-opening after a settle guessed
+    /// <see cref="DocumentOrigin.AdoptedExisting"/> -- so a settled AMBIENT document would come back
+    /// tiered as adopted and stop committing LAST, silently inverting the one ordering guarantee
+    /// <see cref="CommitAll"/> exists to provide: that a failure among the other documents is still
+    /// answerable by rolling the human's real open model back.
+    /// </summary>
+    private readonly Dictionary<string, DocumentOrigin> _originHistory = new();
+
     /// <summary>Every Settle performed this run, in order. Read by the executor after the script finishes.</summary>
     public IReadOnlyList<SettlementRecord> Settlements => _settlements;
 
@@ -386,10 +397,20 @@ internal sealed class ManagedDocumentTransactions
         finally
         {
             entry.InWithoutTransactionScope = false;
-            // Reopened even when the body threw: the run is failing, and RollBackAll's unwind is written
-            // against an entry whose shape it recognises. A group with no transaction still rolls back
-            // correctly either way, so this is about keeping one shape, not about correctness of the undo.
-            ReopenTransaction(entry);
+
+            // Reopened even when the body threw, because a script may CATCH its own exception and carry
+            // on writing -- leaving the document silently non-modifiable would fail its next write for a
+            // reason two steps from the cause.
+            //
+            // SWALLOWED, uniquely in this file, and only on the throwing path: an exception raised inside
+            // a `finally` REPLACES the in-flight one, so a reopen that failed here would destroy the
+            // script's real error and report a transaction-start failure in its place. That is the §01
+            // sin this whole codebase is written against -- an agent handed an error that is not the one
+            // that happened. If the reopen does fail, the document stays non-modifiable and the next
+            // write fails loudly with `script-write-outside-transaction`, which is a legible outcome; a
+            // masked root cause is not. On the SUCCESS path a reopen failure still propagates normally,
+            // because there is no exception to destroy.
+            SafeReopenAfterScope(entry);
         }
     }
 
@@ -412,10 +433,14 @@ internal sealed class ManagedDocumentTransactions
             // No managed pair yet -- typically a document settled earlier this run, or one the script
             // never wrote to. Open a fresh group+transaction for it; end-of-run assimilate covers it
             // like any other managed document.
-            Open(document, DocumentOrigin.AdoptedExisting);
-            entry = FindEntry(document)!;
-            body();
-            CloseTransaction(entry);
+            //
+            // The tier comes from _originHistory when this run has seen the document before, NOT from a
+            // fresh guess: a settled ambient document re-opened as AdoptedExisting would stop committing
+            // last, which is the ordering guarantee CommitAll exists to provide.
+            Open(document, _originHistory.TryGetValue(document.DocumentId, out var known)
+                ? known
+                : DocumentOrigin.AdoptedExisting);
+            RunBody(FindEntry(document)!, body, openedGroupHere: true);
             return;
         }
 
@@ -429,7 +454,55 @@ internal sealed class ManagedDocumentTransactions
         }
 
         ReopenTransaction(entry);
-        body();
+        RunBody(entry, body, openedGroupHere: false);
+    }
+
+    /// <summary>
+    /// Runs a WithTransaction body and closes its transaction, unwinding THIS BLOCK if the body throws.
+    ///
+    /// THE UNWIND IS NOT REDUNDANT WITH RollBackAll, and an earlier version that relied on it was wrong
+    /// in two ways -- both reachable only when the SCRIPT CATCHES, which is ordinary code ("try this API,
+    /// fall back if it fails"), not an exotic case:
+    ///
+    /// 1. WEDGE. Leaving the transaction open made every later WithTransaction on that document throw
+    ///    "a transaction is already open" for the rest of the run, with Settle(discard) -- which throws
+    ///    the work away -- as the only escape. The sibling WithoutTransaction recovers cleanly from the
+    ///    identical mistake, so the asymmetry was an oversight, not a design.
+    /// 2. SILENT COMMIT OF FAILED WORK. The partial writes of a body that threw stayed in the open
+    ///    transaction, and CommitAll (or a later Settle(keep: true)) then made them permanent -- while
+    ///    Connector's own summary promises the connector "commits when the block ends". Neither
+    ///    committing nor rolling back was the one behaviour nothing documented.
+    ///
+    /// When this call also OPENED the group (the no-entry path), the group is unwound and deregistered
+    /// too: nothing was committed into it, so leaving it open would strand a group the script never asked
+    /// for, and deregistering lets a retry open a clean one.
+    /// </summary>
+    private void RunBody(Entry entry, Action body, bool openedGroupHere)
+    {
+        try
+        {
+            body();
+        }
+        catch
+        {
+            var transaction = entry.Transaction;
+            if (transaction is not null)
+            {
+                SafeRollBack(transaction.RollBack);
+                entry.Transaction = null;
+                SafeDispose(transaction, null);
+            }
+
+            if (openedGroupHere)
+            {
+                SafeRollBack(entry.Group.RollBack);
+                SafeDispose(null, entry.Group);
+                _entries.Remove(entry);
+            }
+
+            throw;
+        }
+
         CloseTransaction(entry);
     }
 
@@ -470,20 +543,38 @@ internal sealed class ManagedDocumentTransactions
         }
 
         var description = SafeDescribe(entry);
-        if (keep)
+        try
         {
-            CloseTransaction(entry);
-            entry.Group.Assimilate();
-        }
-        else
-        {
-            if (entry.Transaction is not null)
+            if (keep)
             {
-                SafeRollBack(entry.Transaction.RollBack);
-                entry.Transaction = null;
+                CloseTransaction(entry);
+                entry.Group.Assimilate();
             }
+            else
+            {
+                if (entry.Transaction is not null)
+                {
+                    SafeRollBack(entry.Transaction.RollBack);
+                    entry.Transaction = null;
+                }
 
-            entry.Group.RollBack();
+                entry.Group.RollBack();
+            }
+        }
+        catch (Exception ex)
+        {
+            // THE ENTRY IS DELIBERATELY LEFT IN THE SET. Every other terminal path here removes it, but a
+            // settle that FAILED has not reached a terminal state: the group may still be open, and the
+            // executor's finally-net RollBackAll is the only thing that will close it. Removing it would
+            // leak an open group into the live Revit session with nothing holding a reference -- the exact
+            // failure Open's own catch was written to prevent.
+            //
+            // Re-thrown with context rather than raw, per §01: Revit's own message says nothing about
+            // which document, which direction was attempted, or what state it is now in.
+            throw new InvalidOperationException(
+                $"Settling '{description}' with keep: {(keep ? "true" : "false")} failed: {ex.Message} " +
+                "The document is still managed by this run, so its changes will be rolled back when the " +
+                "script finishes; Close/Save/SaveAs on it will still be refused until then.", ex);
         }
 
         SafeDispose(null, entry.Group);
@@ -584,6 +675,24 @@ internal sealed class ManagedDocumentTransactions
         }
     }
 
+    /// <summary>
+    /// <see cref="ReopenTransaction"/> that never throws -- see the call site in
+    /// <see cref="RunWithoutTransactionCore"/>'s finally for why swallowing is correct there and only
+    /// there: an exception from a finally block replaces the script's own, and losing the real error is
+    /// worse than a document left non-modifiable, which fails legibly on the next write.
+    /// </summary>
+    private void SafeReopenAfterScope(Entry entry)
+    {
+        try
+        {
+            ReopenTransaction(entry);
+        }
+        catch
+        {
+            // By contract -- see the doc comment.
+        }
+    }
+
     /// <summary>Opens a fresh transaction in this entry's still-open group. No-op if one is already open.</summary>
     private void ReopenTransaction(Entry entry)
     {
@@ -593,7 +702,19 @@ internal sealed class ManagedDocumentTransactions
         }
 
         var transaction = entry.Document.CreateTransaction(_transactionName);
-        transaction.Start();
+        try
+        {
+            transaction.Start();
+        }
+        catch
+        {
+            // Same care Open takes for the same failure (issue #34): the adapter exists, nothing tracks
+            // it, and nothing else will ever dispose it -- so this catch is its only terminal point.
+            // Without it the native Revit object reverts to the finalizer-timed reclamation #34 removed.
+            SafeDispose(transaction, null);
+            throw;
+        }
+
         entry.Transaction = transaction;
     }
 
