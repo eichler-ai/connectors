@@ -755,18 +755,31 @@ internal sealed class ManagedDocumentTransactions
             return;
         }
 
-        var transaction = entry.Document.CreateTransaction(_transactionName);
+        // CreateTransaction is inside the try alongside Start(): both are calls into Revit and either
+        // can fail, and the catch below has to cover both to (a) dispose whatever was created and (b)
+        // give the failure the same context every spelling of it deserves.
+        ITransactionAdapter? transaction = null;
         try
         {
+            transaction = entry.Document.CreateTransaction(_transactionName);
             transaction.Start();
         }
-        catch
+        catch (Exception ex)
         {
             // Same care Open takes for the same failure (issue #34): the adapter exists, nothing tracks
             // it, and nothing else will ever dispose it -- so this catch is its only terminal point.
             // Without it the native Revit object reverts to the finalizer-timed reclamation #34 removed.
             SafeDispose(transaction, null);
-            throw;
+
+            // CONTEXTUALIZED rather than re-thrown raw, per PRD §01 -- the same signposting Open,
+            // ResolveAdapter and SettleCore all carry. Revit's own "the transaction could not be started"
+            // names neither the document nor that this is the CONNECTOR reopening a transaction, so on the
+            // WithTransaction path (where this propagates) an agent would get an error two steps from the
+            // cause. On the WithoutTransaction-scope reopen path SafeReopenAfterScope swallows this, so the
+            // added context is harmless there and load-bearing only here; the inner exception is preserved
+            // so the raw Revit reason is never lost.
+            throw new InvalidOperationException(
+                $"Reopening a transaction on '{SafeDescribe(entry)}' failed: {ex.Message}", ex);
         }
 
         entry.Transaction = transaction;

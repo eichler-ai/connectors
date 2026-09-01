@@ -248,6 +248,109 @@ class Preproc : Autodesk.Revit.DB.IFailuresPreprocessor {
 	}
 }
 
+// TestWithTransactionRecoversWhenItsBodyThrowsAndTheScriptCatches is the live
+// half of RunBody's contract, and it exists because both failures that method
+// guards against are reachable only from ORDINARY script code -- a try/catch
+// around one API call, falling back when it fails -- yet neither is provable in
+// tier 1, where no script can name a Revit type or open a real transaction.
+//
+// RunBody's own comment names exactly two things a thrown-then-caught body must
+// not leave behind, and this one script pins both at once:
+//
+//  1. THE WEDGE. If the throwing block's transaction is left open, every later
+//     WithTransaction on that document throws "a transaction is already open"
+//     for the rest of the run. Here the second WithTransaction (block 2) runs
+//     immediately after block 1 threw; secondBlockThrew must be false. Remove
+//     `entry.Transaction = null` from RunBody's catch and this flips true.
+//
+//  2. NO SILENT COMMIT OF FAILED WORK. The partial writes of a body that threw
+//     must not become permanent -- carried in an open transaction that CommitAll
+//     (or a later Settle(keep:true)) makes permanent, while Connector's own
+//     summary promises it "commits when the block ends". atThrown must be 0: the
+//     thrown block's level is absent from the model.
+//
+//     This leg pins that END STATE, and deliberately does not claim a per-line
+//     mutation the way (1) does. Removing ONLY RunBody's explicit SafeRollBack
+//     would NOT flip it: the SafeDispose a line later disposes a still-open Revit
+//     transaction, which Revit itself rolls back, so the level is absent either
+//     way (confirmed against RevitTransactionAdapter.Dispose -> Transaction.Dispose).
+//     The mutation that truly reintroduces a silent commit -- leaving the
+//     transaction open AND registered so CommitAll commits it -- trips (1)'s wedge
+//     as well, and (1) is where the clean per-line evidence lives. atThrown is
+//     kept because "failed work is absent" is a real invariant worth asserting
+//     directly, independent of which line achieves it.
+//
+// atSurvivor==1 is the third leg: recovery is not merely "no crash" but a fully
+// usable document -- block 2's write commits normally. All three come from one
+// run so the wedge and the rollback are proven against the SAME live state, not
+// two documents that happened to behave.
+//
+// WithTransaction is nested inside WithoutTransaction because that is the only
+// state a script can call it from: after OpenForWriting the ambient transaction
+// is open, and WithTransaction on an already-transacted document refuses by
+// design (its own "cannot be nested" guard). Same shape as
+// TestStairsAreCreatableWithSettleOnRequest above.
+func TestWithTransactionRecoversWhenItsBodyThrowsAndTheScriptCatches(t *testing.T) {
+	c, instanceID, documentID := targetDocument(t)
+	fixtureTitle := createBlankFixtureDocument(t, c, instanceID, documentID)
+
+	out := runScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+`
+bool caught = false;
+bool secondBlockThrew = false;
+
+Connector.WithoutTransaction(doc, () => {
+  // Block 1: write, then throw. The SCRIPT catches it -- this is the ordinary
+  // "try an API, fall back on failure" shape, not an exotic case.
+  try {
+    Connector.WithTransaction(doc, () => {
+      Autodesk.Revit.DB.Level.Create(doc, 77.7);
+      throw new System.InvalidOperationException("harness: deliberate throw inside WithTransaction");
+    });
+  } catch (System.InvalidOperationException) {
+    caught = true;
+  }
+
+  // Block 2: the WEDGE probe. If block 1's transaction was left open, this
+  // throws "a transaction is already open" and secondBlockThrew goes true.
+  try {
+    Connector.WithTransaction(doc, () => {
+      Autodesk.Revit.DB.Level.Create(doc, 88.8);
+    });
+  } catch (System.Exception) {
+    secondBlockThrew = true;
+  }
+});
+
+// Back under a transaction here -- WithoutTransaction reopened one in the same
+// group. Count each level by its distinctive elevation: the thrown block's must
+// be GONE (rolled back), the survivor's PRESENT (committed).
+int atThrown = 0, atSurvivor = 0;
+foreach (var e in new Autodesk.Revit.DB.FilteredElementCollector(doc)
+    .OfClass(typeof(Autodesk.Revit.DB.Level))) {
+  var lvl = e as Autodesk.Revit.DB.Level;
+  if (lvl == null) continue;
+  if (System.Math.Abs(lvl.Elevation - 77.7) < 0.01) atThrown++;
+  if (System.Math.Abs(lvl.Elevation - 88.8) < 0.01) atSurvivor++;
+}
+return new { caught, secondBlockThrew, atThrown, atSurvivor };
+`)
+	if out.Status != "success" {
+		t.Fatalf("the run was expected to SUCCEED -- a caught throw inside WithTransaction is ordinary script control flow, and if the block wedged the transaction open the whole run fails here; status=%q (%s)", out.Status, out.diag())
+	}
+	if !strings.Contains(out.ReturnValue, `"caught":true`) {
+		t.Fatalf("the deliberate throw inside WithTransaction did not propagate to the script's own catch, so this test is not exercising what it claims; (%s)", out.diag())
+	}
+	if !strings.Contains(out.ReturnValue, `"secondBlockThrew":false`) {
+		t.Errorf("a second WithTransaction after the first threw was itself refused -- the throwing block left its transaction open (the WEDGE). This is what RunBody's `entry.Transaction = null` prevents; (%s)", out.diag())
+	}
+	if !strings.Contains(out.ReturnValue, `"atThrown":0`) {
+		t.Errorf("the level created by the body that THREW survived -- failed work was committed, exactly the silent-commit RunBody's rollback exists to stop (Connector's summary promises it commits only when the block ENDS); (%s)", out.diag())
+	}
+	if !strings.Contains(out.ReturnValue, `"atSurvivor":1`) {
+		t.Errorf("the level created by the recovered second block is missing -- recovery from a caught throw is not merely 'no crash', the document must stay fully writable afterward; (%s)", out.diag())
+	}
+}
+
 // TestSettleMakesLifecycleActionsReachableInTheSameRun pins the capability
 // Connector.Settle exists for, and the notice PRD §01 requires alongside it.
 //

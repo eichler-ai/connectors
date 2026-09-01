@@ -1479,6 +1479,39 @@ public class ManagedDocumentTransactionsTests
     }
 
     [Fact]
+    public void ReopenTransaction_WhenStartThrows_ContextualizesTheErrorAndPreservesTheCause()
+    {
+        // The sibling ReopenTransaction_DisposesTheAdapterWhenStartThrows pins the #34 cleanup; this pins
+        // the OTHER half of that catch -- the message. A raw re-throw handed the agent Revit's own "the
+        // transaction could not be started", naming neither the document nor that the connector was
+        // reopening a transaction (the WithTransaction path), an error two steps from the cause and the
+        // exact PRD §01 sin Open/ResolveAdapter/SettleCore already signpost against. Reverting the wrap to
+        // a bare `throw` leaves the disposal test green, so this is what actually holds the message.
+        var journal = new List<string>();
+        var set = NewSet();
+        var document = new JournalingDocumentAdapter("a-document-with-a-name", journal);
+        set.Open(document, isAmbient: true);
+
+        // Inside a WithoutTransaction scope so the document has NO open transaction -- otherwise
+        // RunWithTransactionCore refuses for nesting before it reaches ReopenTransaction (the same
+        // for-the-right-reason care the disposal test's comment records).
+        set.RunWithoutTransactionCore(document, () =>
+        {
+            document.ThrowOnStartTransaction = true;
+            var ex = Assert.Throws<InvalidOperationException>(() => set.RunWithTransactionCore(document, () => { }));
+
+            // Names the document and the action, so the agent sees what failed and where.
+            Assert.Contains("a-document-with-a-name", ex.Message);
+            Assert.Contains("Reopening a transaction", ex.Message);
+            // The raw Revit reason survives as the inner exception rather than being discarded.
+            Assert.NotNull(ex.InnerException);
+            Assert.Contains("simulated transaction-start failure", ex.InnerException!.Message);
+
+            document.ThrowOnStartTransaction = false;   // let the scope's own reopen succeed
+        });
+    }
+
+    [Fact]
     public void Settle_PreservesFailuresAccumulatedBeforeItForTheRunsNotices()
     {
         // A settled document leaves the entry set, and CommitAll -- the only reader of
