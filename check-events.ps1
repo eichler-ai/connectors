@@ -1,1 +1,0 @@
-Get-WinEvent -LogName Application -MaxEvents 60 | Where-Object { $_.ProviderName -match 'Revit|.NET Runtime|Application Error' -or $_.LevelDisplayName -eq 'Error' } | Select-Object TimeCreated, ProviderName, Id, LevelDisplayName, Message | Format-List | Out-File -FilePath C:\Users\nicholas\Desktop\events.txt -Width 300

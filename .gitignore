@@ -24,3 +24,6 @@ Connectors/
 bin/
 obj/
 revit/test-harness/.buildtmp/
+
+# Ad-hoc VM debugging scripts kept locally, never committed (re-added twice by `git add -A`).
+check-events.ps1
