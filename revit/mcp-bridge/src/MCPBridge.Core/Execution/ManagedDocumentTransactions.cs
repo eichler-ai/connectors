@@ -360,7 +360,7 @@ internal sealed class ManagedDocumentTransactions
     /// document is refused (decision 3); nesting across DIFFERENT documents is allowed, which is how
     /// LoadFamily -- needing both source and target non-modifiable -- is expressed.
     /// </summary>
-    public void RunWithoutTransaction(IDocumentAdapter document, Action body)
+    internal void RunWithoutTransactionCore(IDocumentAdapter document, Action body)
     {
         var entry = FindEntry(document);
         if (entry is null)
@@ -404,7 +404,7 @@ internal sealed class ManagedDocumentTransactions
     /// inner failure ride silently on the outer commit. The refusal is loud and can be relaxed later;
     /// withdrawing a silent join could not be.
     /// </summary>
-    public void RunWithTransaction(IDocumentAdapter document, Action body)
+    internal void RunWithTransactionCore(IDocumentAdapter document, Action body)
     {
         var entry = FindEntry(document);
         if (entry is null)
@@ -450,7 +450,7 @@ internal sealed class ManagedDocumentTransactions
     /// those methods warn about. Deregistering also frees a later WithTransaction to open a FRESH group
     /// for this document, since Open's DocumentId guard only refuses while an entry exists.
     /// </summary>
-    public void Settle(IDocumentAdapter document, bool keep)
+    internal void SettleCore(IDocumentAdapter document, bool keep)
     {
         var entry = FindEntry(document);
         if (entry is null)
@@ -495,19 +495,28 @@ internal sealed class ManagedDocumentTransactions
     /// Raw-Document entry points for the three scopes -- the halves ScriptGlobals calls, split from the
     /// adapter-typed cores above so those stay tier-1 testable with a fake (same split, same reason, as
     /// <see cref="OpenExisting"/> and <see cref="RequireExistingDocumentSource"/>).
+    ///
+    /// NAMED DIFFERENTLY FROM THE CORES ON PURPOSE, and this is a compile-time trap worth knowing: an
+    /// OVERLOAD SET containing both a Revit-typed and an adapter-typed parameter cannot be called at all
+    /// from MCPBridge.Core.Tests. Overload resolution has to consider every candidate, so binding the
+    /// adapter overload still forces Autodesk.Revit.DB.Document to resolve, and the tier-1 host -- which
+    /// deliberately does not reference RevitAPI -- fails with CS0012 on the CALL SITE. Found by trying
+    /// it: 12 errors across the new scope tests, none of them in code that names a Revit type. This is
+    /// the same family as the type-load note on IConnectorRuntime, one rung earlier (compile rather than
+    /// load), and <see cref="OpenExisting"/> only escapes it by having no adapter-typed twin.
     /// </summary>
     public void RunWithoutTransaction(Autodesk.Revit.DB.Document rawDocument, Action body) =>
-        WithResolved(rawDocument, body, nameof(RunWithoutTransaction), RunWithoutTransaction);
+        WithResolved(rawDocument, body, nameof(RunWithoutTransaction), RunWithoutTransactionCore);
 
     /// <summary>See <see cref="RunWithoutTransaction(Autodesk.Revit.DB.Document, Action)"/>.</summary>
     public void RunWithTransaction(Autodesk.Revit.DB.Document rawDocument, Action body) =>
-        WithResolved(rawDocument, body, nameof(RunWithTransaction), RunWithTransaction);
+        WithResolved(rawDocument, body, nameof(RunWithTransaction), RunWithTransactionCore);
 
     /// <summary>See <see cref="RunWithoutTransaction(Autodesk.Revit.DB.Document, Action)"/>.</summary>
     public void Settle(Autodesk.Revit.DB.Document rawDocument, bool keep)
     {
         var adapter = ResolveAdapter(rawDocument, nameof(Settle));
-        Settle(adapter, keep);
+        SettleCore(adapter, keep);
     }
 
     private void WithResolved(Autodesk.Revit.DB.Document rawDocument, Action body, string memberName, Action<IDocumentAdapter, Action> run)

@@ -150,6 +150,12 @@ public class ManagedDocumentTransactionsTests
 
     private static FailureSummary Error(string message) => new(isError: true, message, "err", new[] { "1" });
 
+    /// <summary>
+    /// A WARNING-severity failure -- commits rather than forcing a rollback, which is what the
+    /// failure-accumulation test needs: it has to survive several successful commits in one run.
+    /// </summary>
+    private static FailureSummary Warning(string message) => new(isError: false, message, "warn", new[] { "1" });
+
     [Fact]
     public void Open_StartsTheGroupBeforeTheTransaction()
     {
@@ -949,5 +955,353 @@ public class ManagedDocumentTransactionsTests
 
         Assert.Contains(nameof(IExistingDocumentSource), ex.Message);
         Assert.Contains("revit/test-harness", ex.Message);
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // settle-on-request (issue #132). These are ORDERING tests above all: every one of the three
+    // scopes is defined by WHEN the connector opens and closes things, not by what it returns, so the
+    // shared journal -- not a return value -- is what can actually fail here.
+    // ---------------------------------------------------------------------------------------------
+
+    [Fact]
+    public void WithoutTransaction_ClosesTheTransactionAroundTheBodyAndReopensItInTheSameGroup()
+    {
+        var journal = new List<string>();
+        var set = NewSet();
+        var document = new JournalingDocumentAdapter("ambient", journal);
+        set.Open(document, isAmbient: true);
+        journal.Clear();
+
+        set.RunWithoutTransactionCore(document, () => journal.Add("BODY"));
+
+        // The body runs BETWEEN a commit and a fresh start, and group.Start never repeats -- the group
+        // is what carries the rollback boundary across the gap, so a second one here would silently
+        // split the run into two undo units.
+        Assert.Equal(
+            new[] { "ambient:tx.Commit", "ambient:tx.Dispose", "BODY", "ambient:tx.Start" },
+            journal);
+        Assert.Equal(1, set.Count);
+    }
+
+    [Fact]
+    public void WithoutTransaction_ReopensTheTransactionEvenWhenTheBodyThrows()
+    {
+        // Otherwise RollBackAll meets an entry with no transaction where it expects one shape, and the
+        // executor's finally net is the only thing standing between a failed run and a leaked group.
+        var journal = new List<string>();
+        var set = NewSet();
+        var document = new JournalingDocumentAdapter("ambient", journal);
+        set.Open(document, isAmbient: true);
+        journal.Clear();
+
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            set.RunWithoutTransactionCore(document, () => throw new InvalidOperationException("script blew up")));
+
+        Assert.Equal("script blew up", ex.Message);
+        Assert.Equal(new[] { "ambient:tx.Commit", "ambient:tx.Dispose", "ambient:tx.Start" }, journal);
+    }
+
+    [Fact]
+    public void WithoutTransaction_RefusesReEntryOnTheSameDocument()
+    {
+        var journal = new List<string>();
+        var set = NewSet();
+        var document = new JournalingDocumentAdapter("ambient", journal);
+        set.Open(document, isAmbient: true);
+
+        Exception? inner = null;
+        set.RunWithoutTransactionCore(document, () =>
+            inner = Record.Exception(() => set.RunWithoutTransactionCore(document, () => { })));
+
+        var ex = Assert.IsType<InvalidOperationException>(inner);
+        Assert.Contains("cannot be nested on the same document", ex.Message);
+        Assert.Contains("ambient (active document)", ex.Message);
+    }
+
+    [Fact]
+    public void WithoutTransaction_AllowsNestingAcrossDifferentDocuments()
+    {
+        // This is the Document.LoadFamily shape -- it needs BOTH source and target non-modifiable, and
+        // decision 3 (#132) chose nesting over a document-set overload precisely so this works.
+        var journal = new List<string>();
+        var set = NewSet();
+        var source = new JournalingDocumentAdapter("source", journal);
+        var target = new JournalingDocumentAdapter("target", journal);
+        set.Open(source, isAmbient: true);
+        set.OpenAdoptedForTesting(target);
+        journal.Clear();
+
+        set.RunWithoutTransactionCore(source, () =>
+            set.RunWithoutTransactionCore(target, () => journal.Add("BOTH-CLOSED")));
+
+        Assert.Equal(
+            new[]
+            {
+                "source:tx.Commit", "source:tx.Dispose",
+                "target:tx.Commit", "target:tx.Dispose",
+                "BOTH-CLOSED",
+                "target:tx.Start",
+                "source:tx.Start",
+            },
+            journal);
+    }
+
+    [Fact]
+    public void WithoutTransaction_OnAnUnmanagedDocumentSimplyRunsTheBody()
+    {
+        // A document nothing manages is ALREADY not modifiable, so refusing would be a refusal the
+        // script could do nothing useful about.
+        var journal = new List<string>();
+        var set = NewSet();
+        var unmanaged = new JournalingDocumentAdapter("unmanaged", journal);
+
+        set.RunWithoutTransactionCore(unmanaged, () => journal.Add("BODY"));
+
+        Assert.Equal(new[] { "BODY" }, journal);
+        Assert.Equal(0, set.Count);
+    }
+
+    [Fact]
+    public void WithTransaction_InsideWithoutTransaction_IsTheStairsShape()
+    {
+        // The whole point of the pair: an edit scope needs NO transaction to start, a transaction to
+        // write, and NO transaction again to commit. The closing tx.Commit before "COMMIT-SCOPE" is
+        // load-bearing -- live, EditScope.Commit() refuses while a transaction is open.
+        var journal = new List<string>();
+        var set = NewSet();
+        var document = new JournalingDocumentAdapter("fixture", journal);
+        set.Open(document, isAmbient: true);
+        journal.Clear();
+
+        set.RunWithoutTransactionCore(document, () =>
+        {
+            journal.Add("START-SCOPE");
+            set.RunWithTransactionCore(document, () => journal.Add("CREATE-RUN"));
+            journal.Add("COMMIT-SCOPE");
+        });
+
+        Assert.Equal(
+            new[]
+            {
+                "fixture:tx.Commit", "fixture:tx.Dispose",
+                "START-SCOPE",
+                "fixture:tx.Start", "CREATE-RUN", "fixture:tx.Commit", "fixture:tx.Dispose",
+                "COMMIT-SCOPE",
+                "fixture:tx.Start",
+            },
+            journal);
+    }
+
+    [Fact]
+    public void WithTransaction_RefusesNestingOnTheSameDocument()
+    {
+        // Decision 1 (#132): refuse loudly rather than join transparently. Joining would make "the
+        // connector commits at block end" false for the inner block, and would let a caught inner
+        // failure ride silently on the outer commit.
+        var journal = new List<string>();
+        var set = NewSet();
+        var document = new JournalingDocumentAdapter("ambient", journal);
+        set.Open(document, isAmbient: true);
+
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            set.RunWithTransactionCore(document, () => { }));
+
+        Assert.Contains("cannot be nested on the same document", ex.Message);
+        Assert.Contains("Write directly instead", ex.Message);
+    }
+
+    [Fact]
+    public void WithTransaction_AccumulatesFailuresFromEveryCommitNotJustTheLast()
+    {
+        // The data-loss bug review found: ITransactionAdapter.CommitFailures is overwritten on every
+        // Commit(), so reading it once at end-of-run destroys the first N-1 sets. Two scoped commits
+        // plus the end-of-run one must all be represented.
+        var journal = new List<string>();
+        var set = NewSet();
+        var document = new JournalingDocumentAdapter("ambient", journal)
+        {
+            FailuresToReport = new[] { Warning("off axis") },
+        };
+        set.Open(document, isAmbient: true);
+
+        set.RunWithoutTransactionCore(document, () =>
+        {
+            set.RunWithTransactionCore(document, () => { });
+            set.RunWithTransactionCore(document, () => { });
+        });
+        var result = set.CommitAll();
+
+        Assert.True(result.Success);
+        // one for the WithoutTransaction close, two for the inner blocks, one for the final commit.
+        Assert.Equal(4, result.CommitFailures.Count);
+        Assert.All(result.CommitFailures, f => Assert.Equal("off axis", f.Message));
+    }
+
+    [Fact]
+    public void WithTransaction_ThrowsWhenRevitForcesARollbackMidScript()
+    {
+        // Terminal for the run today; mid-scope it would otherwise discard the script's writes while
+        // the script kept running unaware. The message must carry the REASON, which lives only in the
+        // accumulated failure list.
+        var journal = new List<string>();
+        var set = NewSet();
+        var document = new JournalingDocumentAdapter("ambient", journal)
+        {
+            FailuresToReport = new[] { Error("walls overlap") },
+        };
+        set.Open(document, isAmbient: true);
+
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            set.RunWithoutTransactionCore(document, () => { }));
+
+        Assert.Contains("Revit rolled back", ex.Message);
+        Assert.Contains("walls overlap", ex.Message);
+    }
+
+    [Fact]
+    public void Settle_KeepAssimilatesTheGroupAndDeregistersTheDocument()
+    {
+        // Deregistration is what keeps the unwind correct: CommitAll walks every entry, so a settled
+        // pair left in the set would be assimilated a SECOND time.
+        var journal = new List<string>();
+        var set = NewSet();
+        var ambient = new JournalingDocumentAdapter("ambient", journal);
+        var scratch = new JournalingDocumentAdapter("scratch", journal);
+        set.Open(ambient, isAmbient: true);
+        set.OpenAdoptedForTesting(scratch);
+        journal.Clear();
+
+        set.SettleCore(scratch, keep: true);
+
+        Assert.Equal(
+            new[] { "scratch:tx.Commit", "scratch:tx.Dispose", "scratch:group.Assimilate", "scratch:group.Dispose" },
+            journal);
+        Assert.Equal(1, set.Count);
+
+        journal.Clear();
+        var result = set.CommitAll();
+        Assert.True(result.Success);
+        Assert.DoesNotContain(journal, entry => entry.StartsWith("scratch:", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Settle_DiscardRollsTheGroupBackAndDeregisters()
+    {
+        var journal = new List<string>();
+        var set = NewSet();
+        var ambient = new JournalingDocumentAdapter("ambient", journal);
+        var scratch = new JournalingDocumentAdapter("scratch", journal);
+        set.Open(ambient, isAmbient: true);
+        set.OpenAdoptedForTesting(scratch);
+        journal.Clear();
+
+        set.SettleCore(scratch, keep: false);
+
+        Assert.Equal(
+            new[] { "scratch:tx.RollBack", "scratch:group.RollBack", "scratch:group.Dispose" },
+            journal);
+        Assert.Equal(1, set.Count);
+    }
+
+    [Fact]
+    public void Settle_IsRecordedSoTheExecutorCanRaiseTheNotice()
+    {
+        // Decision 2 (#132): Settle is the irreversible one, so it is the only scope that notices.
+        var journal = new List<string>();
+        var set = NewSet();
+        var ambient = new JournalingDocumentAdapter("ambient", journal);
+        var scratch = new JournalingDocumentAdapter("scratch", journal);
+        set.Open(ambient, isAmbient: true);
+        set.OpenAdoptedForTesting(scratch);
+
+        set.SettleCore(scratch, keep: true);
+        set.SettleCore(ambient, keep: false);
+
+        Assert.Collection(
+            set.Settlements,
+            first =>
+            {
+                Assert.Equal("scratch (adopted via OpenForWriting)", first.Document);
+                Assert.True(first.Kept);
+            },
+            second =>
+            {
+                Assert.Equal("ambient (active document)", second.Document);
+                Assert.False(second.Kept);
+            });
+    }
+
+    [Fact]
+    public void Settle_RefusesInsideAWithoutTransactionScope()
+    {
+        // That scope reopens a transaction when it ends, which would immediately undo the settle and
+        // leave Close/Save refused again -- a confusing failure two steps from its cause.
+        var journal = new List<string>();
+        var set = NewSet();
+        var document = new JournalingDocumentAdapter("ambient", journal);
+        set.Open(document, isAmbient: true);
+
+        Exception? inner = null;
+        set.RunWithoutTransactionCore(document, () =>
+            inner = Record.Exception(() => set.SettleCore(document, keep: true)));
+
+        var ex = Assert.IsType<InvalidOperationException>(inner);
+        Assert.Contains("cannot run inside a WithoutTransaction scope", ex.Message);
+    }
+
+    [Fact]
+    public void Settle_ThrowsForADocumentThisRunDoesNotManage()
+    {
+        var journal = new List<string>();
+        var set = NewSet();
+
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            set.SettleCore(new JournalingDocumentAdapter("stranger", journal), keep: true));
+
+        Assert.Contains("does not manage", ex.Message);
+    }
+
+    [Fact]
+    public void WritingAgainAfterSettle_OpensAFreshGroupRatherThanBeingRefused()
+    {
+        // Open's DocumentId guard only refuses while an entry EXISTS, so deregistering at settle is
+        // what makes a post-settle write possible at all. Review flagged this as an unnamed constraint.
+        var journal = new List<string>();
+        var set = NewSet();
+        var document = new JournalingDocumentAdapter("ambient", journal);
+        set.Open(document, isAmbient: true);
+        set.SettleCore(document, keep: true);
+        journal.Clear();
+
+        set.RunWithTransactionCore(document, () => journal.Add("LATER-WRITE"));
+
+        Assert.Equal(
+            new[] { "ambient:group.Start", "ambient:tx.Start", "LATER-WRITE", "ambient:tx.Commit", "ambient:tx.Dispose" },
+            journal);
+        Assert.Equal(1, set.Count);
+    }
+
+    [Fact]
+    public void CommitAll_AssimilatesWithoutASecondCommit_WhenAScopeAlreadyClosedTheTransaction()
+    {
+        // An entry whose transaction is null is not an error state -- it is a document a WithTransaction
+        // block already committed into its group. Only the group remains.
+        var journal = new List<string>();
+        var set = NewSet();
+        var document = new JournalingDocumentAdapter("ambient", journal);
+        set.Open(document, isAmbient: true);
+        set.RunWithoutTransactionCore(document, () => { });
+        set.SettleCore(document, keep: true);
+        set.RunWithTransactionCore(document, () => { });
+        journal.Clear();
+
+        var result = set.CommitAll();
+
+        Assert.True(result.Success);
+        // NO tx.Dispose here, and that is correct rather than a gap: the scope disposed the transaction
+        // at its own terminal point (issue #34 -- dispose strictly after that entry's handling settles),
+        // so CommitAll has only the group left to close. An earlier draft of this test asserted a second
+        // tx.Dispose and failed, which is the assertion catching a double-dispose that never happens.
+        Assert.Equal(new[] { "ambient:group.Assimilate", "ambient:group.Dispose" }, journal);
     }
 }
