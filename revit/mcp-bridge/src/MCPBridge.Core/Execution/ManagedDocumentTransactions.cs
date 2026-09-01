@@ -246,6 +246,26 @@ internal sealed class ManagedDocumentTransactions
 
         _entries.Add(new Entry(document, group, transaction, origin));
         _originHistory[document.DocumentId] = origin;
+
+        // #122: capture a created document's identity NOW -- while the entry exists and the document is
+        // freshly in hand -- into a list that outlives the entry set, so the executor can report it on
+        // every run even after CommitAll/RollBackAll has dropped the entry. Mirrors _settlements.
+        // Title is read best-effort (a live Revit call that can throw for a document mid-transition -- the
+        // same reason Describe routes through SafeDescribe); DocumentId is safe, it was just read above.
+        if (origin == DocumentOrigin.CreatedThisRun)
+        {
+            string title;
+            try
+            {
+                title = document.Title;
+            }
+            catch
+            {
+                title = "(title unavailable -- match by document_id)";
+            }
+
+            _createdDocuments.Add(new CreatedDocumentRecord(title, document.DocumentId));
+        }
     }
 
     /// <summary>
@@ -383,6 +403,35 @@ internal sealed class ManagedDocumentTransactions
     /// runs and would otherwise be the only thing that surfaced them.
     /// </summary>
     public IReadOnlyList<FailureSummary> SettledFailures => _settledFailures;
+
+    /// <summary>#122: one per document THIS run created (CreateProjectDocument/CreateFamilyDocument), by
+    /// Title and the tmp- document_id that lets a later call find it.</summary>
+    internal readonly struct CreatedDocumentRecord
+    {
+        public CreatedDocumentRecord(string title, string documentId)
+        {
+            Title = title;
+            DocumentId = documentId;
+        }
+
+        public string Title { get; }
+
+        /// <summary>The tmp- id of the unsaved document, the handle a follow-up execute_script targets to close/save it.</summary>
+        public string DocumentId { get; }
+    }
+
+    private readonly List<CreatedDocumentRecord> _createdDocuments = new();
+
+    /// <summary>
+    /// #122: the documents THIS run created, captured by identity AT creation so they survive
+    /// <see cref="CommitAll"/>/<see cref="RollBackAll"/> dropping the entry set -- the same reason
+    /// <see cref="_settlements"/> is its own list. Read by the executor to report them on EVERY run: a
+    /// created document outlives its run (rollback undoes content, not existence), so an agent whose
+    /// script threw after creating documents would otherwise be left holding an error and no handle to
+    /// what it made (split from #114). Only <see cref="DocumentOrigin.CreatedThisRun"/> is captured --
+    /// the ambient and OpenForWriting-adopted documents existed before the run and are not orphaned by it.
+    /// </summary>
+    public IReadOnlyList<CreatedDocumentRecord> CreatedDocuments => _createdDocuments;
 
     /// <summary>
     /// Runs <paramref name="body"/> with this document NOT modifiable: the connector commits and closes

@@ -731,6 +731,44 @@ throw new System.TimeoutException(""cancellation was never observed"");";
     }
 
     [Fact]
+    public void CreatedDocumentsNotice_NamesEachCreatedDocumentWithItsIdAndACleanupRemedy()
+    {
+        // #122: the executor surfaces the ManagedDocumentTransactions identities as a §01 notice so a
+        // created document that outlives its run never does so silently. (The full script->notice path
+        // needs the real Revit Document type and is proven live in revit/test-harness; the notice shape and
+        // the exposure are what tier 1 pins.)
+        var created = new[]
+        {
+            new ManagedDocumentTransactions.CreatedDocumentRecord("Project1", "tmp-Project1"),
+            new ManagedDocumentTransactions.CreatedDocumentRecord("Family1", "tmp-Family1"),
+        };
+
+        var notice = TransactionScriptExecutor.CreatedDocumentsNotice(created);
+
+        Assert.NotNull(notice);
+        Assert.Equal("script-created-documents", notice!.Code);
+        Assert.Equal(DiagnosticSeverity.Info, notice.Severity);
+        Assert.Contains("Project1", notice.Message);
+        Assert.Contains("Family1", notice.Message);
+
+        // The machine-readable handles the caller matches on.
+        var docs = (System.Collections.Generic.Dictionary<string, object?>[])notice.Detail["created_documents"]!;
+        Assert.Equal(2, docs.Length);
+        Assert.Contains(docs, d => (string?)d["document_id"] == "tmp-Project1" && (string?)d["title"] == "Project1");
+        Assert.Contains(docs, d => (string?)d["document_id"] == "tmp-Family1");
+
+        // A handle is only useful with the way to act on it.
+        Assert.Contains(notice.Remedy, r => r.Contains("confirm_lifecycle_actions"));
+    }
+
+    [Fact]
+    public void CreatedDocumentsNotice_ReturnsNull_WhenNothingWasCreated()
+    {
+        // The common case: no created documents -> no notice, so ordinary runs are not spammed.
+        Assert.Null(TransactionScriptExecutor.CreatedDocumentsNotice(System.Array.Empty<ManagedDocumentTransactions.CreatedDocumentRecord>()));
+    }
+
+    [Fact]
     public async Task ScriptThatDoesNotPublish_HasEmptyFilesArray_NoExportsDirectoryNeeded()
     {
         // exportsDirectoryPath omitted entirely -- existing callers/tests that don't pass one must
