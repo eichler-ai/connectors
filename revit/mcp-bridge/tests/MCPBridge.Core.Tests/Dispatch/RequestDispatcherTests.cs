@@ -683,6 +683,66 @@ public class RequestDispatcherTests
         Assert.DoesNotContain("window-inventory-timeout-fallback", json);
     }
 
+    // #136: the §07 window inventory reads window text via a blocking Win32 call against the very UI thread
+    // it inspects, so under a long-running script it can take seconds -- and it ran SYNCHRONOUSLY on the
+    // pending-response path, intermittently blowing the broker's timeout_ms + 5s wire budget: the diagnostic
+    // timing out the very wire call it exists to explain. These pin the budget math and the hard cap.
+
+    [Theory]
+    // handler already spent ~timeout_ms; plenty of buffer left -> the hard cap, which is what runs.
+    [InlineData(2000, 2000, 1500)]
+    [InlineData(0, 2000, 1500)]
+    // just enough left to bother with (>= InventoryMinBudgetMs=250)
+    [InlineData(5000, 2000, 500)]
+    // budget nearly gone -> below the min, so the caller skips the inventory
+    [InlineData(5300, 2000, 200)]
+    // budget already blown -> negative, which is still "skip", never a wait
+    [InlineData(6000, 2000, -500)]
+    // an unbounded caller timeout_ms is clamped before it inflates the budget
+    [InlineData(0, long.MaxValue, 1500)]
+    public void ComputeInventoryBudgetMs_SizesToRemainingWireBudget(long handlerElapsedMs, long timeoutMs, long expected)
+    {
+        Assert.Equal(expected, RequestDispatcher.ComputeInventoryBudgetMs(handlerElapsedMs, timeoutMs));
+    }
+
+    [Fact]
+    public async Task PollExecution_SlowWindowInventory_DoesNotBlockResponsePastWireBudget()
+    {
+        var executionManager = NewExecutionManager();
+        var bridge = new ExternalEventBridge<ScriptExecutionOutcome>(new FakeExternalEventRaiser());
+        var now = DateTimeOffset.UtcNow;
+        // The inventory blocks for 8s -- exactly #136: a busy UI thread making the diagnostic take seconds.
+        // The response must abandon it and return the pending status, not wait it out.
+        var windowInventory = new FakeWindowInventory
+        {
+            BlockFor = TimeSpan.FromSeconds(8),
+            Windows = new[] { new WindowInfo("Warning", "#32770", Array.Empty<string>()) },
+        };
+        var dispatcher = new RequestDispatcher(
+            executionManager,
+            bridge,
+            NewScriptExecutor(),
+            now: () => now,
+            delay: _ => { now = now.AddMilliseconds(200); return Task.CompletedTask; },
+            windowInventory: windowInventory);
+
+        executionManager.Start("exec-1", "1 + 1", 600_000, now);
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var json = await dispatcher.DispatchAsync(PollRequest(1, "exec-1", timeoutMs: 500));
+        sw.Stop();
+
+        Assert.Contains("\"status\":\"pending\"", json);
+        // Abandoned, not waited on: no notice, and it returned well inside the 8s block (~the hard cap).
+        Assert.DoesNotContain("window-inventory-timeout-fallback", json);
+        Assert.True(
+            sw.Elapsed < TimeSpan.FromSeconds(5),
+            $"poll_execution waited {sw.Elapsed} on a slow window inventory -- the diagnostic must never delay the response past the wire budget (#136).");
+        // It WAS entered (so the notice's absence is the cap firing, not the inventory being skipped): the
+        // enumerate call is in flight on its own task even though the response already returned.
+        Assert.Equal(1, windowInventory.EnumerateCallCount);
+    }
+
     [Fact]
     public async Task UnknownMethod_ReturnsMethodNotFoundError()
     {
