@@ -28,6 +28,21 @@ other overloaded symptoms (`documents: []`, a `busy` instance, a stalled live ru
 drive this VM's UI (see below), but you can see it, and treating "can't drive" as "must work blind"
 has cost hours here.
 
+**If Revit VANISHED, our logs are not the evidence — the Windows Application log is.** A crash takes
+`connection.log` down with the process, so it ends mid-sentence and says nothing about why; the add-in
+never gets to write a final line. Read Revit's own crash record instead:
+
+```powershell
+Get-WinEvent -LogName Application -MaxEvents 60 |
+  Where-Object { $_.ProviderName -match 'Revit|.NET Runtime|Application Error' -or $_.LevelDisplayName -eq 'Error' } |
+  Select-Object TimeCreated, ProviderName, Id, LevelDisplayName, Message | Format-List
+```
+
+Run it through `prlctl exec ... powershell -Command`, which is fine here because reading the event log
+needs no interactive session (unlike anything touching a window). `Application Error` carries the
+faulting module, which is what distinguishes "our add-in threw" from "Revit died in its own native
+code" — the distinction issue #113 turned on.
+
 ## `prlctl`
 
 `prlctl start|stop|restart <vm>` for lifecycle; `prlctl exec <vm> ...` to run commands in the guest.

@@ -169,6 +169,7 @@ stuck. **Add a bullet only when the technique is not already a rule in `SKILL.md
 | Log loaded assemblies' `.Location` to catch a shadow copy | `dev-environment.md` → Deployment |
 | Isolate a `TypeLoadException` by decomposing into `NoInlining` methods | `dev-environment.md` → Assembly loading |
 | Screenshot the VM (`prlctl capture`) before theorising | `dev-environment.md` → When something looks wrong |
+| Read the Windows **Application** event log when Revit crashed and our logs just stop | `dev-environment.md` → When something looks wrong |
 | Read Revit's journal to learn what Revit was actually asked to do | `dev-environment.md` → Deployment |
 | Use the connector's own MCP tools for API research | `dev-environment.md` → Scripts |
 
