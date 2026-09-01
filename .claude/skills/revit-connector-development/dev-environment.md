@@ -119,6 +119,36 @@ can't land in the wrong order.
   even from the agent's own session; `CloseMainWindow()` returns false though the window resolves.
   Don't spend time on it — use a journal replay or ask the user for the click.
 
+## Two Revit versions, and why only one was ever tested
+
+Both **Revit 2025 and 2027 are installed** on this VM, and the add-in multi-targets for both
+(`net8.0-windows` / `net10.0-windows`). Tier 1 runs both legs. **The live harness had never once run
+against 2025**, and the reason was tooling, not choice: `redeploy-and-verify.ps1` always wrote an empty
+line 1 into its `*.launch` signal — the alternate-exe slot the launcher agent has always honoured — so
+it could only ever relaunch 2027. `--revit-exe` now exposes it:
+
+```sh
+revit/dev-tooling/redeploy-and-verify.sh --build \
+  --revit-exe 'C:\Program Files\Autodesk\Revit 2025\Revit.exe' \
+  --tfm net8.0-windows --revit-version 2025 --doc-dest '<a 2025-saved .rvt>'
+```
+
+Two things that bite immediately:
+
+- **Each version needs its own fixture `.rvt`.** Revit is forward-incompatible and says so plainly:
+  *"The file work.rvt was saved in a later version of Revit and cannot be retrieved in this version."*
+  `C:\dev\fixtures\work.rvt` is 2027-saved, so a 2025 run needs a separate document saved by 2025 —
+  and there is no way to produce one without a human, because a harness run needs a document open
+  before it can create anything.
+- **Revit's trial splash blocks the idle loop at LAUNCH** ("24 DAYS LEFT / Dig into your trial"). Worse
+  than the memory warning, which needs a session to age first: this one is up before the first test
+  runs, so an automated sweep against a freshly relaunched Revit fails in its entirety with every case
+  reporting `pending`. It needs a human click today. **Dead end so far:** `prlctl exec` runs as SYSTEM
+  and cannot touch the interactive session's windows, so it cannot dismiss it. The launcher agent
+  *could* (it runs in that session, and `*.runexe` accepts an arbitrary exe), which is the route to try
+  — enumerate `Revit.exe`'s top-level windows first and match class+title exactly, since a stray
+  `WM_CLOSE` would hit Revit's main window. Tracked as issue #134.
+
 ## Deployment
 
 **Revit recognizes exactly two manifest locations per version, and silently ignores everything else —

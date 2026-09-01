@@ -123,6 +123,10 @@ These are the rules that generalize. Each one exists because violating it cost r
   binds hardest in `skill.md`, where such a claim does not merely sit wrong — it is *obeyed*: "there
   is no cleanup path" for connector-created documents was false (a later run closes them fine), and
   the agent that believed it stopped trying and leaked five documents into a live session (#114).
+  **The mirror case costs the same.** Told that a 2027 `.rvt` opens in 2025, an agent abandoned its
+  own correct hypothesis and went hunting a different cause, until Revit's own dialog said the file
+  "cannot be retrieved in this version". Deference and insistence fail identically when one launch
+  settles it: hold the hypothesis, run the test, quote what the screen said.
 - **A test pinning one exploit's syntax is not coverage of the hole.** Name the *shape* being
   blocked (target-typed construction, method groups, callbacks, aliases), and when adding a case,
   say which shape it adds.
@@ -234,6 +238,14 @@ file exchange; before every corpus regression pass; and before cutting a release
 **Iterate with `-run <Case>` (Go) or `--filter <TestClass>` and one `-f <tfm>` (C#); run the full
 suite once before opening the PR.** The C# default runs every suite twice, once per TFM. The dual
 run stays mandatory at PR time — it has caught a real per-TFM difference — just not per edit.
+
+**Two TFMs compiling and unit-testing is not two Revit versions working.** Tier 1 runs both legs, but
+the live harness runs against whichever Revit is up — and until `--revit-exe` existed that was always
+2027, so the `net8.0`/Revit 2025 leg had never once been exercised live. A multi-version claim needs a
+live sweep per version, each against an *equivalent* fixture: several cases assume the routed document
+is **saved on disk** (`TestDocumentIdRouting` copies its `PathName`), so aiming a sweep at a fresh
+unsaved document yields failures that read as version differences and are not. Setup and the
+per-version fixture rule are in `dev-environment.md`.
 
 ## Script API surface — the denylist principle
 

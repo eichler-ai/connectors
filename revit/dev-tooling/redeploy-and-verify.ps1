@@ -48,6 +48,12 @@ param(
     # line -- a tight timeout here fails on nothing but Revit's own ordinary startup time.
     [int]$TimeoutSec = 150,
     [int]$MinDocuments = -1,   # -1 = auto: 1 if DocDest given, else 0 (see resolution below)
+    # Alternate Revit.exe to launch, e.g. 'C:\Program Files\Autodesk\Revit 2025\Revit.exe'. Empty
+    # means the launcher agent's own default (2027). The agent has always supported this as line 1 of a
+    # *.launch signal; this script hardcoded '' and so could only ever relaunch 2027, which is why the
+    # net8.0-windows/Revit 2025 leg had no live path at all -- it built and unit-tested on both TFMs
+    # while every live run was 2027. Pair with -Tfm net8.0-windows -RevitVersion 2025.
+    [string]$RevitExe = '',
     [switch]$SkipCopy,         # skip the DLL deploy -- close/relaunch/verify only
     [switch]$SkipRelaunch,     # skip close/relaunch/wait -- deploy DLLs only, no verification
     # The interactive user Revit/the add-in/the launcher agent actually run as. Deliberately NOT
@@ -307,14 +313,19 @@ if (-not $SkipCopy) {
 
 if (-not $SkipRelaunch) {
     $lines = @()
+    $which = if ($RevitExe) { $RevitExe } else { 'the default Revit' }
     if ($DocSource -and $DocDest) {
-        $lines = @('', $DocSource, $DocDest)
-        Say "launching Revit with pristine-copy fixture doc: '$DocSource' -> '$DocDest'"
+        $lines = @($RevitExe, $DocSource, $DocDest)
+        Say "launching $which with pristine-copy fixture doc: '$DocSource' -> '$DocDest'"
     } elseif ($DocDest) {
-        $lines = @('', $DocDest)
-        Say "launching Revit with document: '$DocDest'"
+        $lines = @($RevitExe, $DocDest)
+        Say "launching $which with document: '$DocDest'"
+    } elseif ($RevitExe) {
+        # A bare exe still needs the line, so the signal cannot be mistaken for "no payload".
+        $lines = @($RevitExe)
+        Say "launching $which with no document"
     } else {
-        Say "launching Revit with no document"
+        Say "launching $which with no document"
     }
     Drop-Signal -Extension 'launch' -Lines $lines
 
