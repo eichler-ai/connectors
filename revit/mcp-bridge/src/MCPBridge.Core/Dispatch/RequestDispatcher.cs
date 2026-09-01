@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Text.RegularExpressions;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.CodeAnalysis.Scripting;
 using Eichler.Connectors.Revit;
@@ -49,6 +50,33 @@ public sealed class RequestDispatcher
 
     /// <summary>PRD §06: "default generous, e.g. 10 minutes" for execute_script's max_duration_ms.</summary>
     private const long DefaultMaxDurationMs = 600_000;
+
+    // #136: the §07 window inventory (BuildWindowInventoryNotices) reads window text via a blocking
+    // Win32 SendMessageTimeout against the very UI thread it is inspecting, so under a long-running
+    // script it consumes real wall-clock. It is diagnosis-only and must NEVER delay the pending response
+    // it annotates past the broker's wire budget -- doing so WAS #136: the diagnostic timing out the very
+    // wire call it exists to explain, intermittently, once a session had accumulated enough top-level
+    // windows to spend its whole budget. So the timeout-branch response waits for the inventory only
+    // within the slice of the wire budget it can spare, and returns the plain pending status without it
+    // when too little remains.
+    //
+    // WireResponseBufferMs mirrors the broker's own grace on top of timeout_ms -- callWire in
+    // mcp-server/internal/execution/execution.go bounds the round trip to `timeout_ms + 5s`. The two are
+    // hand-synced across the wire (per CONVENTIONS.md's "mirrored on both ends" rule); this is the add-in
+    // staying safely INSIDE that budget, so if the broker's grace ever shrinks, this constant must follow.
+    // Deliberately conservative rather than exact -- underestimating the real remaining budget only makes
+    // the diagnostic bail sooner, never the wire call fail.
+    private const long WireResponseBufferMs = 5_000;
+
+    // Reserve of the wire buffer kept for serialising and writing the response after the inventory runs
+    // (the continuation hop and the framed NDJSON write, both off a possibly-contended thread pool).
+    private const long InventoryResponseWriteReserveMs = 1_500;
+
+    // Hard ceiling on how long the response will ever wait for the inventory, independent of budget math.
+    private const long InventoryHardCapMs = 1_500;
+
+    // Below this, running the inventory at all is not worth the risk to the response -- skip it.
+    private const long InventoryMinBudgetMs = 250;
 
     private readonly ExecutionManager _executionManager;
     private readonly ExternalEventBridge<ScriptExecutionOutcome> _bridge;
@@ -156,6 +184,10 @@ public sealed class RequestDispatcher
 
     private async Task<string> HandleExecuteScriptAsync(JsonRpcRequest request)
     {
+        // #136: real wall-clock spent in this handler, so the window-inventory diagnostic on the timeout
+        // branch can be bounded to the slice of the broker's wire budget it can still spare
+        // (BuildWindowInventoryNoticesWithinWireBudget).
+        var handlerSw = System.Diagnostics.Stopwatch.StartNew();
         string executionId;
         string script;
         string documentId;
@@ -260,8 +292,95 @@ public sealed class RequestDispatcher
         // installed, a framework dialog never blocks this long, so a genuine local timeout here means
         // something else (a non-framework dialog, a slow API call, a real hang) is holding the UI
         // thread. Diagnosis only, never persisted onto the record itself.
-        var extraNotices = first != workTask && !record.Status.IsTerminal() ? BuildWindowInventoryNotices() : null;
+        IReadOnlyList<DiagnosticRecord>? extraNotices = null;
+        if (first != workTask && !record.Status.IsTerminal())
+        {
+            extraNotices = await BuildWindowInventoryNoticesWithinWireBudget(handlerSw, timeoutMs).ConfigureAwait(false);
+        }
         return ExecutionResultMessage.FromRecord(request.Id, record, extraNotices);
+    }
+
+    /// <summary>
+    /// #136: how many ms the pending-response path may wait for the window inventory, given how much of
+    /// this call's broker wire budget (ClampTimeoutMs(timeout_ms) + <see cref="WireResponseBufferMs"/>)
+    /// the handler has already spent, after reserving <see cref="InventoryResponseWriteReserveMs"/> to
+    /// serialise and write the response. Hard-ceilinged at <see cref="InventoryHardCapMs"/>. A result
+    /// below <see cref="InventoryMinBudgetMs"/> means "skip the inventory" -- can be negative when the
+    /// budget is already blown. Pure and static so it is unit-testable without a real clock.
+    /// </summary>
+    internal static long ComputeInventoryBudgetMs(long handlerElapsedMs, long timeoutMs)
+    {
+        // ClampTimeoutMs floors at 0, so this over-estimates the real budget only if the broker ever sent a
+        // NEGATIVE timeout_ms -- which it does not: timeout_ms is a non-negative wait, and the broker's own
+        // budget is `timeout_ms + 5s` off the same value. Every other input is safe: a huge timeout_ms is
+        // clamped before it can inflate the budget, and a budget already blown yields a negative result,
+        // which the caller reads as "skip". So the estimate is conservative wherever it matters.
+        var wireBudgetMs = ClampTimeoutMs(timeoutMs) + WireResponseBufferMs;
+        var remainingMs = wireBudgetMs - handlerElapsedMs - InventoryResponseWriteReserveMs;
+        return Math.Min(InventoryHardCapMs, remainingMs);
+    }
+
+    /// <summary>
+    /// #136: runs <see cref="BuildWindowInventoryNotices"/> but bounds how long the pending response
+    /// will wait for it to the slice of the broker's wire budget still unspent, so the diagnostic can
+    /// never blow the very wire call it annotates. When the budget wins, the response returns without the
+    /// notice, and the inventory Task is left to finish on its own -- its blocking Win32 reads are already
+    /// self-limited (Win32WindowInventory's own OverallBudgetMs) -- so that its true, uncapped elapsed
+    /// gets logged for diagnosis (the very question #136 turned on: how long is the §07 pass really taking).
+    /// </summary>
+    private async Task<IReadOnlyList<DiagnosticRecord>?> BuildWindowInventoryNoticesWithinWireBudget(
+        System.Diagnostics.Stopwatch handlerSw, long timeoutMs)
+    {
+        if (_windowInventory is null)
+        {
+            return null;
+        }
+
+        var budgetMs = ComputeInventoryBudgetMs(handlerSw.ElapsedMilliseconds, timeoutMs);
+        if (budgetMs < InventoryMinBudgetMs)
+        {
+            _auditTrailTrace?.Invoke(
+                $"[#136] window inventory skipped: only {budgetMs}ms of wire budget left for it " +
+                $"(timeout_ms={timeoutMs}, handler_elapsed_ms={handlerSw.ElapsedMilliseconds})");
+            return null;
+        }
+
+        // Real Task.Delay, not the injectable _delay: this bound protects a real wall-clock wire deadline,
+        // so it must elapse in real time even under a test clock. (_delay stays the seam for the poll-loop
+        // WAIT, which is logical time.)
+        var inventorySw = System.Diagnostics.Stopwatch.StartNew();
+        var inventoryTask = Task.Run(BuildWindowInventoryNotices);
+        var winner = await Task.WhenAny(inventoryTask, Task.Delay(TimeSpan.FromMilliseconds(budgetMs))).ConfigureAwait(false);
+        if (winner == inventoryTask)
+        {
+            return await inventoryTask.ConfigureAwait(false);
+        }
+
+        // Budget won: send the pending status without the diagnostic rather than hold the wire call.
+        // Report the drop now (§01 observability-over-silence) so a missing window inventory on a timeout is
+        // a stated outcome, not an unexplained gap -- it means a script is holding the UI thread long enough
+        // that reading the windows' text would have risked the response's own wire budget.
+        _auditTrailTrace?.Invoke(
+            $"[#136] window inventory dropped from this response after its {budgetMs}ms wire-budget slice " +
+            "elapsed (a script is holding the UI thread); the pending status is returned without it. Its " +
+            "true elapsed will follow when the abandoned pass finishes.");
+
+        // Observe the abandoned Task so a fault never surfaces as an unobserved-task exception, and log its
+        // true uncapped elapsed on completion either way -- that number is what says whether the cap is
+        // sized right (and is exactly the signal #136 lacked).
+        _ = inventoryTask.ContinueWith(
+            t =>
+            {
+                inventorySw.Stop();
+                var faulted = t.IsFaulted ? $"; faulted: {t.Exception?.GetBaseException().Message}" : "";
+                _auditTrailTrace?.Invoke(
+                    $"[#136] abandoned window inventory finished after {inventorySw.ElapsedMilliseconds}ms " +
+                    $"(budget was {budgetMs}ms){faulted}");
+            },
+            CancellationToken.None,
+            TaskContinuationOptions.None,
+            TaskScheduler.Default);
+        return null;
     }
 
     /// <summary>
@@ -716,6 +835,9 @@ public sealed class RequestDispatcher
             return JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InvalidParams, ex.Message, ex.Diagnostic);
         }
 
+        // Real wall-clock elapsed for the wire-budget cap on the window inventory (#136), distinct from the
+        // injected-clock deadline the poll loop waits against.
+        var handlerSw = System.Diagnostics.Stopwatch.StartNew();
         var deadline = _now().AddMilliseconds(ClampTimeoutMs(timeoutMs));
         while (true)
         {
@@ -732,7 +854,11 @@ public sealed class RequestDispatcher
 
             if (_now() >= deadline)
             {
-                return ExecutionResultMessage.FromRecord(request.Id, record, BuildWindowInventoryNotices());
+                // #136: same wire-budget cap as the execute_script timeout branch -- poll_execution carries
+                // the identical timeout_ms + 5s broker budget, so an unbounded inventory here strands the
+                // poll wire call the same way it stranded the start call.
+                var extraNotices = await BuildWindowInventoryNoticesWithinWireBudget(handlerSw, timeoutMs).ConfigureAwait(false);
+                return ExecutionResultMessage.FromRecord(request.Id, record, extraNotices);
             }
 
             await _delay(PollInterval).ConfigureAwait(false);

@@ -157,6 +157,12 @@ public sealed class Win32WindowInventory : IWindowInventory
     // budget -- a timed-out read is REPORTED as such by the caller (timedOut out-param), never
     // silently dropped: an honest partial inventory beats a hung answer, and honesty means saying
     // which parts are missing.
+    // #136, measured live: a single WM_GETTEXT against a script-blocked UI thread took 1744ms to return
+    // here despite PerWindowTextTimeoutMs=100 -- SMTO_ABORTIFHUNG only short-circuits once Windows has
+    // flagged the thread "hung" (~5s of no message pumping), and before that the send blocks well past
+    // uTimeout. So this per-window bound is soft, the between-window OverallBudgetMs check cannot interrupt
+    // a read already in flight, and the caller (RequestDispatcher) puts a HARD wall-clock cap around the
+    // whole pass rather than trusting either bound to protect the wire response.
     private static string GetWindowText(IntPtr hWnd, out bool timedOut)
     {
         var buffer = new StringBuilder(MaxLength);
