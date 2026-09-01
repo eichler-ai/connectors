@@ -152,6 +152,69 @@ public class RoslynScriptRunnerTests
     }
 
     [Fact]
+    public void CompiledScript_ReleasesTheScriptAfterFirstEmit_KeepingTheCachedImageUsable()
+    {
+        // Issue #31: the Script<object> roots the whole Roslyn Compilation (tens of MB of RevitAPI
+        // symbol tables per cached entry -- a gcdump of a long-lived session showed ~10M objects /
+        // ~0.6GB dominated by Microsoft.CodeAnalysis, held across the bounded LRU). After the first
+        // emit the run path needs only the PE image + Analysis, so the Script is released. The heap win
+        // is not deterministic to assert directly, so this pins the structural fact at the unit seam.
+        var compiled = new CompiledScript(
+            Microsoft.CodeAnalysis.CSharp.Scripting.CSharpScript.Create<object>("1 + 1"),
+            ScriptApiAnalysis.Clean);
+
+        Assert.False(compiled.CompilationReleased); // held until the first emit needs it
+
+        var emitCalls = 0;
+        byte[] FakeEmit(Microsoft.CodeAnalysis.Scripting.Script<object> s)
+        {
+            Assert.NotNull(s); // the Script is still there for the one emit that consumes it
+            emitCalls++;
+            return new byte[] { 9, 8, 7 };
+        }
+
+        var first = compiled.GetOrEmitPeImage(FakeEmit);
+        Assert.True(compiled.CompilationReleased); // released immediately after a successful emit
+
+        // Dropping the Script must not break the LRU-hit path the emit cache exists for: a re-run still
+        // returns the cached image, without the Script and without re-emitting.
+        var second = compiled.GetOrEmitPeImage(FakeEmit);
+        Assert.Equal(1, emitCalls);
+        Assert.Equal(first, second);
+        Assert.Equal(new byte[] { 9, 8, 7 }, second);
+    }
+
+    [Fact]
+    public void CompiledScript_DoesNotReleaseTheScriptWhenEmitThrows_AllowingRetry()
+    {
+        // A transient emit failure must not poison the entry: the image stays uncached and the Script
+        // stays available, so a retry succeeds against the same compilation (pre-#31 behavior preserved).
+        var compiled = new CompiledScript(
+            Microsoft.CodeAnalysis.CSharp.Scripting.CSharpScript.Create<object>("1 + 1"),
+            ScriptApiAnalysis.Clean);
+
+        var attempts = 0;
+        byte[] Emit(Microsoft.CodeAnalysis.Scripting.Script<object> s)
+        {
+            attempts++;
+            if (attempts == 1)
+            {
+                throw new InvalidOperationException("transient emit failure");
+            }
+
+            return new byte[] { 1 };
+        }
+
+        Assert.Throws<InvalidOperationException>(() => compiled.GetOrEmitPeImage(Emit));
+        Assert.False(compiled.CompilationReleased); // still held -- a retry must be possible
+
+        var image = compiled.GetOrEmitPeImage(Emit); // retry succeeds
+        Assert.Equal(2, attempts);
+        Assert.True(compiled.CompilationReleased); // released after the successful emit
+        Assert.Equal(new byte[] { 1 }, image);
+    }
+
+    [Fact]
     public void WarmupCompile_PopulatesTheCache_AndNeverThrows()
     {
         // Issue #52: warmup compiles+emits the marker once; a second call is a cache hit; and the
