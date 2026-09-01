@@ -19,9 +19,13 @@ namespace MCPBridge.Core.Workspace;
 /// `logs/&lt;utc-stamp&gt;-&lt;execution_id&gt;.ndjson` holds one PRD §01 diagnostic record per line
 /// -- the run's notices verbatim, then one terminal record naming the status (with the exception
 /// code/type on failure, and a per-file summary of everything Publish touched). Runs refused
-/// BEFORE a document was resolved (document-not-found, no-active-document, cancelled-while-queued)
-/// leave no audit entry: they touched nothing, their refusal is fully reported through the §01
-/// error path, and -- decisively -- there is no routed document whose workspace could receive one.
+/// BEFORE a document was resolved (document-not-found, no-active-document, cancelled-while-queued,
+/// and -- since #67 -- any compile-time rejection: a denylist violation, a compile error, a
+/// top-level `await`, an unconfirmed lifecycle call, all now caught in the dispatcher's off-UI-thread
+/// pre-flight) leave no §09 audit entry: they touched nothing, their refusal is fully reported through
+/// the §01 error path, and -- decisively -- there is no routed document whose workspace could receive
+/// one. The pre-flight instead writes a `[#67] script rejected pre-flight` line to the connection log,
+/// so a refused attempt -- most importantly a denylist trip -- still leaves an on-disk trace.
 ///
 /// Everything here is best-effort by hard contract: an audit failure must NEVER fail, slow, or
 /// alter a run's outcome, so every entry point swallows and reports through the caller's trace

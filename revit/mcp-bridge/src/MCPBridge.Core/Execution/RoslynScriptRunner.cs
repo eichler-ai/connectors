@@ -189,39 +189,19 @@ internal sealed class RoslynScriptRunner
         CancellationToken cancellationToken,
         bool confirmLifecycleActions = false)
     {
-        CompiledScript compiled;
-        try
+        // #67: the compile-time rejection is a pure property of the script text and runs identically here
+        // (on whatever thread reached execution) and in TryPreflight (on the connection thread, before the
+        // ExternalEvent is raised). Sharing the one method keeps the two from ever drifting -- a script the
+        // pre-flight accepts must never be rejected at run time, and vice versa.
+        var rejection = TryPreflight(scriptText, confirmLifecycleActions);
+        if (rejection is not null)
         {
-            compiled = GetOrCompile(scriptText);
-        }
-        catch (CompilationErrorException ex)
-        {
-            return ScriptExecutionOutcome.Failed(ex, stdOut: "");
-        }
-        catch (ScriptAwaitNotAllowedException ex)
-        {
-            return ScriptExecutionOutcome.Failed(ex, stdOut: "");
-        }
-        catch (ScriptApiDenylistViolationException ex)
-        {
-            // Surfaced through the identical path as the two above (PRD §14): the caller
-            // (TransactionScriptExecutor) rolls back its ambient Transaction/TransactionGroup exactly as
-            // it does for any other pre-execution failure, so the denylist needed no new failure handling.
-            return ScriptExecutionOutcome.Failed(ex, stdOut: "");
+            return rejection;
         }
 
-        // PRD §14, the per-request half of the denylist. Deliberately placed here -- after compilation
-        // (cached or not), before the ALC is created and before anything is emitted or executed -- so a
-        // refused run has the same "nothing happened" property as the unconditional compile-time
-        // rejections above: TransactionScriptExecutor rolls its ambient transaction back and the document
-        // is untouched. Note this is reached identically on a cache HIT and a cache MISS, which is the
-        // whole point: an unconfirmed rerun of a script that was confirmed a moment ago is still refused.
-        if (compiled.Analysis.RequiresLifecycleConfirmation && !confirmLifecycleActions)
-        {
-            return ScriptExecutionOutcome.Failed(
-                ScriptApiDenylistViolationException.LifecycleConfirmationRequired(compiled.Analysis.LifecycleMembers),
-                stdOut: "");
-        }
+        // Cache HIT: TryPreflight just compiled (or found) this exact text, so this returns the cached
+        // CompiledScript with no re-parse/emit/analyze (LruCache is fully locked; the compile is not redone).
+        var compiled = GetOrCompile(scriptText);
 
         var alc = _alcFactory();
         var writer = new StringWriter();
@@ -267,6 +247,59 @@ internal sealed class RoslynScriptRunner
         {
             alc.Unload();
         }
+    }
+
+    /// <summary>
+    /// #67: the compile-time half of <see cref="RunAsync"/> — compile, the top-level-<c>await</c> rejection,
+    /// the denylist, and the per-request lifecycle gate — with NO execution. Returns the same
+    /// <see cref="ScriptExecutionOutcome"/> failure <see cref="RunAsync"/> would for a rejected script, or
+    /// <c>null</c> if the script compiles and is allowed to run.
+    ///
+    /// Every rejection here is a pure property of <paramref name="scriptText"/> (plus
+    /// <paramref name="confirmLifecycleActions"/>): compilation reads only file-metadata references, never a
+    /// live Revit object, and the denylist analyses bound symbols — the same reason <see cref="WarmupCompile"/>
+    /// runs on a background thread and the denylist checks are unit-testable with no live Revit. So the
+    /// dispatcher can call this on the connection thread BEFORE raising the ExternalEvent and reject an
+    /// invalid script immediately and deterministically, instead of queuing it behind a congested UI thread
+    /// where the rejection is delayed past timeout_ms and misreported as `running` (issue #67). On success it
+    /// leaves the compiled script warm in the thread-safe cache, so the UI-thread run reuses it with no
+    /// recompile.
+    /// </summary>
+    internal ScriptExecutionOutcome? TryPreflight(string scriptText, bool confirmLifecycleActions = false)
+    {
+        CompiledScript compiled;
+        try
+        {
+            compiled = GetOrCompile(scriptText);
+        }
+        catch (CompilationErrorException ex)
+        {
+            return ScriptExecutionOutcome.Failed(ex, stdOut: "");
+        }
+        catch (ScriptAwaitNotAllowedException ex)
+        {
+            return ScriptExecutionOutcome.Failed(ex, stdOut: "");
+        }
+        catch (ScriptApiDenylistViolationException ex)
+        {
+            // Surfaced through the identical path as the two above (PRD §14): the caller
+            // (TransactionScriptExecutor) rolls back its ambient Transaction/TransactionGroup exactly as
+            // it does for any other pre-execution failure, so the denylist needed no new failure handling.
+            return ScriptExecutionOutcome.Failed(ex, stdOut: "");
+        }
+
+        // PRD §14, the per-request half of the denylist. Deliberately after compilation (cached or not) and
+        // before anything is emitted or executed, so a refused run has the same "nothing happened" property
+        // as the compile-time rejections above. Reached identically on a cache HIT and a cache MISS, which is
+        // the whole point: an unconfirmed rerun of a script confirmed a moment ago is still refused.
+        if (compiled.Analysis.RequiresLifecycleConfirmation && !confirmLifecycleActions)
+        {
+            return ScriptExecutionOutcome.Failed(
+                ScriptApiDenylistViolationException.LifecycleConfirmationRequired(compiled.Analysis.LifecycleMembers),
+                stdOut: "");
+        }
+
+        return null;
     }
 
     /// <summary>
@@ -420,12 +453,23 @@ internal sealed class RoslynScriptRunner
         {
             var compiled = GetOrCompile("/* mcpbridge warmup */ 1 + 1");
             compiled.GetOrEmitPeImage(EmitToPeImage);
+            // #67: only once Roslyn has JITed and a first script has compiled+emitted is a subsequent
+            // compile cheap enough (~ms) to sit on the response path. The dispatcher gates its pre-flight on
+            // this so a cold compile (the cost this method exists to pay off-line) is never on that path.
+            _isWarm = true;
         }
         catch
         {
-            // Best-effort by contract; the first real script simply pays the cold start as before.
+            // Best-effort by contract; the first real script simply pays the cold start as before, and
+            // IsWarm stays false so the dispatcher keeps compiling in the work item until a warmup succeeds.
         }
     }
+
+    /// <summary>#67: true once <see cref="WarmupCompile"/> has completed a first compile+emit, so a further
+    /// compile is fast enough to run on the response path. False until then (and if warmup faulted).</summary>
+    internal bool IsWarm => _isWarm;
+
+    private volatile bool _isWarm;
 
     private static void RejectTopLevelAwait(Script<object> script)
     {

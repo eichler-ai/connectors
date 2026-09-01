@@ -29,7 +29,15 @@ public class RequestDispatcherTests
     private static ExecutionManager NewExecutionManager() =>
         new(new ExecutionRingBuffer(capacity: 50, retention: TimeSpan.FromMinutes(10)), gracePeriod: TimeSpan.FromSeconds(5));
 
-    private static TransactionScriptExecutor NewScriptExecutor() => new(new RoslynScriptRunner(additionalMetadataReferences: RevitApiReference.References));
+    private static TransactionScriptExecutor NewScriptExecutor()
+    {
+        var executor = new TransactionScriptExecutor(new RoslynScriptRunner(additionalMetadataReferences: RevitApiReference.References));
+        // #67: warm the pipeline so the dispatcher's IsWarm-gated pre-flight actually runs -- production
+        // warms it at startup (BridgeHost), and these tests assert the pre-flight (rejection before the
+        // event is raised), so an unwarmed runner would silently skip it and fall back to the work-item path.
+        executor.WarmupCompile();
+        return executor;
+    }
 
     // document_id defaults to the fake active document's own identity (FakeDocumentAdapter's default
     // DocumentId) -- document_id ROUTES now, so a request naming an id no open document has would be
@@ -238,17 +246,20 @@ public class RequestDispatcherTests
     // is the thing that was wrong; asserting the message alone is what let it pass unnoticed.
 
     [Fact]
-    public async Task ExecuteScript_DeniedByTheDenylist_ReportsItsOwnCodeAndRemedy()
+    public async Task ExecuteScript_DeniedByTheDenylist_RejectedWithoutRaisingTheEvent()
     {
         var executionManager = NewExecutionManager();
-        var bridge = new ExternalEventBridge<ScriptExecutionOutcome>(new FakeExternalEventRaiser());
+        var raiser = new FakeExternalEventRaiser();
+        var bridge = new ExternalEventBridge<ScriptExecutionOutcome>(raiser);
         var dispatcher = new RequestDispatcher(executionManager, bridge, NewScriptExecutor());
 
-        var dispatchTask = dispatcher.DispatchAsync(
-            ExecuteScriptRequest(1, "exec-1", "new Autodesk.Revit.DB.Transaction(Document, \"x\");"));
-        bridge.OnExecute(NewUiApp());
-
-        var json = await dispatchTask;
+        // #67: a denylisted script is a pure compile-time property, so it is rejected on the connection
+        // thread BEFORE the ExternalEvent is raised -- note there is no bridge.OnExecute(...) call here, and
+        // the rejection still comes back. Pre-fix (rejection computed inside the UI-thread work item), this
+        // dispatch would instead have raised the event, waited out timeout_ms with no OnExecute, and
+        // returned a non-terminal `running`. The small timeout_ms keeps that regression cheap to observe.
+        var json = await dispatcher.DispatchAsync(
+            ExecuteScriptRequest(1, "exec-1", "new Autodesk.Revit.DB.Transaction(Document, \"x\");", timeoutMs: 1000));
 
         Assert.Contains("\"status\":\"error\"", json);
         Assert.Contains($"\"code\":\"{ScriptApiDenylistViolationException.DeniedCode}\"", json);
@@ -256,6 +267,9 @@ public class RequestDispatcherTests
         // Unconditional refusal, so the remedy is "change the script", never "retry with a flag".
         Assert.Contains("no argument to execute_script permits it", json);
         Assert.DoesNotContain("confirm_lifecycle_actions", json);
+        // The #67 guarantee: the rejection never went through the UI-thread work item -- the event that
+        // would queue behind a congested UI thread was never raised at all.
+        Assert.Equal(0, raiser.RaiseCallCount);
     }
 
     /// <summary>
@@ -338,14 +352,14 @@ public class RequestDispatcherTests
     public async Task ExecuteScript_LifecycleMemberWithoutConfirmation_ReportsItsOwnCodeAndTheResendRemedy()
     {
         var executionManager = NewExecutionManager();
-        var bridge = new ExternalEventBridge<ScriptExecutionOutcome>(new FakeExternalEventRaiser());
+        var raiser = new FakeExternalEventRaiser();
+        var bridge = new ExternalEventBridge<ScriptExecutionOutcome>(raiser);
         var dispatcher = new RequestDispatcher(executionManager, bridge, NewScriptExecutor());
 
-        // ExecuteScriptRequest sends no confirm_lifecycle_actions -- the refusing case by design.
-        var dispatchTask = dispatcher.DispatchAsync(ExecuteScriptRequest(1, "exec-1", "Document.Close();"));
-        bridge.OnExecute(NewUiApp());
-
-        var json = await dispatchTask;
+        // ExecuteScriptRequest sends no confirm_lifecycle_actions -- the refusing case by design. #67: the
+        // per-request lifecycle gate is part of the pre-flight, so this is rejected before the event is
+        // raised too (no bridge.OnExecute needed), same as the unconditional denylist.
+        var json = await dispatcher.DispatchAsync(ExecuteScriptRequest(1, "exec-1", "Document.Close();", timeoutMs: 1000));
 
         Assert.Contains("\"status\":\"error\"", json);
         Assert.Contains($"\"code\":\"{ScriptApiDenylistViolationException.ConfirmationRequiredCode}\"", json);
@@ -353,6 +367,8 @@ public class RequestDispatcherTests
         // The single most obvious next step in the connector, and it used to be reported with none.
         Assert.Contains("confirm_lifecycle_actions: true", json);
         Assert.Contains("Autodesk.Revit.DB.Document.Close", json);
+        // #67: the lifecycle-gate rejection also never raised the event.
+        Assert.Equal(0, raiser.RaiseCallCount);
     }
 
     [Fact]
