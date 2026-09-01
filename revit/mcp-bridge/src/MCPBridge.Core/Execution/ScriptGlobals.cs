@@ -146,6 +146,18 @@ public sealed class ScriptGlobals : IConnectorRuntime
     object IConnectorRuntime.OpenForWriting(object document) =>
         OpenForWriting((Autodesk.Revit.DB.Document)document);
 
+    void IConnectorRuntime.WithoutTransaction(object document, Action body) =>
+        RequireDocumentTransactions(nameof(Connector.WithoutTransaction))
+            .RunWithoutTransaction((Autodesk.Revit.DB.Document)document, body);
+
+    void IConnectorRuntime.WithTransaction(object document, Action body) =>
+        RequireDocumentTransactions(nameof(Connector.WithTransaction))
+            .RunWithTransaction((Autodesk.Revit.DB.Document)document, body);
+
+    void IConnectorRuntime.Settle(object document, bool keep) =>
+        RequireDocumentTransactions(nameof(Connector.Settle))
+            .Settle((Autodesk.Revit.DB.Document)document, keep);
+
     /// <summary>
     /// Creates a NEW, blank, WRITABLE project document (issue #24) -- the connector opens and manages a
     /// Transaction/TransactionGroup for it in the same step, so the script can modify it immediately.

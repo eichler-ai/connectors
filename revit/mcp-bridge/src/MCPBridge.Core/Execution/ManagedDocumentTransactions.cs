@@ -90,8 +90,34 @@ internal sealed class ManagedDocumentTransactions
 
         public IDocumentAdapter Document { get; }
         public ITransactionGroupAdapter Group { get; }
-        public ITransactionAdapter Transaction { get; }
+
+        /// <summary>
+        /// NULL WHILE NO TRANSACTION IS OPEN ON THIS DOCUMENT (issue #132). Under `always-open` this was
+        /// readonly and never null, because the pair opened and closed together. `settle-on-request` lets
+        /// a script close the transaction and keep the group -- the state where Document.IsModifiable is
+        /// false but the rollback boundary still holds -- so every reader here must cope with its absence
+        /// rather than assume the pair. That is the whole mechanism, expressed in one field.
+        /// </summary>
+        public ITransactionAdapter? Transaction { get; set; }
+
         public DocumentOrigin Origin { get; }
+
+        /// <summary>
+        /// Failures accumulated across EVERY transaction commit on this document, not just the last
+        /// (issue #132; found by review). ITransactionAdapter.CommitFailures is overwritten on each
+        /// Commit(), so once a document can commit N times in one run, reading it only at end-of-run
+        /// destroys the first N-1 failure sets -- and it is the only channel carrying the reason for a
+        /// Revit-forced ProceedWithRollBack. Appended at every commit this class performs.
+        /// </summary>
+        public List<FailureSummary> AccumulatedFailures { get; } = new();
+
+        /// <summary>
+        /// True while this document is inside a Connector.WithoutTransaction scope. Backs the
+        /// same-document re-entry refusal (issue #132, decision 3): nesting is allowed across DIFFERENT
+        /// documents and refused on the same one, which is the identical rule the nested-WithTransaction
+        /// refusal states, so there is one concept to learn rather than two.
+        /// </summary>
+        public bool InWithoutTransactionScope { get; set; }
 
         /// <summary>
         /// How this document is named in a partial-commit report. Title, because that is also how a
@@ -297,6 +323,292 @@ internal sealed class ManagedDocumentTransactions
             "tier-2 live harness (revit/test-harness), not MCPBridge.Core.Tests.");
 
     /// <summary>
+    /// Records one Connector.Settle call, so TransactionScriptExecutor can raise the notice PRD §06
+    /// requires (issue #132, decision 2). Only Settle is recorded: it is the irreversible one -- it
+    /// makes prior writes permanent or discards them, and settling the AMBIENT document gives up the
+    /// rollback remedy for a human's real open model. WithTransaction/WithoutTransaction stay silent,
+    /// because the group still covers rollback and nothing irreversible has happened; a notice per
+    /// scope would bury the real ones under any script that writes in a loop.
+    /// </summary>
+    internal readonly struct SettlementRecord
+    {
+        public SettlementRecord(string document, bool kept)
+        {
+            Document = document;
+            Kept = kept;
+        }
+
+        public string Document { get; }
+
+        /// <summary>True for Settle(keep: true) -- assimilated, so the work is permanent. False for a rollback.</summary>
+        public bool Kept { get; }
+    }
+
+    private readonly List<SettlementRecord> _settlements = new();
+
+    /// <summary>Every Settle performed this run, in order. Read by the executor after the script finishes.</summary>
+    public IReadOnlyList<SettlementRecord> Settlements => _settlements;
+
+    /// <summary>
+    /// Runs <paramref name="body"/> with this document NOT modifiable: the connector commits and closes
+    /// its transaction, keeps the TransactionGroup, and opens a fresh transaction in that same group
+    /// afterwards (issue #132). The group is what preserves all-or-nothing rollback across the gap --
+    /// verified live: TransactionGroup.RollBack() discards transactions already committed inside it.
+    ///
+    /// A document with no managed transaction is already non-modifiable, so the body simply runs; that
+    /// is the honest no-op rather than a refusal the script could do nothing about. Re-entry on the SAME
+    /// document is refused (decision 3); nesting across DIFFERENT documents is allowed, which is how
+    /// LoadFamily -- needing both source and target non-modifiable -- is expressed.
+    /// </summary>
+    public void RunWithoutTransaction(IDocumentAdapter document, Action body)
+    {
+        var entry = FindEntry(document);
+        if (entry is null)
+        {
+            body();
+            return;
+        }
+
+        if (entry.InWithoutTransactionScope)
+        {
+            throw new InvalidOperationException(
+                $"WithoutTransaction is already open for '{SafeDescribe(entry)}' -- it cannot be nested on the " +
+                "same document. Nesting across DIFFERENT documents is allowed and is how a call needing two " +
+                "non-modifiable documents (Document.LoadFamily) is written.");
+        }
+
+        entry.InWithoutTransactionScope = true;
+        try
+        {
+            CloseTransaction(entry);
+            body();
+        }
+        finally
+        {
+            entry.InWithoutTransactionScope = false;
+            // Reopened even when the body threw: the run is failing, and RollBackAll's unwind is written
+            // against an entry whose shape it recognises. A group with no transaction still rolls back
+            // correctly either way, so this is about keeping one shape, not about correctness of the undo.
+            ReopenTransaction(entry);
+        }
+    }
+
+    /// <summary>
+    /// Runs <paramref name="body"/> with a transaction the CONNECTOR opens and commits around it (issue
+    /// #132) -- the counterpart that makes an edit scope writable, since StairsEditScope needs no
+    /// transaction to start and a transaction to write, and its Commit() then needs that transaction
+    /// CLOSED again. Closing at block end is therefore load-bearing, not tidiness.
+    ///
+    /// Nesting on the same document is REFUSED (decision 1) rather than joined transparently: joining
+    /// would make "the connector commits at block end" false for the inner block and would let a caught
+    /// inner failure ride silently on the outer commit. The refusal is loud and can be relaxed later;
+    /// withdrawing a silent join could not be.
+    /// </summary>
+    public void RunWithTransaction(IDocumentAdapter document, Action body)
+    {
+        var entry = FindEntry(document);
+        if (entry is null)
+        {
+            // No managed pair yet -- typically a document settled earlier this run, or one the script
+            // never wrote to. Open a fresh group+transaction for it; end-of-run assimilate covers it
+            // like any other managed document.
+            Open(document, DocumentOrigin.AdoptedExisting);
+            entry = FindEntry(document)!;
+            body();
+            CloseTransaction(entry);
+            return;
+        }
+
+        if (entry.Transaction is not null)
+        {
+            throw new InvalidOperationException(
+                $"A transaction is already open for '{SafeDescribe(entry)}' -- WithTransaction cannot be " +
+                "nested on the same document. Write directly instead: the enclosing scope's transaction " +
+                "already covers this document. (Revit allows only one open transaction per document, and " +
+                "the connector refuses here rather than letting Revit refuse with less context.)");
+        }
+
+        ReopenTransaction(entry);
+        body();
+        CloseTransaction(entry);
+    }
+
+    /// <summary>
+    /// Settles this document's group so Revit will allow Close/Save/SaveAs/SynchronizeWithCentral, which
+    /// refuse while ANY transaction or transaction GROUP is open -- verified live, and unlike the
+    /// EditScope case the group really is the bar here.
+    ///
+    /// <paramref name="keep"/> true assimilates (the work becomes permanent, retroactively, for this
+    /// document) and false rolls the group back (the work is discarded). The DIRECTION IS THE SCRIPT'S TO
+    /// STATE, never inferred: the connector cannot see doc.Save()/doc.Close() at all -- the denylist is a
+    /// compile-time walk that gates but cannot intercept, and neither DocumentSavingAs nor DocumentClosing
+    /// fires while a group is open, because Revit's transaction-phase check precedes event dispatch.
+    ///
+    /// The entry is DEREGISTERED, which is what keeps CommitAll/RollBackAll correct: they walk every entry
+    /// and call Commit/Assimilate/RollBack plus Dispose, so a settled pair left in the set would be
+    /// operated on a second time -- RollBack() on an assimilated group being exactly the invalid case
+    /// those methods warn about. Deregistering also frees a later WithTransaction to open a FRESH group
+    /// for this document, since Open's DocumentId guard only refuses while an entry exists.
+    /// </summary>
+    public void Settle(IDocumentAdapter document, bool keep)
+    {
+        var entry = FindEntry(document);
+        if (entry is null)
+        {
+            throw new InvalidOperationException(
+                $"Settle was called for a document this run does not manage (DocumentId={document.DocumentId}). " +
+                "Nothing is open for it, so Close/Save/SaveAs are already permitted -- and a document settled " +
+                "earlier in this same run is no longer managed either.");
+        }
+
+        if (entry.InWithoutTransactionScope)
+        {
+            throw new InvalidOperationException(
+                $"Settle cannot run inside a WithoutTransaction scope for '{SafeDescribe(entry)}' -- that scope " +
+                "reopens a transaction when it ends, which would immediately undo the settle and leave Close/Save " +
+                "refused again. Settle after the scope returns.");
+        }
+
+        var description = SafeDescribe(entry);
+        if (keep)
+        {
+            CloseTransaction(entry);
+            entry.Group.Assimilate();
+        }
+        else
+        {
+            if (entry.Transaction is not null)
+            {
+                SafeRollBack(entry.Transaction.RollBack);
+                entry.Transaction = null;
+            }
+
+            entry.Group.RollBack();
+        }
+
+        SafeDispose(null, entry.Group);
+        _entries.Remove(entry);
+        _settlements.Add(new SettlementRecord(description, keep));
+    }
+
+    /// <summary>
+    /// Raw-Document entry points for the three scopes -- the halves ScriptGlobals calls, split from the
+    /// adapter-typed cores above so those stay tier-1 testable with a fake (same split, same reason, as
+    /// <see cref="OpenExisting"/> and <see cref="RequireExistingDocumentSource"/>).
+    /// </summary>
+    public void RunWithoutTransaction(Autodesk.Revit.DB.Document rawDocument, Action body) =>
+        WithResolved(rawDocument, body, nameof(RunWithoutTransaction), RunWithoutTransaction);
+
+    /// <summary>See <see cref="RunWithoutTransaction(Autodesk.Revit.DB.Document, Action)"/>.</summary>
+    public void RunWithTransaction(Autodesk.Revit.DB.Document rawDocument, Action body) =>
+        WithResolved(rawDocument, body, nameof(RunWithTransaction), RunWithTransaction);
+
+    /// <summary>See <see cref="RunWithoutTransaction(Autodesk.Revit.DB.Document, Action)"/>.</summary>
+    public void Settle(Autodesk.Revit.DB.Document rawDocument, bool keep)
+    {
+        var adapter = ResolveAdapter(rawDocument, nameof(Settle));
+        Settle(adapter, keep);
+    }
+
+    private void WithResolved(Autodesk.Revit.DB.Document rawDocument, Action body, string memberName, Action<IDocumentAdapter, Action> run)
+    {
+        if (body is null)
+        {
+            throw new ArgumentNullException(nameof(body), $"`{memberName}` needs a body to run.");
+        }
+
+        run(ResolveAdapter(rawDocument, memberName), body);
+    }
+
+    private IDocumentAdapter ResolveAdapter(Autodesk.Revit.DB.Document rawDocument, string memberName)
+    {
+        // Signposted rather than left to fail deep inside DocumentIdentity's ConditionalWeakTable with a
+        // bare ArgumentNullException naming "key" -- the same PRD §01 fix OpenExisting already carries,
+        // and the same easy mistake (a by-Title lookup that found nothing and was not null-checked).
+        if (rawDocument is null)
+        {
+            throw new ArgumentNullException(nameof(rawDocument),
+                $"`{memberName}` was called with a null document -- likely a by-Title lookup that found no " +
+                "match and was not null-checked before being passed in.");
+        }
+
+        return RequireExistingDocumentSource().WrapExisting(rawDocument);
+    }
+
+    private Entry? FindEntry(IDocumentAdapter document) =>
+        _entries.FirstOrDefault(e => e.Document.DocumentId == document.DocumentId);
+
+    /// <summary>
+    /// Commits and closes this entry's transaction, leaving its group open, and accumulates the Failures
+    /// API result (see <see cref="Entry.AccumulatedFailures"/>). A Revit-forced rollback
+    /// (ProceedWithRollBack on an error-severity failure) THROWS rather than returning quietly: today that
+    /// is terminal for the run, and mid-scope it would otherwise discard the script's writes while the
+    /// script kept running unaware -- the silent-loss case review flagged.
+    /// </summary>
+    private void CloseTransaction(Entry entry)
+    {
+        var transaction = entry.Transaction;
+        if (transaction is null)
+        {
+            return;
+        }
+
+        TransactionCommitResult result;
+        try
+        {
+            result = transaction.Commit();
+        }
+        finally
+        {
+            // Read before anything else can overwrite it, and on the throwing path too -- this is the
+            // only carrier of the reason.
+            AccumulateFailures(entry, transaction);
+            entry.Transaction = null;
+            SafeDispose(transaction, null);
+        }
+
+        if (result == TransactionCommitResult.RolledBack)
+        {
+            throw new InvalidOperationException(
+                $"Revit rolled back the changes to '{SafeDescribe(entry)}' because a commit inside this script " +
+                $"raised an error-severity failure: {LastErrorMessage(entry)}");
+        }
+    }
+
+    /// <summary>Opens a fresh transaction in this entry's still-open group. No-op if one is already open.</summary>
+    private void ReopenTransaction(Entry entry)
+    {
+        if (entry.Transaction is not null)
+        {
+            return;
+        }
+
+        var transaction = entry.Document.CreateTransaction(_transactionName);
+        transaction.Start();
+        entry.Transaction = transaction;
+    }
+
+    private static void AccumulateFailures(Entry entry, ITransactionAdapter transaction)
+    {
+        try
+        {
+            entry.AccumulatedFailures.AddRange(transaction.CommitFailures);
+        }
+        catch (Exception ex)
+        {
+            entry.AccumulatedFailures.Add(new FailureSummary(
+                isError: true,
+                message: $"The Failures API result for '{SafeDescribe(entry)}' could not be read: {ex.Message}",
+                failureDefinitionId: "mcp-bridge.commit-failures-unreadable",
+                failingElementIds: Array.Empty<string>()));
+        }
+    }
+
+    private static string LastErrorMessage(Entry entry) =>
+        entry.AccumulatedFailures.LastOrDefault(f => f.IsError)?.Message
+        ?? "the failure list naming it could not be read.";
+
+    /// <summary>
     /// Rolls back every managed document, most recently opened first, best-effort. Used for every
     /// failed run -- a thrown script, a compile/denylist rejection, or a cancellation -- so a failure
     /// leaves no partial changes behind in ANY document, not just the ambient one.
@@ -317,13 +629,22 @@ internal sealed class ManagedDocumentTransactions
             // WITHIN: nothing committed anywhere, and the outcome the caller returns is already the
             // script's own exception. CommitAll is the case where the distinction changes what an agent
             // is told, and that is where it is tracked.
-            SafeRollBack(_entries[i].Transaction.RollBack);
+            // Transaction may be NULL (issue #132): a WithoutTransaction scope that threw, or a
+            // WithTransaction block that already committed, leaves the group open with no transaction.
+            // The group is the rollback boundary, so rolling it back is what actually undoes the run --
+            // the transaction half is only rolled back when one is genuinely open.
+            var openTransaction = _entries[i].Transaction;
+            if (openTransaction is not null)
+            {
+                SafeRollBack(openTransaction.RollBack);
+            }
+
             SafeRollBack(_entries[i].Group.RollBack);
 
             // Issue #34: dispose strictly after this entry's terminal handling. Also the disposal
             // path for entries CommitAll deliberately left populated after an unexpected escape --
             // the executor's finally net routes them here.
-            SafeDispose(_entries[i].Transaction, _entries[i].Group);
+            SafeDispose(openTransaction, _entries[i].Group);
         }
 
         _entries.Clear();
@@ -415,6 +736,7 @@ internal sealed class ManagedDocumentTransactions
                 // Issue #34: terminal for this entry (committed, failures read, described) -- release
                 // the native pair now instead of waiting on finalizers.
                 SafeDispose(entry.Transaction, entry.Group);
+                entry.Transaction = null;
                 continue;
             }
 
@@ -435,7 +757,8 @@ internal sealed class ManagedDocumentTransactions
         for (; index < order.Count; index++)
         {
             var entry = order[index];
-            var transactionUnwound = SafeRollBack(entry.Transaction.RollBack);
+            var openTransaction = entry.Transaction;
+            var transactionUnwound = openTransaction is null || SafeRollBack(openTransaction.RollBack);
             var groupUnwound = SafeRollBack(entry.Group.RollBack);
             (transactionUnwound && groupUnwound ? rolledBack : unknownState).Add(SafeDescribe(entry));
             SafeDispose(entry.Transaction, entry.Group);
@@ -483,20 +806,43 @@ internal sealed class ManagedDocumentTransactions
     /// </summary>
     private static CommitAttempt AttemptCommit(Entry entry, List<FailureSummary> failures)
     {
+        // Everything this document's own commits already raised, whether or not a transaction is still
+        // open (issue #132) -- accumulated per commit rather than read once at the end, because
+        // CommitFailures is overwritten on every Commit().
+        failures.AddRange(entry.AccumulatedFailures);
+
+        var transaction = entry.Transaction;
+        if (transaction is null)
+        {
+            // No open transaction: a WithTransaction block already committed this document's work into
+            // the group and closed it. Only the group remains to assimilate, which is the same terminal
+            // step a committed transaction reaches below.
+            try
+            {
+                entry.Group.Assimilate();
+            }
+            catch (Exception ex)
+            {
+                return CommitAttempt.Failed(ex, SafeRollBack(entry.Group.RollBack));
+            }
+
+            return CommitAttempt.Committed();
+        }
+
         TransactionCommitResult result;
         try
         {
-            result = entry.Transaction.Commit();
+            result = transaction.Commit();
         }
         catch (Exception ex)
         {
-            SafeCollectFailures(entry, failures);
-            var transactionUnwound = SafeRollBack(entry.Transaction.RollBack);
+            SafeCollectFailures(entry, failures, transaction);
+            var transactionUnwound = SafeRollBack(transaction.RollBack);
             var groupUnwound = SafeRollBack(entry.Group.RollBack);
             return CommitAttempt.Failed(ex, transactionUnwound && groupUnwound);
         }
 
-        SafeCollectFailures(entry, failures);
+        SafeCollectFailures(entry, failures, transaction);
 
         if (result == TransactionCommitResult.RolledBack)
         {
@@ -505,7 +851,7 @@ internal sealed class ManagedDocumentTransactions
             // here would be invalid. The Transaction half is therefore already undone by Revit, so the
             // group's own outcome is the whole answer for this document.
             var groupUnwound = SafeRollBack(entry.Group.RollBack);
-            return CommitAttempt.Failed(new InvalidOperationException(SafeRollBackReason(entry)), groupUnwound);
+            return CommitAttempt.Failed(new InvalidOperationException(SafeRollBackReason(entry, transaction)), groupUnwound);
         }
 
         try
@@ -529,11 +875,11 @@ internal sealed class ManagedDocumentTransactions
     /// notices[] through the same path every real Revit failure does, so PRD §01's
     /// observability-over-silence still holds for the case where the observability channel is what broke.
     /// </summary>
-    private static void SafeCollectFailures(Entry entry, List<FailureSummary> failures)
+    private static void SafeCollectFailures(Entry entry, List<FailureSummary> failures, ITransactionAdapter transaction)
     {
         try
         {
-            failures.AddRange(entry.Transaction.CommitFailures);
+            failures.AddRange(transaction.CommitFailures);
         }
         catch (Exception ex)
         {
@@ -550,11 +896,11 @@ internal sealed class ManagedDocumentTransactions
     /// The message for a Revit-forced rollback (ProceedWithRollBack), or a description of why that
     /// message could not be recovered. Never throws -- see <see cref="AttemptCommit"/>.
     /// </summary>
-    private static string SafeRollBackReason(Entry entry)
+    private static string SafeRollBackReason(Entry entry, ITransactionAdapter transaction)
     {
         try
         {
-            return entry.Transaction.CommitFailures.LastOrDefault(f => f.IsError)?.Message
+            return transaction.CommitFailures.LastOrDefault(f => f.IsError)?.Message
                 ?? "A transaction failure forced a rollback.";
         }
         catch (Exception ex)

@@ -129,6 +129,62 @@ public sealed class Connector
         (Autodesk.Revit.DB.Document)_runtime.OpenForWriting(document);
 
     /// <summary>
+    /// Runs your code with this document temporarily NOT modifiable, then makes it writable again. Use it
+    /// for the Revit calls that refuse to run while a transaction is open on their target — <c>Document.LoadFamily</c>,
+    /// <c>UIDocument.RequestViewChange</c>, <c>UIApplication.OpenAndActivateDocument</c>, and starting any
+    /// edit scope such as <c>StairsEditScope</c>.
+    ///
+    /// <para>Your changes are still undone if the script throws: the connector keeps this document's
+    /// transaction group open across the block, and that is what the rollback guarantee rests on. Do not
+    /// write to the document inside the block — it is not modifiable there. To write, nest
+    /// <see cref="WithTransaction"/>, which is how stairs are built.</para>
+    ///
+    /// <para>Nesting this on the SAME document is refused; nesting it on DIFFERENT documents is allowed,
+    /// and is how a call needing two non-modifiable documents, like <c>Document.LoadFamily</c>, is
+    /// written.</para>
+    /// </summary>
+    /// <param name="document">The document to make temporarily non-modifiable.</param>
+    /// <param name="body">Your code. Runs once, immediately.</param>
+    public void WithoutTransaction(Autodesk.Revit.DB.Document document, System.Action body) =>
+        _runtime.WithoutTransaction(document, body);
+
+    /// <summary>
+    /// Runs your code with a transaction the connector opens for this document and commits when the block
+    /// ends. Use it inside <see cref="WithoutTransaction"/> when something there needs to write — an edit
+    /// scope is the case this exists for: <c>StairsEditScope</c> needs no transaction to start, a
+    /// transaction to build its runs, and no transaction again to commit.
+    ///
+    /// <para>Closing at the end of the block is the point, not tidiness: an edit scope cannot commit while
+    /// a transaction is open on its document.</para>
+    ///
+    /// <para>Nesting this on the same document is refused — inside the block the document is already
+    /// writable, so write directly. Your changes still roll back if the script throws, because the
+    /// document's transaction group stays open until the run ends.</para>
+    /// </summary>
+    /// <param name="document">The document to write to.</param>
+    /// <param name="body">Your code. Runs once, immediately.</param>
+    public void WithTransaction(Autodesk.Revit.DB.Document document, System.Action body) =>
+        _runtime.WithTransaction(document, body);
+
+    /// <summary>
+    /// Finishes this document for the rest of the run, so Revit will allow <c>Close</c>, <c>Save</c>,
+    /// <c>SaveAs</c> and <c>SynchronizeWithCentral</c> on it — all of which refuse while the connector
+    /// holds anything open. Call it before those, in the same script.
+    ///
+    /// <para><c>keep: true</c> makes everything written to this document so far PERMANENT, immediately and
+    /// irreversibly: a later failure in this script will no longer undo it. <c>keep: false</c> discards
+    /// that work, which is what you want before closing a scratch document. Either way the choice is
+    /// yours to state — the connector cannot tell what you are about to do.</para>
+    ///
+    /// <para>Writing to the document again afterwards is allowed and starts fresh: those later changes roll
+    /// back on failure as usual, but nothing settled can be recovered.</para>
+    /// </summary>
+    /// <param name="document">The document to finish.</param>
+    /// <param name="keep">True to keep this document's changes permanently; false to discard them.</param>
+    public void Settle(Autodesk.Revit.DB.Document document, bool keep) =>
+        _runtime.Settle(document, keep);
+
+    /// <summary>
     /// Overrides how this script answers a specific Revit dialog, for the dialogs whose default answer is
     /// not the one the script wants. Keyed by Revit's dialog id, valued with the raw result to return, and
     /// set before the action that triggers the dialog, e.g.
