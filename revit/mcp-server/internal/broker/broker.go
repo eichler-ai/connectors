@@ -302,8 +302,17 @@ func (b *Broker) serveAddIn(rwc io.ReadWriteCloser) {
 				// Memory (issue #31) is best-effort: a malformed or absent
 				// params object just means no sample this tick, never a
 				// dropped heartbeat — the liveness timestamp still records.
+				// A bare ping (no params — the common case, and every older
+				// add-in) skips the decode entirely; only params that are
+				// PRESENT but unparseable are logged, mirroring the malformed-
+				// register log above, so a real wire regression leaves a trace
+				// rather than silently yielding no sample forever.
 				var pp pingParams
-				_ = json.Unmarshal(params, &pp)
+				if len(params) > 0 {
+					if err := json.Unmarshal(params, &pp); err != nil {
+						b.logf("broker: malformed ping params from instance %s (liveness still recorded): %v", instanceID, err)
+					}
+				}
 				b.Registry.RecordPing(instanceID, time.Now(), pp.Memory)
 			}
 		}
