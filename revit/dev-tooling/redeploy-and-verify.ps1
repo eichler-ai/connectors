@@ -48,6 +48,12 @@ param(
     # line -- a tight timeout here fails on nothing but Revit's own ordinary startup time.
     [int]$TimeoutSec = 150,
     [int]$MinDocuments = -1,   # -1 = auto: 1 if DocDest given, else 0 (see resolution below)
+    # Alternate Revit.exe to launch, e.g. 'C:\Program Files\Autodesk\Revit 2025\Revit.exe'. Empty
+    # means the launcher agent's own default (2027). The agent has always supported this as line 1 of a
+    # *.launch signal; this script hardcoded '' and so could only ever relaunch 2027, which is why the
+    # net8.0-windows/Revit 2025 leg had no live path at all -- it built and unit-tested on both TFMs
+    # while every live run was 2027. Pair with -Tfm net8.0-windows -RevitVersion 2025.
+    [string]$RevitExe = '',
     [switch]$SkipCopy,         # skip the DLL deploy -- close/relaunch/verify only
     [switch]$SkipRelaunch,     # skip close/relaunch/wait -- deploy DLLs only, no verification
     # The interactive user Revit/the add-in/the launcher agent actually run as. Deliberately NOT
@@ -120,11 +126,21 @@ function Copy-WithRetry([string]$Src, [string]$Dst, [int]$MaxAttempts = 8) {
 # "verifying you're actually debugging the binary you just built" trap: an incremental build that
 # silently no-ops, or a redeploy that races a build still in flight, produces a stale DLL with a
 # fresh timestamp and no other symptom.
+# Both byte alignments for UTF-16 (the `#US` heap stores string LITERALS there, at arbitrary offsets),
+# AND a UTF-8 pass, because metadata NAMES -- types, methods, fields -- live in the `#Strings` heap as
+# UTF-8 and were invisible to a UTF-16-only search. That gap produced a false "deploy likely stale" on a
+# genuinely fresh deploy three times in a row: the marker was a method name, present in the DLL the whole
+# time, and the check could not see it. A freshness guard that cries stale on a good deploy trains you to
+# stop passing -Marker, which is worse than not having it.
+#
+# A marker still has to be something the COMPILER emits. A comment is not: it survives in source and
+# nowhere else, which was the first of those three failures.
 function Test-MarkerPresent([string]$DllPath, [string]$MarkerText) {
     $bytes = [System.IO.File]::ReadAllBytes($DllPath)
-    $s0 = [System.Text.Encoding]::Unicode.GetString($bytes)
-    $s1 = [System.Text.Encoding]::Unicode.GetString($bytes, 1, $bytes.Length - 1)
-    return ($s0.Contains($MarkerText) -or $s1.Contains($MarkerText))
+    $u16a = [System.Text.Encoding]::Unicode.GetString($bytes)
+    $u16b = [System.Text.Encoding]::Unicode.GetString($bytes, 1, $bytes.Length - 1)
+    $utf8 = [System.Text.Encoding]::UTF8.GetString($bytes)
+    return ($u16a.Contains($MarkerText) -or $u16b.Contains($MarkerText) -or $utf8.Contains($MarkerText))
 }
 
 # Waits for a fresh "connected: auth+register" line, reacting to actual file-append events
@@ -138,6 +154,45 @@ function Test-MarkerPresent([string]$DllPath, [string]$MarkerText) {
 # what should be a simple question -- "did a NEW matching line show up". Tracking the log file's
 # byte length before this call, then inspecting only the bytes APPENDED after that point, answers
 # that question directly: anything found there is unambiguously new, no clock math involved at all.
+function Wait-ForLogLine([string]$LogPath, [string]$Pattern, [int]$TimeoutSec, [long]$FromOffset) {
+    # READS FROM AN OFFSET, and that is the whole correctness of this function: connection.log persists
+    # across launches, so a whole-file search would match the PREVIOUS session's line and report success
+    # instantly, every time. The caller captures the length before dropping the launch signal.
+    #
+    # Deliberately NOT reusing Wait-ForFreshConnection's FileSystemWatcher machinery: this wait is short
+    # and its failure is a warning rather than a FAIL, so that bookkeeping would be cost without benefit.
+    # It does keep that function's hard-won discipline of performing one more content check AFTER the
+    # deadline passes -- a line landing in the final beat used to be missed entirely.
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ($true) {
+        $timedOut = (Get-Date) -ge $deadline
+
+        if (Test-Path $LogPath) {
+            $length = (Get-Item $LogPath).Length
+            # Rotation at 5MB (issue #11) means the file is not monotonically growing; a shrink means a
+            # fresh log, so every byte in it is new.
+            $offset = if ($length -lt $FromOffset) { 0 } else { $FromOffset }
+            try {
+                # ReadWrite share -- the add-in holds this file open for writing.
+                $fs = [IO.File]::Open($LogPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+                try {
+                    $fs.Seek($offset, [IO.SeekOrigin]::Begin) | Out-Null
+                    $reader = New-Object IO.StreamReader($fs)
+                    $text = $reader.ReadToEnd()
+                } finally { $fs.Dispose() }
+
+                $hit = $text -split "`n" | Where-Object { $_ -match $Pattern } | Select-Object -Last 1
+                if ($hit) { return $hit.Trim() }
+            } catch {
+                # A transient sharing/IO error is not an answer; keep waiting.
+            }
+        }
+
+        if ($timedOut) { return $null }
+        Start-Sleep -Milliseconds 500
+    }
+}
+
 function Wait-ForFreshConnection([string]$LogPath, [int]$MinDocuments, [int]$TimeoutSec) {
     $startLength = 0
     if (Test-Path $LogPath) { $startLength = (Get-Item $LogPath).Length }
@@ -307,15 +362,24 @@ if (-not $SkipCopy) {
 
 if (-not $SkipRelaunch) {
     $lines = @()
+    $which = if ($RevitExe) { $RevitExe } else { 'the default Revit' }
     if ($DocSource -and $DocDest) {
-        $lines = @('', $DocSource, $DocDest)
-        Say "launching Revit with pristine-copy fixture doc: '$DocSource' -> '$DocDest'"
+        $lines = @($RevitExe, $DocSource, $DocDest)
+        Say "launching $which with pristine-copy fixture doc: '$DocSource' -> '$DocDest'"
     } elseif ($DocDest) {
-        $lines = @('', $DocDest)
-        Say "launching Revit with document: '$DocDest'"
+        $lines = @($RevitExe, $DocDest)
+        Say "launching $which with document: '$DocDest'"
+    } elseif ($RevitExe) {
+        # A bare exe still needs the line, so the signal cannot be mistaken for "no payload".
+        $lines = @($RevitExe)
+        Say "launching $which with no document"
     } else {
-        Say "launching Revit with no document"
+        Say "launching $which with no document"
     }
+    # Captured BEFORE the launch so the warm-line wait below cannot match a previous session's.
+    $logOffsetBeforeLaunch = 0
+    if (Test-Path $connectionLog) { $logOffsetBeforeLaunch = (Get-Item $connectionLog).Length }
+
     Drop-Signal -Extension 'launch' -Lines $lines
 
     Say "waiting for a fresh registration (>= $MinDocuments document(s), timeout ${TimeoutSec}s)"
@@ -323,13 +387,36 @@ if (-not $SkipRelaunch) {
 
     if ($matchedLine) {
         Say "PASS: $matchedLine"
+
+        # REGISTRATION IS NOT READINESS. The add-in registers on its connection thread while Roslyn's
+        # cold start (assembly JIT + reference-metadata load, seconds) is still running on a
+        # threadpool thread, so a harness sweep started the instant this said PASS had its FIRST case
+        # race that warmup and fail on a wire timeout -- three times in one session, each time read as
+        # a regression and re-diagnosed from scratch. The add-in now logs when the pipeline is warm;
+        # wait for it.
+        #
+        # A WARNING, NOT A FAILURE, when it does not appear: WarmupCompile is best-effort and silent by
+        # contract, so a warmup that failed logs nothing and the first script simply pays the cold start
+        # as it always did. Failing the deploy over that would turn a performance nicety into a
+        # deployment gate, which it is not -- but saying nothing would put us back to guessing.
+        $warmSeconds = 60
+        Say "waiting for the script pipeline to warm (timeout ${warmSeconds}s)"
+        $warmLine = Wait-ForLogLine -LogPath $connectionLog -Pattern 'script pipeline warm' -TimeoutSec $warmSeconds -FromOffset $logOffsetBeforeLaunch
+        if ($warmLine) {
+            Say "warm: $warmLine"
+        } else {
+            Say "WARNING: no 'script pipeline warm' line within ${warmSeconds}s. The add-in is connected and"
+            Say "         usable, but the first execute_script may pay Roslyn's cold start -- if a harness"
+            Say "         run's first case fails on a wire timeout, re-run it before believing it."
+        }
+
         Write-Output "REDEPLOY_RESULT: PASS"
         exit 0
     }
 
     Say "FAIL: no matching registration within ${TimeoutSec}s. Last log lines:"
     Get-Content $connectionLog -Tail 5 -ErrorAction SilentlyContinue | ForEach-Object { Say "  $_" }
-    Say "If a document was expected and registration shows 0, a blocking dialog (e.g. the trial splash) may be wedging Revit's idle loop -- capture the VM screen from the Mac side (prlctl capture) to check."
+    Say "If a document was expected and registration shows 0, a MODAL dialog may be wedging Revit's idle loop -- a memory warning, a file-version refusal, a link-reload prompt. Capture the VM screen (prlctl capture), but note the non-modal trial splash covers whatever is really blocking, so move it or read the timeout notice's window inventory instead of trusting the screenshot alone."
     Write-Output "REDEPLOY_RESULT: FAIL"
     exit 1
 }

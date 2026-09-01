@@ -112,10 +112,9 @@ Autodesk.Revit.DB.Level.Create(doc, 10.0);       // just write to it — no tran
 ```
 
 **What you get is headless**: in memory, no window, no open view, never the active document — writable
-by *script*, not visible to the person, who sees nothing appear. Making it visible takes **three calls**,
-and the reason is `SaveAs`, not activation: `UIApplication.OpenAndActivateDocument` needs a path, and a
-connector-created document cannot be saved in the run that created it (below). So: create, `SaveAs` from
-a second call, activate from a third. Route that last one at any document **other than the currently
+by *script*, not visible to the person, who sees nothing appear. Making it visible takes **two calls**:
+`UIApplication.OpenAndActivateDocument` needs a path, so `Connector.Settle(doc, true)` then `SaveAs` in
+the creating run, then activate from a second call routed at any document **other than the currently
 active one** — activation is refused only while the *active* document is modifiable, and your call's own
 target always is.
 
@@ -141,12 +140,11 @@ cannot be undone, so an earlier one can keep its changes; you then get a
 `script-partial-commit` notice naming which documents kept theirs and which did not; the ordering means
 the active document is always the one rolled back.
 
-**Close your scratch documents — just not in the run that created them.** For the length of that run the
-connector holds the document's transaction open, and **Revit itself** refuses both `Close` ("Close is not
-allowed when there is any open sub-transaction, transaction or transaction group") and `SaveAs` ("Unable
-to close all open transaction phases!"); no flag lifts either. The transaction closes when your script
-returns, so the **next** call does both normally with `confirm_lifecycle_actions: true`. Have the creating
-run `return doc.Title;` so the follow-up matches a title it actually saw:
+**Close your scratch documents — nothing else will.** Revit refuses `Close` and `SaveAs` while the
+connector holds anything open on the document, so finish it first with `Connector.Settle(doc, false)`
+(discard) or `Connector.Settle(doc, true)` (keep), then close in the same run with
+`confirm_lifecycle_actions: true`. From a *later* call the document is already unmanaged and closes
+directly — have the creating run `return doc.Title;` so the follow-up matches a title it actually saw:
 
 ```csharp
 var wanted = "Project7";         // whatever Title the creating call returned — don't guess one
@@ -174,22 +172,46 @@ except the active document, activate the one you want to keep, then close the ot
 
 Some Revit APIs manage their own transaction and refuse to run while one is open on the document they
 act on: `UIDocument.RequestViewChange`/`ActiveView`, `Document.LoadFamily`,
-`UIApplication.OpenAndActivateDocument`. **The document your call is routed at is modifiable for the
-whole run**, so against it they always fail ("must not be modifiable", "cannot change the active view
-of a modifiable document"). Route the call at a *different* open document:
+`UIApplication.OpenAndActivateDocument`, and every `EditScope`. **The document your call is routed at is
+modifiable for the whole run**, so against it they always fail ("must not be modifiable", "cannot change
+the active view of a modifiable document").
+
+Wrap them. The connector closes its transaction for the block and reopens one afterwards, so your
+changes still roll back if the script throws:
 
 ```csharp
-// routed at any OTHER open document
-UIApplication.ActiveUIDocument.RequestViewChange(someView);   // applies once your script returns
+Connector.WithoutTransaction(Document, () => {
+    UIApplication.ActiveUIDocument.RequestViewChange(someView);   // applies once your script returns
+});
 ```
 
-`LoadFamily` needs **both** documents non-modifiable, so call it *before* `Connector.OpenForWriting`
-on the target, not after.
+Don't write inside that block — the document isn't modifiable there. To write, nest
+`Connector.WithTransaction`. That pair is what makes **stairs** work, and the closing edge is the point:
+an edit scope can't commit while a transaction is open.
 
-**Stairs are a known dead end.** `StairsEditScope` starts fine on an
-unmanaged document, but then neither commits nor cancels ("EditScope cannot be closed, for there is a
-transaction or transaction group still open"), and a script cannot close the connector's transaction
-mid-run. Issue #115; no workaround today.
+```csharp
+Connector.WithoutTransaction(doc, () => {
+    var scope = new Autodesk.Revit.DB.StairsEditScope(doc, "stairs");
+    var id = scope.Start(baseLevel.Id, topLevel.Id);
+    Connector.WithTransaction(doc, () => {
+        Autodesk.Revit.DB.Architecture.StairsRun.CreateStraightRun(
+            doc, id, line, Autodesk.Revit.DB.Architecture.StairsRunJustification.Center);
+    });
+    scope.Commit(yourFailuresPreprocessor);
+});
+```
+
+`LoadFamily` needs **both** documents non-modifiable — nest a block per document. Nesting the same
+scope on the *same* document is refused, so nest by document, not by helper method.
+
+**To `Close`, `Save` or `SaveAs` a document in the run that touched it**, finish it first with
+`Connector.Settle(doc, keep:)` (itself gated on `confirm_lifecycle_actions`, like the members it enables) — Revit refuses those while the connector holds anything open.
+`keep: true` makes everything written to that document so far **permanent immediately**: a later failure
+will no longer undo it. `keep: false` discards it, which is what you want before closing a scratch
+document. Either way you get a notice saying so. Writing again afterwards is fine and rolls back as
+usual — but the document is unmanaged after a settle, so write through
+`Connector.WithTransaction(doc, () => { ... })` rather than directly, or you get
+`script-write-outside-transaction`. Nothing settled comes back.
 
 ### What you may not do without saying so
 
@@ -217,6 +239,7 @@ for you, so there is never a reason to construct one.
 | `UIDocument.SaveAndClose` | the filesystem, then that person's session |
 | `UIApplication.PostCommand` | anything, after your script's transaction has already closed |
 | `WorksharingUtils.RelinquishOwnership` | another user's ability to edit |
+| `Connector.Settle` | this run's own rollback guarantee for that document — see above |
 
 **Why these and nothing else:** everything else you change is covered by the transaction wrapped around
 your script, so if the script throws, your changes are undone automatically. These are not — they act

@@ -28,6 +28,21 @@ other overloaded symptoms (`documents: []`, a `busy` instance, a stalled live ru
 drive this VM's UI (see below), but you can see it, and treating "can't drive" as "must work blind"
 has cost hours here.
 
+**If Revit VANISHED, our logs are not the evidence — the Windows Application log is.** A crash takes
+`connection.log` down with the process, so it ends mid-sentence and says nothing about why; the add-in
+never gets to write a final line. Read Revit's own crash record instead:
+
+```powershell
+Get-WinEvent -LogName Application -MaxEvents 60 |
+  Where-Object { $_.ProviderName -match 'Revit|.NET Runtime|Application Error' -or $_.LevelDisplayName -eq 'Error' } |
+  Select-Object TimeCreated, ProviderName, Id, LevelDisplayName, Message | Format-List
+```
+
+Run it through `prlctl exec ... powershell -Command`, which is fine here because reading the event log
+needs no interactive session (unlike anything touching a window). `Application Error` carries the
+faulting module, which is what distinguishes "our add-in threw" from "Revit died in its own native
+code" — the distinction issue #113 turned on.
+
 ## `prlctl`
 
 `prlctl start|stop|restart <vm>` for lifecycle; `prlctl exec <vm> ...` to run commands in the guest.
@@ -118,6 +133,42 @@ can't land in the wrong order.
 - **UI automation is a dead end here.** `EnumWindows`/`SendKeys` find zero top-level windows anywhere,
   even from the agent's own session; `CloseMainWindow()` returns false though the window resolves.
   Don't spend time on it — use a journal replay or ask the user for the click.
+
+## Two Revit versions, and why only one was ever tested
+
+Both **Revit 2025 and 2027 are installed** on this VM, and the add-in multi-targets for both
+(`net8.0-windows` / `net10.0-windows`). Tier 1 runs both legs. **The live harness had never once run
+against 2025**, and the reason was tooling, not choice: `redeploy-and-verify.ps1` always wrote an empty
+line 1 into its `*.launch` signal — the alternate-exe slot the launcher agent has always honoured — so
+it could only ever relaunch 2027. `--revit-exe` now exposes it:
+
+```sh
+revit/dev-tooling/redeploy-and-verify.sh --build \
+  --revit-exe 'C:\Program Files\Autodesk\Revit 2025\Revit.exe' \
+  --tfm net8.0-windows --revit-version 2025 --doc-dest '<a 2025-saved .rvt>'
+```
+
+Two things that bite immediately:
+
+- **Each version needs its own fixture `.rvt`.** Revit is forward-incompatible and says so plainly:
+  *"The file work.rvt was saved in a later version of Revit and cannot be retrieved in this version."*
+  `C:\dev\fixtures\work.rvt` is 2027-saved, so a 2025 run needs a separate document saved by 2025 —
+  and there is no way to produce one without a human, because a harness run needs a document open
+  before it can create anything.
+- **Revit's trial splash is NOT modal — it does not block anything, and it HIDES what does.** The
+  "24 DAYS LEFT / Dig into your trial" panel floats; the idle loop keeps running behind it. It is
+  large and opaque, so the real modal — a memory warning, a file-version refusal, a link-reload
+  prompt — sits underneath and is invisible in a screenshot. Attributing a `pending` execution to the
+  splash is a misdiagnosis that costs a whole cycle, and it was made repeatedly in one session:
+  a Revit 2025 launch registering 0 documents was blamed on the splash when the actual blocker
+  beneath it was *"The file work.rvt was saved in a later version of Revit and cannot be retrieved
+  in this version."*
+
+  **So do not diagnose a block from a screenshot alone.** §07's v1 window inventory — already in the
+  timeout notice's `detail.windows` — enumerates every top-level window the Revit process owns
+  regardless of z-order, so it lists the hidden modal the screenshot cannot show. Read that first;
+  use the screenshot to confirm, not to conclude. If you only have a screenshot, move or dismiss the
+  splash and look again before believing what you saw.
 
 ## Deployment
 

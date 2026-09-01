@@ -97,6 +97,13 @@ internal sealed class TransactionScriptExecutor
                 // it threw/was cancelled, and that publication must still be reported here.
                 var dialogNotices = ActiveDialogContext.DrainRecorded();
                 var publishedFiles = globals.PublishedFiles;
+                // A settle on a FAILED run is the case that matters most (issue #132): the rollback
+                // below cannot undo it, so "the script failed" would otherwise imply nothing survived
+                // when something permanently did.
+                dialogNotices = dialogNotices
+                    .Concat(transactions.SettledFailures.Select(ToDiagnosticRecord))
+                    .Concat(transactions.Settlements.Select(SettleNotice))
+                    .ToList();
                 if (dialogNotices.Count == 0 && publishedFiles.Count == 0)
                 {
                     return outcome;
@@ -109,8 +116,14 @@ internal sealed class TransactionScriptExecutor
 
             // The script's own code has already finished at this point -- with one document or with N,
             // every commit happens here, in the executor, never in the script.
+            // Read before CommitAll purely for readability. An earlier comment here claimed CommitAll
+            // clears the settlement log along with the entry set -- it does not; nothing clears
+            // _settlements at all -- so the ordering is not load-bearing, and the claim would have sent a
+            // future reader chasing a hazard that does not exist.
+            var settlements = transactions.Settlements;
             var commit = transactions.CommitAll();
             var notices = CombinedNotices(commit.CommitFailures);
+            notices.AddRange(settlements.Select(SettleNotice));
 
             if (!commit.Success)
             {
@@ -147,6 +160,36 @@ internal sealed class TransactionScriptExecutor
 
         return failureNotices;
     }
+
+    /// <summary>
+    /// One notice per Connector.Settle (issue #132, decision 2). Settle is the ONLY scope that notices,
+    /// and the reason is signal rather than literalism: it is the irreversible one -- it makes this
+    /// document's changes permanent or discards them, immediately -- while WithTransaction and
+    /// WithoutTransaction leave the group's rollback boundary intact and have nothing to confess. A
+    /// notice per scope would bury these under any script that writes in a loop.
+    ///
+    /// Severity is Warning rather than Info deliberately: settling the AMBIENT document gives up the
+    /// roll-back-on-throw guarantee for a real model a person has open, which is the single largest
+    /// change to what a failed run means, and PRD §01 does not permit it passing silently.
+    /// </summary>
+    internal static DiagnosticRecord SettleNotice(ManagedDocumentTransactions.SettlementRecord settlement) =>
+        DiagnosticRecord.Create(
+            DiagnosticSeverity.Warning,
+            settlement.Kept ? "document-settled-kept" : "document-settled-discarded",
+            DiagnosticSource.Execution,
+            settlement.Kept
+                ? $"'{settlement.Document}' was settled with keep: true, so every change made to it before that " +
+                  "point is now permanent -- a later failure in this script can no longer undo them."
+                : $"'{settlement.Document}' was settled with keep: false, so every change made to it before that " +
+                  "point was discarded.",
+            detail: new Dictionary<string, object?>
+            {
+                ["document"] = settlement.Document,
+                ["kept"] = settlement.Kept,
+            },
+            remedy: settlement.Kept
+                ? new[] { "If this was not intended, the changes cannot be rolled back -- inspect the document and correct it explicitly." }
+                : null);
 
     private static DiagnosticRecord ToDiagnosticRecord(FailureSummary failure) => DiagnosticRecord.Create(
         failure.IsError ? DiagnosticSeverity.Error : DiagnosticSeverity.Warning,

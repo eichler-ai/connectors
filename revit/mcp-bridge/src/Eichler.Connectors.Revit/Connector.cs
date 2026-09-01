@@ -7,13 +7,14 @@ namespace Eichler.Connectors.Revit;
 /// them from a script through the <c>Connector</c> global, e.g. <c>Connector.Publish(path)</c>.
 ///
 /// <para>Use these for what a script cannot do with Revit's API alone here: create a document it can
-/// immediately write to, make an already-open document writable again, exchange files with the caller, and
-/// override how a dialog is answered. Revit's own objects arrive as separate globals -- <c>Document</c>,
-/// <c>UIApplication</c>, <c>UIDocument</c> -- and are used exactly as Autodesk documents them.</para>
+/// immediately write to, make one writable again, move a document between transaction states, exchange
+/// files with the caller, and override how a dialog is answered. Revit's own objects --
+/// <c>Document</c>, <c>UIApplication</c>, <c>UIDocument</c> -- arrive as separate globals.</para>
 ///
-/// <para>Every document this connector opens for writing is committed when the script returns normally
-/// and rolled back if it throws. A script never opens a Revit <c>Transaction</c> itself; attempting to
-/// is refused before the script runs.</para>
+/// <para>Every document this connector opens for writing is committed when the script returns normally and
+/// rolled back if it throws -- until <see cref="Settle"/>, which finishes one document early and
+/// permanently. A script never opens a Revit <c>Transaction</c> itself; attempting to is refused before
+/// the script runs.</para>
 /// </summary>
 /// <remarks>
 /// MAINTAINERS: the summaries in this file are the agent-facing product, shipped verbatim by
@@ -73,17 +74,17 @@ public sealed class Connector
     /// nothing has opened for writing and would need <see cref="OpenForWriting"/> as a separate step.</para>
     ///
     /// <para>Being unsaved, it gets a session-only <c>tmp-</c> document id that <c>list_instances</c>
-    /// reports, so a later execute_script call can target it directly. This call holds its transaction
-    /// open, so Revit refuses both <c>Close</c> and <c>SaveAs</c> on it for the rest of this script; any
-    /// later call does either, with <c>confirm_lifecycle_actions</c>. Close your scratch documents —
-    /// nothing else will.</para>
+    /// reports, so a later execute_script call can target it directly. To <c>Close</c> or <c>SaveAs</c> it
+    /// in THIS script, finish it first with <see cref="Settle"/>; from a later call it is already
+    /// unmanaged and needs no such step. Either way you need <c>confirm_lifecycle_actions</c>. Close your
+    /// scratch documents — nothing else will.</para>
     /// </summary>
     /// <remarks>
     /// The headless behaviour is deliberate, not a gap: a script-created document with a real window would
     /// steal focus from whatever a person has open, so making one visible should stay an explicit act.
-    /// It takes two further calls, and the binding constraint is SaveAs rather than activation --
-    /// OpenAndActivateDocument needs a path, and SaveAs is blocked in the creating run for the same reason
-    /// Close is. So SaveAs from one later call, then activate from another. Activation itself is refused
+    /// It takes one further call now, not two: SaveAs is reachable in the creating run once
+    /// <see cref="Settle"/> has finished the document, so only OpenAndActivateDocument -- which needs a
+    /// path -- has to wait for a later call. Activation itself is refused
     /// only while the ACTIVE document is modifiable, which is not a general bar: route that call at any
     /// document other than the currently active one and it succeeds. All verified live against Revit 2027,
     /// including the negative -- the raw NewProjectDocument path, having no managed transaction, can SaveAs
@@ -101,8 +102,8 @@ public sealed class Connector
     /// family template, so a template path is required.
     ///
     /// <para>Headless and session-lived exactly as <see cref="CreateProjectDocument"/> describes: no
-    /// window, never active, no <c>Close</c> or <c>SaveAs</c> during the run that creates it, and yours to
-    /// close from a later execute_script call with <c>confirm_lifecycle_actions</c> once you are done.</para>
+    /// window, never active, and yours to close once you are done — via <see cref="Settle"/> in this same
+    /// script, or directly from a later one, with <c>confirm_lifecycle_actions</c> either way.</para>
     /// </summary>
     /// <param name="templatePath">Path to a family template (.rft).</param>
     /// <returns>The new family document, open for writing.</returns>
@@ -116,17 +117,74 @@ public sealed class Connector
     /// writable: the call that created it closed its transaction when it returned.
     ///
     /// <para>Not needed for the script's own <c>Document</c> or one created earlier in this same script --
-    /// both are already open for writing, and calling this on them fails.</para>
+    /// both are already open for writing, and calling this on them fails. One this run already
+    /// <see cref="Settle"/>d is the exception, and works again.</para>
     ///
-    /// <para>Revit APIs that manage their own transactions, such as <c>Document.LoadFamily</c>, must be
-    /// called BEFORE their document is opened for writing. The script's own <c>Document</c> has a
-    /// transaction open for the whole run, so such a call against it belongs in a separate execute_script
-    /// call.</para>
+    /// <para>Revit APIs that manage their own transaction, such as <c>Document.LoadFamily</c>, refuse to
+    /// run against a document open for writing -- call them before this, or inside
+    /// <see cref="WithoutTransaction"/>.</para>
     /// </summary>
     /// <param name="document">A document found in this Revit session that is not already open for writing.</param>
     /// <returns>The same document, now open for writing. Callers already holding it can ignore this.</returns>
     public Autodesk.Revit.DB.Document OpenForWriting(Autodesk.Revit.DB.Document document) =>
         (Autodesk.Revit.DB.Document)_runtime.OpenForWriting(document);
+
+    /// <summary>
+    /// Runs your code with this document temporarily NOT modifiable, then makes it writable again. Use it
+    /// for the Revit calls that refuse to run while a transaction is open on their target — <c>Document.LoadFamily</c>,
+    /// <c>UIDocument.RequestViewChange</c>, <c>UIApplication.OpenAndActivateDocument</c>, and starting any
+    /// edit scope such as <c>StairsEditScope</c>.
+    ///
+    /// <para>Your changes are still undone if the script throws: the connector keeps this document's
+    /// transaction group open across the block, and that is what the rollback guarantee rests on. Do not
+    /// write to the document inside the block — it is not modifiable there. To write, nest
+    /// <see cref="WithTransaction"/>, which is how stairs are built.</para>
+    ///
+    /// <para>Nesting this on the SAME document is refused; nesting it on DIFFERENT documents is allowed,
+    /// and is how a call needing two non-modifiable documents, like <c>Document.LoadFamily</c>, is
+    /// written.</para>
+    /// </summary>
+    /// <param name="document">The document to make temporarily non-modifiable.</param>
+    /// <param name="body">Your code. Runs once, immediately.</param>
+    public void WithoutTransaction(Autodesk.Revit.DB.Document document, System.Action body) =>
+        _runtime.WithoutTransaction(document, body);
+
+    /// <summary>
+    /// Runs your code with a transaction the connector opens for this document and commits when the block
+    /// ends. Use it inside <see cref="WithoutTransaction"/> when something there needs to write — an edit
+    /// scope is the case this exists for: <c>StairsEditScope</c> needs no transaction to start, one to
+    /// build its runs, and none again to commit.
+    ///
+    /// <para>Closing at the end of the block is the point, not tidiness: an edit scope cannot commit while
+    /// a transaction is open on its document. Your changes still roll back if the script throws.</para>
+    ///
+    /// <para>Nesting on the same document is refused — inside the block it is already writable, so write
+    /// directly. On a document this run does not already manage, this adopts it for the rest of the run,
+    /// as <see cref="OpenForWriting"/> would.</para>
+    /// </summary>
+    /// <param name="document">The document to write to.</param>
+    /// <param name="body">Your code. Runs once, immediately.</param>
+    public void WithTransaction(Autodesk.Revit.DB.Document document, System.Action body) =>
+        _runtime.WithTransaction(document, body);
+
+    /// <summary>
+    /// Finishes this document for the rest of the run, so Revit will allow <c>Close</c>, <c>Save</c>,
+    /// <c>SaveAs</c> and <c>SynchronizeWithCentral</c> on it — all of which refuse while the connector
+    /// holds anything open. Call it before those, in the same script.
+    ///
+    /// <para><c>keep: true</c> makes everything written to this document so far PERMANENT immediately: a
+    /// later failure will no longer undo it. <c>keep: false</c> discards that work, which is what you
+    /// want before closing a scratch document. The choice is yours to state — the connector cannot tell
+    /// what you are about to do.</para>
+    ///
+    /// <para>Needs <c>confirm_lifecycle_actions</c>, like the members it exists to enable. To write to
+    /// the document again afterwards, go through <see cref="WithTransaction"/> — it is no longer open for
+    /// writing, and nothing settled can be recovered.</para>
+    /// </summary>
+    /// <param name="document">The document to finish.</param>
+    /// <param name="keep">True to keep this document's changes permanently; false to discard them.</param>
+    public void Settle(Autodesk.Revit.DB.Document document, bool keep) =>
+        _runtime.Settle(document, keep);
 
     /// <summary>
     /// Overrides how this script answers a specific Revit dialog, for the dialogs whose default answer is

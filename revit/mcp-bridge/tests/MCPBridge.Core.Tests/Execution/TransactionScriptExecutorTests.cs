@@ -3,6 +3,7 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using MCPBridge.Core.Diagnostics;
 using MCPBridge.Core.Execution;
 using MCPBridge.Core.Tests.Fakes;
 using MCPBridge.RevitAdapter;
@@ -860,5 +861,48 @@ throw new System.TimeoutException(""cancellation was never observed"");";
             LastTransactionGroup = new FakeTransactionGroupAdapter(name);
             return LastTransactionGroup;
         }
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // The settle notice (issue #132, decision 2).
+    //
+    // Tested as a MAPPING rather than end-to-end, and that is a real limit rather than a shortcut:
+    // reaching Connector.Settle from a script requires IExistingDocumentSource, which only the live
+    // adapter implements (Autodesk.Revit.DB.Document cannot be wrapped outside a running Revit), so a
+    // fake genuinely cannot get there. That the EXECUTOR emits these on both the success and failure
+    // paths belongs in the tier-2 harness; what is checkable here is that the record an agent receives
+    // says the right thing.
+    // ---------------------------------------------------------------------------------------------
+
+    [Fact]
+    public void SettleNotice_ForKeptChanges_WarnsThatRollbackIsNoLongerPossible()
+    {
+        var notice = TransactionScriptExecutor.SettleNotice(
+            new ManagedDocumentTransactions.SettlementRecord("work (active document)", kept: true));
+
+        Assert.Equal(DiagnosticSeverity.Warning, notice.Severity);
+        Assert.Equal("document-settled-kept", notice.Code);
+        Assert.Contains("work (active document)", notice.Message);
+        Assert.Contains("now permanent", notice.Message);
+        // The consequence, not just the event -- an agent has to know the run's rollback guarantee
+        // no longer covers this document.
+        Assert.Contains("can no longer undo", notice.Message);
+        Assert.NotEmpty(notice.Remedy);
+    }
+
+    [Fact]
+    public void SettleNotice_ForDiscardedChanges_SaysSoAndOffersNoRemedy()
+    {
+        var notice = TransactionScriptExecutor.SettleNotice(
+            new ManagedDocumentTransactions.SettlementRecord("scratch", kept: false));
+
+        Assert.Equal(DiagnosticSeverity.Warning, notice.Severity);
+        Assert.Equal("document-settled-discarded", notice.Code);
+        Assert.Contains("discarded", notice.Message);
+        // No remedy, deliberately: discarding is what the script asked for, and a remedy on an
+        // intentional outcome trains an agent to ignore the field. Asserted EMPTY rather than null --
+        // DiagnosticRecord.Create normalises a null remedy to an empty array, so Assert.Null passes
+        // only for a record that never went through Create.
+        Assert.Empty(notice.Remedy);
     }
 }

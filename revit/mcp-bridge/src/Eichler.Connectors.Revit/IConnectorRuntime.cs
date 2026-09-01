@@ -55,4 +55,15 @@ internal interface IConnectorRuntime
     /// <summary>Backs <see cref="Connector.OpenForWriting"/>. Takes and returns an
     /// <c>Autodesk.Revit.DB.Document</c> as <c>object</c> -- see the type-load note above.</summary>
     object OpenForWriting(object document);
+
+    /// <summary>Backs <see cref="Connector.WithoutTransaction"/>. The document is <c>object</c> for the
+    /// type-load reason above; <c>System.Action</c> names no Revit type, so the callback passes through
+    /// unchanged.</summary>
+    void WithoutTransaction(object document, System.Action body);
+
+    /// <summary>Backs <see cref="Connector.WithTransaction"/>.</summary>
+    void WithTransaction(object document, System.Action body);
+
+    /// <summary>Backs <see cref="Connector.Settle"/>.</summary>
+    void Settle(object document, bool keep);
 }

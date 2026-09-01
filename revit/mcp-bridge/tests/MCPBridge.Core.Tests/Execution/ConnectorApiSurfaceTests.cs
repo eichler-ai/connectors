@@ -54,6 +54,9 @@ public class ConnectorApiSurfaceTests
         "ImportsDirectory",
         "OpenForWriting",
         "Publish",
+        "Settle",
+        "WithTransaction",
+        "WithoutTransaction",
     };
 
     private const string ConnectorDocId = "T:Eichler.Connectors.Revit.Connector";

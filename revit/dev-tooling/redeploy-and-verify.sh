@@ -61,6 +61,12 @@
 #                             This is a BUILD OUTPUT, not just an input: unless --skip-broker-restart
 #                             is given, the broker is rebuilt from this checkout and written here,
 #                             overwriting whatever was at that path.
+#   --revit-exe PATH         VM-side Revit.exe to launch (default: the launcher agent's own, 2027).
+#                            Pass with --tfm/--revit-version to exercise the OTHER version end to end,
+#                            e.g. --revit-exe 'C:\Program Files\Autodesk\Revit 2025\Revit.exe'
+#                            --tfm net8.0-windows --revit-version 2025. Until this existed the 2025 leg
+#                            had no live path: it built and unit-tested on both TFMs while every live
+#                            run was 2027.
 #   --tfm TFM                Build output TFM to deploy (default: net10.0-windows)
 #   --revit-version VER      Addins\<VER> folder to deploy into (default: 2027)
 #   --doc-source PATH        VM-side pristine fixture .rvt to launch with (needs --doc-dest too)
@@ -93,6 +99,7 @@ SHARE_NAME="$(basename "$REPO_ROOT")"
 MAC_BIND=""
 APP_DATA_DIR="$REPO_ROOT/Connectors/Revit"
 BROKER_EXE="$REPO_ROOT/revit/mcp-server/mcp-server-mac"
+REVIT_EXE=""
 TFM="net10.0-windows"
 REVIT_VERSION="2027"
 DOC_SOURCE=""
@@ -118,6 +125,7 @@ while [[ $# -gt 0 ]]; do
     --mac-bind) MAC_BIND="$2"; shift 2 ;;
     --app-data-dir) APP_DATA_DIR="$2"; shift 2 ;;
     --broker-exe) BROKER_EXE="$2"; shift 2 ;;
+    --revit-exe) REVIT_EXE="$2"; shift 2 ;;
     --tfm) TFM="$2"; shift 2 ;;
     --revit-version) REVIT_VERSION="$2"; shift 2 ;;
     --doc-source) DOC_SOURCE="$2"; shift 2 ;;
@@ -346,6 +354,7 @@ fi
 PS_ARGS=(-SrcRoot "$UNC_ROOT\\revit\\mcp-bridge\\src" -Tfm "$TFM" -AddinsVersion "$REVIT_VERSION" -TimeoutSec "$TIMEOUT_SEC")
 [[ -n "$DOC_SOURCE" ]] && PS_ARGS+=(-DocSource "$DOC_SOURCE")
 [[ -n "$DOC_DEST" ]] && PS_ARGS+=(-DocDest "$DOC_DEST")
+[[ -n "$REVIT_EXE" ]] && PS_ARGS+=(-RevitExe "$REVIT_EXE")
 [[ -n "$MARKER" ]] && PS_ARGS+=(-Marker "$MARKER")
 $SKIP_COPY && PS_ARGS+=(-SkipCopy)
 $SKIP_RELAUNCH && PS_ARGS+=(-SkipRelaunch)
@@ -370,7 +379,8 @@ else
   echo
   echo "==> FAILED -- see the PowerShell output above." >&2
   echo "    If it registered 0 documents with no refresh following and a document was expected, a blocking dialog" >&2
-  echo "    (e.g. Revit's trial splash) may be wedging the idle loop -- check the screen:" >&2
+  echo "    may be wedging the idle loop. The non-modal trial splash COVERS whatever is really" >&2
+  echo "    blocking, so do not stop at seeing it -- check the screen, moving it if present:" >&2
   echo "    prlctl capture \"$VM_NAME\" --file /tmp/vm-screen.png" >&2
   exit "$status"
 fi

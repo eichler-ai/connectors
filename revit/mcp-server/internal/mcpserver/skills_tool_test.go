@@ -62,7 +62,19 @@ func TestSkillFileStaysWithinItsLightweightBudget(t *testing.T) {
 	// bounds the choice rather than determining it: 32% would have fit this change too. What picks
 	// 35% is the size of the margin wanted (~950 tokens, about three troubleshooting rows), not
 	// arithmetic. The 3-bytes/token measure above stays pessimistic on top of it.
-	const budgetTokens = ceilingTokens * 35 / 100
+	// Raised again, 35% -> 38%, deliberately and on request rather than as a side effect (#132).
+	// settle-on-request added three script members and a capability an agent cannot infer -- how to
+	// build stairs, and how to Close/Save a document in the run that touched it -- while the same
+	// change made three EXISTING paragraphs wrong (Close/SaveAs "for the rest of this script", the
+	// LoadFamily two-call split, and "stairs are a known dead end"). Correcting those recovered tokens
+	// and the file still landed at ~8.6k -- past the old soft line with ~170 to spare, which is the
+	// tripwire state the previous raise exists to prevent rather than recreate.
+	//
+	// 38% of the host cap. Same framing as before: the cap bounds the choice, it does not determine it.
+	// What picks 38% is the margin wanted -- ~920 tokens, the same "about three troubleshooting rows"
+	// the 35% raise sized for -- and the soft line moves with it so the file starts BELOW the line
+	// again. A soft line the file is already past is a warning that fires forever and means nothing.
+	const budgetTokens = ceilingTokens * 38 / 100
 
 	// The soft line sits ABOVE the file's current size, deliberately, and this is a correction to a
 	// first draft of this raise (independent PR review). That draft promoted the previous CEILING to
@@ -79,7 +91,7 @@ func TestSkillFileStaysWithinItsLightweightBudget(t *testing.T) {
 	// the `go test ./...` this repo's SKILL.md documents. The ci.yml step "skill.md budget headroom"
 	// re-runs this one test with -v for the sole purpose of surfacing it. If that step is ever
 	// removed, this branch goes silent and should be deleted rather than left as decoration.
-	const softBudgetTokens = ceilingTokens * 33 / 100
+	const softBudgetTokens = ceilingTokens * 36 / 100
 
 	// The footer get_skills appends at runtime is charged to the same reader's
 	// context as the file itself, so the budget measures what a caller
