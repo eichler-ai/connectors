@@ -608,6 +608,63 @@ func TestLifecycleGateCoversTheNewlyAddedMembers(t *testing.T) {
 	}
 }
 
+// TestConnectorSettleIsConfirmationGatedLive is the live REFUSAL half of the
+// gate for Connector.Settle (issue #132), and it sits here beside the other
+// confirmation-gate tests because that is the question it answers -- "is Settle
+// actually gated on the wire?" -- not "does Settle work", which
+// TestSettleMakesLifecycleActionsReachableInTheSameRun already covers with the
+// flag set.
+//
+// It is not redundant with that test or with the tier-1
+// RunAsync_ConnectorSettle_RequiresConfirmation. Tier 1 proves the gate's
+// DECISION on Settle but cannot carry a real refusal record across the broker;
+// the same-run test proves Settle RUNS once confirmed but never sends it
+// unconfirmed. Nothing else asserts that an UNconfirmed Settle is refused end to
+// end with the retryable code and the member named -- the exact wire contract an
+// agent branches on. Settle is also the first of OUR OWN members on the gated
+// list rather than Revit's, so proving the enforcement path reaches a
+// non-Autodesk type live matters on its own.
+//
+// METHOD GROUP, NEVER INVOKED -- same discipline as
+// TestLifecycleGateRequiresConfirmation: detection fires on the reference
+// exactly as on a call, and actually invoking Settle would move the shared
+// target document between transaction states mid-suite. Binding to a
+// two-argument Action is the whole spelling difference from the Close case; the
+// gate keys on the bound symbol, not the delegate shape.
+func TestConnectorSettleIsConfirmationGatedLive(t *testing.T) {
+	c, instanceID, documentID := targetDocument(t)
+
+	const script = `System.Action<Autodesk.Revit.DB.Document, bool> settle = Connector.Settle; return settle != null ? "bound" : "null";`
+
+	// Unconfirmed: refused, before anything runs.
+	rej := runRejectedScript(t, c, instanceID, documentID, script)
+	if rej.Error.Code != "script-lifecycle-confirmation-required" {
+		t.Errorf("record's code = %q, want script-lifecycle-confirmation-required -- an agent matching on the field cannot see this is retryable; result: %s", rej.Error.Code, rej.Text)
+	}
+	if !strings.Contains(strings.Join(rej.Error.Remedy, " "), "confirm_lifecycle_actions: true") {
+		t.Errorf("remedy does not tell the agent to resend with confirm_lifecycle_actions, which is the whole point of a retryable refusal (PRD §01); result: %s", rej.Text)
+	}
+	if !strings.Contains(rej.Text, "Eichler.Connectors.Revit.Connector.Settle") {
+		t.Errorf("refusal does not name the member the script used -- for our own member the fully-qualified Connector.Settle is what the denylist walk reports; result: %s", rej.Text)
+	}
+
+	// Confirmed: the identical text gets through the gate and binds.
+	out := decodeToolResult[executeScriptOut](t, callExecuteScriptWith(t, c, instanceID, documentID, script,
+		map[string]any{"confirm_lifecycle_actions": true}))
+	if out.Status != "success" {
+		t.Fatalf("confirmed Settle-binding script did not run: status=%q %s", out.Status, out.diag())
+	}
+	if !strings.Contains(out.ReturnValue, "bound") {
+		t.Errorf("confirmed script ran but did not return its own result; %s", out.diag())
+	}
+
+	// Per-request, not sticky: the same text without the flag is refused again.
+	again := runRejectedScript(t, c, instanceID, documentID, script)
+	if again.Error.Code != "script-lifecycle-confirmation-required" {
+		t.Errorf("confirmation leaked to a later unconfirmed run of the same script; result: %s", again.Text)
+	}
+}
+
 // TestApplicationCreatesDocuments covers the top-level
 // Autodesk.Revit.ApplicationServices.Application object -- reached from a script
 // as UIApplication.Application -- and specifically the two document-creating
