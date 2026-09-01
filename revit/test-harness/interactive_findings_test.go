@@ -345,6 +345,44 @@ func hasNoticeCode(out executeScriptOut, code string) bool {
 	return false
 }
 
+// TestWriteOutsideATransactionCarriesAnActionableCode pins the §01 remedy
+// mapping settle-on-request needs (#132).
+//
+// WHY IT HAS TO BE A LIVE TEST. Revit offers no pre-write hook, so a script that
+// forgets to wrap a write is inevitable, and Revit's own message ("Attempt to
+// modify the model outside of transaction") names no way out. The connector maps
+// that to `script-write-outside-transaction` plus a remedy -- but it matches on
+// the exception's FULL TYPE NAME as a string, because a type pattern would force
+// RevitAPI.dll to resolve when the dispatcher method is JITed and break the
+// entire tier-1 host. A string match FAILS OPEN: a typo does not error, the
+// mapping just never fires and the agent silently gets the generic code back.
+// Nothing at tier 1 can catch that, because tier 1 cannot construct the
+// exception. This test is the only thing standing between that string and a
+// silent regression.
+func TestWriteOutsideATransactionCarriesAnActionableCode(t *testing.T) {
+	c, instanceID, documentID := targetDocument(t)
+	fixtureTitle := createBlankFixtureDocument(t, c, instanceID, documentID)
+
+	// fixtureLookupPreamble deliberately, NOT fixtureWritePreamble: the whole point
+	// is a document that is found but never opened for writing.
+	rejected := runRejectedScript(t, c, instanceID, documentID, fixtureLookupPreamble(fixtureTitle)+`
+Autodesk.Revit.DB.Level.Create(doc, 50.0);
+return "should not get here";
+`)
+
+	if rejected.Error.Code != "script-write-outside-transaction" {
+		t.Fatalf("a write with no transaction open must map to `script-write-outside-transaction`, got %q -- if this is `script-execution-failed`, the full type name in RequestDispatcher.IsModificationOutsideTransaction no longer matches Revit's and the mapping is failing open; message: %s", rejected.Error.Code, rejected.Error.Message)
+	}
+	if len(rejected.Error.Remedy) == 0 {
+		t.Fatalf("the code is right but no remedy was carried, which is the half that tells an agent what to do; %+v", rejected.Error)
+	}
+	// The remedy has to name the member that fixes it, not merely describe the problem.
+	joined := strings.Join(rejected.Error.Remedy, " ")
+	if !strings.Contains(joined, "Connector.WithTransaction") {
+		t.Errorf("the remedy does not name Connector.WithTransaction, so it does not actually tell an agent what to do: %q", joined)
+	}
+}
+
 // TestRoomOnScriptCreatedLevelNeedsComputationHeight pins the live-confirmed
 // gotcha behind issue #118: a Level created via Level.Create defaults its
 // Room Computation Height to 0 -- exactly the level's own elevation, which

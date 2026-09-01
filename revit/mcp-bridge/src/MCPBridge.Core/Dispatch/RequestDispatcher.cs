@@ -613,8 +613,34 @@ public sealed class RequestDispatcher
         // global is `Document`. The names were never secret -- get_skills lists all ten with prose -- but
         // an agent that didn't call get_skills first had no path from the error to the answer.
         CompilationErrorException compilation => ("script-compilation-failed", CompilationRemedy(compilation)),
+        // Issue #132. Revit offers no pre-write hook, so a script that forgets to wrap a write is
+        // inevitable rather than unlikely -- and Revit's own message ("Attempt to modify the model
+        // outside of transaction") names no way out. This is the same class of gap issue #84 closed for
+        // CS0103: the connector knows exactly what the agent needs to do and was saying nothing.
+        Exception modification when IsModificationOutsideTransaction(modification) =>
+            ("script-write-outside-transaction", new[]
+            {
+                "Wrap the write in Connector.WithTransaction(document, () => { ... }) -- the connector " +
+                "opens the transaction and commits it when the block ends.",
+                "If this is inside Connector.WithoutTransaction, that block is deliberately not " +
+                "modifiable; nest Connector.WithTransaction inside it to write.",
+                "If the document was created or settled by an earlier call, open it first with " +
+                "Connector.OpenForWriting(document).",
+            }),
         _ => ("script-execution-failed", null),
     };
+
+    /// <summary>
+    /// Matched on the type's FULL NAME rather than by a type pattern, and that is load-bearing rather
+    /// than stylistic: a pattern naming Autodesk.Revit.Exceptions.ModificationOutsideTransactionException
+    /// forces that type to resolve when THIS method is JITed, and MCPBridge.Core.Tests runs where
+    /// RevitAPI.dll cannot load -- so every tier-1 test touching this call site would fail to load the
+    /// assembly, silently, at `dotnet test` exit 0. Same hazard IConnectorRuntime documents for its own
+    /// signatures, one rung over. The name is asserted live by the harness rather than trusted here,
+    /// because a string typo would fail open: the mapping simply would not fire.
+    /// </summary>
+    private static bool IsModificationOutsideTransaction(Exception exception) =>
+        exception.GetType().FullName == "Autodesk.Revit.Exceptions.ModificationOutsideTransactionException";
 
     /// <summary>
     /// Remedy lines for a compile failure. The globals are listed ONLY for CS0103 ("the name X does not
