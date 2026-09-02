@@ -32,7 +32,7 @@ func TestPhaseCFloorsGridsSheetsAndText(t *testing.T) {
 	// CreateFloor: a closed four-segment CurveLoop profile, Floor.Create against the default floor
 	// type (Floor.GetDefaultFloorType(doc, isFoundation: false)).
 	t.Run("CreateFloor", func(t *testing.T) {
-		out := runScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+`
+		out := runScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+withTx(`
 var level = Autodesk.Revit.DB.Level.Create(doc, 700.0);
 var floorTypeId = Autodesk.Revit.DB.Floor.GetDefaultFloorType(doc, false);
 var loop = new Autodesk.Revit.DB.CurveLoop();
@@ -44,7 +44,7 @@ var profile = new System.Collections.Generic.List<Autodesk.Revit.DB.CurveLoop> {
 var floor = Autodesk.Revit.DB.Floor.Create(doc, profile, floorTypeId, level.Id);
 doc.Regenerate();
 return new { floorCreated = floor != null, category = floor.Category == null ? "null" : floor.Category.Name };
-`)
+`))
 		if out.Status != "success" {
 			t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
 		}
@@ -65,7 +65,7 @@ return new { floorCreated = floor != null, category = floor.Category == null ? "
 	// coincident with an existing one is silently allowed (no exception, no warning surfaced) --
 	// Revit's own permissiveness, not a connector or discovery gap.
 	t.Run("CreateGrid", func(t *testing.T) {
-		out := runScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+`
+		out := runScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+withTx(`
 var line1 = Autodesk.Revit.DB.Line.CreateBound(new Autodesk.Revit.DB.XYZ(300, -10, 0), new Autodesk.Revit.DB.XYZ(300, 30, 0));
 var grid1 = Autodesk.Revit.DB.Grid.Create(doc, line1);
 var line2 = Autodesk.Revit.DB.Line.CreateBound(new Autodesk.Revit.DB.XYZ(330, -10, 0), new Autodesk.Revit.DB.XYZ(330, 30, 0));
@@ -76,7 +76,7 @@ var grid2 = Autodesk.Revit.DB.Grid.Create(doc, line2);
 // specific literals -- is done here, in-script, rather than parsed back out of two separate
 // output fields on the Go side.
 return new { grid1Created = grid1 != null, grid2Created = grid2 != null, namesDiffer = grid1.Name != grid2.Name };
-`)
+`))
 		if out.Status != "success" {
 			t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
 		}
@@ -104,7 +104,7 @@ return new { grid1Created = grid1 != null, grid2Created = grid2 != null, namesDi
 	// The corner case that motivated finding this in the first place -- placing an ALREADY-placed
 	// view on a second sheet -- IS encoded below: CanAddViewToSheet must report false for it.
 	t.Run("CreateSheetAndPlaceView", func(t *testing.T) {
-		out := runScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+`
+		out := runScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+withTx(`
 var level = Autodesk.Revit.DB.Level.Create(doc, 760.0);
 Autodesk.Revit.DB.ElementId vftId = null;
 foreach (Autodesk.Revit.DB.ViewFamilyType vft in new Autodesk.Revit.DB.FilteredElementCollector(doc).OfClass(typeof(Autodesk.Revit.DB.ViewFamilyType))) {
@@ -127,7 +127,7 @@ return new {
   viewportCreated = viewport != null,
   canAddSecondTime
 };
-`)
+`))
 		if out.Status != "success" {
 			t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
 		}
@@ -151,14 +151,14 @@ return new {
 	// TrimEnd('\r') below rather than exact equality, so this subtest doesn't silently start failing
 	// if a future Revit version changes or drops the trailing character.
 	t.Run("CreateTextNote", func(t *testing.T) {
-		out := runScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+`
+		out := runScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+withTx(`
 Autodesk.Revit.DB.ViewPlan view = null;
 foreach (Autodesk.Revit.DB.ViewPlan v in new Autodesk.Revit.DB.FilteredElementCollector(doc).OfClass(typeof(Autodesk.Revit.DB.ViewPlan))) { if (!v.IsTemplate) { view = v; break; } }
 Autodesk.Revit.DB.ElementId typeId = null;
 foreach (Autodesk.Revit.DB.TextNoteType tnt in new Autodesk.Revit.DB.FilteredElementCollector(doc).OfClass(typeof(Autodesk.Revit.DB.TextNoteType))) { typeId = tnt.Id; break; }
 var note = Autodesk.Revit.DB.TextNote.Create(doc, view.Id, new Autodesk.Revit.DB.XYZ(0, 0, 0), "Phase C text note", typeId);
 return new { viewFound = view != null, typeFound = typeId != null, noteCreated = note != null, text = note.Text.TrimEnd('\r') };
-`)
+`))
 		if out.Status != "success" {
 			t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
 		}

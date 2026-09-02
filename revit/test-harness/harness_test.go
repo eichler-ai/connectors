@@ -381,7 +381,7 @@ func TestCreateLevel(t *testing.T) {
 
 	script := `
 var before = new Autodesk.Revit.DB.FilteredElementCollector(Document).OfClass(typeof(Autodesk.Revit.DB.Level)).GetElementCount();
-var level = Autodesk.Revit.DB.Level.Create(Document, 999.0);
+var level = Connector.WithTransaction(Document, () => Autodesk.Revit.DB.Level.Create(Document, 999.0));
 var after = new Autodesk.Revit.DB.FilteredElementCollector(Document).OfClass(typeof(Autodesk.Revit.DB.Level)).GetElementCount();
 return new { ok = after == before + 1, levelId = level.Id.Value, before, after };
 `
@@ -884,24 +884,28 @@ return "matches = " + matches + ";";
 		}
 	})
 
-	// The third limit, pinned rather than merely written down: a script cannot
-	// make a created document the active one, so it cannot route around
-	// execute_script targeting ActiveUIDocument. Attempted against the ACTIVE
-	// document's OWN path deliberately -- that document is already open and
-	// already active, so if the call unexpectedly succeeded it would be a no-op
-	// rather than switching the session out from under a person.
-	t.Run("CannotChangeTheActiveDocumentFromAScript", func(t *testing.T) {
+	// The third limit, inverted by #146 Phase 3 and pinned in its new shape: activation
+	// is refused only while the ACTIVE document is modifiable, i.e. inside a
+	// WithTransaction block on it. Between blocks (the resting state now) a script
+	// CAN activate a document, which is what the routing test relies on. Attempted
+	// against the ACTIVE document's OWN path deliberately -- that document is
+	// already open and already active, so the allowed call is a no-op rather than
+	// switching the session out from under a person.
+	t.Run("ActivationIsRefusedOnlyInsideABlockOnTheActiveDocument", func(t *testing.T) {
 		out := runScript(t, c, instanceID, documentID, `
 if (Document.PathName.Length == 0) { return "unsaved-active-document"; }
-try {
-  UIApplication.OpenAndActivateDocument(Document.PathName);
-  return "activated";
-} catch (Autodesk.Revit.Exceptions.InvalidOperationException ex) {
-  // Autodesk.Revit.Exceptions.InvalidOperationException, NOT System's -- they
-  // share a short name, so ex.GetType().Name reads identically in a probe and
-  // catching the wrong one fails with the very message you were expecting.
-  return "refused: " + ex.Message;
+string Try(System.Action a) {
+  try { a(); return "activated"; }
+  catch (Autodesk.Revit.Exceptions.InvalidOperationException ex) {
+    // Autodesk.Revit.Exceptions.InvalidOperationException, NOT System's -- they
+    // share a short name, so ex.GetType().Name reads identically in a probe and
+    // catching the wrong one fails with the very message you were expecting.
+    return "refused: " + ex.Message;
+  }
 }
+var outside = Try(() => UIApplication.OpenAndActivateDocument(Document.PathName));
+var inside = Connector.WithTransaction(Document, () => Try(() => UIApplication.OpenAndActivateDocument(Document.PathName)));
+return new { outside, inside };
 `)
 		if out.Status != "success" {
 			t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
@@ -909,8 +913,11 @@ try {
 		if strings.Contains(out.ReturnValue, "unsaved-active-document") {
 			t.Skip("the active document has never been saved, so it has no path to re-activate by")
 		}
-		if !strings.Contains(out.ReturnValue, "refused:") {
-			t.Fatalf("OpenAndActivateDocument was not refused from inside the ambient transaction; if that is now genuinely allowed, PRD §14's account of fixture addressing needs revisiting; %s", out.diag())
+		if !strings.Contains(out.ReturnValue, `"outside":"activated"`) {
+			t.Fatalf("OpenAndActivateDocument between blocks was expected to be allowed under group-always (the active document is not modifiable there); %s", out.diag())
+		}
+		if !strings.Contains(out.ReturnValue, `"inside":"refused:`) {
+			t.Fatalf("OpenAndActivateDocument inside a WithTransaction block on the active document was expected to be refused; %s", out.diag())
 		}
 	})
 
@@ -1020,7 +1027,7 @@ var doc = Connector.CreateProjectDocument();
 System.Console.WriteLine("cleanup-title=" + doc.Title + ";");
 var before = new Autodesk.Revit.DB.FilteredElementCollector(doc)
     .OfClass(typeof(Autodesk.Revit.DB.Level)).GetElementCount();
-var level = Autodesk.Revit.DB.Level.Create(doc, 4242.0);
+var level = Connector.WithTransaction(doc, () => Autodesk.Revit.DB.Level.Create(doc, 4242.0));
 var after = new Autodesk.Revit.DB.FilteredElementCollector(doc)
     .OfClass(typeof(Autodesk.Revit.DB.Level)).GetElementCount();
 return new {
@@ -1059,7 +1066,7 @@ return new {
 		// from the template or from another subtest's document.
 		created := runScript(t, c, instanceID, documentID, `
 var doc = Connector.CreateProjectDocument();
-Autodesk.Revit.DB.Level.Create(doc, 4343.0);
+Connector.WithTransaction(doc, () => { Autodesk.Revit.DB.Level.Create(doc, 4343.0); });
 return doc.Title;
 `)
 		if created.Status != "success" {
@@ -1103,7 +1110,7 @@ return "matches = " + matches + ";";
 		// one document.
 		thrown := runRejectedScript(t, c, instanceID, documentID, `
 var doc = Connector.CreateProjectDocument();
-Autodesk.Revit.DB.Level.Create(doc, `+elevRolledBack+`);
+Connector.WithTransaction(doc, () => { Autodesk.Revit.DB.Level.Create(doc, `+elevRolledBack+`); });
 System.Console.WriteLine(doc.Title);
 throw new System.InvalidOperationException("deliberate");
 `)
@@ -1154,7 +1161,7 @@ if (template.Length == 0) { return "no-template"; }
 var doc = Connector.CreateFamilyDocument(template);
 System.Console.WriteLine("cleanup-title=" + doc.Title + ";");
 var before = doc.FamilyManager.Types.Size;
-doc.FamilyManager.NewType("MCPBridgeIssue24Type");
+Connector.WithTransaction(doc, () => { doc.FamilyManager.NewType("MCPBridgeIssue24Type"); });
 return new {
   isFamily = doc.IsFamilyDocument,
   typeAdded = doc.FamilyManager.Types.Size == before + 1
@@ -1214,8 +1221,8 @@ return "ok:" + (doc != null);
 		created := runScript(t, c, instanceID, documentID, `
 var a = Connector.CreateProjectDocument();
 var b = Connector.CreateProjectDocument();
-Autodesk.Revit.DB.Level.Create(a, `+elevA+`);
-Autodesk.Revit.DB.Level.Create(b, `+elevB+`);
+Connector.WithTransaction(a, () => { Autodesk.Revit.DB.Level.Create(a, `+elevA+`); });
+Connector.WithTransaction(b, () => { Autodesk.Revit.DB.Level.Create(b, `+elevB+`); });
 return a.Title + "|" + b.Title;
 `)
 		if created.Status != "success" {
@@ -1265,8 +1272,9 @@ return "a = " + a + "; b = " + b + ";";
 	})
 
 	// LIVE FINDING, pinned because it is a real consequence of this change and a
-	// surprising one: while the connector holds a managed transaction on a
-	// document, REVIT ITSELF refuses to close it —
+	// surprising one: while the connector holds a managed group on a document
+	// (since #146 Phase 3 the group alone -- no transaction is open between
+	// blocks, and the group is still enough), REVIT ITSELF refuses to close it —
 	// "Close is not allowed when there is any open sub-transaction, transaction
 	// or transaction group." So a document made with CreateProjectDocument
 	// cannot be closed from within the same script, even with
@@ -1278,14 +1286,13 @@ return "a = " + a + "; b = " + b + ";";
 	// partial-commit case issue #24 flagged as undetermined. Revit refuses
 	// before that state is reachable.
 	//
-	// If you genuinely want a throwaway document you can close, use the raw
-	// Application.NewProjectDocument path — no transaction is opened for it, so
-	// Close still works there (and it is read-only, which is the trade).
-	t.Run("ACreatedDocumentCannotBeClosedWhileItsTransactionIsOpen", func(t *testing.T) {
+	// If you genuinely want a throwaway document you can close in the same run,
+	// Connector.Settle(doc, keep: false) ends its group first (#132).
+	t.Run("ACreatedDocumentCannotBeClosedWhileItsGroupIsOpen", func(t *testing.T) {
 		out := decodeToolResult[executeScriptOut](t, callExecuteScriptWith(t, c, instanceID, documentID, `
 var doc = Connector.CreateProjectDocument();
 System.Console.WriteLine("cleanup-title=" + doc.Title + ";");
-Autodesk.Revit.DB.Level.Create(doc, 5050.0);
+Connector.WithTransaction(doc, () => { Autodesk.Revit.DB.Level.Create(doc, 5050.0); });
 try { doc.Close(false); return "closed"; }
 catch (Autodesk.Revit.Exceptions.InvalidOperationException ex) { return "refused: " + ex.Message; }
 `, map[string]any{"confirm_lifecycle_actions": true}))
@@ -1308,8 +1315,10 @@ catch (Autodesk.Revit.Exceptions.InvalidOperationException ex) { return "refused
 		out := runScript(t, c, instanceID, documentID, `
 var doc = Connector.CreateProjectDocument();
 System.Console.WriteLine("cleanup-title=" + doc.Title + ";");
-var lvl = Autodesk.Revit.DB.Level.Create(doc, 0.0);
-doc.Create.NewRoom(lvl, new Autodesk.Revit.DB.UV(5, 5));
+Connector.WithTransaction(doc, () => {
+  var lvl = Autodesk.Revit.DB.Level.Create(doc, 0.0);
+  doc.Create.NewRoom(lvl, new Autodesk.Revit.DB.UV(5, 5));
+});
 return "room-created";
 `)
 		if out.Status != "success" {
@@ -1335,8 +1344,8 @@ return "room-created";
 		out := runScript(t, c, instanceID, documentID, `
 var created = Connector.CreateProjectDocument();
 System.Console.WriteLine("cleanup-title=" + created.Title + ";");
-Autodesk.Revit.DB.Level.Create(created, `+elevA+`);
-Autodesk.Revit.DB.Level.Create(Document, `+elevAmbient+`);
+Connector.WithTransaction(created, () => { Autodesk.Revit.DB.Level.Create(created, `+elevA+`); });
+Connector.WithTransaction(Document, () => { Autodesk.Revit.DB.Level.Create(Document, `+elevAmbient+`); });
 return "done";
 `)
 		if out.Status != "success" {

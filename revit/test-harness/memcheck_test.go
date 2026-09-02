@@ -25,14 +25,14 @@ func memcheckGate(t *testing.T) {
 	}
 }
 
-// TestOpenForWritingMemoryCycles is a throwaway diagnostic, not part of the
+// TestAdoptedDocumentMemoryCycles is a throwaway diagnostic, not part of the
 // coverage corpus: N true cross-call cycles (create in one execute_script
-// call, OpenForWriting+write in a separate one, close in a third) -- the
-// exact pattern the OpenForWriting feature and its memory-safety analysis
+// call, adopt-and-write in a separate one via Connector.WithTransaction, close in
+// a third) -- the exact pattern the adopt-an-existing-document path and its memory-safety analysis
 // are about. Run with Revit's process memory sampled before and after via
 // `prlctl exec ... Get-Process` externally; this test only drives the
 // cycles themselves.
-func TestOpenForWritingMemoryCycles(t *testing.T) {
+func TestAdoptedDocumentMemoryCycles(t *testing.T) {
 	memcheckGate(t)
 	c, instanceID, documentID := targetDocument(t)
 	const cycles = 6
@@ -54,7 +54,7 @@ func TestOpenForWritingMemoryCycles(t *testing.T) {
 			defer closeDocumentByTitle(t, c, instanceID, documentID, title, "")
 
 			written := runScript(t, c, instanceID, documentID, fixtureWritePreamble(title)+
-				fmt.Sprintf("var level = Autodesk.Revit.DB.Level.Create(doc, %d.0);\nreturn level != null;\n", 10+i))
+				withTx(fmt.Sprintf("var level = Autodesk.Revit.DB.Level.Create(doc, %d.0);\nreturn level != null;\n", 10+i)))
 			if written.Status != "success" {
 				t.Fatalf("cycle %d: write failed: status=%q %s", i, written.Status, written.diag())
 			}
@@ -164,7 +164,7 @@ func runMemoryCycle(t *testing.T, c *mcpclient.Client, instanceID, documentID st
 	defer closeDocumentByTitle(t, c, instanceID, documentID, title, "")
 
 	written := runScript(t, c, instanceID, documentID, fixtureWritePreamble(title)+
-		"var level = Autodesk.Revit.DB.Level.Create(doc, 10.0);\nreturn level != null;\n")
+		withTx("var level = Autodesk.Revit.DB.Level.Create(doc, 10.0);\nreturn level != null;\n"))
 	if written.Status != "success" {
 		t.Fatalf("cycle write failed: status=%q %s", written.Status, written.diag())
 	}

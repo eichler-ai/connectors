@@ -43,11 +43,9 @@ var connectorMembers = []string{
 	"DialogResultOverrides",
 	"ExportsDirectory",
 	"ImportsDirectory",
-	"OpenForWriting",
 	"Publish",
 	"Settle",
 	"WithTransaction",
-	"WithoutTransaction",
 }
 
 type searchFunctionsResult struct {

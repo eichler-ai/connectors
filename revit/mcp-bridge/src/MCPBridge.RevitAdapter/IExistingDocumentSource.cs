@@ -3,7 +3,7 @@ namespace MCPBridge.RevitAdapter;
 /// <summary>
 /// Wraps an already-open Autodesk.Revit.DB.Document (found via Application.Documents, not created this
 /// execute_script call) in a fresh IDocumentAdapter, for ManagedDocumentTransactions.OpenExisting to open
-/// a managed transaction on -- the adapter half of ScriptGlobals.OpenForWriting, symmetric to
+/// a managed transaction on -- the adapter half of ScriptGlobals.Connector.WithTransaction/Settle on a raw Document, symmetric to
 /// IDocumentCreationSource's CreateProjectDocument/CreateFamilyDocument for a document that already exists.
 ///
 /// A SEPARATE interface from IDocumentCreationSource, deliberately, not one more method added to it.

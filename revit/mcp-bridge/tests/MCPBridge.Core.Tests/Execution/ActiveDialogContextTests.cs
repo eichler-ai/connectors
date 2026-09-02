@@ -11,6 +11,7 @@ namespace MCPBridge.Core.Tests.Execution;
 /// MCPBridge.AddIn and needs real Revit event args, so it's only live-testable; this is the pure-logic
 /// slice that is testable here.
 /// </summary>
+[Collection(ActiveDialogContextCollection.Name)]
 public class ActiveDialogContextTests
 {
     public ActiveDialogContextTests()

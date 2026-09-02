@@ -6,13 +6,22 @@ using MCPBridge.RevitAdapter;
 namespace MCPBridge.Core.Execution;
 
 /// <summary>
-/// Every document one script run may write to, each with the Transaction/TransactionGroup pair this
-/// connector opened and owns for it (issue #24) -- the ambient document, any document this run creates
-/// via CreateProjectDocument/CreateFamilyDocument, and (a later addition, same mechanism) any
-/// PRE-EXISTING document this run opens via ScriptGlobals.OpenForWriting -- e.g. one a PRIOR
-/// execute_script call created and left open, addressed again by Title (PRD §14: no document_id).
+/// Every document one script run may write to, each with the TransactionGroup this connector opened and
+/// owns for it (issue #24; #146 Phase 3) -- the ambient document, any document this run creates via
+/// CreateProjectDocument/CreateFamilyDocument, and any PRE-EXISTING document a Connector.WithTransaction
+/// block adopts -- e.g. one a PRIOR execute_script call created and left open.
 ///
-/// WHY N PAIRS AND NOT ONE. TransactionScriptExecutor used to manage exactly one pair, around the
+/// GROUP-ALWAYS, TRANSACTION-ON-WRITE (#146 Phase 3). The connector opens a GROUP for a document and no
+/// transaction: the document is readable and NOT modifiable until a script opens a transaction through
+/// Connector.WithTransaction, which this class opens inside the group and commits at block end. The group
+/// is the rollback boundary (RollBack discards every transaction committed into it, verified live), the
+/// notices envelope, and -- when anything committed -- one undo entry via Assimilate. A group nothing
+/// committed into is ROLLED BACK, never assimilated, so a read-only run leaves no undo entry at all.
+/// Before Phase 3 (`always-open`) a transaction was opened with the group, which made every document
+/// modifiable by default and forced the self-transacting Revit APIs (LoadFamily, EditScope, view
+/// activation) through a now-removed Connector.WithoutTransaction escape hatch.
+///
+/// WHY N GROUPS AND NOT ONE. TransactionScriptExecutor used to manage exactly one pair, around the
 /// ambient (active) document. Revit's one-open-transaction rule is per-DOCUMENT, not global, so a
 /// document a script creates mid-run is simply not covered by that pair -- writing to it threw
 /// ModificationOutsideTransactionException, and the script could not open its own Transaction either,
@@ -56,11 +65,11 @@ internal sealed class ManagedDocumentTransactions
 {
     /// <summary>
     /// Independent PR review finding: a plain <c>bool IsAmbient</c> conflated two genuinely different
-    /// kinds of "not ambient" document once <c>OpenForWriting</c> shipped. Before it, every non-ambient
+    /// kinds of "not ambient" document once <c>WithTransaction-adoption</c> shipped. Before it, every non-ambient
     /// entry was a document THIS run created (unsaved, in-memory, touching no file/central model/session)
     /// -- the entire justification <see cref="CommitAll"/>'s "created first, ambient last" ordering and
     /// <see cref="TransactionScriptExecutor"/>'s partial-commit remedy text both give for why confining
-    /// partial-failure fallout to non-ambient documents is safe. <c>OpenForWriting</c> can adopt a
+    /// partial-failure fallout to non-ambient documents is safe. <c>WithTransaction-adoption</c> can adopt a
     /// PRE-EXISTING document that is just as real as the ambient one -- a saved, possibly workshared model
     /// that merely isn't the active document -- and a bare bool would have silently let that document
     /// commit FIRST, alongside genuinely-throwaway created ones, exposing it to exactly the fallout the
@@ -71,7 +80,7 @@ internal sealed class ManagedDocumentTransactions
         /// <summary>A document THIS run created via CreateProjectDocument/CreateFamilyDocument -- unsaved, in-memory, safest to commit first.</summary>
         CreatedThisRun,
 
-        /// <summary>A PRE-EXISTING document THIS run adopted via OpenForWriting -- may be a real, saved model; committed after created documents but still before the ambient one.</summary>
+        /// <summary>A PRE-EXISTING document THIS run adopted via a Connector.WithTransaction block -- may be a real, saved model; committed after created documents but still before the ambient one.</summary>
         AdoptedExisting,
 
         /// <summary>The run's active document -- always committed last (see this class's own doc comment).</summary>
@@ -80,11 +89,10 @@ internal sealed class ManagedDocumentTransactions
 
     private sealed class Entry
     {
-        public Entry(IDocumentAdapter document, ITransactionGroupAdapter group, ITransactionAdapter transaction, DocumentOrigin origin)
+        public Entry(IDocumentAdapter document, ITransactionGroupAdapter group, DocumentOrigin origin)
         {
             Document = document;
             Group = group;
-            Transaction = transaction;
             Origin = origin;
         }
 
@@ -92,13 +100,18 @@ internal sealed class ManagedDocumentTransactions
         public ITransactionGroupAdapter Group { get; }
 
         /// <summary>
-        /// NULL WHILE NO TRANSACTION IS OPEN ON THIS DOCUMENT (issue #132). Under `always-open` this was
-        /// readonly and never null, because the pair opened and closed together. `settle-on-request` lets
-        /// a script close the transaction and keep the group -- the state where Document.IsModifiable is
-        /// false but the rollback boundary still holds -- so every reader here must cope with its absence
-        /// rather than assume the pair. That is the whole mechanism, expressed in one field.
+        /// NULL WHILE NO TRANSACTION IS OPEN ON THIS DOCUMENT -- the resting state since #146 Phase 3: the
+        /// group is open, the document is not modifiable, the rollback boundary holds. Non-null only for
+        /// the duration of a Connector.WithTransaction block. Every reader copes with its absence.
         /// </summary>
         public ITransactionAdapter? Transaction { get; set; }
+
+        /// <summary>
+        /// How many transactions committed into this group (#146 Phase 3). Zero at CommitAll means the
+        /// group is EMPTY and is rolled back rather than assimilated -- the rule that makes a read-only
+        /// run provably undo-invisible regardless of how Revit treats an empty Assimilate.
+        /// </summary>
+        public int CommittedCount { get; set; }
 
         public DocumentOrigin Origin { get; }
 
@@ -112,14 +125,6 @@ internal sealed class ManagedDocumentTransactions
         public List<FailureSummary> AccumulatedFailures { get; } = new();
 
         /// <summary>
-        /// True while this document is inside a Connector.WithoutTransaction scope. Backs the
-        /// same-document re-entry refusal (issue #132, decision 3): nesting is allowed across DIFFERENT
-        /// documents and refused on the same one, which is the identical rule the nested-WithTransaction
-        /// refusal states, so there is one concept to learn rather than two.
-        /// </summary>
-        public bool InWithoutTransactionScope { get; set; }
-
-        /// <summary>
         /// How this document is named in a partial-commit report. Title, because that is also how a
         /// created document is addressed across execute_script calls (PRD §14: it stays in
         /// Application.Documents and is found there by Title -- there is no document_id for it), so the
@@ -128,7 +133,7 @@ internal sealed class ManagedDocumentTransactions
         public string Describe() => Origin switch
         {
             DocumentOrigin.Ambient => $"{Document.Title} (active document)",
-            DocumentOrigin.AdoptedExisting => $"{Document.Title} (adopted via OpenForWriting)",
+            DocumentOrigin.AdoptedExisting => $"{Document.Title} (adopted via WithTransaction)",
             _ => Document.Title,
         };
     }
@@ -147,11 +152,11 @@ internal sealed class ManagedDocumentTransactions
     public int Count => _entries.Count;
 
     /// <summary>
-    /// Opens and starts a TransactionGroup + Transaction for <paramref name="document"/> and tracks
-    /// them. <paramref name="isAmbient"/> marks the run's active document -- at most one, opened by
+    /// Opens and starts a TransactionGroup -- and only a group (#146 Phase 3) -- for
+    /// <paramref name="document"/> and tracks it. <paramref name="isAmbient"/> marks the run's active document -- at most one, opened by
     /// TransactionScriptExecutor before the script runs; created documents are opened lazily as the
     /// script creates them (via the internal <see cref="DocumentOrigin"/> overload below, which
-    /// distinguishes them from a document OpenForWriting adopted -- see that enum's own doc comment).
+    /// distinguishes them from a document WithTransaction-adoption adopted -- see that enum's own doc comment).
     ///
     /// Guards against opening the SAME document twice, by <see cref="IDocumentAdapter.DocumentId"/>.
     ///
@@ -169,7 +174,7 @@ internal sealed class ManagedDocumentTransactions
     /// live document can pass that DocumentId does not already catch on its own. Closing this gap for real
     /// needs a comparison on something that stays stable ACROSS wrapper instances (e.g. a value read off
     /// the document itself, not the wrapper), which needs live-Revit verification before it's added here --
-    /// not done as part of this fix. Until then: OpenForWriting on a document reached through a DIFFERENT
+    /// not done as part of this fix. Until then: WithTransaction-adoption on a document reached through a DIFFERENT
     /// API entry point than however it's already tracked (e.g. re-found via `Application.Documents` when
     /// it was originally opened as the ambient document) can silently open a SECOND transaction on it
     /// rather than being refused -- Revit's own one-open-transaction-per-document rule is what actually
@@ -177,12 +182,12 @@ internal sealed class ManagedDocumentTransactions
     ///
     /// KNOWN, ACCEPTED gap in the other direction: a workshared document's DocumentId is derived from its
     /// CentralModelPath, so a local copy and its own central model opened in the same session legitimately
-    /// share one DocumentId -- OpenForWriting on the second would be refused as a false-positive "already
+    /// share one DocumentId -- WithTransaction-adoption on the second would be refused as a false-positive "already
     /// open". Not worth restructuring for; noted so a future reader doesn't have to rediscover it live.
     ///
-    /// This guard was never needed before OpenForWriting shipped: CreateProjectDocument/CreateFamilyDocument
+    /// This guard was never needed before WithTransaction-adoption shipped: CreateProjectDocument/CreateFamilyDocument
     /// only ever hand back a document that didn't exist until that call returned -- nothing else could
-    /// already reference it -- but OpenForWriting specifically targets a document that MAY already be
+    /// already reference it -- but WithTransaction-adoption specifically targets a document that MAY already be
     /// tracked (the ambient one, or one opened earlier this same run), which a second Transaction.Start()
     /// on the same document cannot safely do (Revit allows only one open Transaction per document at a
     /// time) and which CommitAll/RollBackAll were never written to iterate twice for one document. Fails
@@ -194,9 +199,9 @@ internal sealed class ManagedDocumentTransactions
     /// <summary>
     /// Test-only entry point for the <see cref="DocumentOrigin.AdoptedExisting"/> tier (independent PR
     /// review finding: that tier previously had ZERO tier-1 coverage at all -- not the ordering, not
-    /// <see cref="Entry.Describe"/>'s "(adopted via OpenForWriting)" branch, not the
+    /// <see cref="Entry.Describe"/>'s "(adopted via WithTransaction)" branch, not the
     /// <c>AnyCommittedDocumentMayBeReal</c> true branch -- because the only way to reach it was through
-    /// <see cref="OpenExisting"/>, which needs a real <c>Autodesk.Revit.DB.Document</c>. This lets a fake
+    /// the raw-Document re-acquisition path (now the no-entry branch of RunWithTransactionCore), which needs a real <c>Autodesk.Revit.DB.Document</c>. This lets a fake
     /// exercise it directly, the same way <see cref="RequireExistingDocumentSource"/> was split out for
     /// the same reason.
     /// </summary>
@@ -209,9 +214,9 @@ internal sealed class ManagedDocumentTransactions
         {
             throw new InvalidOperationException(
                 $"A managed transaction is already open for '{SafeDescribe(existing)}' (DocumentId=" +
-                $"{document.DocumentId}) -- Open was called twice for the same document. This happens " +
-                "when OpenForWriting is called on the ambient document, or on a document already opened " +
-                "via CreateProjectDocument/CreateFamilyDocument/OpenForWriting earlier in this same run.");
+                $"{document.DocumentId}) -- Open was called twice for the same document (the ambient one, " +
+                "or one already opened via CreateProjectDocument/CreateFamilyDocument or adopted by a " +
+                "WithTransaction block earlier in this same run).");
         }
 
         var group = document.CreateTransactionGroup(_transactionName);
@@ -227,24 +232,9 @@ internal sealed class ManagedDocumentTransactions
             throw;
         }
 
-        ITransactionAdapter? transaction = null;
-        try
-        {
-            transaction = document.CreateTransaction(_transactionName);
-            transaction.Start();
-        }
-        catch
-        {
-            // The group started but the transaction did not, so nothing tracks the group and nothing
-            // would ever close it. Undo it here rather than leaking an open group into the session --
-            // and dispose both adapters (issue #34): nothing will ever track them, so this catch is
-            // their only terminal point.
-            SafeRollBack(group.RollBack);
-            SafeDispose(transaction, group);
-            throw;
-        }
-
-        _entries.Add(new Entry(document, group, transaction, origin));
+        // NO TRANSACTION HERE (#146 Phase 3): the document is readable and not modifiable until a
+        // Connector.WithTransaction block opens one inside this group (ReopenTransaction).
+        _entries.Add(new Entry(document, group, origin));
         _originHistory[document.DocumentId] = origin;
 
         // #122: capture a created document's identity NOW -- while the entry exists and the document is
@@ -254,7 +244,7 @@ internal sealed class ManagedDocumentTransactions
         // same reason Describe routes through SafeDescribe); DocumentId is safe, it was just read above.
         // De-duped by document_id: a created document that is Settle'd (which empties _entries, so the
         // duplicate-open guard above no longer fires) and then re-Opened -- via a fresh WithTransaction or
-        // OpenForWriting -- would otherwise be captured twice (independent PR review finding).
+        // WithTransaction-adoption -- would otherwise be captured twice (independent PR review finding).
         if (origin == DocumentOrigin.CreatedThisRun && !_createdDocuments.Any(d => d.DocumentId == document.DocumentId))
         {
             string title;
@@ -299,56 +289,15 @@ internal sealed class ManagedDocumentTransactions
     }
 
     /// <summary>
-    /// Opens a managed transaction on a document that already exists -- the adapter half of
-    /// ScriptGlobals.OpenForWriting. Unlike <see cref="CreateAndOpen"/>, this document is not new: Open's
-    /// own DocumentId guard is what actually protects against double-tracking it (the ambient document,
-    /// or one already opened via CreateProjectDocument/CreateFamilyDocument/OpenForWriting this run).
-    /// Tracked as <see cref="DocumentOrigin.AdoptedExisting"/>, not <see cref="DocumentOrigin.CreatedThisRun"/>
-    /// -- see that enum's own doc comment for why the distinction matters to commit ordering.
-    /// </summary>
-    public IDocumentAdapter OpenExisting(Autodesk.Revit.DB.Document rawDocument)
-    {
-        // Independent PR review finding: a script calling OpenForWriting(null) -- easy, since the
-        // standard by-Title lookup preamble leaves `doc` null when nothing matches and a script forgets
-        // the null check -- used to reach RevitDocumentAdapter's constructor and fail deep inside
-        // DocumentIdentity's ConditionalWeakTable with a bare ArgumentNullException naming "key", not
-        // "document". Signposted here instead, per PRD §01 (Raw<T>'s own doc comment names this exact
-        // class of unexplained-exception as the thing to avoid).
-        if (rawDocument is null)
-        {
-            throw new ArgumentNullException(nameof(rawDocument),
-                "OpenForWriting was called with a null document -- likely a by-Title lookup that found no " +
-                "match and wasn't null-checked before being passed in.");
-        }
-
-        var source = RequireExistingDocumentSource();
-        var adapter = source.WrapExisting(rawDocument);
-
-        // The remembered tier wins when this run has seen the document before -- the same rule
-        // RunWithTransactionCore applies, and this is the route the docs actually send people down
-        // ("one this run already Settled is the exception, and works again"). Hardcoding
-        // AdoptedExisting here re-tiered a settled AMBIENT document as adopted, so the human's real
-        // open model could commit before another saved model and would be named "(adopted via
-        // OpenForWriting)" in a partial-commit notice. Fixing only the other call site left the
-        // documented path broken.
-        Open(adapter, OriginFor(adapter.DocumentId, DocumentOrigin.AdoptedExisting));
-        return adapter;
-    }
-
-    /// <summary>
-    /// Split out from <see cref="OpenExisting"/> specifically so the "does this run's adapter support
-    /// OpenForWriting at all" check is tier-1 testable on its own (independent PR review finding: the
-    /// combined method was untestable in its ENTIRETY at tier 1, when only the raw-Document-wrapping half
-    /// genuinely needs live Revit -- mirrors <see cref="CreateAndOpen"/>'s own existing shape, which keeps
-    /// the same cast-and-throw check separable from its Revit-typed template-path argument). A test needs
-    /// no Autodesk.Revit.DB.Document reference to call this -- only an adapter that does or doesn't
-    /// implement IExistingDocumentSource, which every existing tier-1 fake already is (the "doesn't"
-    /// case).
+    /// The "does this run's adapter support wrapping a raw Document at all" check, split out so it is
+    /// tier-1 testable on its own: only the raw-Document-wrapping half of <see cref="ResolveAdapter"/>
+    /// genuinely needs live Revit. A fake that does not implement IExistingDocumentSource is the tier-1
+    /// case, and gets a signposted error rather than a cast failure.
     /// </summary>
     internal IExistingDocumentSource RequireExistingDocumentSource() =>
         _uiApplication as IExistingDocumentSource
         ?? throw new NotSupportedException(
-            $"OpenForWriting needs a live Revit session, but {_uiApplication.GetType().Name} does not " +
+            $"WithTransaction/Settle need a live Revit session, but {_uiApplication.GetType().Name} does not " +
             $"implement {nameof(IExistingDocumentSource)}. Only the live adapter does -- " +
             "Autodesk.Revit.DB.Document is non-constructible/non-wrappable outside a running Revit " +
             "session, so a fake genuinely cannot supply one. A test that needs this belongs in the " +
@@ -358,7 +307,7 @@ internal sealed class ManagedDocumentTransactions
     /// Records one Connector.Settle call, so TransactionScriptExecutor can raise the notice PRD §06
     /// requires (issue #132, decision 2). Only Settle is recorded: it is the irreversible one -- it
     /// makes prior writes permanent or discards them, and settling the AMBIENT document gives up the
-    /// rollback remedy for a human's real open model. WithTransaction/WithoutTransaction stay silent,
+    /// rollback remedy for a human's real open model. WithTransaction stays silent,
     /// because the group still covers rollback and nothing irreversible has happened; a notice per
     /// scope would bury the real ones under any script that writes in a loop.
     /// </summary>
@@ -442,81 +391,16 @@ internal sealed class ManagedDocumentTransactions
     /// created document outlives its run (rollback undoes content, not existence), so an agent whose
     /// script threw after creating documents would otherwise be left holding an error and no handle to
     /// what it made (split from #114). Only <see cref="DocumentOrigin.CreatedThisRun"/> is captured --
-    /// the ambient and OpenForWriting-adopted documents existed before the run and are not orphaned by it.
+    /// the ambient and block-adopted documents existed before the run and are not orphaned by it.
     /// </summary>
     public IReadOnlyList<CreatedDocumentRecord> CreatedDocuments => _createdDocuments;
 
     /// <summary>
-    /// Runs <paramref name="body"/> with this document NOT modifiable: the connector commits and closes
-    /// its transaction, keeps the TransactionGroup, and afterwards RESTORES the state it found -- a fresh
-    /// transaction in that same group if one was open on entry, nothing if none was (issue #132; #146 H1).
-    /// The group is what preserves all-or-nothing rollback across the gap --
-    /// verified live: TransactionGroup.RollBack() discards transactions already committed inside it.
-    ///
-    /// A document with no managed transaction is already non-modifiable, so the body simply runs; that
-    /// is the honest no-op rather than a refusal the script could do nothing about. Re-entry on the SAME
-    /// document is refused (decision 3); nesting across DIFFERENT documents is allowed, which is how
-    /// LoadFamily -- needing both source and target non-modifiable -- is expressed.
-    /// </summary>
-    internal void RunWithoutTransactionCore(IDocumentAdapter document, Action body)
-    {
-        var entry = FindEntry(document);
-        if (entry is null)
-        {
-            body();
-            return;
-        }
-
-        if (entry.InWithoutTransactionScope)
-        {
-            throw new InvalidOperationException(
-                $"WithoutTransaction is already open for '{SafeDescribe(entry)}' -- it cannot be nested on the " +
-                "same document. Nesting across DIFFERENT documents is allowed and is how a call needing two " +
-                "non-modifiable documents (Document.LoadFamily) is written.");
-        }
-
-        // RESTORES THE STATE IT FOUND, not "a transaction" (#146 H1). This scope used to reopen a
-        // transaction unconditionally, so on a document that entered WITHOUT one -- reachable today via
-        // settle-then-WithTransaction, which leaves the group open and the transaction closed -- the
-        // block handed the document back MODIFIABLE for the rest of the run, silently reinstating
-        // always-open on a document the docs say is no longer open for writing. Under the group-only
-        // default this epic is heading for, that one path would have re-created the old model wholesale.
-        var hadTransactionOnEntry = entry.Transaction is not null;
-
-        entry.InWithoutTransactionScope = true;
-        try
-        {
-            CloseTransaction(entry);
-            body();
-        }
-        finally
-        {
-            entry.InWithoutTransactionScope = false;
-
-            // Reopened even when the body threw, because a script may CATCH its own exception and carry
-            // on writing -- leaving the document silently non-modifiable would fail its next write for a
-            // reason two steps from the cause.
-            //
-            // SWALLOWED, uniquely in this file, and only on the throwing path: an exception raised inside
-            // a `finally` REPLACES the in-flight one, so a reopen that failed here would destroy the
-            // script's real error and report a transaction-start failure in its place. That is the §01
-            // sin this whole codebase is written against -- an agent handed an error that is not the one
-            // that happened. If the reopen does fail, the document stays non-modifiable and the next
-            // write fails loudly with `script-write-outside-transaction`, which is a legible outcome; a
-            // masked root cause is not. On the SUCCESS path a reopen failure still propagates normally,
-            // because there is no exception to destroy.
-            if (hadTransactionOnEntry)
-            {
-                SafeReopenAfterScope(entry);
-            }
-        }
-    }
-
-    /// <summary>
-    /// Runs <paramref name="body"/> with a transaction the CONNECTOR opens and commits around it (issue
-    /// #132) -- the counterpart that makes an edit scope writable, since StairsEditScope needs no
-    /// transaction to start and a transaction to write, and its Commit() then needs that transaction
-    /// CLOSED again. Closing at block end is therefore load-bearing, not tidiness.
+    /// THE write primitive (#146 Phase 3): runs <paramref name="body"/> with a transaction the CONNECTOR
+    /// opens inside the document's group and commits at block end -- installing the §07 failure
+    /// preprocessor on that commit, which is why scripts never own a transaction. Closing at block end is
+    /// load-bearing beyond tidiness: an EditScope needs no transaction to start, one to write, and none
+    /// again to commit, and a document must be non-modifiable for LoadFamily and view activation.
     ///
     /// Nesting on the same document is REFUSED (decision 1) rather than joined transparently: joining
     /// would make "the connector commits at block end" false for the inner block and would let a caught
@@ -528,15 +412,18 @@ internal sealed class ManagedDocumentTransactions
         var entry = FindEntry(document);
         if (entry is null)
         {
-            // No managed pair yet -- typically a document settled earlier this run, or one the script
-            // never wrote to. Open a fresh group+transaction for it; end-of-run assimilate covers it
-            // like any other managed document.
+            // No managed group yet -- a document settled earlier this run, or one this run has not touched
+            // (a document a prior call created and left open, reached through Application.Documents).
+            // Open a fresh group for it and ADOPT it for the rest of the run; end-of-run CommitAll covers
+            // it like any other managed document.
             //
             // The tier comes from _originHistory when this run has seen the document before, NOT from a
             // fresh guess: a settled ambient document re-opened as AdoptedExisting would stop committing
             // last, which is the ordering guarantee CommitAll exists to provide.
             Open(document, OriginFor(document.DocumentId, DocumentOrigin.AdoptedExisting));
-            RunBody(FindEntry(document)!, body, openedGroupHere: true);
+            entry = FindEntry(document)!;
+            ReopenTransaction(entry);
+            RunBody(entry, body, openedGroupHere: true);
             return;
         }
 
@@ -649,14 +536,6 @@ internal sealed class ManagedDocumentTransactions
                 "earlier in this same run is no longer managed either.");
         }
 
-        if (entry.InWithoutTransactionScope)
-        {
-            throw new InvalidOperationException(
-                $"Settle cannot run inside a WithoutTransaction scope for '{SafeDescribe(entry)}' -- that scope " +
-                "restores the document's transaction state when it ends, which would reopen a transaction on a " +
-                "document it found writable and leave Close/Save refused again. Settle after the scope returns.");
-        }
-
         var description = SafeDescribe(entry);
         try
         {
@@ -664,9 +543,17 @@ internal sealed class ManagedDocumentTransactions
             {
                 // No derived undo label here (#146 Phase 2b): this group assimilates mid-run, before the
                 // document's net effect is known, so it keeps the name it was created with -- the agent's
-                // label when one was given, else the default. Only CommitAll derives names.
+                // label when one was given, else the default. Only CommitAll derives names. An EMPTY group
+                // (nothing committed) is rolled back instead: identical outcome, no undo entry (#146 Phase 3).
                 CloseTransaction(entry);
-                entry.Group.Assimilate();
+                if (entry.CommittedCount == 0)
+                {
+                    entry.Group.RollBack();
+                }
+                else
+                {
+                    entry.Group.Assimilate();
+                }
             }
             else
             {
@@ -715,9 +602,9 @@ internal sealed class ManagedDocumentTransactions
     }
 
     /// <summary>
-    /// Raw-Document entry points for the three scopes -- the halves ScriptGlobals calls, split from the
+    /// Raw-Document entry points for the scopes -- the halves ScriptGlobals calls, split from the
     /// adapter-typed cores above so those stay tier-1 testable with a fake (same split, same reason, as
-    /// <see cref="OpenExisting"/> and <see cref="RequireExistingDocumentSource"/>).
+    /// <see cref="RequireExistingDocumentSource"/>).
     ///
     /// NAMED DIFFERENTLY FROM THE CORES ON PURPOSE, and this is a compile-time trap worth knowing: an
     /// OVERLOAD SET containing both a Revit-typed and an adapter-typed parameter cannot be called at all
@@ -726,12 +613,8 @@ internal sealed class ManagedDocumentTransactions
     /// deliberately does not reference RevitAPI -- fails with CS0012 on the CALL SITE. Found by trying
     /// it: 12 errors across the new scope tests, none of them in code that names a Revit type. This is
     /// the same family as the type-load note on IConnectorRuntime, one rung earlier (compile rather than
-    /// load), and <see cref="OpenExisting"/> only escapes it by having no adapter-typed twin.
+    /// load).
     /// </summary>
-    public void RunWithoutTransaction(Autodesk.Revit.DB.Document rawDocument, Action body) =>
-        WithResolved(rawDocument, body, nameof(RunWithoutTransaction), RunWithoutTransactionCore);
-
-    /// <summary>See <see cref="RunWithoutTransaction(Autodesk.Revit.DB.Document, Action)"/>.</summary>
     public void RunWithTransaction(Autodesk.Revit.DB.Document rawDocument, Action body) =>
         WithResolved(rawDocument, body, nameof(RunWithTransaction), RunWithTransactionCore);
 
@@ -750,7 +633,7 @@ internal sealed class ManagedDocumentTransactions
         return RunWithTransactionCore(ResolveAdapter(rawDocument, nameof(RunWithTransaction)), body);
     }
 
-    /// <summary>See <see cref="RunWithoutTransaction(Autodesk.Revit.DB.Document, Action)"/>.</summary>
+    /// <summary>See <see cref="RunWithTransaction(Autodesk.Revit.DB.Document, Action)"/>.</summary>
     public void Settle(Autodesk.Revit.DB.Document rawDocument, bool keep)
     {
         var adapter = ResolveAdapter(rawDocument, nameof(Settle));
@@ -783,18 +666,16 @@ internal sealed class ManagedDocumentTransactions
     }
 
     /// <summary>
-    /// The tier to re-open a document under. Shared by BOTH re-acquisition points on purpose: the fix
-    /// was first applied only to RunWithTransactionCore, leaving OpenExisting -- the adapter half of
-    /// Connector.OpenForWriting, and the route that member's own documentation sends people down after a
-    /// settle -- still hardcoding AdoptedExisting. One rule, one place.
+    /// The tier to re-open a document under, kept in one place: a settled ambient document re-acquired
+    /// by a later WithTransaction must come back as Ambient, not AdoptedExisting.
     /// </summary>
     private DocumentOrigin OriginFor(string documentId, DocumentOrigin fallback) =>
         _originHistory.TryGetValue(documentId, out var known) ? known : fallback;
 
     /// <summary>
-    /// Test seam for <see cref="OriginFor"/>. OpenExisting itself needs a real Autodesk.Revit.DB.Document
-    /// and so is tier-2 only; the DECISION it makes is what actually regressed, and this makes that
-    /// decision assertable without one.
+    /// Test seam for <see cref="OriginFor"/>: the raw-Document re-acquisition path needs a real
+    /// Autodesk.Revit.DB.Document and so is tier-2 only; the DECISION it makes is what regressed once,
+    /// and this makes that decision assertable without one.
     /// </summary>
     internal DocumentOrigin OriginForTesting(string documentId) =>
         OriginFor(documentId, DocumentOrigin.AdoptedExisting);
@@ -837,24 +718,8 @@ internal sealed class ManagedDocumentTransactions
                 $"Revit rolled back the changes to '{SafeDescribe(entry)}' because a commit inside this script " +
                 $"raised an error-severity failure: {LastErrorMessage(entry)}");
         }
-    }
 
-    /// <summary>
-    /// <see cref="ReopenTransaction"/> that never throws -- see the call site in
-    /// <see cref="RunWithoutTransactionCore"/>'s finally for why swallowing is correct there and only
-    /// there: an exception from a finally block replaces the script's own, and losing the real error is
-    /// worse than a document left non-modifiable, which fails legibly on the next write.
-    /// </summary>
-    private void SafeReopenAfterScope(Entry entry)
-    {
-        try
-        {
-            ReopenTransaction(entry);
-        }
-        catch
-        {
-            // By contract -- see the doc comment.
-        }
+        entry.CommittedCount++;
     }
 
     /// <summary>Opens a fresh transaction in this entry's still-open group. No-op if one is already open.</summary>
@@ -885,9 +750,7 @@ internal sealed class ManagedDocumentTransactions
             // ResolveAdapter and SettleCore all carry. Revit's own "the transaction could not be started"
             // names neither the document nor that this is the CONNECTOR reopening a transaction, so on the
             // WithTransaction path (where this propagates) an agent would get an error two steps from the
-            // cause. On the WithoutTransaction-scope reopen path SafeReopenAfterScope swallows this, so the
-            // added context is harmless there and load-bearing only here; the inner exception is preserved
-            // so the raw Revit reason is never lost.
+            // cause; the inner exception is preserved so the raw Revit reason is never lost.
             throw new InvalidOperationException(
                 $"Reopening a transaction on '{SafeDescribe(entry)}' failed: {ex.Message}", ex);
         }
@@ -936,8 +799,8 @@ internal sealed class ManagedDocumentTransactions
             // WITHIN: nothing committed anywhere, and the outcome the caller returns is already the
             // script's own exception. CommitAll is the case where the distinction changes what an agent
             // is told, and that is where it is tracked.
-            // Transaction may be NULL (issue #132): a WithoutTransaction scope that threw, or a
-            // WithTransaction block that already committed, leaves the group open with no transaction.
+            // Transaction is NULL in the resting state (#146 Phase 3) and after every WithTransaction
+            // block; only a block still open at rollback time has one.
             // The group is the rollback boundary, so rolling it back is what actually undoes the run --
             // the transaction half is only rolled back when one is genuinely open.
             var openTransaction = _entries[i].Transaction;
@@ -977,7 +840,7 @@ internal sealed class ManagedDocumentTransactions
     public ManagedDocumentCommitResult CommitAll(Func<string, string?>? undoLabel = null)
     {
         // Three tiers now, not two (independent PR review finding) -- CreatedThisRun (safest: unsaved,
-        // in-memory) first, AdoptedExisting (may be a real, saved model OpenForWriting adopted) next,
+        // in-memory) first, AdoptedExisting (may be a real, saved model WithTransaction-adoption adopted) next,
         // Ambient (the run's active document) always last. See DocumentOrigin's own doc comment for why
         // collapsing AdoptedExisting into the old "commit early" bucket alongside CreatedThisRun would
         // have been wrong.
@@ -1031,7 +894,7 @@ internal sealed class ManagedDocumentTransactions
         Exception? failure = null;
         // Independent PR review finding: PartialCommitNotice's remedy used to unconditionally claim every
         // committed document was "unsaved and in-memory" -- true when every non-ambient entry was
-        // CreatedThisRun, false the moment OpenForWriting could adopt a real, saved document as
+        // CreatedThisRun, false the moment WithTransaction-adoption could adopt a real, saved document as
         // AdoptedExisting or the ambient one itself commits. Tracked here, at the one place that already
         // knows each entry's origin AND which of them actually committed.
         var anyCommittedDocumentMayBeReal = false;
@@ -1130,9 +993,20 @@ internal sealed class ManagedDocumentTransactions
         var transaction = entry.Transaction;
         if (transaction is null)
         {
-            // No open transaction: a WithTransaction block already committed this document's work into
-            // the group and closed it. Only the group remains to assimilate, which is the same terminal
-            // step a committed transaction reaches below.
+            if (entry.CommittedCount == 0)
+            {
+                // NOTHING WAS COMMITTED INTO THIS GROUP -- a read-only run, the resting state (#146 Phase 3).
+                // Rolled back, not assimilated: the outcome is identical (there is nothing to keep) and the
+                // rollback is the one that provably leaves no undo entry, whatever Revit does with an empty
+                // Assimilate. Reported as committed: the document closed cleanly with all of its (zero)
+                // changes intact.
+                return SafeRollBack(entry.Group.RollBack)
+                    ? CommitAttempt.Committed()
+                    : CommitAttempt.Failed(new InvalidOperationException($"rolling back the empty group for '{SafeDescribe(entry)}' failed"), rollbackVerified: false);
+            }
+
+            // No open transaction, but WithTransaction blocks committed into the group. Only the group
+            // remains to assimilate, which is the same terminal step a committed transaction reaches below.
             try
             {
                 SafeSetUndoLabel(entry, undoLabel, undoLabelFailures);
@@ -1160,6 +1034,10 @@ internal sealed class ManagedDocumentTransactions
         }
 
         SafeCollectFailures(entry, failures, transaction);
+        if (result == TransactionCommitResult.Committed)
+        {
+            entry.CommittedCount++;
+        }
 
         if (result == TransactionCommitResult.RolledBack)
         {

@@ -34,9 +34,17 @@ internal sealed class FakeDocumentAdapter : IDocumentAdapter
         return tx;
     }
 
+    /// <summary>Applied to every group this document creates -- the end-of-run failure shapes since #146 Phase 3 (assimilate or rollback throwing).</summary>
+    public bool GroupThrowOnRollBack { get; set; }
+
+    public bool GroupThrowOnAssimilate { get; set; }
+
+    /// <summary>Attached to every group this document creates; see FakeTransactionGroupAdapter.OnTerminal.</summary>
+    public Action? OnGroupTerminal { get; set; }
+
     public ITransactionGroupAdapter CreateTransactionGroup(string name)
     {
-        var group = new FakeTransactionGroupAdapter(name);
+        var group = new FakeTransactionGroupAdapter(name) { ThrowOnRollBack = GroupThrowOnRollBack, ThrowOnAssimilate = GroupThrowOnAssimilate, OnTerminal = OnGroupTerminal };
         LastTransactionGroup = group;
         return group;
     }

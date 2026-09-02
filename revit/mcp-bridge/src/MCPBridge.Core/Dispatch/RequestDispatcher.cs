@@ -1059,10 +1059,10 @@ public sealed class RequestDispatcher
             (denial.Code, new[]
             {
                 $"Remove {denial.DeniedMember} from the script; no argument to execute_script permits it.",
-                "Make document changes directly instead -- the connector already runs every script inside " +
-                "its own Transaction, which is committed on success and rolled back if the script throws. " +
-                "For a savepoint within the run, a native Autodesk.Revit.DB.SubTransaction held in a `using` " +
-                "is permitted; Commit or RollBack it before the enclosing transaction closes.",
+                "Write inside Connector.WithTransaction(document, () => { ... }) instead -- the connector " +
+                "opens that transaction (with its failure capture) and commits it when the block ends; the " +
+                "whole run is undone if the script throws. For a savepoint inside the block, a native " +
+                "Autodesk.Revit.DB.SubTransaction held in a `using` is permitted.",
             }),
         ScriptAwaitNotAllowedException =>
             (ScriptAwaitNotAllowedException.Code, new[]
@@ -1083,45 +1083,43 @@ public sealed class RequestDispatcher
         Exception modification when IsModificationOutsideTransaction(modification) =>
             ("script-write-outside-transaction", new[]
             {
-                "Wrap the write in Connector.WithTransaction(document, () => { ... }) -- the connector " +
-                "opens the transaction and commits it when the block ends. It works on any open document, " +
-                "including one created or settled by an earlier call, and the value-returning form " +
-                "(var id = Connector.WithTransaction(doc, () => ...)) hands back what the block produced.",
-                "If this is inside Connector.WithoutTransaction, that block is deliberately not " +
-                "modifiable; nest Connector.WithTransaction inside it to write.",
+                "Documents are not modifiable until you open a transaction: wrap the write in " +
+                "Connector.WithTransaction(document, () => { ... }) -- the connector opens the transaction and " +
+                "commits it when the block ends. It works on any open document, including one created or " +
+                "settled by an earlier call; the value-returning form (var id = Connector.WithTransaction(doc, " +
+                "() => ...)) hands back what the block produced. Reads need no block.",
             }),
-        // #146 Phase 0 (H10's inverse). The mirror image of the case above: a Revit API that manages its
-        // OWN transaction -- Document.LoadFamily, UIDocument.RequestViewChange, every EditScope -- refuses
-        // because the target IS modifiable, and under always-open that is the CONNECTOR's transaction the
-        // script never asked for. Revit's message names the symptom and no way out; the fix is one wrap.
+        // #146 Phase 0 (H10's inverse), Phase 3 wording. The mirror image of the case above: a Revit API
+        // that manages its OWN transaction -- Document.LoadFamily, UIDocument.RequestViewChange, every
+        // EditScope -- refuses because the target IS modifiable. Since Phase 3 that can only be the
+        // script's own WithTransaction block; Revit's message names the symptom and no way out.
         Exception modifiable when IsTargetMustNotBeModifiable(modifiable) =>
             ("script-target-must-not-be-modifiable", new[]
             {
-                "Wrap this call in Connector.WithoutTransaction(document, () => { ... }) -- the connector " +
-                "closes its transaction for the block and restores it afterwards, so your other changes " +
-                "still roll back if the script throws. To write inside that block, nest " +
-                "Connector.WithTransaction.",
-                "Document.LoadFamily needs BOTH documents non-modifiable: nest one WithoutTransaction " +
-                "per document (source and target).",
+                "Move this call OUTSIDE your Connector.WithTransaction block -- documents are not modifiable " +
+                "between blocks, which is what this API needs; open a new block afterwards for any further " +
+                "writes. Your earlier blocks' changes still roll back if the script throws.",
+                "Document.LoadFamily needs BOTH documents non-modifiable: call it with no block open on " +
+                "either the source or the target. An EditScope starts and commits outside a block, with " +
+                "its writes in a block in between.",
             }),
         // #146 Phase 1 (H8). A native SubTransaction is permitted, and the one state it cannot start in
-        // is "no open transaction" -- inside Connector.WithoutTransaction, or on a document this run never
-        // wrote to. Revit's message is accurate and names no way to get a transaction open here.
+        // is "no open transaction" -- the resting state since #146 Phase 3: anywhere outside a
+        // Connector.WithTransaction block. Revit's message is accurate and names no way to get a transaction open here.
         Exception subTransaction when IsSubTransactionOutsideTransaction(subTransaction) =>
             ("script-subtransaction-needs-transaction", new[]
             {
                 "A SubTransaction is a savepoint INSIDE a transaction. Open one first: wrap this code in " +
                 "Connector.WithTransaction(document, () => { ... }) and start the SubTransaction inside it.",
-                "If this is inside Connector.WithoutTransaction, that block is deliberately not " +
-                "modifiable; nest Connector.WithTransaction inside it.",
             }),
         _ => ("script-execution-failed", null),
     };
 
     /// <summary>
     /// Revit's wording for SubTransaction.Start() with no enclosing transaction, verified live (Revit
-    /// 2025): "A sub-transaction can only be active inside an open Transaction." Message-matched for the
-    /// same reason as <see cref="IsTargetMustNotBeModifiable"/>; fails open if reworded, pinned live.
+    /// 2025): "A sub-transaction can only be active inside an open Transaction." Since #146 Phase 3 that is
+    /// the RESTING state (no block open), so this is the common mistake rather than an edge. Message-matched
+    /// for the same reason as <see cref="IsTargetMustNotBeModifiable"/>; fails open if reworded, pinned live.
     /// </summary>
     private static bool IsSubTransactionOutsideTransaction(Exception exception) =>
         exception.Message.Contains("sub-transaction can only be active inside an open Transaction", StringComparison.OrdinalIgnoreCase);

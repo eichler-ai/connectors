@@ -22,17 +22,16 @@ namespace MCPBridge.Core.Execution;
 /// a script constructing its own Autodesk.Revit.DB.Transaction against the same Document
 /// TransactionScriptExecutor has already opened one on. That invariant is now enforced
 /// where it actually belongs: <see cref="ScriptApiDenylist"/>, a compile-time semantic
-/// check, not the type system. Everything else about the real API (reads, writes, element
-/// queries, geometry) rides the executor's existing ambient transaction and needs no new
-/// transaction-ownership scheme -- confirmed live before this shipped (PRD §14).
+/// check, not the type system. Reads need nothing; writes go inside Connector.WithTransaction, whose
+/// transaction the connector opens in the run's group and commits at block end (#146 Phase 3 --
+/// before it, a transaction was open for the whole run and every write rode it).
 ///
-/// ISSUE #24 adds the one exception to "everything rides the ambient transaction": a document
-/// the script CREATES is a different document, and Revit's one-open-transaction rule is
-/// per-document, so the ambient pair does not cover it. Hence CreateProjectDocument/
-/// CreateFamilyDocument below -- they create the document AND have the executor open a
-/// managed transaction for it, in one step. That keeps the denylist rule above completely
-/// unconditional: the script still never constructs a transaction, because it never needs to.
-/// The raw Application.NewProjectDocument path is untouched and stays read-only.
+/// ISSUE #24: a document the script CREATES is a different document, and Revit's transaction rules
+/// are per-document, so the ambient group does not cover it. Hence CreateProjectDocument/
+/// CreateFamilyDocument below -- they create the document AND have the executor open a managed
+/// group for it, in one step, so its writes roll back with the run's. That keeps the denylist rule
+/// above completely unconditional: the script still never constructs a transaction, because it never
+/// needs to. The raw Application.NewProjectDocument path is untouched and untracked.
 ///
 /// WHY THIS ONE FILE REFERENCES RevitAPI/RevitAPIUI DIRECTLY, and why that is not a
 /// precedent: MCPBridge.Core is otherwise entirely decoupled from Revit, working only
@@ -143,13 +142,6 @@ public sealed class ScriptGlobals : IConnectorRuntime
     object IConnectorRuntime.CreateFamilyDocument(string templatePath) =>
         CreateFamilyDocument(templatePath);
 
-    object IConnectorRuntime.OpenForWriting(object document) =>
-        OpenForWriting((Autodesk.Revit.DB.Document)document);
-
-    void IConnectorRuntime.WithoutTransaction(object document, Action body) =>
-        RequireDocumentTransactions(nameof(Connector.WithoutTransaction))
-            .RunWithoutTransaction((Autodesk.Revit.DB.Document)document, body);
-
     void IConnectorRuntime.WithTransaction(object document, Action body) =>
         RequireDocumentTransactions(nameof(Connector.WithTransaction))
             .RunWithTransaction((Autodesk.Revit.DB.Document)document, body);
@@ -163,22 +155,21 @@ public sealed class ScriptGlobals : IConnectorRuntime
             .Settle((Autodesk.Revit.DB.Document)document, keep);
 
     /// <summary>
-    /// Creates a NEW, blank, WRITABLE project document (issue #24) -- the connector opens and manages a
-    /// Transaction/TransactionGroup for it in the same step, so the script can modify it immediately.
+    /// Creates a NEW, blank project document (issue #24) -- the connector opens and manages a
+    /// TransactionGroup for it in the same step (#146 Phase 3: group only; the script writes to it inside
+    /// Connector.WithTransaction like any other document), so its changes roll back with the run's.
     ///
-    /// USE THIS RATHER THAN `UIApplication.Application.NewProjectDocument(...)` whenever the script
-    /// intends to write to the document. Both still work and both return a real Document; the raw
-    /// Application member is READ-ONLY from a script, because nothing opens a transaction for what it
-    /// returns and a script may never open one itself (ScriptApiDenylist check 1, unconditional). This
-    /// is the difference between the two paths, and it is the only difference.
+    /// USE THIS RATHER THAN `UIApplication.Application.NewProjectDocument(...)`: both return a real
+    /// Document, but only this one is tracked by the run, so only this one's writes are undone if the
+    /// script throws. That is the difference between the two paths, and it is the only difference.
     ///
     /// <paramref name="templatePath"/> defaults to the Revit install's own DefaultProjectTemplate --
     /// the PRD §13 fixture-system case, where the point is a blank document needing no template asset.
     ///
-    /// The document is committed when the script returns normally and rolled back if it throws, exactly
-    /// like the ambient document. It is unsaved and in-memory; it stays in Application.Documents for the
-    /// rest of the session, which is how a later execute_script call addresses it (by Title -- there is
-    /// no document_id for a created document, PRD §14).
+    /// Its writes are kept when the script returns normally and rolled back if it throws, exactly like the
+    /// ambient document. It is unsaved and in-memory; it stays in Application.Documents for the rest of
+    /// the session, which is how a later execute_script call addresses it (by Title, or by its tmp-
+    /// document_id from list_instances).
     /// </summary>
     internal Autodesk.Revit.DB.Document CreateProjectDocument(string? templatePath = null) =>
         Raw<IRawDocumentSource>(
@@ -187,37 +178,13 @@ public sealed class ScriptGlobals : IConnectorRuntime
 
     /// <summary>
     /// Family-document counterpart of <see cref="CreateProjectDocument"/> -- see that method for the
-    /// writable-vs-read-only distinction against the raw Application members. Unlike a project document
+    /// tracked-vs-untracked distinction against the raw Application members. Unlike a project document
     /// there is no install-wide default family template, so <paramref name="templatePath"/> is required.
     /// </summary>
     internal Autodesk.Revit.DB.Document CreateFamilyDocument(string templatePath) =>
         Raw<IRawDocumentSource>(
             RequireDocumentTransactions(nameof(CreateFamilyDocument)).CreateAndOpenFamilyDocument(templatePath),
             nameof(CreateFamilyDocument)).RawDocument;
-
-    /// <summary>
-    /// Opens a managed Transaction/TransactionGroup for a document this script did NOT create this run --
-    /// one found by iterating UIApplication.Application.Documents, e.g. a document a PRIOR execute_script
-    /// call created via CreateProjectDocument/CreateFamilyDocument and left open. Without this, such a
-    /// document is readable but not writable: it commits and closes its managed transaction the moment the
-    /// call that created it returns, and a script may never open its own Transaction (ScriptApiDenylist
-    /// check 1, unconditional) -- confirmed live as a real gap while building the test-harness coverage
-    /// corpus, whose fixture-system bundles need exactly this (one document, built up across several
-    /// separate execute_script calls).
-    ///
-    /// Same commit/rollback guarantee as CreateProjectDocument/CreateFamilyDocument and the ambient
-    /// document: writes commit when THIS script returns normally, roll back if it throws. Returns the
-    /// same Document reference passed in -- callers that already hold it don't need the return value.
-    ///
-    /// Throws if <paramref name="document"/> already has a managed transaction open this run (it's the
-    /// ambient document, was created this run, or OpenForWriting was already called on it) -- opening a
-    /// second Transaction on a document that already has one open is not a state ManagedDocumentTransactions
-    /// can safely track or Revit's own API allows.
-    /// </summary>
-    internal Autodesk.Revit.DB.Document OpenForWriting(Autodesk.Revit.DB.Document document) =>
-        Raw<IRawDocumentSource>(
-            RequireDocumentTransactions(nameof(OpenForWriting)).OpenExisting(document),
-            nameof(OpenForWriting)).RawDocument;
 
     /// <summary>
     /// The managed-transaction set for this run, or a signposted failure if none was supplied. Null

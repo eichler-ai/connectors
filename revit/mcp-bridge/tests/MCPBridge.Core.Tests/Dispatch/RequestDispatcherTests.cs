@@ -1,3 +1,4 @@
+using MCPBridge.Core.Tests.Execution;
 using System;
 using System.Linq;
 using System.Text.Json;
@@ -24,6 +25,7 @@ namespace MCPBridge.Core.Tests.Dispatch;
 /// bridge instance the test itself constructed and passed in. That lets these tests drive OnExecute()
 /// deterministically (no timing races, no sleeps) exactly like ExternalEventBridgeTests does.
 /// </summary>
+[Collection(ActiveDialogContextCollection.Name)]
 public class RequestDispatcherTests
 {
     private static ExecutionManager NewExecutionManager() =>
@@ -86,13 +88,13 @@ public class RequestDispatcherTests
         var json = await dispatchTask;
 
         Assert.Contains("\"status\":\"success\"", json);
-        // The ambient transaction opened on the ROUTED document -- the script ran against the
-        // document the request addressed, and the active document was never touched. This pair of
-        // assertions is the entire point of routing: before it, the transaction always landed on the
-        // active document no matter what the request said.
-        Assert.NotNull(routedDocument.LastTransaction);
-        Assert.Equal(new[] { "Start", "Commit", "Dispose" }, routedDocument.LastTransaction!.Calls);
-        Assert.Null(activeDocument.LastTransaction);
+        // The run's group opened on the ROUTED document -- the script ran against the document the
+        // request addressed, and the active document was never touched. This pair of assertions is the
+        // entire point of routing: before it, the group always landed on the active document no matter
+        // what the request said. (Group only, #146 Phase 3: a read opens no transaction.)
+        Assert.NotNull(routedDocument.LastTransactionGroup);
+        Assert.Equal(new[] { "Start", "RollBack", "Dispose" }, routedDocument.LastTransactionGroup!.Calls);
+        Assert.Null(activeDocument.LastTransactionGroup);
     }
 
     [Fact]
@@ -122,7 +124,7 @@ public class RequestDispatcherTests
         Assert.Contains("Active.rvt", json);
         // The silent-fallback hazard routing exists to end: the active document must NOT have run
         // anything.
-        Assert.Null(activeDocument.LastTransaction);
+        Assert.Null(activeDocument.LastTransactionGroup);
     }
 
     [Fact]
@@ -150,7 +152,7 @@ public class RequestDispatcherTests
         var json = await dispatchTask;
 
         Assert.Contains("\"status\":\"success\"", json);
-        Assert.NotNull(activeDocument.LastTransaction);
+        Assert.NotNull(activeDocument.LastTransactionGroup);
     }
 
     [Fact]
@@ -269,8 +271,10 @@ public class RequestDispatcherTests
         Assert.DoesNotContain("\"code\":\"script-execution-failed\"", json);
 
         var remedy = string.Join(" ", ParseRemedy(json));
-        Assert.Contains("Connector.WithoutTransaction", remedy);
-        // The two-document case is the one that trips people even after they know the wrap.
+        // #146 Phase 3: the fix is to move the call OUTSIDE the block -- documents are not modifiable by
+        // default, which is what these APIs need.
+        Assert.Contains("OUTSIDE your Connector.WithTransaction block", remedy);
+        // The two-document case is the one that trips people even after they know the rule.
         Assert.Contains("LoadFamily", remedy);
     }
 

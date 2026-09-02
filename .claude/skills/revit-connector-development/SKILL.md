@@ -275,8 +275,8 @@ before considering it closed.
 **When a guard is over-broad because it cannot see intent, give the connector the job the script was
 reaching for.** The compile-time check cannot know which document a `Transaction` targets, so it also
 refused a document the script had just created — which Revit allows. Rather than narrow the check,
-the connector now owns a transaction for every document a script creates
-(`CreateProjectDocument`/`CreateFamilyDocument`, and `OpenForWriting` for an existing one). The rule
+the connector now owns a group for every document a script touches (`CreateProjectDocument`/
+`CreateFamilyDocument`, and a `WithTransaction` block adopting an existing one). The rule
 stayed unconditional, no bypass surface appeared, and a bug in the new plumbing breaks a feature
 rather than a security boundary.
 

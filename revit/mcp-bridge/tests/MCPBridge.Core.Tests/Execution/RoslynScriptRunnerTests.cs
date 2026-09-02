@@ -925,22 +925,15 @@ public class RoslynScriptRunnerTests
     }
 
     [Fact]
-    public async Task RunAsync_ConnectorWithTransactionAndWithoutTransaction_AreNotGated()
+    public async Task RunAsync_ConnectorWithTransaction_IsNotGated()
     {
-        // The other two scopes must NOT be gated, and asserting it is not redundant: gating the whole
-        // Connector type rather than the single member would have been the easy mistake, and it would
-        // have made every stairs script -- the feature's headline case -- require a flag it has no
-        // reason to need. Neither leaves anything permanent; the group still covers rollback.
+        // The write primitive must NOT be gated, and asserting it is not redundant: gating the whole
+        // Connector type rather than the single member would have been the easy mistake, and under
+        // group-always (#146 Phase 3) it would have made EVERY writing script require a flag it has no
+        // reason to need. A block leaves nothing permanent; the group still covers rollback.
         var runner = NewRunner();
 
-        foreach (var script in new[]
-                 {
-                     "Connector.WithTransaction(Document, () => { });",
-                     "Connector.WithoutTransaction(Document, () => { });",
-                 })
-        {
-            var outcome = await runner.RunAsync(script, NewGlobals(), CancellationToken.None);
-            Assert.IsNotType<ScriptApiDenylistViolationException>(outcome.Exception);
-        }
+        var outcome = await runner.RunAsync("Connector.WithTransaction(Document, () => { });", NewGlobals(), CancellationToken.None);
+        Assert.IsNotType<ScriptApiDenylistViolationException>(outcome.Exception);
     }
 }

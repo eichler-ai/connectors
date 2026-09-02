@@ -168,7 +168,7 @@ fully-qualify Revit types or add `using` directives):
 ### The `Connector` global
 
 The four globals above are Revit's own objects. `Connector` is everything this connector adds on top,
-and it is **not part of the Revit API** — `Connector.Publish(path)`, `Connector.OpenForWriting(doc)`,
+and it is **not part of the Revit API** — `Connector.Publish(path)`, `Connector.WithTransaction(doc, body)`,
 and so on.
 
 Its members are deliberately **not enumerated here**, and that is the point of issue #91: they are
@@ -179,13 +179,16 @@ three of them were wrong. The file-exchange workspace (PRD §09) that `Connector
 imports and exports directories of also carries a per-run audit trail beside them — `scripts/`
 (verbatim script per run) and `logs/` (per-run NDJSON diagnostics), aged out after 14 days.
 
-**Transactions are never yours to open.** Every script runs inside a connector-managed
-`Transaction`/`TransactionGroup`: changes commit when the script returns and roll back if it
-throws. Constructing `Transaction`/`TransactionGroup` is rejected at compile time,
-unconditionally (`script-api-denied`). A native `SubTransaction` held in a `using` is permitted as
-a savepoint inside the connector's transaction (#146 Phase 1); constructed outside a `using` it is
-rejected the same way, and started with no transaction open it fails with
-`script-subtransaction-needs-transaction`.
+**Transactions are never yours to open — blocks are.** The connector opens a `TransactionGroup` per
+document for the run and no transaction: a document is readable but not modifiable until the script
+writes inside `Connector.WithTransaction(doc, () => { ... })`, whose transaction the connector opens (with
+failure capture) and commits at block end. A run that returns normally keeps what its blocks committed
+as **one undo entry**; a run that throws rolls the whole group back; a run that only read leaves no undo
+entry. Constructing `Transaction`/`TransactionGroup` is rejected at compile time, unconditionally
+(`script-api-denied`). A native `SubTransaction` held in a `using` is permitted as a savepoint inside a
+block; outside a `using` it is rejected the same way, and started with no block open it fails with
+`script-subtransaction-needs-transaction`. (#146 Phase 3; before it a transaction was open for the whole
+run, and `Connector.WithoutTransaction`/`OpenForWriting` existed to work around that.)
 
 **Confirmation-gated members** (`confirm_lifecycle_actions: true` required): `Document.Close`
 / `.Dispose` / `.Save` / `.SaveAs` / `.SaveAsCloudModel` / `.SynchronizeWithCentral` /

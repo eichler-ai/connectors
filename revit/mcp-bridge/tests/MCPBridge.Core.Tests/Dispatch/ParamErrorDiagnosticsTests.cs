@@ -1,3 +1,4 @@
+using MCPBridge.Core.Tests.Execution;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -24,6 +25,7 @@ namespace MCPBridge.Core.Tests.Dispatch;
 /// record belongs. A test that constructed a JsonRpcParamException and inspected its Diagnostic property
 /// would stay green with every one of those `null`s restored -- i.e. with the bug fully reinstated.</para>
 /// </summary>
+[Collection(ActiveDialogContextCollection.Name)]
 public class ParamErrorDiagnosticsTests
 {
     /// <summary>A tiny public fixture type, so DiscoveryService has something real to reflect over with no Revit dependency.</summary>

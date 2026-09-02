@@ -73,46 +73,35 @@ message and does not block — only the text read does.
 
 Some Revit API calls that take a `Document` argument — `Document.LoadFamily(Document)` is the one found
 live, building the validation corpus's family-placement case — internally manage their own transaction
-on **both** the document the call is on and the document passed as an argument, and refuse to run if
-either already has one open. This connector's ambient-transaction model (`OpenForWriting`,
-`CreateProjectDocument`/`CreateFamilyDocument`) keeps a document's transaction open for the rest of the
-`execute_script` call that touched it, which collides with exactly this.
+on the document they modify and refuse to run if it already has one open. (The original finding blamed
+the SOURCE family document too; re-tested under Phase 3 on Revit 2025, `LoadFamily` from a modifiable
+source into a non-modifiable target succeeds — under always-open the target was always modifiable, and
+the error message was read as being about the source.) Since #146 Phase 3 (group-always, transaction-on-write) a document has NO
+transaction open outside a `Connector.WithTransaction` block, so these calls work at top level; the
+symptom now means the call sits INSIDE a block.
 
 | Cause | Definitive check |
 |---|---|
-| The document is the one the call is ROUTED at, so the ambient managed transaction covers it for the whole run | Route the call at a **different** open document and reach this one through `UIApplication` — `ActiveUIDocument`, or `Application.Documents` by `Title`. Nothing else lifts it; there is no per-call opt-out |
-| The call's own document was created earlier in the SAME script call, so its managed transaction is still open | Split into two calls: create/edit in one, let it return (commits the transaction), call the API from a separate call that finds the document fresh |
-| `OpenForWriting` was called on the TARGET document before the API call, not after | Reorder: make the call first, `OpenForWriting` afterward, if the call's own result is what you need to keep editing |
+| The call is inside a `Connector.WithTransaction` block on the document it modifies (for `LoadFamily`, the TARGET project document) | Move the call between blocks: end the block, make the call, open a new block for further writes. The connector maps this to `script-target-must-not-be-modifiable` with that remedy |
 
-Not specific to `LoadFamily` — treat this as the general shape for any Document-argument API that
-throws a transaction/modifiability error, and check both documents' transaction state before assuming
-the API itself is broken. Members known to behave this way, with how each is known — the distinction
-matters, because only the first two are pinned by anything:
-
-| Member | Evidence |
-|---|---|
-| `Document.LoadFamily` (needs BOTH source and target non-modifiable) | Regression-pinned: `TestValidationCorpus_LoadFamilyAndPlaceInstance` |
-| `UIDocument.RequestViewChange` / `ActiveView` | Verified live against Revit 2027 (issue #115 triage); not yet pinned by a test |
-| `UIApplication.OpenAndActivateDocument` | **Not independently re-verified** — recorded in `Connector.cs`'s `<remarks>`, which states it was checked live. Treat as second-hand until something pins it |
-
-**The routing fix does NOT generalize to edit scopes, and that distinction is the whole of issue
-#115.** Routing solves "the target must not be modifiable when the call STARTS". `StairsEditScope`
-adds a second requirement at the other end: no transaction may be open when the scope **commits**.
-Live trace, on a document nothing manages:
+Members known to behave this way (each live-verified): `Document.LoadFamily` (target non-modifiable),
+`UIDocument.RequestViewChange`/`ActiveView`, `UIApplication.OpenAndActivateDocument`,
+`Document.Export`, and every `EditScope` — whose second edge is the one that cost #115 the most time:
+**no transaction may be open when the scope COMMITS** either. Live trace, pre-Phase 3:
 
 ```
 1: scope.Start() OK, IsInEditMode=True
-2: Connector.OpenForWriting(d) INSIDE the edit scope OK; IsModifiable=True
+2: a connector transaction opened INSIDE the edit scope OK; IsModifiable=True
 3: StairsRun.CreateStraightRun OK
 4: scope.Commit() -> InvalidOperationException: "EditScope cannot be closed, for there is a
    transaction or transaction group still open in the document."   (Cancel() fails identically)
 ```
 
 Note what the error says versus what is true: with the connector's **transaction** committed but its
-**group** still open, `EditScope.Commit()` succeeds — the group is not the bar, the open transaction
-is. So the missing capability is closing a connector-owned transaction mid-script, which no script can
-do. Worse, the run above returns `status: "success"` having created nothing, so this fails **silently**
-— check `Document.IsInEditMode()` before believing an edit-scope result.
+**group** still open, `EditScope.Commit()` succeeds — the group is not the bar, the open transaction is.
+So the stairs shape is: `scope.Start()` between blocks, `CreateStraightRun` inside a block, `scope.Commit()`
+after the block. The run above returned `status: "success"` having created nothing, so this fails
+**silently** — check `Document.IsInEditMode()` before believing an edit-scope result.
 
 ## Symptom: Revit crashes ("closed unexpectedly") on a Document.Close some seconds after a script ran
 

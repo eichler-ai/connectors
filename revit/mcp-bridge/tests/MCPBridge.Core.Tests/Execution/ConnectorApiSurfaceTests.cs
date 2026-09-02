@@ -52,11 +52,9 @@ public class ConnectorApiSurfaceTests
         "DialogResultOverrides",
         "ExportsDirectory",
         "ImportsDirectory",
-        "OpenForWriting",
         "Publish",
         "Settle",
         "WithTransaction",
-        "WithoutTransaction",
     };
 
     private const string ConnectorDocId = "T:Eichler.Connectors.Revit.Connector";
@@ -65,7 +63,7 @@ public class ConnectorApiSurfaceTests
     /// Catches the failure mode D5 measured: the pre-#91 summaries ran 80-230 words because one comment
     /// was serving both an agent and a maintainer.
     ///
-    /// <para>The headroom is real but not large -- <c>OpenForWriting</c>, the longest, measures around 110
+    /// <para>The headroom is real but not large -- <c>WithTransaction-adoption</c>, the longest, measures around 110
     /// words. An earlier revision of this comment claimed "none of the seven is near it", which was simply
     /// not measured and was wrong. If a summary needs more than this, that is the signal to move something
     /// into <c>&lt;remarks&gt;</c>, which XmlDocIndex does not read.</para>

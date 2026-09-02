@@ -15,9 +15,37 @@ internal sealed class FakeTransactionGroupAdapter : ITransactionGroupAdapter
 
     public void Start() => Calls.Add("Start");
 
-    public void Assimilate() => Calls.Add("Assimilate");
+    public bool ThrowOnAssimilate { get; set; }
 
-    public void RollBack() => Calls.Add("RollBack");
+    public bool ThrowOnRollBack { get; set; }
+
+    /// <summary>
+    /// Runs at the start of Assimilate/RollBack -- the group's terminal step, which the executor reaches
+    /// INSIDE its try block after the script has run and before the finally tears down per-run state.
+    /// Since #146 Phase 3 this is the one hook a tier-1 test has for observing that state while it is
+    /// still live (a read-only script opens no transaction, so a commit hook never fires).
+    /// </summary>
+    public Action? OnTerminal { get; set; }
+
+    public void Assimilate()
+    {
+        OnTerminal?.Invoke();
+        Calls.Add("Assimilate");
+        if (ThrowOnAssimilate)
+        {
+            throw new InvalidOperationException("simulated assimilate failure");
+        }
+    }
+
+    public void RollBack()
+    {
+        OnTerminal?.Invoke();
+        Calls.Add("RollBack");
+        if (ThrowOnRollBack)
+        {
+            throw new InvalidOperationException("simulated group-rollback failure");
+        }
+    }
 
     public string? LastName { get; private set; }
 

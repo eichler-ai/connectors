@@ -52,16 +52,9 @@ internal interface IConnectorRuntime
     /// <c>Autodesk.Revit.DB.Document</c> as <c>object</c> -- see the type-load note above.</summary>
     object CreateFamilyDocument(string templatePath);
 
-    /// <summary>Backs <see cref="Connector.OpenForWriting"/>. Takes and returns an
-    /// <c>Autodesk.Revit.DB.Document</c> as <c>object</c> -- see the type-load note above.</summary>
-    object OpenForWriting(object document);
-
-    /// <summary>Backs <see cref="Connector.WithoutTransaction"/>. The document is <c>object</c> for the
-    /// type-load reason above; <c>System.Action</c> names no Revit type, so the callback passes through
-    /// unchanged.</summary>
-    void WithoutTransaction(object document, System.Action body);
-
-    /// <summary>Backs <see cref="Connector.WithTransaction(Autodesk.Revit.DB.Document, System.Action)"/>.</summary>
+    /// <summary>Backs <see cref="Connector.WithTransaction(Autodesk.Revit.DB.Document, System.Action)"/>. The
+    /// document is <c>object</c> for the type-load reason above; <c>System.Action</c> names no Revit type, so the
+    /// callback passes through unchanged.</summary>
     void WithTransaction(object document, System.Action body);
 
     /// <summary>Backs <see cref="Connector.WithTransaction{T}"/>. <c>System.Func&lt;T&gt;</c> names no

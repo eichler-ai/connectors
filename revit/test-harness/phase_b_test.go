@@ -50,7 +50,7 @@ func TestPhaseBAnnotationAndScheduling(t *testing.T) {
 	// this subtest since it holds the just-created Room's own reference directly, but real and
 	// worth knowing before reaching for a Room collector anywhere else in this corpus.
 	t.Run("CreateRoomAndTagIt", func(t *testing.T) {
-		out := runScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+`
+		out := runScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+withTx(`
 var level = Autodesk.Revit.DB.Level.Create(doc, 500.0);
 var p1 = new Autodesk.Revit.DB.XYZ(0, 0, 0);
 var p2 = new Autodesk.Revit.DB.XYZ(20, 0, 0);
@@ -72,7 +72,7 @@ var linkId = new Autodesk.Revit.DB.LinkElementId(room.Id);
 var tag = doc.Create.NewRoomTag(linkId, new Autodesk.Revit.DB.UV(10, 10), view.Id);
 
 return new { roomCreated = room != null, area = room.Area, viewFound = view != null, tagCreated = tag != null };
-`)
+`))
 		if out.Status != "success" {
 			t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
 		}
@@ -91,7 +91,7 @@ return new { roomCreated = room != null, area = room.Area, viewFound = view != n
 	// FamilySymbol must be Activate()-d before use, or NewFamilyInstance throws), and hosts an
 	// instance on a wall at its midpoint -- the standard door-placement pattern.
 	t.Run("PlaceDoorInWall", func(t *testing.T) {
-		out := runScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+`
+		out := runScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+withTx(`
 var level = Autodesk.Revit.DB.Level.Create(doc, 540.0);
 var line = Autodesk.Revit.DB.Line.CreateBound(new Autodesk.Revit.DB.XYZ(100, 0, 0), new Autodesk.Revit.DB.XYZ(120, 0, 0));
 var hostWall = Autodesk.Revit.DB.Wall.Create(doc, line, level.Id, false);
@@ -106,7 +106,7 @@ var midpoint = (hostWall.Location as Autodesk.Revit.DB.LocationCurve).Curve.Eval
 var door = doc.Create.NewFamilyInstance(midpoint, doorSymbol, hostWall, level, Autodesk.Revit.DB.Structure.StructuralType.NonStructural);
 
 return new { doorCreated = door != null, category = door.Category == null ? "null" : door.Category.Name, hostId = door.Host == null ? "null" : door.Host.Id.ToString() };
-`)
+`))
 		if out.Status != "success" {
 			t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
 		}
@@ -127,7 +127,7 @@ return new { doorCreated = door != null, category = door.Category == null ? "nul
 	// with a tolerance and floor/ceiling bounds rather than an exact literal, since the exact
 	// value depends on the default wall type's thickness, which this test doesn't control.
 	t.Run("DimensionBetweenWalls", func(t *testing.T) {
-		out := runScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+`
+		out := runScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+withTx(`
 var level = Autodesk.Revit.DB.Level.Create(doc, 580.0);
 var wallA = Autodesk.Revit.DB.Wall.Create(doc, Autodesk.Revit.DB.Line.CreateBound(new Autodesk.Revit.DB.XYZ(200, 0, 0), new Autodesk.Revit.DB.XYZ(220, 0, 0)), level.Id, false);
 var wallB = Autodesk.Revit.DB.Wall.Create(doc, Autodesk.Revit.DB.Line.CreateBound(new Autodesk.Revit.DB.XYZ(200, 20, 0), new Autodesk.Revit.DB.XYZ(220, 20, 0)), level.Id, false);
@@ -146,7 +146,7 @@ var dimLine = Autodesk.Revit.DB.Line.CreateBound(new Autodesk.Revit.DB.XYZ(210, 
 var dim = doc.Create.NewDimension(view, dimLine, refArray);
 
 return new { dimCreated = dim != null, viewFound = view != null, value = dim.Value };
-`)
+`))
 		if out.Status != "success" {
 			t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
 		}
@@ -179,7 +179,7 @@ return new { dimCreated = dim != null, viewFound = view != null, value = dim.Val
 	// with zero or more walls already in the document), so it behaves identically whether run as
 	// part of the bundle or in isolation via -run .../CreateWallSchedule.
 	t.Run("CreateWallSchedule", func(t *testing.T) {
-		out := runScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+`
+		out := runScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+withTx(`
 var categoryId = new Autodesk.Revit.DB.ElementId(Autodesk.Revit.DB.BuiltInCategory.OST_Walls);
 var schedule = Autodesk.Revit.DB.ViewSchedule.CreateSchedule(doc, categoryId);
 
@@ -190,7 +190,7 @@ foreach (var sf in schedule.Definition.GetSchedulableFields()) {
 if (areaField != null) { schedule.Definition.AddField(areaField); }
 
 return new { scheduleCreated = schedule != null, name = schedule.Name, fieldAdded = areaField != null, fieldCount = schedule.Definition.GetFieldCount() };
-`)
+`))
 		if out.Status != "success" {
 			t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
 		}
