@@ -140,7 +140,118 @@ ranker always returns something:
 - no floor-plan view is created with a level (from #7)
 - `BuiltInParameterGroup` / `ParameterType` gone in 2025+ (`GroupTypeId` / `SpecTypeId`; from #5 and the skill's own rule)
 
-## 4. Decisions the audit needs
+## 4. Growth: `submit_howto` → tagged issue → `/triage-howto-submission` → corpus
+
+The seed is a one-off; the corpus grows because agents that just learned something can hand it in.
+That path is as important as the seed and moves **ahead of** search in the implementation order
+(§6): both the extractor and the submit tool emit schema documents, and a review queue can start
+filling before `search_howto` exists to serve it.
+
+### 4a. What the agent is told (`skill.md`)
+
+One bullet, under the discovery tools, within the token budget (something of equal size comes out):
+
+> - **`submit_howto`** — when a task needed more than one search, a reformulated query, or a pitfall
+>   you hit and got past, hand it in: the task in one sentence, the working script, the members, the
+>   queries that missed and the one that hit, the pitfall as symptom → cause → fix. It saves to your
+>   own how-to corpus at once and, with `confirm_submission: true`, prepares a scrubbed GitHub issue
+>   for the maintainers to review. Submit **after** the script ran successfully, never speculatively.
+
+The trigger is the important part: the moment of value is when the agent has *just* recovered from a
+miss, which is exactly the recorded episode the corpus wants. `get_skills` also tells the agent what
+a submission must not contain (project data, paths, names), so the scrubber is a backstop rather
+than the first line.
+
+### 4b. `submit_howto` — tool contract
+
+```
+submit_howto(
+  title, task, script, members[],           # required
+  pitfalls[]?, queries?, tags?, summary?,   # schema fields, optional
+  instance_id?,                             # which Revit verified it (defaults as for discovery)
+  confirm_submission: bool                  # outward half; default false
+) -> {
+  document,        # the schema-valid document as written locally (id assigned: slug of title)
+  local_path,      # <exchange-root>/howto/local/<id>.json
+  verified,        # the session stamp, if the exact script ran successfully this session, else null
+  submission?: {   # only with confirm_submission: true
+    scrubbed_document,   # what leaves the machine, shown in full
+    outbox_path,         # <exchange-root>/howto/outbox/<id>.json -- the issue body
+    issue_url            # prefilled https://github.com/eichler-ai/connectors/issues/new?labels=howto-submission&title=...
+  },
+  notices[], guidance
+}
+```
+
+Behaviour, in order:
+
+1. **Validate** against `howto-schema.json`; a failing field is a `howto-invalid` error naming it.
+2. **Write locally first** (`provenance.kind: "local"`), so the submitter's own `search_howto` serves
+   it immediately. Re-submitting the same `id` overwrites the local file and says so.
+3. **Session stamp**: if this session executed exactly this `script` text and it succeeded, append
+   a `by: "session"` line to the local sidecar. This needs the broker to keep the sha256 of every
+   executed script for the execution record's lifetime (design note §6, still **[proposed]**).
+4. **Gate**: without `confirm_submission: true`, stop here and return
+   `howto-submission-confirmation-required` (info) with the document, so the agent can show the user
+   what would be sent. With it:
+5. **Scrub** every text field and the script's string literals; refuse (`howto-submission-unscrubbed`,
+   naming field and line) if any path or host survives.
+6. **Write the outbox file and return the prefilled issue URL.** The broker never files the issue: it
+   holds no token and spawns nothing (design note §6). **Filing is the agent's job**, using the
+   `gh` the agent session already has: the returned `guidance` says
+   `gh issue create --label howto-submission --title "<title>" --body-file "<outbox_path>"`, and the
+   agent runs it under its own permission model, which is where the user sees and approves the
+   outward action. An agent without `gh` hands the user the prefilled URL and the outbox path.
+
+The outbox file *is* the issue body: a one-line summary, the target Revit version and connector
+version, a checklist for the reviewer (schema valid · script ran on `<version>` · scrubbed · not a
+duplicate of …), and the document in a fenced ```json block so the triage command can parse it back
+out verbatim.
+
+### 4c. `/triage-howto-submission` — the maintainer's command
+
+Modelled on `/triage-issues`: takes issue numbers (`/triage-howto-submission 171 172`), refuses to
+choose issues itself, and loads `revit-connector-development` for the harness rules. Per issue:
+
+1. **Read and parse.** Pull the fenced JSON out of the issue body; validate against the schema; a
+   parse or schema failure is a comment on the issue asking the submitter for the outbox file, not a
+   guess at what they meant.
+2. **Scrub again, by eye.** The tool's scrubber is a filter; the maintainer reads the document for
+   anything project-specific before it runs anywhere. Anything found is redacted in the comment and
+   the reviewer says what was removed.
+3. **Run it, on a disposable fixture.** Route the script at a blank fixture document on the
+   connected Revit (the sweep's fixture rule, design note §3), capture status, diagnostic and return
+   value, and record the outcome as a comment. A failure is not a rejection by itself — the fix may be
+   a one-line edit — but nothing enters the corpus without a passing run on at least one version.
+   This is the `howto-reviewed` gate made concrete: the human reads before the script runs.
+4. **De-duplicate.** Search the existing corpus (`search_howto` once it exists; a `members`-set
+   match until then). A near-duplicate becomes a `supersedes` of the older document if it is better,
+   or a comment pointing at the existing one if not.
+5. **Edit.** The maintainer edits `task`, `title`, `pitfalls` wording and `tags` in place — this is
+   where prose quality is enforced, and it is a human edit, not the agent's. `queries.miss` is kept
+   verbatim: it is evidence, not prose.
+6. **Append and stamp.** Append the final document to `revit/howto/corpus.jsonl` with
+   `provenance.kind: "submission"`, `ref` = the issue URL, `reviewed_by` = the maintainer's login;
+   append the harness stamp from step 3 to `revit/howto/verified.jsonl`; open one PR per triage run
+   listing the issues it closes (`Closes #171`), CI validates both files.
+7. **Report.** Issues closed, documents added, documents superseded, and — the same net-count
+   discipline `/triage-issues` uses — the queue size before and after.
+
+The command lives at `.claude/skills/triage-howto-submission/SKILL.md` and is written when the
+validator and the fixture-run helper exist (§6 step 2); its text is this section.
+
+### 4d. Queue hygiene
+
+- Label `howto-submission` is applied by the prefilled URL and by the `gh` command; an issue without
+  the label is not in the queue.
+- A submission that mentions a document title, a file path or a machine name in *any* field is
+  closed with a comment, never edited into shape by the maintainer — the point of the scrubber is
+  that nothing private reaches the tracker, and a leak is a bug report against the scrubber.
+- Rate: a session may open at most one submission issue per how-to `id`; re-submissions of the same
+  id add a comment to the open issue (the `gh` command the guidance emits checks for an open issue
+  with the id in its title first).
+
+## 5. Decisions the audit needs
 
 1. **Granularity.** One document per subtest (≈33) versus merged task bundles (≈20). Recommendation:
    one per subtest, with `pitfall`/`negative` split out where marked; small documents rank and read
@@ -152,5 +263,19 @@ ranker always returns something:
 4. **Whether to include #31/#32** before #146 Phase 2c settles.
 5. **Versioning as in §1** (bundled release stream, per-component install skip, corpus version in
    `-version`/`get_skills`) — confirms or reopens D1/D2 of the design note.
+6. **Filing by the agent's `gh`** (§4b step 6) rather than by the broker — confirms the design
+   note's no-token / no-subprocess decision while still producing a tagged issue automatically for
+   any agent session that has `gh`.
 
 Nothing is annotated or extracted until this table is settled.
+
+## 6. Implementation order [proposed, revised]
+
+1. Schemas + validator (Go) — shared by everything below.
+2. **`submit_howto`** (local write, gate, scrubber, outbox + prefilled URL, `skill.md` bullet) and
+   the fixture-run helper; then `/triage-howto-submission` as a skill file. The queue can start
+   filling from real sessions while the seed is audited.
+3. Harness extractor + the audited seed (`revit/howto/corpus.jsonl`), the tier-2 sweep writing the
+   sidecar, and the corpus embedded in the broker with its version in `-version` / `get_skills`.
+4. Generalised index + `search_howto` / `describe_howto`; local corpus indexed alongside.
+5. Release manifest + install.ps1 per-component skip; release-notes diff of the corpus.
