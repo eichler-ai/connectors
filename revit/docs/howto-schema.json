@@ -241,7 +241,7 @@
     "rev": {
       "type": "integer",
       "minimum": 1,
-      "description": "Revision of this lineage, from 1. The corpus may hold several revisions of one id; readers serve the highest. An improvement is the same id with rev+1 (submit_howto handles this)."
+      "description": "Revision of this lineage, from 1. The corpus file holds only the latest revision per id (git history keeps the rest); an improvement is the same id with rev+1 replacing the line. rev exists so references and verification stamps can name the revision they meant."
     },
     "contributors": {
       "type": "array",

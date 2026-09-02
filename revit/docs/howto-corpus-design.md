@@ -257,8 +257,10 @@ submit_howto(title, task, script, members[], pitfalls[]?, queries?, notes?, conf
    then de-duplicates (same `members` set plus similar `task` embedding), edits `task`/`pitfalls`
    wording, and opens the append PR for a human to merge. Running an arbitrary public submission
    under the `Connector` global without that label would be remote code execution from a public
-   queue. Accepting appends the document to `revit/howto/corpus.jsonl` **[decided: append-only in
-   git; an edit is the same `id` at `rev + 1`, and `supersedes` merges two lineages]**, so the file's history is the audit trail;
+   queue. Accepting appends the document to `revit/howto/corpus.jsonl` **[decided: one line per
+   lineage, latest revision only; an edit is the same `id` at `rev + 1` replacing that line, and
+   `supersedes` merges two lineages]**, so git history is the audit trail and readers never resolve
+   revisions;
    uniqueness of `id` across the file is a CI check on the PR.
 
 ## 7. Relationship to the ranking note

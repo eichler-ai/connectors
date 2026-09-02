@@ -66,8 +66,10 @@ The seed is extracted from the harness, and only from tests that opt in. Mechani
    so extracted scripts are already in the shipped dialect; the design note's warning that seed
    scripts would fail the sweep no longer applies to a seed extracted after #160.
 5. **Extractor is a build step**, `go run ./cmd/howto-extract`, committed output at
-   `revit/howto/corpus.jsonl`; CI fails if the committed file is stale against the tests. The sidecar
-   `revit/howto/verified.jsonl` is written only by the tier-2 sweep and committed with it.
+   `revit/howto/corpus.jsonl` (one line per lineage, latest revision only); CI fails if the committed
+   file is stale against the tests. The sidecar `revit/howto/verified.jsonl` is written only by the
+   tier-2 sweep and committed with it; a stamp whose script hash no longer matches its document is
+   pruned by the same step.
 6. **Then the ranking corpus.** Every recorded `queries.miss` becomes a candidate row for the how-to
    equivalent of `ranking-corpus.tsv`, once `search_howto` exists to grade it.
 
@@ -162,10 +164,14 @@ proof scaffolding, so no harness run has executed this exact text — the sweep 
 edit step, §4c). The text is optimised for retrieval and for tokens: every field an agent reads
 should either help the ranker find the document or help the agent do the task.
 
-1. **`id` is a lineage, `rev` is the version.** The id is a kebab slug chosen once and never renamed;
-   an improvement is the same id with `rev + 1`. References (`describe_howto`, local overrides, links
-   between documents) therefore survive edits. Uniqueness is a triage check against the shared corpus
-   (submit_howto suffixes `-2`, `-3` … on a local/embedded clash).
+1. **`id` is a lineage, `rev` is the version, and the corpus holds one line per lineage.** The id is
+   a kebab slug chosen once and never renamed; an improvement is the same id with `rev + 1`, and it
+   **replaces** the lineage's line in `corpus.jsonl` — git history is the audit trail, so main keeps
+   only the most recent revision. Readers therefore never resolve revisions; `rev` exists so a
+   reference or a verification stamp can say which revision it meant. References (`describe_howto`,
+   local overrides, links between documents) survive edits because the id does. Uniqueness is a
+   triage check against the shared corpus (submit_howto suffixes `-2`, `-3` … on a local/embedded
+   clash).
 2. **`task` is the search text**: one or two plain sentences naming the element type, the operation,
    and the key member nouns of the answer (`GroupType`, `ungroup`). No preamble, no rationale.
 3. **The script's comments are the explanation.** There is no `summary` field. Setup a real task
@@ -246,7 +252,8 @@ submit_howto(
 
 **Improving an existing how-to.** With `id: <existing id>`, the tool loads that document (local
 first, then the embedded/shared corpus), overlays only the fields the call supplied, and produces
-the **next revision**: same `id`, `rev + 1` — the corpus's append-only edit shape (design note §6).
+the **next revision**: same `id`, `rev + 1`, which replaces the previous line once accepted (design
+note §6).
 So an agent that found one missing pitfall submits just `id`, `pitfalls` and `change_note`; `title`,
 `task`, `script` and the rest carry over. Rules: a `script` change without a successful run in this
 session is accepted locally but flagged `unverified-script-change` in the issue; `queries` and
@@ -308,10 +315,12 @@ choose issues itself, and loads `revit-connector-development` for the harness ru
 5. **Edit.** The maintainer edits `task`, `title`, `pitfalls` wording and `tags` in place — this is
    where prose quality is enforced, and it is a human edit, not the agent's. `queries.miss` is kept
    verbatim: it is evidence, not prose.
-6. **Append and stamp.** Append the final document to `revit/howto/corpus.jsonl` with
-   `provenance.kind: "submission"`, `ref` = the issue URL, `reviewed_by` = the maintainer's login
-   (for an edit, the same `id` at `rev + 1`; readers serve the highest rev); keep the submitter's
-   `contributors` entry as submitted and optionally append the maintainer as `reviewer`;
+6. **Write and stamp.** Add the document to `revit/howto/corpus.jsonl` — a new line for a new
+   lineage, or **replacing** the lineage's existing line for an edit (same `id`, `rev + 1`; the old
+   revision lives on in git history only) — with `provenance.kind: "submission"`, `ref` = the issue
+   URL, `reviewed_by` = the maintainer's login; keep the submitter's `contributors` entry as submitted
+   and optionally append the maintainer as `reviewer`; drop sidecar stamps whose `script_sha256` no
+   longer matches the current script (a changed script is unverified until the sweep runs again);
    append the harness stamp from step 3 to `revit/howto/verified.jsonl`; open one PR per triage run
    listing the issues it closes (`Closes #171`), CI validates both files.
 7. **Report.** Issues closed, documents added, documents superseded, and — the same net-count
