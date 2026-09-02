@@ -13,6 +13,7 @@ fetch() { # url dest sha256
   if [ "$got" != "$3" ]; then rm -f "$2.tmp"; echo "sha256 mismatch for $2: got $got want $3" >&2; exit 1; fi
   mv "$2.tmp" "$2"; echo "fetched $2"
 }
+fetch "https://huggingface.co/minishlab/potion-base-8M/resolve/$POTION_REV/config.json"         potion-base-8M/config.json         2a6ac0e9aaa356a68a5688070db78fc3a464fefe85d2f06a1905ce3718687553
 fetch "https://huggingface.co/minishlab/potion-base-8M/resolve/$POTION_REV/tokenizer.json"      potion-base-8M/tokenizer.json      e67e803f624fb4d67dea1c730d06e1067e1b14d830e2c2202569e3ef0f70bb50
 fetch "https://huggingface.co/minishlab/potion-base-8M/resolve/$POTION_REV/model.safetensors"   potion-base-8M/model.safetensors   f65d0f325faadc1e121c319e2faa41170d3fa07d8c89abd48ca5358d9a223de2
 fetch "https://huggingface.co/Xenova/ms-marco-MiniLM-L-6-v2/resolve/$MSMARCO_REV/onnx/model_quantized.onnx" ms-marco-MiniLM-L-6-v2/model.onnx e9d8ebf845c413e981c175bfe49a3bfa9b3dcce2a3ba54875ee5df5a58639fbe

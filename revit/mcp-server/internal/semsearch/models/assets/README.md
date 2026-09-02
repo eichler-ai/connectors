@@ -5,7 +5,7 @@ gitignored and produced by `../fetch-models.sh` (macOS/Linux) or `../fetch-model
 (Windows), which download pinned revisions from Hugging Face and verify them against the
 SHA-256 pins in `../models.go`:
 
-- `potion-base-8M/` — `tokenizer.json`, `model.safetensors` (minishlab/potion-base-8M, MIT)
+- `potion-base-8M/` — `config.json`, `tokenizer.json`, `model.safetensors` (minishlab/potion-base-8M, MIT)
 - `ms-marco-MiniLM-L-6-v2/` — `model.onnx` (int8), `tokenizer.json`, `config.json`,
   `special_tokens_map.json` (Xenova/ms-marco-MiniLM-L-6-v2, Apache-2.0)
 

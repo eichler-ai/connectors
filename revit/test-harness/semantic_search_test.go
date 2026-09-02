@@ -10,7 +10,6 @@
 package harness_test
 
 import (
-	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -127,6 +126,5 @@ func TestSemanticSearchAnswersTaskSentences(t *testing.T) {
 				t.Errorf("junk member surfaced: %s", r.MemberID)
 			}
 		}
-		_ = json.Valid
 	})
 }

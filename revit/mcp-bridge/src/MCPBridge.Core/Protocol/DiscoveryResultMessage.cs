@@ -270,16 +270,11 @@ public static class DiscoveryResultMessage
     {
         var dto = new DumpMembersResultDto
         {
-            Members = result.Members.Select(m => new DumpedMemberDto
+            Members = result.Members.Select(m =>
             {
-                MemberId = m.Member.MemberId,
-                Kind = m.Member.Kind,
-                Namespace = m.Member.Namespace,
-                DeclaringType = m.Member.DeclaringType,
-                Name = m.Member.Name,
-                Signature = m.Member.Signature,
-                Summary = m.Member.Summary,
-                Core = m.IsCore,
+                var dto = ToMemberDto<DumpedMemberDto>(m.Member);
+                dto.Core = m.IsCore;
+                return dto;
             }).ToList(),
             Total = result.Total,
             NextOffset = result.NextOffset,
@@ -319,7 +314,8 @@ public static class DiscoveryResultMessage
         return Serialize(id, overloadDto);
     }
 
-    private static ScoredMemberDto ToScoredMemberDto(MemberSignature m) => new()
+    /// <summary>Populates the shared member fields of any <see cref="MemberDto"/> subclass -- one mapping for search_functions' scored rows and dump_members' rows alike.</summary>
+    private static T ToMemberDto<T>(MemberSignature m) where T : MemberDto, new() => new()
     {
         MemberId = m.MemberId,
         Kind = m.Kind,
@@ -329,6 +325,8 @@ public static class DiscoveryResultMessage
         Signature = m.Signature,
         Summary = m.Summary,
     };
+
+    private static ScoredMemberDto ToScoredMemberDto(MemberSignature m) => ToMemberDto<ScoredMemberDto>(m);
 
     private static string Serialize<TResult>(JsonElement id, TResult dto)
     {

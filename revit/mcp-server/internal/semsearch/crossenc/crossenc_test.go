@@ -2,7 +2,6 @@ package crossenc
 
 import (
 	"context"
-	"math"
 	"os"
 	"testing"
 	"time"
@@ -68,5 +67,4 @@ func TestScoresMatchPythonCrossEncoder(t *testing.T) {
 	if el > 10*time.Second {
 		t.Errorf("pool-20 rerank took %v; the budget assumed in semsearch.DefaultRerankPool is ~1-3s", el)
 	}
-	_ = math.Abs
 }

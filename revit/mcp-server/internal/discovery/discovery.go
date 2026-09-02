@@ -233,13 +233,9 @@ func callWire(ctx context.Context, conn *transport.Conn, method string, params m
 // the instance isn't in the registry) so the mcpserver layer can stamp
 // every discovery response with which Revit version it reflects.
 func (r *Router) call(ctx context.Context, instanceID, method string, params map[string]any) (json.RawMessage, string, *diag.Record) {
-	conn, resolvedID, drec := r.resolveConn(instanceID)
+	conn, _, revitVersion, drec := r.resolve(instanceID)
 	if drec != nil {
 		return nil, "", drec
-	}
-	revitVersion := ""
-	if inst, ok := r.reg.Get(resolvedID); ok {
-		revitVersion = inst.RevitVersion
 	}
 	raw, callErr := callWire(ctx, conn, method, params)
 	if callErr != nil {
@@ -254,15 +250,23 @@ func (r *Router) call(ctx context.Context, instanceID, method string, params map
 // its Revit version. The broker-side search_functions ranker uses it so an
 // index lookup honours exactly the routing an add-in call would have.
 func (r *Router) ResolveInstance(instanceID string) (string, string, *diag.Record) {
-	_, resolvedID, drec := r.resolveConn(instanceID)
+	_, resolvedID, revitVersion, drec := r.resolve(instanceID)
+	return resolvedID, revitVersion, drec
+}
+
+// resolve is resolveConn plus the registry's Revit version for the resolved
+// instance (empty when the registry no longer has it) -- the one place the
+// "which version answered" rule lives.
+func (r *Router) resolve(instanceID string) (*transport.Conn, string, string, *diag.Record) {
+	conn, resolvedID, drec := r.resolveConn(instanceID)
 	if drec != nil {
-		return "", "", drec
+		return nil, "", "", drec
 	}
 	revitVersion := ""
 	if inst, ok := r.reg.Get(resolvedID); ok {
 		revitVersion = inst.RevitVersion
 	}
-	return resolvedID, revitVersion, nil
+	return conn, resolvedID, revitVersion, nil
 }
 
 // ListFunctions forwards to the add-in's list_functions wire method. See

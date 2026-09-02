@@ -300,7 +300,7 @@ third-party dependency, pinned to the Python implementation by `TestParityWithPy
 |---|---|
 | 8.1 Lexical in Go or C# FTS5 | **Go.** `internal/semsearch` implements BM25F over name / path / summary with the POC's field weights, the identifier splitter mirroring the add-in's `IdentifierRelevance.SplitWords`, RRF (1.5 : 1, k = 60), the `BuiltIn*`/`PostableCommand` junk mask, the namespace pre-mask, and core-wins-exact-ties. The C# ranker is untouched and still answers as the fallback. |
 | 8.2 Index build timing | **On attach, in the background, never blocking a call.** `internal/semsearch/manager` pages the corpus over a new add-in wire method `dump_members` (5,000 members a page, ~16 pages for 2027), builds lexical (0.3 s) then dense (1.4 s), and caches by corpus fingerprint (SHA-256 of the loaded assembly set, computed by `DiscoveryCache.CorpusFingerprint`) so a reconnect or a sibling instance reuses the index after one page. Until ready, `search_functions` forwards to the add-in's keyword ranker and the response says `ranker: keyword-fallback`. |
-| 8.3 Latency budget | Query path: static embed < 1 ms, brute-force cosine over 3 × 76k × 256 ≈ 90 ms, cross-encoder pool 20 ≈ 1.0–1.3 s. No ANN index needed at this corpus size. |
+| 8.3 Latency budget | Query path: static embed < 1 ms, brute-force cosine over 3 × 76k × 256 ≈ 90 ms, cross-encoder pool 20 ≈ 1.0–1.3 s. No ANN index needed at this corpus size. Cursor pages are slices of a small bounded cache of ranked lists (16 entries), so a second page costs nothing; the cursor's scope includes the corpus fingerprint and ranker so it cannot replay across ranked sets. |
 | 8.4 Corpus freshness | The fingerprint. A fingerprint change between pages fails the build (the add-in re-synced mid-dump) and the next attach rebuilds; a failed build never blocks search (fallback). |
 | 8.5 How-to-docs corpus | **Not shipped**; the merge point in §4 remains open. |
 
@@ -327,3 +327,14 @@ lexical 15 / 21 / 27 and hybrid 17 / 23 / 33 at recall@1 / 3 / 10, against Pytho
 - **Retire the C# ranker** once the fallback has proved unnecessary in the field; today it is still
   the answer for the first seconds after connect and for model-less builds.
 - **Go toolchain**: hugot requires Go 1.26, so `revit/mcp-server/go.mod` moved from 1.25.4.
+- **Efficiency headroom, deliberately not taken yet** (from the pre-PR quality review): the ~700
+  distinct namespace strings are embedded and stored once per member rather than once per string
+  (~78 MB per index); `topIdx` sorts every positive-score doc to take 200; dense scoring is
+  single-threaded; model loading (~sha256 of 53 MB, tokenizer parse, GoMLX graph) runs on the
+  broker's startup path and is logged; the add-in's `dump_members` deserialises `params_json` for
+  every row it ships and recounts the corpus per page. Each is a measured-cost, low-risk follow-up
+  once the live latency numbers say which matters.
+- **Structural junk rule**: the mask is a hardcoded type list; the deeper fix is an `enum` flag on
+  the wire and a member-count threshold.
+- **Attach/detach plumbing**: the manager is told about instances through a third broker hook
+  (`Broker.Search`); an observer on `discovery.Router` would fence once for every consumer.

@@ -24,18 +24,20 @@ import (
 
 // Doc is one API member as the add-in reflects it -- the same fields
 // search_functions has always returned (mcpserver.Member), plus Core.
+// The JSON tags are the dump_members wire shape (DiscoveryResultMessage.cs),
+// so a page decodes straight into []Doc.
 type Doc struct {
-	MemberID      string
-	Kind          string
-	Namespace     string
-	DeclaringType string
-	Name          string
-	Signature     string
-	Summary       string
+	MemberID      string `json:"member_id"`
+	Kind          string `json:"kind"`
+	Namespace     string `json:"namespace"`
+	DeclaringType string `json:"declaring_type"`
+	Name          string `json:"name"`
+	Signature     string `json:"signature"`
+	Summary       string `json:"summary"`
 	// Core is true for members of RevitAPI.dll/RevitAPIUI.dll, false for any
 	// other loaded add-in. Used as a tie-break in favour of core, never to
 	// exclude add-ins (PRD §08).
-	Core bool
+	Core bool `json:"core"`
 }
 
 // Path is the declaring type's fully-qualified name. On the wire the add-in
@@ -109,9 +111,6 @@ const (
 	// (recall@1 23/43, MRR 0.629 == pool 50) at ~1s in pure Go; pool 50
 	// costs 2.1-2.4s for no rank-1 gain.
 	DefaultRerankPool = 20
-	// coreTieBreak is far below any real score difference; it only orders
-	// otherwise-identical core vs add-in members.
-	coreTieBreak = 1e-9
 )
 
 // Per-field weights, lexical (BM25F) and dense (cosine), from the POC.
@@ -142,25 +141,30 @@ func fieldText(d Doc, field int) string {
 
 // Index is a built corpus. Build once per (Revit version, add-in set); the
 // dense side is attached separately by Embed because it needs a model and
-// the lexical side does not.
+// the lexical side does not. Junk docs (IsJunk) are dropped at Build, so
+// they cost nothing per query and can never be returned.
 type Index struct {
 	docs []Doc
-	junk []bool
 	lex  *lexicalIndex
 
 	denseMu sync.RWMutex
 	dense   *denseIndex
 }
 
-// Build indexes docs for lexical retrieval.
+// Build indexes the non-junk docs for lexical retrieval.
 func Build(docs []Doc) *Index {
-	ix := &Index{docs: docs, junk: make([]bool, len(docs))}
+	kept := make([]Doc, 0, len(docs))
+	for _, d := range docs {
+		if !IsJunk(d) {
+			kept = append(kept, d)
+		}
+	}
+	ix := &Index{docs: kept}
 	fields := make([][][]string, numFields)
 	for f := range fields {
-		fields[f] = make([][]string, len(docs))
+		fields[f] = make([][]string, len(kept))
 	}
-	for i, d := range docs {
-		ix.junk[i] = IsJunk(d)
+	for i, d := range kept {
 		for f := 0; f < numFields; f++ {
 			fields[f][i] = Tokenize(fieldText(d, f))
 		}
@@ -169,7 +173,7 @@ func Build(docs []Doc) *Index {
 	return ix
 }
 
-// Len is the number of indexed docs, junk included.
+// Len is the number of indexed (non-junk) docs.
 func (ix *Index) Len() int { return len(ix.docs) }
 
 // Embed attaches the dense retriever by embedding every doc's fields with
@@ -223,8 +227,8 @@ func (ix *Index) Search(ctx context.Context, q Query) ([]Hit, error) {
 
 	hits := make([]Hit, len(fused))
 	for i, id := range fused {
-		// Position-derived score keeps hits strictly ordered and lets core
-		// win an exact tie without disturbing any real ranking signal.
+		// Without a reranker the score is position-derived (1/rank): fused
+		// RRF scores are not meaningful to a caller, order is.
 		hits[i] = Hit{Doc: ix.docs[id], Score: 1.0 / float64(i+1)}
 	}
 	hits = ix.breakCoreTies(hits, fused, lexScores)
@@ -260,12 +264,12 @@ func (ix *Index) Search(ctx context.Context, q Query) ([]Hit, error) {
 	return hits, nil
 }
 
-// mask returns the per-doc eligibility vector for q: not junk, and in the
-// requested namespace (exact match) when one is given.
+// mask returns the per-doc eligibility vector for q: in the requested
+// namespace (exact match), or every doc when none is given.
 func (ix *Index) mask(namespace string) []bool {
 	m := make([]bool, len(ix.docs))
 	for i, d := range ix.docs {
-		m[i] = !ix.junk[i] && (namespace == "" || d.Namespace == namespace)
+		m[i] = namespace == "" || d.Namespace == namespace
 	}
 	return m
 }
@@ -307,8 +311,8 @@ var junkTypes = map[string]bool{
 	"Autodesk.Revit.UI.PostableCommand":       true,
 }
 
-// IsJunk reports whether d is masked from search results. Junk docs remain
-// reachable through list_functions and describe_function.
+// IsJunk reports whether d is excluded from the search index. Junk docs
+// remain reachable through list_functions and describe_function.
 func IsJunk(d Doc) bool {
 	if junkTypes[d.Path()] {
 		return true

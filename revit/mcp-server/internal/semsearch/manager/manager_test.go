@@ -108,7 +108,7 @@ func TestBuildPagesWholeCorpusAndServesSearch(t *testing.T) {
 		t.Fatalf("Search before attach err = %v, want ErrNotReady", err)
 	}
 
-	m.OnAttach("inst-1", "2027")
+	m.OnAttach("inst-1")
 	st := waitReady(t, m, "inst-1")
 	if st.State != StateReady || st.Members != 30 || st.Fingerprint != "fp-a" || st.Dense {
 		t.Fatalf("status = %+v", st)
@@ -116,9 +116,16 @@ func TestBuildPagesWholeCorpusAndServesSearch(t *testing.T) {
 	if got := src.calls.Load(); got < 5 {
 		t.Fatalf("expected paging through the capped source, got %d calls", got)
 	}
-	hits, err := m.Search(context.Background(), "inst-1", "create wall", "")
-	if err != nil || len(hits) == 0 || hits[0].Doc.MemberID != "M:Autodesk.Revit.DB.Wall.Create" {
-		t.Fatalf("hits=%v err=%v", hits, err)
+	res, err := m.Search(context.Background(), "inst-1", "create wall", "")
+	if err != nil || len(res.Hits) == 0 || res.Hits[0].Doc.MemberID != "M:Autodesk.Revit.DB.Wall.Create" || res.Dense || res.Fingerprint != "fp-a" {
+		t.Fatalf("res=%+v err=%v", res, err)
+	}
+	// The identical search is served from the ranked-list cache: same hits,
+	// no second pipeline run (the reranker counts calls in
+	// TestModelsAreWiredIntoSearch; here we check identity of the slice).
+	again, _ := m.Search(context.Background(), "inst-1", "  Create Wall ", "")
+	if len(again.Hits) != len(res.Hits) || &again.Hits[0] != &res.Hits[0] {
+		t.Fatalf("repeat search did not hit the cache")
 	}
 }
 
@@ -126,11 +133,11 @@ func TestAttachIsIdempotentWhileBuildingAndWhenReady(t *testing.T) {
 	src := newFakeSource()
 	src.set("inst-1", "fp-a", corpus(10))
 	m := New(src, nil, nil, nil)
-	m.OnAttach("inst-1", "2027")
-	m.OnAttach("inst-1", "2027") // doc-event re-register during the build
+	m.OnAttach("inst-1")
+	m.OnAttach("inst-1") // doc-event re-register during the build
 	waitReady(t, m, "inst-1")
 	calls := src.calls.Load()
-	m.OnAttach("inst-1", "2027") // and once ready
+	m.OnAttach("inst-1") // and once ready
 	time.Sleep(50 * time.Millisecond)
 	if src.calls.Load() != calls {
 		t.Fatalf("re-attach triggered another dump: %d -> %d calls", calls, src.calls.Load())
@@ -143,11 +150,11 @@ func TestSameFingerprintReusesIndexAcrossInstances(t *testing.T) {
 	src.set("inst-1", "fp-shared", docs)
 	src.set("inst-2", "fp-shared", docs)
 	m := New(src, nil, nil, nil)
-	m.OnAttach("inst-1", "2027")
+	m.OnAttach("inst-1")
 	waitReady(t, m, "inst-1")
 	before := src.calls.Load()
 
-	m.OnAttach("inst-2", "2027")
+	m.OnAttach("inst-2")
 	st := waitReady(t, m, "inst-2")
 	if st.State != StateReady || st.Members != 20 {
 		t.Fatalf("inst-2 status = %+v", st)
@@ -163,7 +170,7 @@ func TestSameFingerprintReusesIndexAcrossInstances(t *testing.T) {
 		t.Fatalf("after detach state = %s", st.State)
 	}
 	before = src.calls.Load()
-	m.OnAttach("inst-1", "2027")
+	m.OnAttach("inst-1")
 	waitReady(t, m, "inst-1")
 	if got := src.calls.Load() - before; got != 1 {
 		t.Fatalf("reattach made %d dump calls, want 1", got)
@@ -176,16 +183,16 @@ func TestWireFailureMarksFailedAndAllowsRebuildOnNextAttach(t *testing.T) {
 	src.set("inst-1", "fp-a", corpus(12))
 	src.failAt = 5
 	m := New(src, nil, nil, nil)
-	m.OnAttach("inst-1", "2027")
+	m.OnAttach("inst-1")
 	st := waitReady(t, m, "inst-1")
-	if st.State != StateFailed || st.Err == nil {
-		t.Fatalf("status = %+v, want failed", st)
+	if st.State != StateFailed || st.Err == nil || st.Err.Code != "search-index-build-failed" || st.Err.Detail["cause"] == nil {
+		t.Fatalf("status = %+v, want failed with a §01 record carrying the wire cause", st)
 	}
 	if _, err := m.Search(context.Background(), "inst-1", "wall", ""); !errors.Is(err, ErrNotReady) {
 		t.Fatalf("Search on failed index err = %v", err)
 	}
 	src.failAt = -1
-	m.OnAttach("inst-1", "2027")
+	m.OnAttach("inst-1")
 	if st := waitReady(t, m, "inst-1"); st.State != StateReady {
 		t.Fatalf("rebuild status = %+v", st)
 	}
@@ -196,7 +203,7 @@ func TestFingerprintChangeMidDumpFails(t *testing.T) {
 	src.pageCap = 5
 	src.set("inst-1", "fp-a", corpus(12))
 	m := New(src, nil, nil, nil)
-	m.OnAttach("inst-1", "2027")
+	m.OnAttach("inst-1")
 	st := waitReady(t, m, "inst-1")
 	if st.State != StateFailed {
 		t.Fatalf("status = %+v, want failed on fingerprint flip", st)
@@ -238,18 +245,30 @@ func TestModelsAreWiredIntoSearch(t *testing.T) {
 	src.set("inst-1", "fp-a", corpus(10))
 	rr := &countingReranker{}
 	m := New(src, constEmbedder{}, rr, nil)
-	if !m.HasModels() {
-		t.Fatal("HasModels false with both models set")
-	}
-	m.OnAttach("inst-1", "2027")
+	m.OnAttach("inst-1")
 	st := waitReady(t, m, "inst-1")
 	if !st.Dense {
 		t.Fatalf("status = %+v, want dense", st)
 	}
+	res, err := m.Search(context.Background(), "inst-1", "create wall", "")
+	if err != nil || !res.Dense {
+		t.Fatalf("res=%+v err=%v", res, err)
+	}
+	if rr.calls.Load() != 1 {
+		t.Fatalf("reranker calls = %d, want 1", rr.calls.Load())
+	}
+	// A cursor page re-asks the same query: served from cache, no rerank.
 	if _, err := m.Search(context.Background(), "inst-1", "create wall", ""); err != nil {
 		t.Fatal(err)
 	}
 	if rr.calls.Load() != 1 {
-		t.Fatalf("reranker calls = %d, want 1", rr.calls.Load())
+		t.Fatalf("repeat search re-ran the reranker: %d calls", rr.calls.Load())
+	}
+	// A different namespace scope is a different ranked set.
+	if _, err := m.Search(context.Background(), "inst-1", "create wall", "Autodesk.Revit.DB"); err != nil {
+		t.Fatal(err)
+	}
+	if rr.calls.Load() != 2 {
+		t.Fatalf("scoped search should rerank once more: %d calls", rr.calls.Load())
 	}
 }

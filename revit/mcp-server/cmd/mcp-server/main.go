@@ -282,16 +282,14 @@ func main() {
 		return
 	}
 	if *showSearchModels {
-		if models.Available() {
-			if err := models.Verify(); err != nil {
-				fmt.Println("search models: bundled but failed verification:", err)
-				os.Exit(1)
-			}
-			fmt.Println("search models: bundled (potion-base-8M static embedder + ms-marco-MiniLM-L-6-v2 int8 cross-encoder, sha256-verified)")
-			return
+		// Verify distinguishes both failure modes itself: a missing file
+		// names the fetch step, a bad one names the pin mismatch.
+		if err := models.Verify(); err != nil {
+			fmt.Println("search models: not usable --", err, "-- this binary ranks keyword-only")
+			os.Exit(1)
 		}
-		fmt.Printf("search models: missing %v -- run internal/semsearch/models/fetch-models.sh before building; this binary ranks keyword-only\n", models.Missing())
-		os.Exit(1)
+		fmt.Println("search models: bundled (potion-base-8M static embedder + ms-marco-MiniLM-L-6-v2 int8 cross-encoder, sha256-verified)")
+		return
 	}
 
 	logger := log.New(os.Stderr, "["+serverName+"] ", log.LstdFlags|log.Lmsgprefix)
@@ -652,16 +650,20 @@ func runSecondary(ctx context.Context, dataDir string, logger *log.Logger, stdin
 // or silently ranking worse.
 func newSearchManager(router *discovery.Router, dataDir string, logger *log.Logger) *manager.Manager {
 	logf := logger.Printf
-	if !models.Available() {
-		logger.Printf("semsearch: embedding models not bundled in this build (missing %v); search_functions ranks lexical-only", models.Missing())
-		return manager.New(router, nil, nil, logf)
-	}
-	tok, st, err := models.Embedder()
+	// Model loading is synchronous on the startup path; the log line makes
+	// its cost visible so a slow machine's "broker took N seconds to come
+	// up" has an attribution.
+	start := time.Now()
+	defer func() {
+		logger.Printf("semsearch: search models loaded in %v", time.Since(start).Round(time.Millisecond))
+	}()
+	tok, st, normalize, err := models.Embedder()
 	if err != nil {
+		// Covers the not-fetched build: read() names the fetch step.
 		logger.Printf("semsearch: %v; search_functions ranks lexical-only", err)
 		return manager.New(router, nil, nil, logf)
 	}
-	emb, err := staticembed.Load(tok, st, true)
+	emb, err := staticembed.Load(tok, st, normalize)
 	if err != nil {
 		logger.Printf("semsearch: loading static embedder: %v; search_functions ranks lexical-only", err)
 		return manager.New(router, nil, nil, logf)

@@ -72,7 +72,7 @@ public class DiscoveryCacheTests
         var first = cache.CorpusFingerprint();
         cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
 
-        Assert.Equal(64, first.Length);
+        Assert.Equal(64, first.Length); // SHA-256 hex
         Assert.Equal(first, cache.CorpusFingerprint());
 
         cache.SetStoredHashForTesting(typeof(Widget).Assembly.Location, "deliberately-stale-hash");

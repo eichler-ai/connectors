@@ -174,16 +174,7 @@ public sealed class DiscoveryService
         {
             Members = rows.Select(r => new DumpedMember
             {
-                Member = new MemberSignature
-                {
-                    MemberId = r.MemberId,
-                    Kind = r.Kind,
-                    Namespace = r.Namespace,
-                    DeclaringType = r.DeclaringType,
-                    Name = r.Name,
-                    Signature = r.Signature,
-                    Summary = r.Summary,
-                },
+                Member = ToMemberSignature(r, truncateSummary: false),
                 IsCore = r.IsCoreAssembly,
             }).ToList(),
             Total = total,
@@ -192,7 +183,12 @@ public sealed class DiscoveryService
         };
     }
 
-    private static MemberSignature ToMemberSignature(DiscoveryMemberRow row) => new()
+    /// <param name="truncateSummary">
+    /// list_functions/search_functions truncate for display; describe_function (below) doesn't, and
+    /// dump_members ships the full text as ranking input -- see DiscoveryReflector.MaxSummaryLength's own
+    /// doc comment for why truncation happens here, not at reflection/insert time.
+    /// </param>
+    private static MemberSignature ToMemberSignature(DiscoveryMemberRow row, bool truncateSummary = true) => new()
     {
         MemberId = row.MemberId,
         Kind = row.Kind,
@@ -200,10 +196,7 @@ public sealed class DiscoveryService
         DeclaringType = row.DeclaringType,
         Name = row.Name,
         Signature = row.Signature,
-        // list_functions/search_functions truncate; describe_function (below) doesn't -- see
-        // DiscoveryReflector.MaxSummaryLength's own doc comment for why this happens here, not at
-        // reflection/insert time.
-        Summary = DiscoveryReflector.Truncate(row.Summary),
+        Summary = truncateSummary ? DiscoveryReflector.Truncate(row.Summary) : row.Summary,
     };
 
     // -------------------------------------------------------------------------------------------------

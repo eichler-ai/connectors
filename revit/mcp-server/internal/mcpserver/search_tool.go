@@ -15,15 +15,15 @@ import (
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/semsearch/manager"
 )
 
+// Broker-owned paging and display bounds for the index path. They match
+// the add-in's historical values (top_n default 20, max 500; 300-char
+// summaries) so the tool's shape did not change when ranking moved, but the
+// broker is now the owner: the corpus arrives with untruncated summaries for
+// ranking and is truncated here for display.
 const (
-	// defaultSearchTopN / maxSearchTopN mirror the add-in's
-	// RequestDispatcher (DefaultSearchFunctionsTopN, ClampPageSize).
 	defaultSearchTopN = 20
 	maxSearchTopN     = 500
-	// maxSummaryChars mirrors DiscoveryReflector.MaxSummaryLength: the corpus
-	// carries untruncated summaries for ranking; results are truncated for
-	// display exactly as the add-in always has.
-	maxSummaryChars = 300
+	maxSummaryChars   = 300
 )
 
 // Ranker values reported on SearchFunctionsOut.Ranker.
@@ -65,13 +65,17 @@ func truncateSummary(s string) string {
 	return strings.TrimRight(s[:maxSummaryChars], " \t\r\n") + "..."
 }
 
-// Cursors are "offset:scopehash", the add-in's own scheme, so a cursor
-// issued for one query cannot be replayed against another.
-func searchScope(query, namespace string) string {
+// Cursors are "offset:scopehash". The scope covers the query, the namespace
+// and the identity of the ranked set (corpus fingerprint plus ranker), so a
+// cursor cannot be replayed against another query, nor against a different
+// ranking of the same one -- e.g. one minted while the add-in's keyword
+// ranker was answering, once the broker index is ready.
+func searchScope(query, namespace, fingerprint, ranker string) string {
 	h := fnv.New32a()
-	h.Write([]byte(namespace))
-	h.Write([]byte{0})
-	h.Write([]byte(strings.ToLower(strings.TrimSpace(query))))
+	for _, part := range []string{namespace, strings.ToLower(strings.TrimSpace(query)), fingerprint, ranker} {
+		h.Write([]byte(part))
+		h.Write([]byte{0})
+	}
 	return strconv.FormatUint(uint64(h.Sum32()), 16)
 }
 
@@ -137,14 +141,27 @@ func semanticGuidance(returned, total int, dense bool) string {
 }
 
 // fallbackGuidance explains why the add-in's keyword ranker answered instead
-// of the broker index, and what to do.
+// of the broker index, and what to do. The structured reason travels in
+// notices[] (fallbackNotice); this is the prose hint beside it.
 func fallbackGuidance(st manager.Status) string {
 	switch st.State {
 	case manager.StateBuilding:
 		return "The semantic search index for this Revit instance is still building (it usually takes a few seconds after the instance connects); this result came from the add-in's keyword ranker. Retry shortly for semantic ranking. "
 	case manager.StateFailed:
-		return fmt.Sprintf("The semantic search index for this Revit instance failed to build (%v); this result came from the add-in's keyword ranker, which matches tokens only. ", st.Err)
+		return "The semantic search index for this Revit instance failed to build (see notices); this result came from the add-in's keyword ranker, which matches tokens only. "
 	default:
 		return "The semantic search index is not available for this Revit instance; this result came from the add-in's keyword ranker, which matches tokens only. "
 	}
+}
+
+// fallbackNotice is the §01 record for why the index did not answer: the
+// build failure itself when there is one, else an info-level building note.
+func fallbackNotice(instanceID string, st manager.Status) *diag.Record {
+	if st.State == manager.StateFailed && st.Err != nil {
+		return st.Err
+	}
+	return diag.New(diag.SeverityInfo, "search-index-building", discoverySource,
+		"the search_functions index for instance "+instanceID+" is not ready yet ("+st.State.String()+"); this response was ranked by the add-in's keyword ranker").
+		WithDetail(map[string]any{"instance_id": instanceID, "state": st.State.String()}).
+		WithRemedy("retry in a few seconds for semantic ranking")
 }

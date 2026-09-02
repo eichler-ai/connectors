@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -54,6 +55,10 @@ func (s State) String() string {
 
 // Bounds (CONVENTIONS.md: every retained buffer states its bound).
 const (
+	// maxCachedSearches bounds the ranked-list cache that makes cursor paging
+	// a slice instead of a re-run of the whole pipeline (the cross-encoder
+	// alone is ~1s): entries × up to 2*candidateDepth hits, well under 1MB.
+	maxCachedSearches = 16
 	// pageSize members per dump_members call: ~300 bytes each, ~1.5MB a
 	// page, far under the wire's 64MiB line cap; the 2027 corpus is ~16 pages.
 	pageSize = 5000
@@ -62,31 +67,44 @@ const (
 	maxMembers = 400_000
 	// buildTimeout bounds the whole page-and-index run.
 	buildTimeout = 5 * time.Minute
-	// maxCachedIndexes bounds the fingerprint cache: each index is ~250MB
-	// for the full corpus with dense vectors, so keep only a few.
+	// maxCachedIndexes bounds the fingerprint cache: each index is ~235MB for
+	// the 2027 corpus with dense vectors (76k × 3 fields × 256 × 4B), so this
+	// is up to ~700MB resident. Keep only a few.
 	maxCachedIndexes = 3
 )
 
 // Status is a snapshot of one instance's index.
 type Status struct {
-	State        State
-	Fingerprint  string
-	Members      int
-	Dense        bool // dense retriever attached (models available and embedded)
-	Err          error
-	BuiltAt      time.Time
-	RevitVersion string
+	State       State
+	Fingerprint string
+	Members     int
+	Dense       bool // dense retriever attached (models available and embedded)
+	// Err is the build failure as a §01 record (code search-index-build-failed);
+	// nil unless State is StateFailed.
+	Err     *diag.Record
+	BuiltAt time.Time
+}
+
+// built is the outcome of one build; entry embeds it. Every field is written
+// before done is closed, and only read after, so the close is the fence.
+type built struct {
+	fingerprint string
+	ix          *semsearch.Index
+	members     int
+	dense       bool
+	builtAt     time.Time
 }
 
 type entry struct {
-	fingerprint  string
-	revitVersion string
-	ix           *semsearch.Index
-	members      int
-	dense        bool
-	builtAt      time.Time
-	err          error
-	done         chan struct{} // closed when the build finished (ready or failed)
+	built
+	err  *diag.Record
+	done chan struct{} // closed when the build finished (ready or failed)
+}
+
+// cachedSearch is one ranked list, kept so cursor pages are slices.
+type cachedSearch struct {
+	key  string
+	hits []semsearch.Hit
 }
 
 // Manager -- construct with New.
@@ -96,10 +114,13 @@ type Manager struct {
 	reranker semsearch.Reranker
 	logf     func(string, ...any)
 
-	mu         sync.Mutex
+	mu sync.Mutex
+	// byInstance is bounded by the connected instances (the broker detaches
+	// on disconnect and the registry prunes dead ones).
 	byInstance map[string]*entry
 	byPrint    map[string]*built // ready indexes by fingerprint, oldest evicted first
 	printOrder []string
+	searches   []cachedSearch // most recent last, bounded by maxCachedSearches
 }
 
 // New builds a Manager. embedder and reranker may be nil (lexical-only).
@@ -111,13 +132,10 @@ func New(src Source, embedder semsearch.Embedder, reranker semsearch.Reranker, l
 		byInstance: map[string]*entry{}, byPrint: map[string]*built{}}
 }
 
-// HasModels reports whether the dense retriever and reranker are wired.
-func (m *Manager) HasModels() bool { return m.embedder != nil && m.reranker != nil }
-
 // OnAttach starts (or reuses) the index build for instanceID. Idempotent:
 // the add-in re-registers on every document event, so repeated calls while a
 // build is running or an index is ready are no-ops.
-func (m *Manager) OnAttach(instanceID, revitVersion string) {
+func (m *Manager) OnAttach(instanceID string) {
 	m.mu.Lock()
 	if e, ok := m.byInstance[instanceID]; ok {
 		select {
@@ -132,7 +150,7 @@ func (m *Manager) OnAttach(instanceID, revitVersion string) {
 			return // building
 		}
 	}
-	e := &entry{revitVersion: revitVersion, done: make(chan struct{})}
+	e := &entry{done: make(chan struct{})}
 	m.byInstance[instanceID] = e
 	m.mu.Unlock()
 	go m.build(instanceID, e)
@@ -157,18 +175,16 @@ func (m *Manager) Status(instanceID string) Status {
 	select {
 	case <-e.done:
 	default:
-		return Status{State: StateBuilding, RevitVersion: e.revitVersion}
+		return Status{State: StateBuilding}
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	if e.err != nil {
-		return Status{State: StateFailed, Err: e.err, RevitVersion: e.revitVersion}
+		return Status{State: StateFailed, Err: e.err}
 	}
-	return Status{State: StateReady, Fingerprint: e.fingerprint, Members: e.members, Dense: e.dense, BuiltAt: e.builtAt, RevitVersion: e.revitVersion}
+	return Status{State: StateReady, Fingerprint: e.fingerprint, Members: e.members, Dense: e.dense, BuiltAt: e.builtAt}
 }
 
-// WaitReady blocks until the instance's build finishes or ctx ends; for tests
-// and for callers that prefer a short wait over a degraded answer.
+// WaitReady blocks until the instance's build finishes or ctx ends. Test
+// helper; production never waits on a build (it falls back instead).
 func (m *Manager) WaitReady(ctx context.Context, instanceID string) Status {
 	m.mu.Lock()
 	e, ok := m.byInstance[instanceID]
@@ -187,63 +203,101 @@ func (m *Manager) WaitReady(ctx context.Context, instanceID string) Status {
 // unknown; Status carries the detail.
 var ErrNotReady = errors.New("search index not ready")
 
+// Result is one ranked search over a ready index.
+type Result struct {
+	Hits []semsearch.Hit
+	// Dense reports whether the dense retriever (and so the semantic ranker)
+	// took part; false means lexical-only.
+	Dense bool
+	// Fingerprint identifies the corpus the ranking came from, so a paging
+	// cursor can be tied to exactly this ranked set.
+	Fingerprint string
+}
+
 // Search runs the full pipeline (dense when models are wired, cross-encoder
 // rerank over the default pool) for instanceID. Namespace is an exact-match
-// pre-mask; an empty string means unscoped.
-func (m *Manager) Search(ctx context.Context, instanceID, query, namespace string) ([]semsearch.Hit, error) {
+// pre-mask; an empty string means unscoped. Repeated identical searches on
+// the same corpus are served from a small cache, which is what makes cursor
+// paging cheap.
+func (m *Manager) Search(ctx context.Context, instanceID, query, namespace string) (Result, error) {
 	m.mu.Lock()
 	e, ok := m.byInstance[instanceID]
 	m.mu.Unlock()
 	if !ok {
-		return nil, ErrNotReady
+		return Result{}, ErrNotReady
 	}
 	select {
 	case <-e.done:
 	default:
-		return nil, ErrNotReady
+		return Result{}, ErrNotReady
 	}
-	m.mu.Lock()
-	ix, dense, buildErr := e.ix, e.dense, e.err
-	m.mu.Unlock()
-	if buildErr != nil {
-		return nil, ErrNotReady
+	if e.err != nil {
+		return Result{}, ErrNotReady
 	}
-	q := semsearch.Query{Text: query, Namespace: namespace}
-	if dense {
+	res := Result{Dense: e.dense, Fingerprint: e.fingerprint}
+	key := e.fingerprint + "\x00" + namespace + "\x00" + strings.ToLower(strings.TrimSpace(query))
+	if hits, ok := m.cachedSearch(key); ok {
+		res.Hits = hits
+		return res, nil
+	}
+	q := semsearch.Query{Text: query, Namespace: namespace, Reranker: m.reranker}
+	if e.dense {
 		q.Embedder = m.embedder
 	}
-	if m.reranker != nil {
-		q.Reranker = m.reranker
-		q.RerankPool = semsearch.DefaultRerankPool
+	hits, err := e.ix.Search(ctx, q)
+	if err != nil {
+		return Result{}, err
 	}
-	return ix.Search(ctx, q)
+	m.rememberSearch(key, hits)
+	res.Hits = hits
+	return res, nil
+}
+
+func (m *Manager) cachedSearch(key string) ([]semsearch.Hit, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, c := range m.searches {
+		if c.key == key {
+			return c.hits, true
+		}
+	}
+	return nil, false
+}
+
+func (m *Manager) rememberSearch(key string, hits []semsearch.Hit) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.searches = append(m.searches, cachedSearch{key: key, hits: hits})
+	if len(m.searches) > maxCachedSearches {
+		m.searches = m.searches[1:]
+	}
 }
 
 // --- build -------------------------------------------------------------------
 
 type dumpPage struct {
-	Members []struct {
-		MemberID      string `json:"member_id"`
-		Kind          string `json:"kind"`
-		Namespace     string `json:"namespace"`
-		DeclaringType string `json:"declaring_type"`
-		Name          string `json:"name"`
-		Signature     string `json:"signature"`
-		Summary       string `json:"summary"`
-		Core          bool   `json:"core"`
-	} `json:"members"`
-	Total       int    `json:"total"`
-	NextOffset  *int   `json:"next_offset"`
-	Fingerprint string `json:"fingerprint"`
+	Members     []semsearch.Doc `json:"members"`
+	Total       int             `json:"total"`
+	NextOffset  *int            `json:"next_offset"`
+	Fingerprint string          `json:"fingerprint"`
 }
 
-// built is the outcome of one build, published into the entry under m.mu.
-type built struct {
-	fingerprint string
-	ix          *semsearch.Index
-	members     int
-	dense       bool
-	builtAt     time.Time
+const source = "mcp-server.internal.semsearch.manager"
+
+// buildFailed wraps a build failure as the §01 record search_functions
+// reports in its notices; cause may be a wire diag.Record (kept in detail).
+func buildFailed(instanceID string, cause *diag.Record, err error) *diag.Record {
+	msg := "the search_functions index for instance " + instanceID + " could not be built"
+	if err != nil {
+		msg += ": " + err.Error()
+	}
+	rec := diag.New(diag.SeverityWarning, "search-index-build-failed", source, msg).
+		WithRemedy("search_functions keeps answering from the add-in's keyword ranker; the index is rebuilt when the instance next reconnects")
+	detail := map[string]any{"instance_id": instanceID}
+	if cause != nil {
+		detail["cause"] = cause
+	}
+	return rec.WithDetail(detail)
 }
 
 func (m *Manager) build(instanceID string, e *entry) {
@@ -251,34 +305,30 @@ func (m *Manager) build(instanceID string, e *entry) {
 	defer cancel()
 	start := time.Now()
 	res, err := m.buildCorpus(ctx, instanceID)
-	m.mu.Lock()
 	if err != nil {
 		e.err = err
+		m.logf("semsearch: index build for instance %s failed after %v: %s", instanceID, time.Since(start).Round(time.Millisecond), err.Message)
 	} else {
-		e.fingerprint, e.ix, e.members, e.dense, e.builtAt = res.fingerprint, res.ix, res.members, res.dense, res.builtAt
-	}
-	m.mu.Unlock()
-	if err != nil {
-		m.logf("semsearch: index build for instance %s failed after %v: %v", instanceID, time.Since(start).Round(time.Millisecond), err)
-	} else {
+		e.built = res
 		m.logf("semsearch: index for instance %s ready in %v (%d members, fingerprint %.12s, dense=%v)",
 			instanceID, time.Since(start).Round(time.Millisecond), res.members, res.fingerprint, res.dense)
 	}
 	close(e.done)
 }
 
-func (m *Manager) buildCorpus(ctx context.Context, instanceID string) (built, error) {
+func (m *Manager) buildCorpus(ctx context.Context, instanceID string) (built, *diag.Record) {
 	var res built
 	var docs []semsearch.Doc
 	offset := 0
+	fail := func(err error) (built, *diag.Record) { return res, buildFailed(instanceID, nil, err) }
 	for {
 		raw, _, drec := m.src.DumpMembers(ctx, instanceID, offset, pageSize)
 		if drec != nil {
-			return res, fmt.Errorf("dump_members at offset %d: %s: %s", offset, drec.Code, drec.Message)
+			return res, buildFailed(instanceID, drec, fmt.Errorf("dump_members at offset %d failed", offset))
 		}
 		var page dumpPage
 		if err := json.Unmarshal(raw, &page); err != nil {
-			return res, fmt.Errorf("dump_members at offset %d: decoding: %w", offset, err)
+			return fail(fmt.Errorf("dump_members at offset %d: decoding: %w", offset, err))
 		}
 		if offset == 0 {
 			// Reuse a cached index for this exact corpus, if we have one.
@@ -288,24 +338,21 @@ func (m *Manager) buildCorpus(ctx context.Context, instanceID string) (built, er
 			}
 			res.fingerprint = page.Fingerprint
 			if page.Total > maxMembers {
-				return res, fmt.Errorf("corpus reports %d members, above the %d bound", page.Total, maxMembers)
+				return fail(fmt.Errorf("corpus reports %d members, above the %d bound", page.Total, maxMembers))
 			}
 			docs = make([]semsearch.Doc, 0, page.Total)
 		} else if page.Fingerprint != res.fingerprint {
-			return res, fmt.Errorf("corpus changed mid-dump (fingerprint %.12s -> %.12s); the add-in re-synced", res.fingerprint, page.Fingerprint)
+			return fail(fmt.Errorf("corpus changed mid-dump (fingerprint %.12s -> %.12s); the add-in re-synced", res.fingerprint, page.Fingerprint))
 		}
-		for _, r := range page.Members {
-			docs = append(docs, semsearch.Doc{MemberID: r.MemberID, Kind: r.Kind, Namespace: r.Namespace, DeclaringType: r.DeclaringType,
-				Name: r.Name, Signature: r.Signature, Summary: r.Summary, Core: r.Core})
-		}
+		docs = append(docs, page.Members...)
 		if len(docs) > maxMembers {
-			return res, fmt.Errorf("corpus exceeded the %d member bound", maxMembers)
+			return fail(fmt.Errorf("corpus exceeded the %d member bound", maxMembers))
 		}
 		if page.NextOffset == nil || len(page.Members) == 0 {
 			break
 		}
 		if *page.NextOffset <= offset {
-			return res, fmt.Errorf("dump_members next_offset %d does not advance past %d", *page.NextOffset, offset)
+			return fail(fmt.Errorf("dump_members next_offset %d does not advance past %d", *page.NextOffset, offset))
 		}
 		offset = *page.NextOffset
 	}
@@ -313,11 +360,11 @@ func (m *Manager) buildCorpus(ctx context.Context, instanceID string) (built, er
 	ix := semsearch.Build(docs)
 	if m.embedder != nil {
 		if err := ix.Embed(ctx, m.embedder); err != nil {
-			return res, fmt.Errorf("embedding corpus: %w", err)
+			return fail(fmt.Errorf("embedding corpus: %w", err))
 		}
 		res.dense = true
 	}
-	res.ix, res.members, res.builtAt = ix, len(docs), time.Now()
+	res.ix, res.members, res.builtAt = ix, ix.Len(), time.Now()
 	m.storePrint(res)
 	return res, nil
 }

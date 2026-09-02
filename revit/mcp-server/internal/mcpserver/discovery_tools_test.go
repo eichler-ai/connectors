@@ -12,16 +12,19 @@ import (
 
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/discovery"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/registry"
+	"github.com/eichler-ai/connectors/revit/mcp-server/internal/semsearch/manager"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/transport"
 )
 
 // connectDiscoveryClient wires an in-process MCP client to a server that has
 // the discovery tools registered, using the SDK's in-memory transport pair —
 // mirrors tools_test.go's connectClient.
-func connectDiscoveryClient(t *testing.T, r *discovery.Router) *mcp.ClientSession {
+// connectDiscoveryClient wires the discovery tools over in-memory MCP
+// transports; search is the broker-side index (nil = add-in ranker only).
+func connectDiscoveryClient(t *testing.T, r *discovery.Router, search *manager.Manager) *mcp.ClientSession {
 	t.Helper()
 	server := mcp.NewServer(&mcp.Implementation{Name: "revit-mcp-server-test", Version: "0.0.0"}, nil)
-	RegisterDiscovery(server, r, nil)
+	RegisterDiscovery(server, r, search)
 
 	clientTransport, serverTransport := mcp.NewInMemoryTransports()
 
@@ -69,7 +72,7 @@ func TestListFunctionsToolSuccess_NamespacesTier(t *testing.T) {
 			"total_scoped": 60,
 		}, nil
 	})
-	cs := connectDiscoveryClient(t, r)
+	cs := connectDiscoveryClient(t, r, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -107,7 +110,7 @@ func TestListFunctionsToolSuccess_TypesTier(t *testing.T) {
 			"total_scoped": 1234,
 		}, nil
 	})
-	cs := connectDiscoveryClient(t, r)
+	cs := connectDiscoveryClient(t, r, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -148,7 +151,7 @@ func TestListFunctionsToolSuccess_MembersTier(t *testing.T) {
 			"total_scoped": 2,
 		}, nil
 	})
-	cs := connectDiscoveryClient(t, r)
+	cs := connectDiscoveryClient(t, r, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -200,7 +203,7 @@ func TestSearchFunctionsToolSuccess(t *testing.T) {
 			"total_matched": 57,
 		}, nil
 	})
-	cs := connectDiscoveryClient(t, r)
+	cs := connectDiscoveryClient(t, r, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -250,7 +253,7 @@ func TestSearchFunctionsToolWorkableSetGuidance(t *testing.T) {
 			"total_matched": 4,
 		}, nil
 	})
-	cs := connectDiscoveryClient(t, r)
+	cs := connectDiscoveryClient(t, r, nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	res, err := cs.CallTool(ctx, &mcp.CallToolParams{
@@ -280,7 +283,7 @@ func TestSearchFunctionsToolEmptyGuidance(t *testing.T) {
 	attachFakeDiscoveryInstance(t, r, "inst-1", func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
 		return map[string]any{"results": []any{}, "total_matched": 0}, nil
 	})
-	cs := connectDiscoveryClient(t, r)
+	cs := connectDiscoveryClient(t, r, nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	res, err := cs.CallTool(ctx, &mcp.CallToolParams{
@@ -328,7 +331,7 @@ func TestDescribeFunctionToolSingleOverload(t *testing.T) {
 			"overload_count": 3,
 		}, nil
 	})
-	cs := connectDiscoveryClient(t, r)
+	cs := connectDiscoveryClient(t, r, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -361,7 +364,7 @@ func TestDescribeFunctionToolMultipleOverloads(t *testing.T) {
 			},
 		}, nil
 	})
-	cs := connectDiscoveryClient(t, r)
+	cs := connectDiscoveryClient(t, r, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -386,7 +389,7 @@ func TestDescribeFunctionToolMultipleOverloads(t *testing.T) {
 
 func TestListFunctionsToolNoInstanceIsToolError(t *testing.T) {
 	r := discovery.NewRouter(registry.New())
-	cs := connectDiscoveryClient(t, r)
+	cs := connectDiscoveryClient(t, r, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -415,7 +418,7 @@ func TestListFunctionsToolNoInstanceIsToolError(t *testing.T) {
 
 func TestDescribeFunctionToolUnknownInstanceIsToolError(t *testing.T) {
 	r := discovery.NewRouter(registry.New())
-	cs := connectDiscoveryClient(t, r)
+	cs := connectDiscoveryClient(t, r, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -444,7 +447,7 @@ func TestDiscoveryToolsMalformedWireResponseIsToolError(t *testing.T) {
 		// a bare JSON string instead of an object.
 		return "not an object", nil
 	})
-	cs := connectDiscoveryClient(t, r)
+	cs := connectDiscoveryClient(t, r, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -470,7 +473,7 @@ func TestDiscoveryToolsMalformedWireResponseIsToolError(t *testing.T) {
 
 func TestDescribeFunctionToolNeitherMemberNorMemberIDIsToolError(t *testing.T) {
 	r := discovery.NewRouter(registry.New())
-	cs := connectDiscoveryClient(t, r)
+	cs := connectDiscoveryClient(t, r, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -515,7 +518,7 @@ func TestDescribeFunctionToolMemberIDOnlyIsAcceptedAndForwarded(t *testing.T) {
 			"overload_count": 3,
 		}, nil
 	})
-	cs := connectDiscoveryClient(t, r)
+	cs := connectDiscoveryClient(t, r, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -545,7 +548,7 @@ func TestDescribeFunctionToolMemberIDOnlyIsAcceptedAndForwarded(t *testing.T) {
 
 func TestDescribeFunctionInputSchemaMemberOptionalAndNoOverloadIndex(t *testing.T) {
 	r := discovery.NewRouter(registry.New())
-	cs := connectDiscoveryClient(t, r)
+	cs := connectDiscoveryClient(t, r, nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -591,7 +594,7 @@ func TestDescribeFunctionInputSchemaMemberOptionalAndNoOverloadIndex(t *testing.
 
 func TestDiscoveryToolsAreRegisteredWithExpectedNames(t *testing.T) {
 	r := discovery.NewRouter(registry.New())
-	cs := connectDiscoveryClient(t, r)
+	cs := connectDiscoveryClient(t, r, nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 

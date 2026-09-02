@@ -22,6 +22,7 @@ import (
 	"crypto/sha256"
 	"embed"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"os"
@@ -35,6 +36,7 @@ var assets embed.FS
 // table must agree, and Verify enforces the pins at load time so a tampered
 // or half-downloaded file fails loudly rather than ranking silently wrong.
 var pins = map[string]string{
+	"potion-base-8M/config.json":                     "2a6ac0e9aaa356a68a5688070db78fc3a464fefe85d2f06a1905ce3718687553",
 	"potion-base-8M/tokenizer.json":                  "e67e803f624fb4d67dea1c730d06e1067e1b14d830e2c2202569e3ef0f70bb50",
 	"potion-base-8M/model.safetensors":               "f65d0f325faadc1e121c319e2faa41170d3fa07d8c89abd48ca5358d9a223de2",
 	"ms-marco-MiniLM-L-6-v2/model.onnx":              "e9d8ebf845c413e981c175bfe49a3bfa9b3dcce2a3ba54875ee5df5a58639fbe",
@@ -50,14 +52,7 @@ const (
 
 // Available reports whether every pinned file was embedded. It does not
 // verify checksums (Verify does); it answers "was the fetch step run".
-func Available() bool {
-	for p := range pins {
-		if _, err := fs.Stat(assets, "assets/"+p); err != nil {
-			return false
-		}
-	}
-	return true
-}
+func Available() bool { return len(Missing()) == 0 }
 
 // Missing lists the pinned files absent from the build, for diagnostics.
 func Missing() []string {
@@ -72,36 +67,45 @@ func Missing() []string {
 
 // Verify checks every embedded file against its pin.
 func Verify() error {
-	for p, want := range pins {
-		b, err := assets.ReadFile("assets/" + p)
-		if err != nil {
-			return fmt.Errorf("models: %s not embedded (run fetch-models before building): %w", p, err)
-		}
-		sum := sha256.Sum256(b)
-		if got := hex.EncodeToString(sum[:]); got != want {
-			return fmt.Errorf("models: %s sha256 %s does not match pin %s", p, got, want)
+	for p := range pins {
+		if _, err := read(p); err != nil {
+			return err
 		}
 	}
 	return nil
 }
 
-// Embedder returns the static embedder's tokenizer.json and model.safetensors.
-func Embedder() (tokenizerJSON, safetensors []byte, err error) {
+// Embedder returns the static embedder's tokenizer.json and
+// model.safetensors, and whether its config.json asks for L2-normalised
+// output (potion models do; read rather than assumed).
+func Embedder() (tokenizerJSON, safetensors []byte, normalize bool, err error) {
+	cfg, err := read(embedderDir + "/config.json")
+	if err != nil {
+		return nil, nil, false, err
+	}
+	var c struct {
+		Normalize bool `json:"normalize"`
+	}
+	if err := json.Unmarshal(cfg, &c); err != nil {
+		return nil, nil, false, fmt.Errorf("models: %s/config.json: %w", embedderDir, err)
+	}
 	tokenizerJSON, err = read(embedderDir + "/tokenizer.json")
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, false, err
 	}
 	safetensors, err = read(embedderDir + "/model.safetensors")
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, false, err
 	}
-	return tokenizerJSON, safetensors, nil
+	return tokenizerJSON, safetensors, c.Normalize, nil
 }
 
 // Materialize writes the reranker's files under dir (creating
 // dir/ms-marco-MiniLM-L-6-v2) and returns that model directory, for a loader
-// that needs real paths. Files already present with the right size are left
-// alone, so a broker restart does not rewrite 23MB.
+// that needs real paths (hugot walks a directory). A file already on disk
+// with the pinned sha256 is left alone, so a broker restart rewrites nothing
+// and a corrupted copy is replaced. The on-disk set is bounded to this one
+// model directory: the pinned file names are the only ones ever written.
 func Materialize(dir string) (string, error) {
 	out := filepath.Join(dir, rerankerDir)
 	if err := os.MkdirAll(out, 0o755); err != nil {
@@ -116,8 +120,11 @@ func Materialize(dir string) (string, error) {
 			return "", err
 		}
 		dst := filepath.Join(out, filepath.Base(p))
-		if st, err := os.Stat(dst); err == nil && st.Size() == int64(len(b)) {
-			continue
+		if onDisk, err := os.ReadFile(dst); err == nil {
+			sum := sha256.Sum256(onDisk)
+			if hex.EncodeToString(sum[:]) == pins[p] {
+				continue
+			}
 		}
 		tmp := dst + ".tmp"
 		if err := os.WriteFile(tmp, b, 0o644); err != nil {

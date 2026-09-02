@@ -84,7 +84,7 @@ type Broker struct {
 
 // SearchIndexer is what Broker needs from internal/semsearch/manager.
 type SearchIndexer interface {
-	OnAttach(instanceID, revitVersion string)
+	OnAttach(instanceID string)
 	OnDetach(instanceID string)
 }
 
@@ -280,8 +280,7 @@ func (b *Broker) serveAddIn(rwc io.ReadWriteCloser) {
 			if instanceID != "" && instanceID != rp.InstanceID {
 				b.logf("broker: connection re-registered from instance %s to %s; detaching the former", instanceID, rp.InstanceID)
 				b.Execution.DetachInstance(instanceID, conn)
-				b.Discovery.DetachInstance(instanceID, conn)
-				if b.Search != nil {
+				if b.Discovery.DetachInstance(instanceID, conn) && b.Search != nil {
 					b.Search.OnDetach(instanceID)
 				}
 				b.Registry.RemoveIfEpoch(instanceID, registerEpoch)
@@ -308,7 +307,7 @@ func (b *Broker) serveAddIn(rwc io.ReadWriteCloser) {
 			}
 			b.Discovery.AttachInstance(rp.InstanceID, conn)
 			if b.Search != nil {
-				b.Search.OnAttach(rp.InstanceID, rp.RevitVersion)
+				b.Search.OnAttach(rp.InstanceID)
 			}
 		case "ping":
 			// Heartbeat (PRD §05) — instanceID is only known once this

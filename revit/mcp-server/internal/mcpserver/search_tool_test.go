@@ -19,12 +19,15 @@ import (
 // --- pure helpers ------------------------------------------------------------
 
 func TestSearchCursorRoundTripAndScope(t *testing.T) {
-	scope := searchScope("Create Wall", "Autodesk.Revit.DB")
-	if scope != searchScope("  create wall ", "Autodesk.Revit.DB") {
+	scope := searchScope("Create Wall", "Autodesk.Revit.DB", "fp", rankerSemantic)
+	if scope != searchScope("  create wall ", "Autodesk.Revit.DB", "fp", rankerSemantic) {
 		t.Fatal("scope must be case/whitespace insensitive on the query")
 	}
-	if scope == searchScope("create wall", "") {
+	if scope == searchScope("create wall", "", "fp", rankerSemantic) {
 		t.Fatal("scope must include the namespace")
+	}
+	if scope == searchScope("Create Wall", "Autodesk.Revit.DB", "other-fp", rankerSemantic) || scope == searchScope("Create Wall", "Autodesk.Revit.DB", "fp", rankerLexical) {
+		t.Fatal("scope must include the ranked set's identity (fingerprint and ranker)")
 	}
 	c := buildSearchCursor(40, scope)
 	off, drec := parseSearchCursor(c, scope)
@@ -132,23 +135,6 @@ func testCorpus() []map[string]any {
 	}
 }
 
-func connectSearchClient(t *testing.T, r *discovery.Router, m *manager.Manager) *mcp.ClientSession {
-	t.Helper()
-	server := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "0"}, nil)
-	RegisterDiscovery(server, r, m)
-	ct, st := mcp.NewInMemoryTransports()
-	ctx := context.Background()
-	if _, err := server.Connect(ctx, st, nil); err != nil {
-		t.Fatal(err)
-	}
-	cs, err := mcp.NewClient(&mcp.Implementation{Name: "c", Version: "0"}, nil).Connect(ctx, ct, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { cs.Close() })
-	return cs
-}
-
 func callSearch(t *testing.T, cs *mcp.ClientSession, args map[string]any) (SearchFunctionsOut, bool) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -169,13 +155,13 @@ func TestSearchFunctionsServedFromBrokerIndexWithPaging(t *testing.T) {
 	r := discovery.NewRouter(reg)
 	attachFakeDiscoveryInstance(t, r, "inst-1", fakeAddIn(t, testCorpus(), 0))
 	m := manager.New(r, nil, nil, t.Logf)
-	m.OnAttach("inst-1", "2027")
+	m.OnAttach("inst-1")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if st := m.WaitReady(ctx, "inst-1"); st.State != manager.StateReady {
 		t.Fatalf("index state %s (%v)", st.State, st.Err)
 	}
-	cs := connectSearchClient(t, r, m)
+	cs := connectDiscoveryClient(t, r, m)
 
 	out, isErr := callSearch(t, cs, map[string]any{"query": "wall", "top_n": 1})
 	if isErr {
@@ -219,8 +205,8 @@ func TestSearchFunctionsFallsBackToAddInWhileIndexBuilds(t *testing.T) {
 	// dump_members stalls, so the index stays in StateBuilding for the test.
 	attachFakeDiscoveryInstance(t, r, "inst-1", fakeAddIn(t, testCorpus(), 30*time.Second))
 	m := manager.New(r, nil, nil, t.Logf)
-	m.OnAttach("inst-1", "2027")
-	cs := connectSearchClient(t, r, m)
+	m.OnAttach("inst-1")
+	cs := connectDiscoveryClient(t, r, m)
 
 	out, isErr := callSearch(t, cs, map[string]any{"query": "Delete"})
 	if isErr {
@@ -232,12 +218,15 @@ func TestSearchFunctionsFallsBackToAddInWhileIndexBuilds(t *testing.T) {
 	if !strings.Contains(out.Guidance, "still building") {
 		t.Fatalf("guidance = %q", out.Guidance)
 	}
+	if len(out.Notices) != 1 || out.Notices[0].Code != "search-index-building" || out.Notices[0].Severity != "info" {
+		t.Fatalf("notices = %+v, want one search-index-building info record", out.Notices)
+	}
 }
 
 func TestSearchFunctionsNoInstanceIsToolErrorOnIndexPath(t *testing.T) {
 	r := discovery.NewRouter(registry.New())
 	m := manager.New(r, nil, nil, nil)
-	cs := connectSearchClient(t, r, m)
+	cs := connectDiscoveryClient(t, r, m)
 	out, isErr := callSearch(t, cs, map[string]any{"query": "wall"})
 	if !isErr || out.Error == nil {
 		t.Fatalf("expected a tool error with no instance, got %+v", out)

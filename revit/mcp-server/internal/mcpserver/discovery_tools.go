@@ -152,8 +152,13 @@ type SearchFunctionsOut struct {
 	// embedding + keyword + cross-encoder index), "lexical" (broker index,
 	// models not bundled), or "keyword-fallback" (the add-in's own ranker,
 	// while the broker index is still building). Guidance explains.
-	Ranker string       `json:"ranker,omitempty"`
-	Error  *diag.Record `json:"error,omitempty"`
+	Ranker string `json:"ranker,omitempty"`
+	// Notices carries §01 records about how this response was produced --
+	// today, why the broker index did not answer (search-index-building /
+	// search-index-build-failed) -- so the reason is structured, not only
+	// prose in Guidance.
+	Notices []*diag.Record `json:"notices,omitempty"`
+	Error   *diag.Record   `json:"error,omitempty"`
 }
 
 // DescribeFunctionOut is the output schema for the describe_function tool.
@@ -241,7 +246,9 @@ func RegisterDiscovery(s *mcp.Server, r *discovery.Router, search *manager.Manag
 		if search != nil {
 			out.Ranker = rankerKeywordFallback
 			if resolved, _, rdrec := r.ResolveInstance(in.InstanceID); rdrec == nil {
-				out.Guidance = fallbackGuidance(search.Status(resolved)) + out.Guidance
+				st := search.Status(resolved)
+				out.Guidance = fallbackGuidance(st) + out.Guidance
+				out.Notices = append(out.Notices, fallbackNotice(resolved, st))
 			}
 		}
 		return nil, out, nil
@@ -305,7 +312,7 @@ func searchViaIndex(ctx context.Context, r *discovery.Router, search *manager.Ma
 	if drec != nil {
 		return SearchFunctionsOut{Error: drec}, true
 	}
-	hits, err := search.Search(ctx, resolved, in.Query, in.Namespace)
+	res, err := search.Search(ctx, resolved, in.Query, in.Namespace)
 	if errors.Is(err, manager.ErrNotReady) {
 		return SearchFunctionsOut{}, false
 	}
@@ -314,26 +321,25 @@ func searchViaIndex(ctx context.Context, r *discovery.Router, search *manager.Ma
 			"search_functions could not rank against the broker index: "+err.Error()).
 			WithRemedy("retry; if it persists, restart the broker and report with its log")}, true
 	}
-	scope := searchScope(in.Query, in.Namespace)
+	ranker := rankerLexical
+	if res.Dense {
+		ranker = rankerSemantic
+	}
+	scope := searchScope(in.Query, in.Namespace, res.Fingerprint, ranker)
 	offset, cdrec := parseSearchCursor(in.Cursor, scope)
 	if cdrec != nil {
 		return SearchFunctionsOut{Error: cdrec}, true
 	}
-	topN := clampTopN(in.TopN)
-	page, next := pageHits(hits, offset, topN)
-	st := search.Status(resolved)
+	page, next := pageHits(res.Hits, offset, clampTopN(in.TopN))
 	out := SearchFunctionsOut{
 		Results:      page,
-		TotalMatched: len(hits),
+		TotalMatched: len(res.Hits),
 		RevitVersion: revitVersion,
-		Ranker:       rankerLexical,
+		Ranker:       ranker,
+		Guidance:     semanticGuidance(len(page), len(res.Hits), res.Dense),
 	}
-	if st.Dense {
-		out.Ranker = rankerSemantic
-	}
-	if next < len(hits) {
+	if next < len(res.Hits) {
 		out.NextCursor = buildSearchCursor(next, scope)
 	}
-	out.Guidance = semanticGuidance(len(page), len(hits), st.Dense)
 	return out, true
 }

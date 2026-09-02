@@ -105,7 +105,12 @@ carries the `revit_version` that answered.
   `list_functions` and `describe_function`. Core Revit API results win exact ties over other loaded
   add-ins'. Every response carries `ranker` — `semantic` (the broker index), `lexical` (a broker
   built without the bundled models), or `keyword-fallback` (the add-in's own ranker, while the
-  instance's index is still building in the seconds after it connects) — and a `guidance` note.
+  instance's index is still building in the seconds after it connects) — and a `guidance` note;
+  a fallback response also carries the reason as a §01 record in `notices[]`
+  (`search-index-building` / `search-index-build-failed`). Cursor pages are served from the
+  ranked list the first page produced, so paging never re-runs the reranker, and a cursor is
+  bound to that ranked set (a cursor minted under the keyword fallback is rejected once the
+  index answers).
   The corpus comes from the add-in over an internal `dump_members` wire method, keyed by a
   fingerprint of the loaded assembly set, so two instances of one Revit build share an index.
 - `describe_function(member?, member_id?)` — one member's full signature, parameters, returns,

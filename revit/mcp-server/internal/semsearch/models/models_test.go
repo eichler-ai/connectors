@@ -14,7 +14,7 @@ import (
 func TestEmbeddedStateIsConsistent(t *testing.T) {
 	if !Available() {
 		t.Logf("models not fetched (missing %v); asserting the degraded path", Missing())
-		if _, _, err := Embedder(); err == nil {
+		if _, _, _, err := Embedder(); err == nil {
 			t.Fatal("Embedder() succeeded with models missing")
 		}
 		if _, err := Materialize(t.TempDir()); err == nil {
@@ -31,9 +31,9 @@ func TestEmbeddedStateIsConsistent(t *testing.T) {
 	if err := Verify(); err != nil {
 		t.Fatal(err)
 	}
-	tok, st, err := Embedder()
-	if err != nil || len(tok) == 0 || len(st) == 0 {
-		t.Fatalf("Embedder(): %v (%d, %d bytes)", err, len(tok), len(st))
+	tok, st, normalize, err := Embedder()
+	if err != nil || len(tok) == 0 || len(st) == 0 || !normalize {
+		t.Fatalf("Embedder(): %v (%d, %d bytes, normalize=%v)", err, len(tok), len(st), normalize)
 	}
 	dir, err := Materialize(t.TempDir())
 	if err != nil {

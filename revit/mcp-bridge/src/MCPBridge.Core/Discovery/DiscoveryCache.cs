@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using Microsoft.Data.Sqlite;
 
@@ -651,14 +652,14 @@ public sealed class DiscoveryCache : IDisposable
             ThrowIfDisposed();
             using var cmd = _connection.CreateCommand();
             cmd.CommandText = "SELECT kind, name, file_hash FROM assemblies ORDER BY file_path";
-            var sb = new System.Text.StringBuilder();
+            var sb = new StringBuilder();
             using var reader = cmd.ExecuteReader();
             while (reader.Read())
             {
                 sb.Append(reader.GetString(0)).Append('|').Append(reader.GetString(1)).Append('|').Append(reader.GetString(2)).Append('\n');
             }
-            var digest = System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(sb.ToString()));
-            return Convert.ToHexString(digest).ToLowerInvariant();
+            // Same hash-to-hex form as ComputeFileHash above; the broker treats the value as opaque.
+            return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(sb.ToString())));
         }
     }
 
