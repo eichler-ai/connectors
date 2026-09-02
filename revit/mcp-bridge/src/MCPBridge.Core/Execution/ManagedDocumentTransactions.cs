@@ -438,8 +438,9 @@ internal sealed class ManagedDocumentTransactions
 
     /// <summary>
     /// Runs <paramref name="body"/> with this document NOT modifiable: the connector commits and closes
-    /// its transaction, keeps the TransactionGroup, and opens a fresh transaction in that same group
-    /// afterwards (issue #132). The group is what preserves all-or-nothing rollback across the gap --
+    /// its transaction, keeps the TransactionGroup, and afterwards RESTORES the state it found -- a fresh
+    /// transaction in that same group if one was open on entry, nothing if none was (issue #132; #146 H1).
+    /// The group is what preserves all-or-nothing rollback across the gap --
     /// verified live: TransactionGroup.RollBack() discards transactions already committed inside it.
     ///
     /// A document with no managed transaction is already non-modifiable, so the body simply runs; that
@@ -642,8 +643,8 @@ internal sealed class ManagedDocumentTransactions
         {
             throw new InvalidOperationException(
                 $"Settle cannot run inside a WithoutTransaction scope for '{SafeDescribe(entry)}' -- that scope " +
-                "reopens a transaction when it ends, which would immediately undo the settle and leave Close/Save " +
-                "refused again. Settle after the scope returns.");
+                "restores the document's transaction state when it ends, which would reopen a transaction on a " +
+                "document it found writable and leave Close/Save refused again. Settle after the scope returns.");
         }
 
         var description = SafeDescribe(entry);

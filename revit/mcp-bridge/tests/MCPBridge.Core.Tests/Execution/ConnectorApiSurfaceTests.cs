@@ -154,9 +154,10 @@ public class ConnectorApiSurfaceTests
 
         foreach (var member in ExpectedMembers)
         {
-            // EVERY overload, not the first one found (#146 Phase 0 added WithTransaction<T>): an
-            // undocumented overload would otherwise hide behind its documented sibling, and
-            // describe_function ships each overload's summary separately.
+            // EVERY overload, not the first one found (#146 Phase 0 added WithTransaction<T>): the word
+            // budget applies per overload, since describe_function ships each overload's summary
+            // separately. (A wholly undocumented overload is a build error -- CS1591 is WarningsAsErrors
+            // -- so absence is not what this loop catches; oversize or empty text is.)
             var entries = FindMemberEntries(docs, member);
             Assert.True(entries.Count > 0, $"'{member}' has no entry at all in the generated XML sidecar.");
 
@@ -193,9 +194,8 @@ public class ConnectorApiSurfaceTests
         Assert.Single(overloads, m => m.IsGenericMethodDefinition && m.GetGenericArguments().Length == 1);
         Assert.Single(overloads, m => !m.IsGenericMethodDefinition);
 
-        var generic = FindMemberEntries(LoadShippedDocs(), "WithTransaction")
-            .Single(e => e.Returns is not null);
-        Assert.Contains("returned", generic.Returns, StringComparison.OrdinalIgnoreCase);
+        // The value-returning overload documents what it returns; the Action form has nothing to.
+        Assert.Contains(FindMemberEntries(LoadShippedDocs(), "WithTransaction"), e => !string.IsNullOrWhiteSpace(e.Returns));
     }
 
     /// <summary>

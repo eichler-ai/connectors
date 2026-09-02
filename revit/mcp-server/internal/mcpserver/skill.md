@@ -178,11 +178,11 @@ except the active document, activate the one you want to keep, then close the ot
 Some Revit APIs manage their own transaction and refuse to run while one is open on the document they
 act on: `UIDocument.RequestViewChange`/`ActiveView`, `Document.LoadFamily`,
 `UIApplication.OpenAndActivateDocument`, and every `EditScope`. **The document your call is routed at is
-modifiable for the whole run**, so against it they always fail — reported with `code`
-`script-target-must-not-be-modifiable`.
+modifiable for the whole run**, so against it they always fail ("must not be modifiable") — reported with
+`code` `script-target-must-not-be-modifiable`.
 
-Wrap them. The connector closes its transaction for the block and reopens one afterwards, so your
-changes still roll back if the script throws:
+Wrap them. The connector closes its transaction for the block and restores it afterwards (a document that
+had none open stays non-modifiable), so your changes still roll back if the script throws:
 
 ```csharp
 Connector.WithoutTransaction(Document, () => {
@@ -192,7 +192,8 @@ Connector.WithoutTransaction(Document, () => {
 
 Don't write inside that block — the document isn't modifiable there. To write, nest
 `Connector.WithTransaction` (it also returns a value: `var id = Connector.WithTransaction(doc, () =>
-Level.Create(doc, 3.0).Id);`). That pair is what makes **stairs** work, and the closing edge is the point:
+Level.Create(doc, 3.0).Id);` — being overloaded, `describe_function` lists its two overloads; pass a
+`member_id` for the text). That pair is what makes **stairs** work, and the closing edge is the point:
 an edit scope can't commit while a transaction is open.
 
 ```csharp

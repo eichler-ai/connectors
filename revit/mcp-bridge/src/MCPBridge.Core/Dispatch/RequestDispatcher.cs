@@ -876,13 +876,11 @@ public sealed class RequestDispatcher
             ("script-target-must-not-be-modifiable", new[]
             {
                 "Wrap this call in Connector.WithoutTransaction(document, () => { ... }) -- the connector " +
-                "closes its transaction for the block and reopens it afterwards, so your other changes " +
+                "closes its transaction for the block and restores it afterwards, so your other changes " +
                 "still roll back if the script throws. To write inside that block, nest " +
                 "Connector.WithTransaction.",
                 "Document.LoadFamily needs BOTH documents non-modifiable: nest one WithoutTransaction " +
                 "per document (source and target).",
-                "If you called Connector.OpenForWriting on this document earlier in the script, make " +
-                "this call before it instead.",
             }),
         _ => ("script-execution-failed", null),
     };
@@ -894,8 +892,13 @@ public sealed class RequestDispatcher
     /// Revit's own wording for the three known shapes -- the modifiability precondition ("must not be
     /// modifiable"), the active-view variant ("of a modifiable document"), and the EditScope commit edge,
     /// which is the same collision at the other end of the block (caveats.md, issue #115). Fails OPEN if
-    /// Revit rewords them (the run simply reports script-execution-failed), which is why the live harness
-    /// pins each against real Revit rather than trusting these strings.
+    /// Revit rewords them (the run simply reports script-execution-failed). The first two are pinned
+    /// live against real Revit (TestTargetMustNotBeModifiableIsMappedToItsOwnCode); the EditScope phrase
+    /// comes verbatim from the live trace recorded in caveats.md and is exercised only at tier 1.
+    ///
+    /// Reads the OUTER message only, on purpose: a refusal rewrapped by the script or surfaced through
+    /// reflection (TargetInvocationException) falls to script-execution-failed rather than being matched
+    /// by a recursive walk that would also match any inner exception a script chose to wrap.
     /// </summary>
     private static bool IsTargetMustNotBeModifiable(Exception exception)
     {
