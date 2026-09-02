@@ -8,8 +8,8 @@ to hold them — it sits at its token budget covering basic usage, and the Revit
 too large for a skill file or even tens of them. The corpus is searched on demand, exactly like the
 API, and the two are ranked by the same pipeline.
 
-Companion files: [`howto-schema.json`](howto-schema.json) (the document schema, JSON Schema 2020-12),
-[`howto-verification-schema.json`](howto-verification-schema.json) (the harness-owned verification
+Companion files: [`howto-schema.json` (in `revit/mcp-server/internal/howto/schema/`, embedded in the broker)](../mcp-server/internal/howto/schema/howto-schema.json) (the document schema, JSON Schema 2020-12),
+[`howto-verification-schema.json`](../mcp-server/internal/howto/schema/howto-verification-schema.json) (the harness-owned verification
 sidecar, §3) and [`howto-example-join-walls.json`](howto-example-join-walls.json) (one real document,
 extracted by hand from `test-harness/validation_corpus_test.go` case #2 and validated against the
 schema). The example carries **no verification**: its `script` replaces the test's fixture preamble

@@ -290,7 +290,7 @@ two lineages turn out to be one.
 
 Behaviour, in order:
 
-1. **Validate** against `howto-schema.json`; a failing field is a `howto-invalid` error naming it.
+1. **Validate** against `howto-schema.json` (in `revit/mcp-server/internal/howto/schema/`, embedded in the broker); a failing field is a `howto-invalid` error naming it.
    With `id`, also check the target exists and is the lineage's latest revision (else base the edit
    on the latest and say so).
 2. **Write locally first** (`provenance.kind: "local"`), so the submitter's own `search_howto` serves
