@@ -92,7 +92,7 @@ func loadEmbedded(fsys fs.FS) (*Corpus, []Stamp, Version, error) {
 		jsonl.Write(line)
 		jsonl.WriteByte('\n')
 	}
-	c, err := LoadCorpus(&jsonl, "embedded")
+	c, err := LoadCorpus(&jsonl, SourceSeed)
 	if err != nil {
 		return nil, nil, Version{}, err
 	}

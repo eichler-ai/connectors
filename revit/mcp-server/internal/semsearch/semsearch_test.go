@@ -86,7 +86,7 @@ func TestDocPathAcceptsQualifiedOrBareDeclaringType(t *testing.T) {
 	}
 	// The wire shape (qualified declaring_type) must tokenize the name field
 	// without namespace noise, exactly like the bare shape.
-	if a, b := Tokenize(fieldText(bare, fieldName)), Tokenize(fieldText(qualified, fieldName)); !reflect.DeepEqual(a, b) {
+	if a, b := Tokenize(APISchema.Fields[0].Text(bare)), Tokenize(APISchema.Fields[0].Text(qualified)); !reflect.DeepEqual(a, b) {
 		t.Errorf("name-field tokens differ: %v vs %v", a, b)
 	}
 	if !strings.HasPrefix(RerankText(qualified), "Wall.Create") {
@@ -172,7 +172,7 @@ func TestCoreWinsTiesOverAddIn(t *testing.T) {
 
 func TestNamespaceIsAPreRankingMask(t *testing.T) {
 	ix := Build(fixture())
-	hits, err := ix.Search(context.Background(), Query{Text: "element", Namespace: "Autodesk.Revit.UI"})
+	hits, err := ix.Search(context.Background(), Query{Text: "element", Mask: InNamespace("Autodesk.Revit.UI")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +186,7 @@ func TestNamespaceIsAPreRankingMask(t *testing.T) {
 	}
 	// Exact namespace only -- no prefix matching that would let
 	// "Autodesk.Revit" pull in both DB and UI.
-	hits, _ = ix.Search(context.Background(), Query{Text: "element", Namespace: "Autodesk.Revit"})
+	hits, _ = ix.Search(context.Background(), Query{Text: "element", Mask: InNamespace("Autodesk.Revit")})
 	if len(hits) != 0 {
 		t.Fatalf("namespace prefix should not match: %v", ids(hits))
 	}
@@ -276,7 +276,7 @@ func TestDenseRespectsNamespaceMaskAndJunk(t *testing.T) {
 	if r := rankOf(hits, "F:Autodesk.Revit.DB.BuiltInCategory.OST_Walls"); r != 0 {
 		t.Fatalf("junk leaked through dense path at rank %d", r)
 	}
-	hits, _ = ix.Search(ctx, Query{Text: "display element", Namespace: "Autodesk.Revit.DB", Embedder: emb})
+	hits, _ = ix.Search(ctx, Query{Text: "display element", Mask: InNamespace("Autodesk.Revit.DB"), Embedder: emb})
 	for _, h := range hits {
 		if h.Doc.Namespace != "Autodesk.Revit.DB" {
 			t.Fatalf("dense path leaked out-of-namespace doc %s", h.Doc.MemberID)
@@ -318,7 +318,7 @@ func TestRRF(t *testing.T) {
 	// doc 7: lex rank 1, dense rank 2 -> 1.5/61 + 1.0/62
 	// doc 3: lex rank 2, dense rank 1 -> 1.5/62 + 1.0/61
 	// doc 9: dense rank 3 only        -> 1.0/63
-	ix := &Index{docs: make([]Doc, 10)}
+	ix := &Index{schema: APISchema, docs: make([]Doc, 10)}
 	got := ix.rrf([][]int{{7, 3}, {3, 7, 9}}, []float64{1.5, 1.0}, 60)
 	want := []int{7, 3, 9}
 	if !reflect.DeepEqual(got, want) {
@@ -396,5 +396,76 @@ func TestRerankText(t *testing.T) {
 	// No summary: no dangling separator.
 	if got := RerankText(fixture()[3]); strings.Contains(got, "—") {
 		t.Fatalf("RerankText without summary = %q", got)
+	}
+}
+
+// --- generic schema + preference ------------------------------------------
+
+type note struct {
+	Title, Body string
+	Verified    bool
+}
+
+var noteSchema = Schema[note]{
+	Fields: []Field[note]{
+		{Name: "title", Text: func(n note) string { return n.Title }, Lexical: 1.0, Dense: 0.6},
+		{Name: "body", Text: func(n note) string { return n.Body }, Lexical: 0.5, Dense: 1.0},
+	},
+	RerankText: func(n note) string { return n.Title + " — " + n.Body },
+}
+
+func TestBuildWithIndexesAnotherDocumentType(t *testing.T) {
+	ix := BuildWith(noteSchema, []note{
+		{Title: "Create walls", Body: "enclose a footprint"},
+		{Title: "Create floors", Body: "sketch a closed loop"},
+		{Title: "Place doors", Body: "hosted in a wall"},
+	})
+	hits, err := ix.Search(context.Background(), QueryOf[note]{Text: "sketch floors"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 1 || hits[0].Doc.Title != "Create floors" {
+		t.Fatalf("hits = %+v", hits)
+	}
+}
+
+func TestPreferPartitionsTheHeadOnlyAndNeverFilters(t *testing.T) {
+	// Six docs all matching "wall"; the title weight puts the title matches
+	// first. Prefer moves verified docs ahead within a pool of 4 and leaves
+	// the tail (ranks 5-6) in ranked order, so a preferred but weak match
+	// cannot bury a strong one further than the window.
+	docs := []note{
+		{Title: "wall one", Body: "x", Verified: false},
+		{Title: "wall two", Body: "x", Verified: false},
+		{Title: "wall three", Body: "x", Verified: true},
+		{Title: "wall four", Body: "x", Verified: false},
+		{Title: "a", Body: "wall five", Verified: true},
+		{Title: "b", Body: "wall six", Verified: true},
+	}
+	ix := BuildWith(noteSchema, docs)
+	prefer := func(n note) bool { return n.Verified }
+	hits, err := ix.Search(context.Background(), QueryOf[note]{Text: "wall", Prefer: prefer, RerankPool: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, h := range hits {
+		got = append(got, h.Doc.Title)
+	}
+	if len(got) != 6 {
+		t.Fatalf("a preference must not filter: got %d of 6: %v", len(got), got)
+	}
+	if got[0] != "wall three" {
+		t.Errorf("the verified head doc should lead, got %v", got)
+	}
+	if got[1] != "wall one" || got[2] != "wall two" || got[3] != "wall four" {
+		t.Errorf("the rest of the head should keep its ranked order, got %v", got)
+	}
+	if got[4] != "a" || got[5] != "b" {
+		t.Errorf("the tail beyond the pool must not be touched, got %v", got)
+	}
+	plain, _ := ix.Search(context.Background(), QueryOf[note]{Text: "wall", RerankPool: 4})
+	if plain[0].Doc.Title != "wall one" {
+		t.Errorf("without Prefer the ranked order stands, got %q first", plain[0].Doc.Title)
 	}
 }
