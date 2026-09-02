@@ -379,6 +379,16 @@ internal sealed class ManagedDocumentTransactions
     private readonly List<SettlementRecord> _settlements = new();
 
     /// <summary>
+    /// The DocumentIds settled with keep: false this run (#146 Phase 2) -- their group was rolled back,
+    /// so whatever DocumentChanged reported for them is not in the model any more and must leave the
+    /// mutation report. Ids, not descriptions, because that is what the tracker keys on.
+    /// </summary>
+    private readonly List<string> _discardedDocumentIds = new();
+
+    /// <summary>See <see cref="_discardedDocumentIds"/>.</summary>
+    public IReadOnlyList<string> DiscardedDocumentIds => _discardedDocumentIds;
+
+    /// <summary>
     /// Failures accumulated by documents that have since been SETTLED and deregistered. Without this they
     /// vanished: <see cref="Entry.AccumulatedFailures"/> exists precisely so a document committing N times
     /// keeps all N failure sets, but <see cref="CommitAll"/> is its only reader and walks <c>_entries</c> --
@@ -695,6 +705,10 @@ internal sealed class ManagedDocumentTransactions
         _settledFailures.AddRange(entry.AccumulatedFailures);
         _entries.Remove(entry);
         _settlements.Add(new SettlementRecord(description, keep));
+        if (!keep)
+        {
+            _discardedDocumentIds.Add(entry.Document.DocumentId);
+        }
     }
 
     /// <summary>

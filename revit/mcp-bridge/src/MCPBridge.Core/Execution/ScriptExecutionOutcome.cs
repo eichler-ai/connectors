@@ -23,8 +23,16 @@ public sealed class ScriptExecutionOutcome
     /// </summary>
     public IReadOnlyList<PublishedFileRecord> Files { get; init; } = Array.Empty<PublishedFileRecord>();
 
-    public static ScriptExecutionOutcome Completed(object? returnValue, string stdOut, IReadOnlyList<DiagnosticRecord>? notices = null, IReadOnlyList<PublishedFileRecord>? files = null) =>
-        new() { Success = true, ReturnValue = returnValue, StdOut = stdOut, Notices = notices ?? Array.Empty<DiagnosticRecord>(), Files = files ?? Array.Empty<PublishedFileRecord>() };
+    /// <summary>
+    /// #146 Phase 2: what the run changed, net, across its committed transactions -- or null when nothing
+    /// did, or when the run failed (its changes were rolled back, so there is nothing to report). Unlike
+    /// <see cref="Files"/> this IS conditional on success, by design: a report of writes that were undone
+    /// would be the exact thing an agent must not act on.
+    /// </summary>
+    public MutationReport? Mutations { get; init; }
+
+    public static ScriptExecutionOutcome Completed(object? returnValue, string stdOut, IReadOnlyList<DiagnosticRecord>? notices = null, IReadOnlyList<PublishedFileRecord>? files = null, MutationReport? mutations = null) =>
+        new() { Success = true, ReturnValue = returnValue, StdOut = stdOut, Notices = notices ?? Array.Empty<DiagnosticRecord>(), Files = files ?? Array.Empty<PublishedFileRecord>(), Mutations = mutations };
 
     public static ScriptExecutionOutcome Failed(Exception exception, string stdOut, IReadOnlyList<DiagnosticRecord>? notices = null, IReadOnlyList<PublishedFileRecord>? files = null) =>
         new() { Success = false, Exception = exception, StdOut = stdOut, Notices = notices ?? Array.Empty<DiagnosticRecord>(), Files = files ?? Array.Empty<PublishedFileRecord>() };

@@ -41,6 +41,87 @@ public class TransactionScriptExecutorTests
         Assert.Equal(new[] { "Start", "Assimilate", "Dispose" }, document.LastTransactionGroup!.Calls);
     }
 
+    // ------------------------------------------------------------------------------------------
+    // #146 Phase 2: the mutation report rides the run's DocumentChanged subscription
+    // ------------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task SuccessfulScript_ReportsNetMutations_FromChangesRaisedDuringTheRun()
+    {
+        var executor = NewExecutor();
+        var document = new FakeDocumentAdapter();
+        var uiApp = new FakeUiApplicationAdapter { ActiveUiDocument = new FakeUiDocumentAdapter { Document = document } };
+        // The fake raises the change INSIDE the commit, exactly where Revit raises DocumentChanged.
+        document.OnTransactionCommit = () => uiApp.EmitChange(new DocumentChange(
+            document.DocumentId, DocumentChangeOperation.Committed, "TransactionCommitted", new[] { "MCP Bridge Script" },
+            new[] { new ChangedElement(1, "Walls"), new ChangedElement(2, "Walls") },
+            new[] { new ChangedElement(9, "Levels") },
+            Array.Empty<long>(),
+            categoriesTruncated: false));
+
+        var outcome = await executor.ExecuteAsync(document, uiApp, null, "1 + 1", CancellationToken.None);
+
+        Assert.True(outcome.Success);
+        var report = Assert.IsType<MutationReport>(outcome.Mutations);
+        Assert.Equal(2, report.Created);
+        Assert.Equal(1, report.Modified);
+        Assert.Equal(2, report.ByCategory["Walls"].Created);
+        // The subscription is per run: nothing may keep listening after the executor returns.
+        Assert.Equal(0, uiApp.ChangeSubscribers);
+    }
+
+    [Fact]
+    public async Task ReadOnlyScript_CarriesNoMutationReport()
+    {
+        var executor = NewExecutor();
+        var document = new FakeDocumentAdapter();
+        var uiApp = new FakeUiApplicationAdapter { ActiveUiDocument = new FakeUiDocumentAdapter { Document = document } };
+
+        var outcome = await executor.ExecuteAsync(document, uiApp, null, "1 + 1", CancellationToken.None);
+
+        Assert.True(outcome.Success);
+        Assert.Null(outcome.Mutations);
+    }
+
+    [Fact]
+    public async Task ThrowingScript_CarriesNoMutationReport_ItsChangesWereRolledBack()
+    {
+        var executor = NewExecutor();
+        var document = new FakeDocumentAdapter();
+        var uiApp = new FakeUiApplicationAdapter { ActiveUiDocument = new FakeUiDocumentAdapter { Document = document } };
+        var subscribedDuringRun = false;
+
+        var outcome = await executor.ExecuteAsync(document, uiApp, null,
+            "throw new System.InvalidOperationException(\"boom\");", CancellationToken.None);
+
+        Assert.False(outcome.Success);
+        Assert.Null(outcome.Mutations);
+        Assert.Equal(0, uiApp.ChangeSubscribers);
+        _ = subscribedDuringRun;
+    }
+
+    [Fact]
+    public async Task AnAdapterWithoutADocumentChangeSource_StillRuns_WithNoReport()
+    {
+        // Every pre-#146 fake and any future adapter that does not opt in: the report is a capability,
+        // not a requirement, and its absence must not change the run.
+        var executor = NewExecutor();
+        var document = new FakeDocumentAdapter();
+        var uiApp = new NoChangeSourceUiApplicationAdapter { ActiveUiDocument = new FakeUiDocumentAdapter { Document = document } };
+
+        var outcome = await executor.ExecuteAsync(document, uiApp, null, "1 + 1", CancellationToken.None);
+
+        Assert.True(outcome.Success);
+        Assert.Null(outcome.Mutations);
+    }
+
+    private sealed class NoChangeSourceUiApplicationAdapter : IUiApplicationAdapter
+    {
+        public IUiDocumentAdapter? ActiveUiDocument { get; init; }
+        public System.Collections.Generic.IReadOnlyList<OpenDocumentInfo> OpenDocuments => Array.Empty<OpenDocumentInfo>();
+        public IDocumentAdapter? FindOpenDocument(string documentId) => null;
+    }
+
     [Fact]
     public async Task ThrowingScript_RollsBackTransaction_AndGroup_NeverCommits()
     {

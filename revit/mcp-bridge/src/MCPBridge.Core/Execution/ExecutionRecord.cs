@@ -40,6 +40,9 @@ public sealed class ExecutionRecord
     /// <summary>Files published via ScriptGlobals.Publish during this execution (PRD §09) -- a sibling list to Notices.</summary>
     public IReadOnlyList<PublishedFileRecord> Files { get; private set; } = Array.Empty<PublishedFileRecord>();
 
+    /// <summary>#146 Phase 2: the completed run's net mutation report; null when nothing changed or the run did not complete.</summary>
+    public MutationReport? Mutations { get; private set; }
+
     private ExecutionRecord(string executionId, string scriptText, long maxDurationMs, DateTimeOffset createdAt)
     {
         ExecutionId = executionId;
@@ -59,7 +62,7 @@ public sealed class ExecutionRecord
         StartedAt = now;
     }
 
-    public void MarkCompleted(DateTimeOffset now, string? result, string? stdOut, IReadOnlyList<DiagnosticRecord> notices, IReadOnlyList<PublishedFileRecord>? files = null)
+    public void MarkCompleted(DateTimeOffset now, string? result, string? stdOut, IReadOnlyList<DiagnosticRecord> notices, IReadOnlyList<PublishedFileRecord>? files = null, MutationReport? mutations = null)
     {
         RequireNonTerminal();
         Status = ExecutionStatus.Completed;
@@ -68,6 +71,7 @@ public sealed class ExecutionRecord
         StdOut = stdOut;
         Notices = notices;
         Files = files ?? Array.Empty<PublishedFileRecord>();
+        Mutations = mutations;
     }
 
     public void MarkError(DateTimeOffset now, DiagnosticRecord error, string? stdOut, IReadOnlyList<DiagnosticRecord>? notices = null, IReadOnlyList<PublishedFileRecord>? files = null)

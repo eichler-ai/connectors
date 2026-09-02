@@ -64,10 +64,9 @@ Every script call targets `{instance_id, document_id}`. Get both from `list_inst
   `tmp-<guid>` for an unsaved one (session-only; don't persist it).
 - `status` is `idle` / `pending` / `busy` / `unresponsive` / `unrecoverable`. Only `idle` starts work
   immediately. `unrecoverable` means that instance needs Revit restarted — nothing you send will run.
-- `memory` (MB, updated each heartbeat) reports the Revit process's own use; `private_mb` is the one
-  to watch. It climbs across create/write/close cycles — mostly Revit's own document memory, which is
-  not released until the process exits — so on a long session, restart Revit if `private_mb` grows into
-  the multi-GB range rather than waiting for a slowdown.
+- `memory` (MB, updated each heartbeat) is the Revit process's own use; watch `private_mb`. It climbs
+  across create/write/close cycles (mostly Revit's document memory, never released until exit), so on a
+  long session restart Revit once it reaches multiple GB.
 
 **Several Revit versions can be connected at once**, and 2025 and 2027 have genuinely different API
 surfaces. Scripts are always explicitly targeted, so they're unaffected. Discovery is not — see below.
@@ -81,7 +80,8 @@ with `document-not-found` and an `open_documents` list; omitted means the active
 `UIDocument` is null unless the routed document is the active one; use `Document` for a background
 one. `return` a value and it comes back as `return_value` — strings verbatim, collections and
 anonymous types as JSON, anything else as a self-explaining `<...>` marker. `output` is stdout,
-Revit's own writes too.
+Revit's own writes too. A successful run that changed the model also carries **`mutations`** (net
+`created`/`modified`/`deleted` counts plus `by_category`), so skip the read-after-write check.
 
 ```csharp
 return Document.Title;
@@ -129,9 +129,8 @@ document nothing has opened for writing** — writing to it throws
 `Connector` calls above, which do both in one step.
 
 Ask Revit for template paths rather than guessing: `Application.DefaultProjectTemplate` is a full `.rte`
-path, and `Application.FamilyTemplatePath` is the **root of the family-template tree**, not a flat
-folder of `.rft` files — templates sit in subdirectories, so search recursively
-(`SearchOption.AllDirectories`).
+path; `Application.FamilyTemplatePath` is the **root of the family-template tree** — search it
+recursively (`SearchOption.AllDirectories`).
 
 However you made it, a created document is unsaved, so it gets a session-only **`tmp-<guid>`
 `document_id`**: it appears in `list_instances` like any other open document and a later call can be

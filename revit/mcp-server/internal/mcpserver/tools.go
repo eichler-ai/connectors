@@ -85,7 +85,10 @@ type ExecutionOut struct {
 	ReturnValue string                 `json:"return_value,omitempty"`
 	Notices     []diag.Record          `json:"notices,omitempty"`
 	Files       []execution.FileRecord `json:"files,omitempty"`
-	Error       *diag.Record           `json:"error,omitempty"`
+	// Mutations: what a successful run changed, net (#146 Phase 2); absent on a
+	// read-only run and on every failed one. See execution.MutationReport.
+	Mutations *execution.MutationReport `json:"mutations,omitempty"`
+	Error     *diag.Record              `json:"error,omitempty"`
 }
 
 // Register adds execute_script, poll_execution, and cancel_execution to s,
@@ -169,6 +172,7 @@ func toolResult(res *execution.Result, drec *diag.Record) (*mcp.CallToolResult, 
 		ReturnValue: res.ReturnValue,
 		Notices:     res.Notices,
 		Files:       res.Files,
+		Mutations:   res.Mutations,
 		Error:       res.ErrorDetail,
 	}
 	if isErrorStatus(res.Status) {

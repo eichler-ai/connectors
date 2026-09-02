@@ -158,6 +158,18 @@ type executeScriptOut struct {
 		Message  string   `json:"message"`
 		Remedy   []string `json:"remedy"`
 	} `json:"notices"`
+	// Mutations is the #146 Phase 2 net change report; nil when the run
+	// changed nothing (or failed), which the report's own tests assert on.
+	Mutations *struct {
+		Created    int `json:"created"`
+		Modified   int `json:"modified"`
+		Deleted    int `json:"deleted"`
+		ByCategory map[string]struct {
+			Created  int `json:"created"`
+			Modified int `json:"modified"`
+		} `json:"by_category"`
+		Truncated bool `json:"truncated"`
+	} `json:"mutations"`
 	// Files carries the PRD §09 per-published-file records -- read by
 	// file_exchange_test.go, which is the live pin of the Publish contract.
 	Files []struct {

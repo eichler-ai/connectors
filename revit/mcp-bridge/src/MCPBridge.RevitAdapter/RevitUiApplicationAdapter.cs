@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using Autodesk.Revit.UI;
 
 namespace MCPBridge.RevitAdapter;
@@ -12,8 +13,112 @@ namespace MCPBridge.RevitAdapter;
 /// IDocumentCreationSource members below hand back an IDocumentAdapter whose CreateTransaction a script
 /// could then call. Public, it was a one-line route to an unmanaged transaction on a brand-new document.
 /// </summary>
-internal sealed class RevitUiApplicationAdapter : IUiApplicationAdapter, IRawUiApplicationSource, IDocumentCreationSource, IExistingDocumentSource
+internal sealed class RevitUiApplicationAdapter : IUiApplicationAdapter, IRawUiApplicationSource, IDocumentCreationSource, IExistingDocumentSource, IDocumentChangeSource
 {
+    /// <summary>
+    /// Category resolution cap per event (#146 Phase 2). Resolving a category is a Document.GetElement
+    /// per id, on the UI thread, inside the commit that raised the event; a script that touches a whole
+    /// model would otherwise pay for it twice. Past the cap the ids still count (the totals stay exact)
+    /// and the event is flagged truncated so by_category is known to undercount.
+    /// </summary>
+    private const int CategoryResolutionCap = 20_000;
+
+    /// <summary>
+    /// See <see cref="IDocumentChangeSource"/>. The handler NEVER throws: it runs inside Revit's own
+    /// event dispatch on the UI thread, where an unhandled exception is Revit's to deal with, not ours --
+    /// a broken report is not worth a broken session, so any failure drops that one event.
+    /// </summary>
+    public IDisposable Subscribe(Action<DocumentChange> onChange)
+    {
+        EventHandler<Autodesk.Revit.DB.Events.DocumentChangedEventArgs> handler = (_, e) =>
+        {
+            DocumentChange change;
+            try
+            {
+                change = Translate(e);
+            }
+            catch
+            {
+                return;
+            }
+
+            onChange(change);
+        };
+
+        _uiApplication.Application.DocumentChanged += handler;
+        return new Unsubscriber(() => _uiApplication.Application.DocumentChanged -= handler);
+    }
+
+    private static DocumentChange Translate(Autodesk.Revit.DB.Events.DocumentChangedEventArgs e)
+    {
+        var document = e.GetDocument();
+        var documentId = TryResolveId(document) ?? "(unknown document)";
+        var operationName = e.Operation.ToString();
+        var operation = operationName switch
+        {
+            "TransactionCommitted" => DocumentChangeOperation.Committed,
+            "TransactionUndone" => DocumentChangeOperation.Undone,
+            "TransactionRedone" => DocumentChangeOperation.Redone,
+            _ => DocumentChangeOperation.Other,
+        };
+
+        var budget = CategoryResolutionCap;
+        var truncated = false;
+        var added = Resolve(document, e.GetAddedElementIds(), ref budget, ref truncated);
+        var modified = Resolve(document, e.GetModifiedElementIds(), ref budget, ref truncated);
+        var deleted = e.GetDeletedElementIds().Select(id => id.Value).ToArray();
+
+        return new DocumentChange(documentId, operation, operationName, e.GetTransactionNames().ToArray(), added, modified, deleted, truncated);
+    }
+
+    private static IReadOnlyList<ChangedElement> Resolve(Autodesk.Revit.DB.Document document, ICollection<Autodesk.Revit.DB.ElementId> ids, ref int budget, ref bool truncated)
+    {
+        var result = new List<ChangedElement>(ids.Count);
+        foreach (var id in ids)
+        {
+            string? category = null;
+            if (budget > 0)
+            {
+                budget--;
+                try
+                {
+                    category = document.GetElement(id)?.Category?.Name;
+                }
+                catch
+                {
+                    // An element mid-transition can throw from Category; it still counts, uncategorised.
+                }
+            }
+            else
+            {
+                truncated = true;
+            }
+
+            result.Add(new ChangedElement(id.Value, category));
+        }
+
+        return result;
+    }
+
+    private sealed class Unsubscriber : IDisposable
+    {
+        private Action? _dispose;
+        public Unsubscriber(Action dispose) => _dispose = dispose;
+        public void Dispose()
+        {
+            var dispose = _dispose;
+            _dispose = null;
+            try
+            {
+                dispose?.Invoke();
+            }
+            catch
+            {
+                // Unsubscribing after the Application is gone is not worth failing a run over.
+            }
+        }
+    }
+
     private readonly UIApplication _uiApplication;
 
     public RevitUiApplicationAdapter(UIApplication uiApplication)

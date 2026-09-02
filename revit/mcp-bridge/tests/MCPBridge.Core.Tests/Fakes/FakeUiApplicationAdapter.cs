@@ -13,9 +13,40 @@ namespace MCPBridge.Core.Tests.Fakes;
 /// assembly; IDocumentCreationSource returns an IDocumentAdapter, so the create-and-track logic stays
 /// tier-1 testable while only the final unwrap to a real Document remains tier-2.
 /// </summary>
-internal sealed class FakeUiApplicationAdapter : IUiApplicationAdapter, IDocumentCreationSource
+internal sealed class FakeUiApplicationAdapter : IUiApplicationAdapter, IDocumentCreationSource, IDocumentChangeSource
 {
     public IUiDocumentAdapter? ActiveUiDocument { get; init; }
+
+    private readonly List<Action<DocumentChange>> _changeSubscribers = new();
+
+    /// <summary>How many DocumentChanged subscriptions are live -- the executor must leave zero behind.</summary>
+    public int ChangeSubscribers => _changeSubscribers.Count;
+
+    /// <summary>Stands in for Revit raising Application.DocumentChanged (#146 Phase 2).</summary>
+    public void EmitChange(DocumentChange change)
+    {
+        foreach (var subscriber in _changeSubscribers.ToArray())
+        {
+            subscriber(change);
+        }
+    }
+
+    public IDisposable Subscribe(Action<DocumentChange> onChange)
+    {
+        _changeSubscribers.Add(onChange);
+        return new Unsubscriber(() => _changeSubscribers.Remove(onChange));
+    }
+
+    private sealed class Unsubscriber : IDisposable
+    {
+        private Action? _dispose;
+        public Unsubscriber(Action dispose) => _dispose = dispose;
+        public void Dispose()
+        {
+            _dispose?.Invoke();
+            _dispose = null;
+        }
+    }
 
     /// <summary>Candidates the routing error reports; empty by default.</summary>
     public IReadOnlyList<OpenDocumentInfo> OpenDocuments { get; init; } = Array.Empty<OpenDocumentInfo>();
