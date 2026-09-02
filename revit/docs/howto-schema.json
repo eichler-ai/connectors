@@ -1,0 +1,222 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/eichler-ai/connectors/revit/docs/howto-schema.json",
+  "title": "Revit connector how-to document",
+  "description": "One task, the shortest correct path to doing it on a given Revit version, and the mistakes that path avoids. Interchange format for the how-to corpus (see howto-corpus-design.md). One document per JSONL line.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "kind", "title", "task", "members", "verified", "provenance", "created_at", "updated_at"],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1,
+      "description": "Schema revision this document conforms to. A broker skips documents newer than it understands and says so in guidance."
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{2,79}$",
+      "description": "Stable kebab-case slug, unique across the shared corpus. A local document with the same id overrides the shared one for that user (supersedes_shared on the hit)."
+    },
+    "kind": {
+      "type": "string",
+      "enum": ["howto", "negative", "pitfall"],
+      "description": "howto: a working path to a task. negative: the API does NOT offer this; here is what to do instead (the ranker always returns something, so 'stop looking' must be a document). pitfall: a single mistake and its fix, without a full task script."
+    },
+    "title": {
+      "type": "string",
+      "minLength": 8,
+      "maxLength": 120,
+      "description": "Short noun phrase, the way a person would name the example."
+    },
+    "task": {
+      "type": "string",
+      "minLength": 20,
+      "maxLength": 600,
+      "description": "The task in agent language, one to three plain sentences naming the element types and the operation. Primary embedding text for search."
+    },
+    "summary": {
+      "type": "string",
+      "maxLength": 1200,
+      "description": "Optional: the approach in prose, for describe_howto. Not indexed."
+    },
+    "queries": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Recorded phrasings from real sessions. Misses are the most valuable rows: they are where API search failed and this document earns its keep.",
+      "properties": {
+        "hit": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/query" },
+          "maxItems": 20,
+          "description": "Phrasings that found the right member or this document."
+        },
+        "miss": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/query" },
+          "maxItems": 20,
+          "description": "Phrasings that did NOT surface the answer, with what they surfaced instead."
+        }
+      }
+    },
+    "members": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 40,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Za-z_][A-Za-z0-9_]*(\\.[A-Za-z_][A-Za-z0-9_`]*)+$"
+      },
+      "description": "Fully-qualified Type.Member names the script uses (describe_function's 'member' shape). Indexed for exact-name hits and used to cross-link API results. Empty is legal for kind=negative."
+    },
+    "script": {
+      "type": "string",
+      "maxLength": 16384,
+      "description": "The C# script body in the connector's dialect: ambient transaction (never open your own), `Document`/`UIApplication`/`Connector` globals, `return` a value. Required for kind=howto; optional otherwise. 16 KB bound."
+    },
+    "script_language": {
+      "type": "string",
+      "const": "csharp-script"
+    },
+    "pitfalls": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["symptom", "cause", "fix"],
+        "properties": {
+          "symptom": { "type": "string", "maxLength": 400, "description": "What the agent sees: the error text, the wrong result, the silent nothing." },
+          "cause": { "type": "string", "maxLength": 600 },
+          "fix": { "type": "string", "maxLength": 600 },
+          "members": {
+            "type": "array",
+            "items": { "type": "string" },
+            "maxItems": 10,
+            "description": "Members this pitfall is about, when different from the document's."
+          }
+        }
+      },
+      "description": "One entry per mistake the path avoids. Indexed text."
+    },
+    "tags": {
+      "type": "array",
+      "maxItems": 12,
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{1,31}$" },
+      "description": "Free-form facets (walls, views, sheets, worksharing, transactions). Not indexed for ranking; for browsing and de-duplication."
+    },
+    "verified": {
+      "type": "object",
+      "description": "Per Revit major version, the verification record. Only a harness run or a session's own successful execution writes these; a submitter cannot declare one. Keys are four-digit Revit years.",
+      "propertyNames": { "pattern": "^20[2-9][0-9]$" },
+      "additionalProperties": { "$ref": "#/$defs/verification" }
+    },
+    "api_since": {
+      "type": "string",
+      "pattern": "^20[2-9][0-9]$",
+      "description": "Declared hint: first Revit version whose API offers the members used. Not verification."
+    },
+    "api_until": {
+      "type": "string",
+      "pattern": "^20[2-9][0-9]$",
+      "description": "Declared hint: last Revit version before a used member was removed or deprecated."
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["harness", "validation-corpus", "submission", "local", "maintainer"],
+          "description": "harness/validation-corpus: extracted from a repo test. submission: arrived through submit_howto and the review queue. local: written by submit_howto into the user's own corpus, never reviewed. maintainer: authored directly in the repo."
+        },
+        "ref": {
+          "type": "string",
+          "maxLength": 300,
+          "description": "Where it came from: a test function name (harness), an issue URL (submission), a validation-corpus case number."
+        },
+        "reviewed_by": {
+          "type": "string",
+          "maxLength": 120,
+          "description": "Reviewer handle or 'review-agent', set when accepted into the shared corpus."
+        },
+        "reviewed_at": { "type": "string", "format": "date-time" },
+        "submitter": {
+          "type": "string",
+          "maxLength": 120,
+          "description": "Optional public handle the submitter chose to attach. Never an email or machine name; the scrubber removes those."
+        }
+      }
+    },
+    "supersedes": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{2,79}$",
+      "description": "id of the document this one replaces. The shared corpus is append-only; an edit is a new document pointing at the old one, and search hides superseded documents."
+    },
+    "created_at": { "type": "string", "format": "date-time" },
+    "updated_at": { "type": "string", "format": "date-time" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "kind": { "const": "howto" } } },
+      "then": { "required": ["script"] }
+    }
+  ],
+  "$defs": {
+    "query": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["text"],
+      "properties": {
+        "text": { "type": "string", "maxLength": 300, "description": "The query as sent to search_functions or search_howto." },
+        "tool": { "type": "string", "enum": ["search_functions", "search_howto"], "default": "search_functions" },
+        "rank": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "For hits: the rank the answer appeared at."
+        },
+        "surfaced": {
+          "type": "string",
+          "maxLength": 300,
+          "description": "For misses: what came back instead, in a few words."
+        },
+        "revit_version": { "type": "string", "pattern": "^20[2-9][0-9]$" },
+        "ranker": {
+          "type": "string",
+          "description": "The ranker value the response reported (semantic, lexical, keyword-fallback, or the pre-#107 add-in ranker as 'legacy-tiered'), so a recorded rank is read against the ranker that produced it."
+        }
+      }
+    },
+    "verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "at", "by"],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": ["passed", "failed"],
+          "description": "A failed entry is kept, not deleted: the document keeps serving for versions where it passes, and the failure is shown to the agent."
+        },
+        "at": { "type": "string", "format": "date-time" },
+        "by": {
+          "type": "string",
+          "enum": ["harness", "session"],
+          "description": "harness: the repo's tier-2 run stamped it. session: the submitting session had just executed this exact script successfully (weaker; shown as such)."
+        },
+        "script_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "Hash of the script text that was verified; a later edit to the script invalidates the stamp until re-run."
+        },
+        "connector_version": { "type": "string", "maxLength": 40 },
+        "diagnostic": {
+          "type": "string",
+          "maxLength": 1000,
+          "description": "For failed: the §01 diagnostic message the run produced."
+        }
+      }
+    }
+  }
+}
