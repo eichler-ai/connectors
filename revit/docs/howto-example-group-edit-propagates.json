@@ -5,24 +5,6 @@
   "title": "Change a group's contents so every placed instance picks up the edit",
   "task": "Edit the elements inside a model group so that all other placed instances of that group change too. Revit has no group-edit-mode API; the route is ungroup, edit, regroup into a new GroupType, then reassign the other instances to it.",
   "summary": "Ungroup the instance you want to change (Group.UngroupMembers), edit the now-loose elements, regroup them (Document.Create.NewGroup) to mint a new GroupType, then set Group.GroupType = newType on every other placed instance. After reassignment Revit re-creates those instances' member elements, so any member ElementIds captured earlier are stale.",
-  "queries": {
-    "miss": [
-      {
-        "text": "edit group",
-        "tool": "search_functions",
-        "surfaced": "nothing resembling a group edit mode; there is no such API",
-        "ranker": "keyword-fallback"
-      }
-    ],
-    "hit": [
-      {
-        "text": "Group.GroupType set",
-        "tool": "search_functions",
-        "rank": 1,
-        "ranker": "keyword-fallback"
-      }
-    ]
-  },
   "members": [
     "Autodesk.Revit.DB.Group.UngroupMembers",
     "Autodesk.Revit.Creation.Document.NewGroup",

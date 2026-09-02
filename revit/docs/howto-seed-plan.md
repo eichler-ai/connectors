@@ -145,7 +145,8 @@ ranker always returns something:
 Audit row #6 is written out in full as the level-of-detail reference, split as the audit proposed:
 
 - [`howto-example-group-edit-propagates.json`](howto-example-group-edit-propagates.json) — the how-to
-  (kind `howto`, ~2 KB script, three pitfalls, one recorded miss, one recorded hit).
+  (kind `howto`, ~2 KB script, three pitfalls; no `queries` — the test records the research outcome,
+  not the query strings, and none were invented).
 - [`howto-example-group-edit-mode-api-does-not-exist.json`](howto-example-group-edit-mode-api-does-not-exist.json)
   — the negative (kind `negative`, no members, the "stop looking" answer with the route to take).
 - [`howto-example-group-member-move-silently-does-nothing.json`](howto-example-group-member-move-silently-does-nothing.json)

@@ -5,22 +5,6 @@
   "title": "There is no group edit mode in the Revit API",
   "task": "Enter a group's edit mode programmatically, the way the Revit UI's Edit Group does, to change its members in place. No such API exists: there is no Document.EditGroup and nothing like Document.EditFamily for groups.",
   "summary": "Stop searching for an edit-group scope. To change what a group contains, ungroup an instance, edit the loose elements, regroup them into a new GroupType, and reassign the other instances (see group-edit-propagates). A member edit without ungrouping is allowed only while exactly one instance is placed, and then only with a warning.",
-  "queries": {
-    "miss": [
-      {
-        "text": "edit group",
-        "tool": "search_functions",
-        "surfaced": "no group edit scope member exists to find",
-        "ranker": "keyword-fallback"
-      },
-      {
-        "text": "group edit mode",
-        "tool": "search_functions",
-        "surfaced": "unrelated Group members",
-        "ranker": "keyword-fallback"
-      }
-    ]
-  },
   "members": [],
   "pitfalls": [
     {
