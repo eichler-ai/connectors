@@ -2,12 +2,13 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/eichler-ai/connectors/revit/docs/howto-schema.json",
   "title": "Revit connector how-to document",
-  "description": "One task, the shortest correct path to doing it on a given Revit version, and the mistakes that path avoids. Interchange format for the how-to corpus (see howto-corpus-design.md). One document per JSONL line. Unknown top-level fields are ALLOWED so an older broker can still read a newer corpus (it ignores what it does not know and reports the newer corpus_version in guidance); the fields it does know are validated strictly.",
+  "description": "One task, the shortest correct path to doing it on a given Revit version, and the mistakes that path avoids. Interchange format for the how-to corpus (see howto-corpus-design.md). One document per JSONL line. Unknown top-level fields are ALLOWED so an older broker can still read a newer corpus (it ignores what it does not know and reports the newer corpus_version in guidance); the fields it does know are validated strictly. Cross-field rules the Go validator enforces beyond this schema: absorbs excludes own id; contributors[].rev <= rev; updated_at >= created_at; hit/miss query shape.",
   "type": "object",
   "additionalProperties": true,
   "required": [
     "schema_version",
     "id",
+    "rev",
     "kind",
     "title",
     "task",
@@ -25,7 +26,7 @@
     "id": {
       "type": "string",
       "pattern": "^[a-z0-9][a-z0-9-]{2,79}$",
-      "description": "Stable kebab-case slug, unique across the shared corpus. A local document with the same id overrides the shared one for that user (supersedes_shared on the hit)."
+      "description": "Lineage id: a kebab-case slug chosen when the document is first created and never renamed. Edits keep the id and bump `rev`, so a reference (describe_howto, a local override, a link in another document) stays valid across revisions. Uniqueness is checked against the shared corpus at triage and against local + embedded corpora by submit_howto, which appends -2, -3 … on a clash."
     },
     "kind": {
       "type": "string",
@@ -34,7 +35,7 @@
         "negative",
         "pitfall"
       ],
-      "description": "howto: a working path to a task. negative: the API does NOT offer this; here is what to do instead (the ranker always returns something, so 'stop looking' must be a document). pitfall: a single mistake and its fix, without a full task script."
+      "description": "howto: a working path to a task (the normal kind). pitfall: a single mistake and its fix, without a full task script, for a mistake that is a task in its own right. negative: reserved for 'the API cannot do this and there is no route' -- when a how-to exists, its task sentence states the missing API and no separate negative document is written."
     },
     "title": {
       "type": "string",
@@ -46,12 +47,7 @@
       "type": "string",
       "minLength": 20,
       "maxLength": 600,
-      "description": "The task in agent language, one to three plain sentences naming the element types and the operation. Primary embedding text for search."
-    },
-    "summary": {
-      "type": "string",
-      "maxLength": 1200,
-      "description": "Optional: the approach in prose, for describe_howto. Not indexed."
+      "description": "The task in agent language: one or two plain sentences naming the element type, the operation, and the key member nouns of the answer. This is the primary search text, so every word should earn its place; no preamble, no rationale."
     },
     "queries": {
       "type": "object",
@@ -90,7 +86,7 @@
     "script": {
       "type": "string",
       "maxLength": 16384,
-      "description": "The C# script body in the connector's dialect: ambient transaction (never open your own), `Document`/`UIApplication`/`Connector` globals, `return` a value. Required for kind=howto; optional otherwise. 16 KB bound.",
+      "description": "The complete, runnable C# script body in the connector's current dialect (reads at top level; writes inside Connector.WithTransaction; return a value). Comments in the script ARE the explanation: label setup as setup, number the steps of the recipe, and say why at the step where it matters. There is no separate prose summary. Required for kind=howto. 16 KB bound; aim well under 3 KB.",
       "minLength": 1
     },
     "script_language": {
@@ -147,7 +143,7 @@
         "type": "string",
         "pattern": "^[a-z0-9][a-z0-9-]{1,31}$"
       },
-      "description": "Free-form facets (walls, views, sheets, worksharing, transactions). Not indexed for ranking; for browsing and de-duplication."
+      "description": "Facets (walls, views, sheets, worksharing, transactions, groups). Indexed at low weight for search and returned on every hit; also used for browsing and de-duplication."
     },
     "api_since": {
       "type": "string",
@@ -191,11 +187,6 @@
           "type": "string",
           "format": "date-time",
           "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$"
-        },
-        "submitter": {
-          "type": "string",
-          "maxLength": 120,
-          "description": "Optional public handle the submitter chose to attach. Never an email or machine name; the scrubber removes those."
         }
       },
       "allOf": [
@@ -229,12 +220,8 @@
             }
           }
         }
-      ]
-    },
-    "supersedes": {
-      "type": "string",
-      "pattern": "^[a-z0-9][a-z0-9-]{2,79}$",
-      "description": "id of the document this one replaces. The shared corpus is append-only; an edit is a new document pointing at the old one, and search hides superseded documents."
+      ],
+      "description": "Maintainer-facing only: never returned by search_howto or describe_howto, and never indexed. Credit lives in `contributors`, which is agent-visible."
     },
     "created_at": {
       "type": "string",
@@ -245,6 +232,61 @@
       "type": "string",
       "format": "date-time",
       "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$"
+    },
+    "rev": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Revision of this lineage, from 1. The corpus file holds only the latest revision per id (git history keeps the rest); an improvement is the same id with rev+1 replacing the line. rev exists so references and verification stamps can name the revision they meant."
+    },
+    "contributors": {
+      "type": "array",
+      "maxItems": 50,
+      "description": "Credit, agent-visible: who authored and improved this lineage, accumulated across revisions (a new revision appends, never rewrites). Opt-in: submit_howto only records a handle the submitter passed as credit_as; nothing is inferred from git, gh or the machine. Returned by describe_howto.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "handle",
+          "role",
+          "rev"
+        ],
+        "properties": {
+          "handle": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9 ._-]{0,38}$",
+            "description": "A GitHub login or a display name the submitter chose (letters, digits, space, dot, underscore, hyphen). Never an email (no @) or a machine/host name (no backslash or slash)."
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "author",
+              "contributor",
+              "reviewer"
+            ],
+            "description": "author: created rev 1. contributor: submitted a later revision. reviewer: triaged it into the shared corpus (optional; maintainers may decline credit)."
+          },
+          "rev": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "The revision this credit applies to; must not exceed the document's rev (validator check; triage renumbers on acceptance)."
+          },
+          "at": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$"
+          }
+        }
+      }
+    },
+    "absorbs": {
+      "type": "array",
+      "maxItems": 20,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9][a-z0-9-]{2,79}$"
+      },
+      "description": "Lineage MERGE record, set only at triage: ids of other lineages folded into this one. Their lines are deleted from the corpus; describe_howto on an absorbed id follows the pointer here. Must not contain this document's own id."
     }
   },
   "allOf": [
@@ -309,7 +351,8 @@
           ],
           "description": "The ranker value the response reported, so a recorded rank is read against the ranker that produced it. Episodes recorded before #107 shipped were served by the add-in's tiered ranker, which is what keyword-fallback names today."
         }
-      }
+      },
+      "description": "A recorded phrasing. In queries.hit, rank is required and surfaced absent; in queries.miss, surfaced is required and rank absent (enforced by the validator)."
     }
   }
 }

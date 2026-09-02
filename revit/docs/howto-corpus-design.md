@@ -26,8 +26,10 @@ Throughout: **[decided]** is settled by this note, **[open]** needs a decision b
 ## 1. What a how-to is
 
 One task an agent might be asked to do, with the shortest path to doing it correctly on a specific
-Revit version, and the mistakes that path avoids. Not API reference (that is `describe_function`),
-not orientation (that is `get_skills`). The unit of value is the **pitfall**: the harness comments are
+Revit version, and the mistakes that path avoids. The topic can be anything relevant to using the
+connector — a Revit API task, or the connector's own mechanics (transaction blocks, created
+documents, routing, publishing, undo) — so long as it is a worked example. Not API reference (that
+is `describe_function`), not orientation or rules (that is `get_skills`). The unit of value is the **pitfall**: the harness comments are
 full of them ("`AreElementsJoined` and `IsWallJoinAllowedAtEnd` measure different things";
 "`LoadFamily` needs *both* documents to have no open transaction, so load first, then open for
 writing") and nothing today serves them to an agent at the moment it needs them.
@@ -36,12 +38,14 @@ A document carries:
 
 | Field group | Purpose |
 |---|---|
-| `id`, `title`, `task` | identity and the task in agent language — `task` is the primary embedding text |
+| `id`, `rev`, `title`, `task` | lineage id (never renamed) and revision; `task` is the primary search text |
 | `queries` | phrasings that found it and phrasings that *missed*; the misses are the corpus's most valuable rows, they are where API search fails and the how-to earns its keep |
 | `members` | fully-qualified members used, so an API hit and a how-to hit can be cross-linked |
-| `script` | the working C# body, in the connector's script dialect **as of the version it was verified on** — see the dialect note below |
+| `script` | the working C# body in the connector's dialect **as of the version it was verified on** (dialect note below); its comments are the explanation — there is no prose summary |
 | `pitfalls` | one entry per mistake avoided, each with the symptom the agent would otherwise see |
-| `provenance` | where it came from and how it was reviewed |
+| `tags` | facets; indexed at low weight, returned on hits |
+| `contributors` | opt-in credit per revision (`author` / `contributor` / `reviewer`), cumulative across a lineage; agent-visible |
+| `provenance` | where it came from and how it was reviewed — maintainer-facing, never returned to an agent |
 
 Verification is deliberately **not** a field of the document (§3): it lives in a sidecar keyed by the
 document's id and script hash, so a submitter cannot write it and an append-only corpus file never
@@ -57,7 +61,7 @@ self-transacting calls (`LoadFamily`, `RequestViewChange`, EditScope start/commi
 *between* blocks; `Connector.Settle` unchanged; `OpenForWriting` and `WithoutTransaction` gone. The
 validation-corpus case #3 pitfalls about `LoadFamily` and open transactions are therefore about to
 change shape too — a second concrete instance of D6. Every script in the seed — including the example beside this note — is written in the pre-#146
-dialect and fails the sweep against a #160 broker (the example's source test predates #160). That is the mechanism working as intended (§3):
+dialect if it was extracted from a pre-#160 test; the seed is extracted post-#160, so it is in the shipped dialect (`howto-seed-plan.md` §2). Older extractions fail the sweep, and that is the mechanism working as intended (§3):
 the stamps go `failed` with the diagnostic naming the fix, the seed is re-extracted from the harness
 tests once they are updated, and the sidecar's `connector_version` records which broker verified
 what. It also means the sweep must key stamps by connector version as well as Revit version, and
@@ -167,22 +171,11 @@ query returns only members.
 | **local** | `<app-data>/howto/local/*.json`, one document per file | `submit_howto` writes here first; a person can also drop files | unreviewed, the user's own |
 | **seed** | `revit/howto/corpus.jsonl` in the repo, embedded in the broker | harness extraction (§2) | reviewed, harness-verified; the offline floor |
 
-**Distribution [decided, with one open question]:** the shared corpus is **not embedded** in the
-broker. The intent is that it changes more often than the broker; **whether it does is §9 D1** — if
-the corpus only ever ships inside a broker release, the fetch machinery below buys nothing and the
-seed alone suffices. Assuming it does: the broker's existing 6-hourly release poll
-(`internal/updatecheck`) is extended — today it reads only `tag_name` through a 1 MB limit and has no
-asset or ETag handling — to also fetch the corpus asset with its digest, and a corpus-only release
-must **not** flip the ribbon's "update available" (PRD §12), so corpus releases are tagged distinctly
-(`howto-vN`) and the broker-update check ignores them. Every line is validated against the schema; a
-line that fails is skipped and counted, never fatal, and the count reaches the agent as a
-`notices[]` record. The cache is `<app-data>/howto/shared/`; offline, the cache serves; with no
-cache, the embedded seed serves.
-
-**The corpus is code the agent will run, so it is verified like code [decided]:** the release pipeline
-already publishes `checksums.txt` and Authenticode-signs the binaries; the corpus asset's sha256 is
-listed there and the broker refuses a corpus whose digest does not match. A signature on the corpus
-itself is the stronger follow-up once a real code-signing certificate replaces the self-signed one.
+**Distribution [decided in the seed plan §1]:** the shared corpus is **embedded in the broker**, like
+`skill.md`, and ships with every connector release; there is no runtime fetch, cache, or separate
+release tag. The fetch channel this section originally described is kept only as the escape hatch if
+corpus churn ever outpaces the release cadence. What a corpus-only release costs the user, and the
+installer work that makes it cheap, is in `howto-seed-plan.md` §1.
 
 **Forward compatibility [decided]:** documents allow unknown top-level fields, so an older broker reads
 a newer corpus, validates the fields it knows, and reports `howto-corpus-newer-than-broker` in
@@ -232,7 +225,7 @@ submit_howto(title, task, script, members[], pitfalls[]?, queries?, notes?, conf
    write is the intended non-gated half, and only the outward half is gated.
 3. **Scrub, then show.** The broker rewrites absolute and UNC paths to placeholders and drops anything
    that looks like a document title, project path, user name, machine name or bind address, across
-   **every** text field — `task`, `summary`, `pitfalls[].symptom` (which §01 diagnostics deliberately
+   **every** text field — `task`, `pitfalls[].symptom` (which §01 diagnostics deliberately
    fill with concrete identifiers), `queries[].text` and the script's string literals — and returns
    the scrubbed document so the user sees exactly what will leave the machine. Anything that still
    matches a path or host pattern after scrubbing is refused with a `remedy` naming the field and
@@ -245,7 +238,7 @@ submit_howto(title, task, script, members[], pitfalls[]?, queries?, notes?, conf
    `issues/new` URL as `queue_ref` for the person to open; because URLs cap at roughly 8 KB and a
    script may be 16 KB, the prefill carries title, task, members and pitfalls, and the body asks the
    person to paste the JSON the tool also wrote to `<exchange-root>/howto/outbox/<id>.json`.
-   Attribution is opt-in (`provenance.submitter`), never inferred.
+   Attribution is opt-in (`contributors[]` via `credit_as`), never inferred.
 5. **Review** happens on the issue and is **human-gated before any execution [decided]**: a
    maintainer reads the submission and applies `howto-reviewed`; only then does the review agent
    (a `/schedule` routine is the natural home) run the script — against a disposable fixture
@@ -253,16 +246,19 @@ submit_howto(title, task, script, members[], pitfalls[]?, queries?, notes?, conf
    then de-duplicates (same `members` set plus similar `task` embedding), edits `task`/`pitfalls`
    wording, and opens the append PR for a human to merge. Running an arbitrary public submission
    under the `Connector` global without that label would be remote code execution from a public
-   queue. Accepting appends the document to `revit/howto/corpus.jsonl` **[decided: append-only in
-   git; edits are new documents with `supersedes`]**, so the file's history is the audit trail;
+   queue. Accepting appends the document to `revit/howto/corpus.jsonl` **[decided: one line per
+   lineage, latest revision only; an edit is the same `id` at `rev + 1` replacing that line, and
+   `supersedes` merges two lineages]**, so git history is the audit trail and readers never resolve
+   revisions;
    uniqueness of `id` across the file is a CI check on the PR.
 
 ## 7. Relationship to the ranking note
 
 [`search-ranking-redesign.md`](search-ranking-redesign.md) §4 sketched the how-to index as "embedded
 once, shipped" with the two result streams merged into one `search_functions` response. This note
-supersedes both points: the shared corpus is fetched rather than embedded (§5, with §9 D1 open), and
-the two corpora get separate tools with cross-promotion deferred (§4). The ranking note's §10.4
+supersedes the second point (separate tools, cross-promotion deferred, §4); on the first, the seed
+plan later decided the corpus is embedded after all (§5 above), so both notes now agree with §4's
+sketch on that. The ranking note's §10.4
 entry for 8.5 points here.
 
 ## 8. What is not in scope
