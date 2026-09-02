@@ -233,7 +233,10 @@ those are real Revit types now (PRD §14). Tier 1 can still assert everything co
 scripts (denylist checks, globals binding), since Roslyn only needs metadata.
 
 Run it before merging anything touching threading (§06), dialogs/failures (§07), discovery (§08), or
-file exchange; before every corpus regression pass; and before cutting a release.
+file exchange; before every corpus regression pass; and before cutting a release. A release that
+carries a how-to corpus change (any file under `internal/howto/corpus/`) additionally needs
+`TestHowToSweep` and `TestHowToEndToEnd` run on **both** Revit versions first — the sweep is what
+earns the version stamps the release ships, and the pipeline does not run the harness.
 
 **Iterate with `-run <Case>` (Go) or `--filter <TestClass>` and one `-f <tfm>` (C#); run the full
 suite once before opening the PR.** The C# default runs every suite twice, once per TFM. The dual

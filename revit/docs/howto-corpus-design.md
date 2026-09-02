@@ -1,6 +1,6 @@
 # How-to corpus — searchable, versioned, community-fed worked examples
 
-**Status: implemented** (PRs #161–#175, 2026-09-02; what landed per step is in [`howto-seed-plan.md`](howto-seed-plan.md) §6, the agent-facing summary in [`PRD.md`](PRD.md) §08 "How-to corpus", and the tool contracts in [`tools.md`](tools.md)). Where this note and the code differ, the code and the seed plan win; the note is kept as the design rationale. Originally it resolved the open point left by
+**Status: implemented** (PRs #159, #161, #165, #166, #170–#175, 2026-09-02; what landed per step is in [`howto-seed-plan.md`](howto-seed-plan.md) §6, the agent-facing summary in [`PRD.md`](PRD.md) §08 "How-to corpus", and the tool contracts in [`tools.md`](tools.md)). Where this note and the code differ, the code and the seed plan win; the note is kept as the design rationale. Originally it resolved the open point left by
 [`search-ranking-redesign.md`](search-ranking-redesign.md) §8.5 / §10.4: `search_functions` now
 finds API *members* by meaning, but the idiom-shaped tasks it still misses ("get all walls" is a
 `FilteredElementCollector` pattern, not a member) are how-to territory, and `get_skills` cannot grow

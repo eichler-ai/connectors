@@ -32,6 +32,9 @@ the tag itself.
    bitten before by `dotnet test` exiting 0 while silently skipping an entire test assembly (missing
    DLL for a TFM prints no summary line at all). If either leg fails or can't be confirmed, stop and
    report it.
+   If the release carries a how-to corpus change (`git diff <last-tag> -- revit/mcp-server/internal/howto/corpus/`
+   is non-empty), the `revit-connector-development` skill also requires the live `TestHowToSweep` and
+   `TestHowToEndToEnd` runs on both Revit versions before the tag; confirm they were run, or stop.
 
 4. **Determine the current latest version.** `git fetch --tags`, then
    `git tag -l 'v*' --sort=-v:refname | head -1`. If that's empty, treat the current version as
