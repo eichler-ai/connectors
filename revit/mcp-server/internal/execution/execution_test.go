@@ -1448,4 +1448,137 @@ func TestReconcileBusyLeavesTheLatchWhenTheWireCallFails(t *testing.T) {
 	if second.Status != StatusBusy || second.ExecutionID != first.ExecutionID {
 		t.Fatalf("second = %+v, want the honest busy answer", second)
 	}
+	// Not silent: the failed reconciliation rides along as a notice.
+	if len(second.Notices) != 1 || second.Notices[0].Code != "add-in-error" {
+		t.Errorf("busy answer should carry the failed reconcile's diagnostic as a notice, got %+v", second.Notices)
+	}
+}
+
+func TestUndoRedoReconcilesAnUnpolledCompletionTheSameWay(t *testing.T) {
+	_, conn := newFakeInstance(t, func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
+		var p map[string]any
+		json.Unmarshal(params, &p)
+		switch method {
+		case "execute_script":
+			return Result{Status: StatusRunning, ExecutionID: p["execution_id"].(string)}, nil
+		case "poll_execution":
+			return Result{Status: StatusSuccess, ExecutionID: p["execution_id"].(string)}, nil
+		case "undo_redo":
+			return Result{Status: StatusSuccess, ExecutionID: p["execution_id"].(string), Output: "undone"}, nil
+		}
+		return nil, &transport.RPCError{Code: -32601, Message: "unexpected " + method}
+	})
+	m := NewManager()
+	m.AttachInstance("inst-1", conn)
+	if _, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "slow", 100, 60000, ScriptOptions{}); drec != nil {
+		t.Fatal(drec)
+	}
+
+	res, drec := m.UndoRedo(context.Background(), "inst-1", "undo", true, 5000, "")
+	if drec != nil || res.Status != StatusSuccess || res.Output != "undone" {
+		t.Fatalf("undo after an unpolled completion = %+v %+v, want it to run", res, drec)
+	}
+}
+
+func TestReconcileThatLearnsUnrecoverable_ReturnsTheUnrecoverableError(t *testing.T) {
+	_, conn := newFakeInstance(t, func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
+		var p map[string]any
+		json.Unmarshal(params, &p)
+		if method == "poll_execution" {
+			return Result{Status: StatusUnrecoverable, ExecutionID: p["execution_id"].(string)}, nil
+		}
+		return Result{Status: StatusRunning, ExecutionID: p["execution_id"].(string)}, nil
+	})
+	m := NewManager()
+	m.AttachInstance("inst-1", conn)
+	m.ExecuteScript(context.Background(), "inst-1", "doc-1", "slow", 100, 60000, ScriptOptions{})
+
+	res, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "another", 100, 60000, ScriptOptions{})
+	if res != nil || drec == nil || drec.Code != "instance-unrecoverable" {
+		t.Fatalf("got %+v %+v, want the instance-unrecoverable error (the reconcile learned it; the retry must honour it)", res, drec)
+	}
+}
+
+func TestReconcileOnUnknownExecutionId_SettlesItLostAndRunsTheNewScript(t *testing.T) {
+	// #42's execution-lost settle, reached through a reconciliation instead of a real poll: the add-in's
+	// own live connection saying it is not running the latched execution frees the instance.
+	_, conn := newFakeInstance(t, func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
+		var p map[string]any
+		json.Unmarshal(params, &p)
+		switch method {
+		case "poll_execution":
+			return nil, &transport.RPCError{Code: -32602, Message: "unknown", Data: diag.New(diag.SeverityError, "unknown-execution-id", "test", "not known")}
+		case "execute_script":
+			if p["script"] == "lost" {
+				return Result{Status: StatusRunning, ExecutionID: p["execution_id"].(string)}, nil
+			}
+			return Result{Status: StatusSuccess, ExecutionID: p["execution_id"].(string)}, nil
+		}
+		return nil, &transport.RPCError{Code: -32601, Message: "unexpected " + method}
+	})
+	m := NewManager()
+	m.AttachInstance("inst-1", conn)
+	first, _ := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "lost", 100, 60000, ScriptOptions{})
+
+	second, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "fresh", 100, 60000, ScriptOptions{})
+	if drec != nil || second.Status != StatusSuccess {
+		t.Fatalf("second = %+v %+v, want it to run", second, drec)
+	}
+	lost, _ := m.PollExecution(context.Background(), first.ExecutionID, 100)
+	if lost == nil || lost.Status != StatusError || lost.ErrorDetail == nil || lost.ErrorDetail.Code != "execution-lost" {
+		t.Errorf("the latched execution should have settled as execution-lost, got %+v", lost)
+	}
+}
+
+func TestReconcileIsBoundedWhenTheAddInHangs(t *testing.T) {
+	_, conn := newFakeInstance(t, func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
+		var p map[string]any
+		json.Unmarshal(params, &p)
+		if method == "poll_execution" {
+			select {
+			case <-ctx.Done():
+			case <-time.After(10 * time.Second):
+			}
+			return Result{Status: StatusRunning, ExecutionID: p["execution_id"].(string)}, nil
+		}
+		return Result{Status: StatusRunning, ExecutionID: p["execution_id"].(string)}, nil
+	})
+	m := NewManager()
+	m.AttachInstance("inst-1", conn)
+	first, _ := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "slow", 100, 60000, ScriptOptions{})
+
+	started := time.Now()
+	second, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "another", 100, 60000, ScriptOptions{})
+	elapsed := time.Since(started)
+	if drec != nil || second.Status != StatusBusy || second.ExecutionID != first.ExecutionID {
+		t.Fatalf("second = %+v %+v, want busy", second, drec)
+	}
+	if elapsed > reconcileBusyBudget+time.Second {
+		t.Errorf("busy answer took %s; the reconcile budget (%s) did not bound it", elapsed, reconcileBusyBudget)
+	}
+	if len(second.Notices) != 1 || second.Notices[0].Code != "wire-call-failed" {
+		t.Errorf("the timed-out reconcile should be reported as a notice, got %+v", second.Notices)
+	}
+}
+
+func TestReconcileIsSuppressedRightAfterAnAttempt(t *testing.T) {
+	var polls int32
+	_, conn := newFakeInstance(t, func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
+		var p map[string]any
+		json.Unmarshal(params, &p)
+		if method == "poll_execution" {
+			atomic.AddInt32(&polls, 1)
+		}
+		return Result{Status: StatusRunning, ExecutionID: p["execution_id"].(string)}, nil
+	})
+	m := NewManager()
+	m.AttachInstance("inst-1", conn)
+	m.ExecuteScript(context.Background(), "inst-1", "doc-1", "slow", 100, 60000, ScriptOptions{})
+
+	for i := 0; i < 5; i++ {
+		m.ReconcileBusy(context.Background(), "inst-1")
+	}
+	if got := atomic.LoadInt32(&polls); got != 1 {
+		t.Errorf("five back-to-back reconciliations should cost one poll, got %d", got)
+	}
 }

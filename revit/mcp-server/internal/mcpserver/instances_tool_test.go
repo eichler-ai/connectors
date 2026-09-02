@@ -3,6 +3,7 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -186,5 +187,56 @@ func TestListInstancesToolUnrecoverableBeatsUnresponsive(t *testing.T) {
 	out := callListInstances(t, cs)
 	if len(out.Instances) != 1 || out.Instances[0].Status != string(execution.StatusUnrecoverable) {
 		t.Errorf("expected exactly 1 instance with status unrecoverable (beating an also-true unresponsive condition), got %+v", out.Instances)
+	}
+}
+
+// Issue #54: list_instances reconciles a busy latch against the add-in before reporting it.
+func TestListInstancesToolReportsIdleAfterAnUnpolledCompletion(t *testing.T) {
+	reg := registry.New()
+	mgr := execution.NewManager()
+	reg.Register(&registry.Instance{InstanceID: "inst-1"}, time.Now())
+	attachFakeInstance(t, mgr, "inst-1", func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
+		var p map[string]any
+		json.Unmarshal(params, &p)
+		if method == "poll_execution" {
+			return execution.Result{Status: execution.StatusSuccess, ExecutionID: p["execution_id"].(string)}, nil
+		}
+		return execution.Result{Status: execution.StatusRunning, ExecutionID: p["execution_id"].(string)}, nil
+	})
+	if _, drec := mgr.ExecuteScript(context.Background(), "inst-1", "doc-1", "slow", 100, 60000, execution.ScriptOptions{}); drec != nil {
+		t.Fatalf("ExecuteScript: %+v", drec)
+	}
+
+	cs := connectInstancesClient(t, reg, mgr)
+	out := callListInstances(t, cs)
+	if len(out.Instances) != 1 || out.Instances[0].Status != string(execution.StatusIdle) {
+		t.Errorf("expected idle after the reconciliation learned the run finished, got %+v", out.Instances)
+	}
+}
+
+func TestListInstancesToolDoesNotReconcileAnUnresponsiveInstance(t *testing.T) {
+	reg := registry.New()
+	mgr := execution.NewManager()
+	var polls int32
+	reg.Register(&registry.Instance{InstanceID: "inst-1"}, time.Now().Add(-time.Hour))
+	attachFakeInstance(t, mgr, "inst-1", func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
+		var p map[string]any
+		json.Unmarshal(params, &p)
+		if method == "poll_execution" {
+			atomic.AddInt32(&polls, 1)
+		}
+		return execution.Result{Status: execution.StatusRunning, ExecutionID: p["execution_id"].(string)}, nil
+	})
+	if _, drec := mgr.ExecuteScript(context.Background(), "inst-1", "doc-1", "slow", 100, 60000, execution.ScriptOptions{}); drec != nil {
+		t.Fatalf("ExecuteScript: %+v", drec)
+	}
+
+	cs := connectInstancesClient(t, reg, mgr)
+	out := callListInstances(t, cs)
+	if len(out.Instances) != 1 || out.Instances[0].Status != "unresponsive" {
+		t.Fatalf("expected unresponsive, got %+v", out.Instances)
+	}
+	if atomic.LoadInt32(&polls) != 0 {
+		t.Errorf("an unresponsive instance must not be reconciled (the answer is discarded anyway); got %d polls", polls)
 	}
 }
