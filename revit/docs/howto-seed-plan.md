@@ -226,10 +226,12 @@ should either help the ranker find the document or help the agent do the task.
    the record look complete.
 7. **`provenance` is maintainer-facing**: never returned to an agent, never indexed. It names the
    source test and, for a document derived from a comment rather than executed code, says so.
-8. **Indexed fields**: `title`, `task`, `pitfalls` text, `members`, `tags` (low weight), and the
-   script's comment lines (code stripped). What `search_howtos` returns per hit: `id`, `rev`, `title`,
-   `task`, `members`, `tags`, `verified_on`, `source`. What `describe_howto` returns: those plus
-   `script`, `pitfalls` and `contributors`.
+8. **Indexed fields**: `title`, `task` (highest weight), the recorded hit `queries`, `pitfalls`
+   text, `members` as `Type.Member`, and `tags` (low weight); the script is not indexed. What
+   `search_howtos` returns per hit: `id`, `rev`, `title`, `task`, `members`, `tags`, `verified_on`,
+   `failed_on`, `verified_here`, `source`, `shared_rev`. What `describe_howto` returns: those plus
+   `script`, `pitfalls`, `api_since`/`api_until`, `absorbs` and the verification for the caller's
+   version — never `provenance`, `verify` or `contributors`.
 9. **Credit is opt-in and cumulative.** `contributors[]` records `{handle, role, rev}` per revision:
    `author` for rev 1, `contributor` for each later revision, `reviewer` optionally for the maintainer
    who triaged it. A new revision appends to the list it inherits, so a lineage improved by several

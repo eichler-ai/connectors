@@ -137,6 +137,15 @@ func TestSearchHowTosPagesWithABoundCursor(t *testing.T) {
 	if p2.Error != nil || len(p2.Results) == 0 || p2.Results[0].ID == p1.Results[0].ID {
 		t.Fatalf("page 2: %+v", p2)
 	}
+	args["revit_version"] = "2025"
+	other, isErr := callHowToTool[SearchHowTosOut](t, cs, "search_howtos", args)
+	if !isErr || other.Error == nil || other.Error.Code != "invalid-cursor" {
+		t.Fatalf("a cursor is bound to the version it was ranked for: %+v", other.Error)
+	}
+	if !strings.Contains(other.Error.Message, "revit_version") || other.Error.Source != howtoSource {
+		t.Errorf("the refusal should name what changed and come from the how-to tool: %+v", other.Error)
+	}
+	args["revit_version"] = "2027"
 	args["query"] = "something else entirely about sheets"
 	bad, isErr := callHowToTool[SearchHowTosOut](t, cs, "search_howtos", args)
 	if !isErr || bad.Error == nil || bad.Error.Code != "invalid-cursor" {
@@ -159,10 +168,21 @@ func TestDescribeHowToReturnsTheScriptAndTheVersionsVerification(t *testing.T) {
 	if !strings.Contains(out.Guidance, "harness") {
 		t.Errorf("guidance should say who verified it: %q", out.Guidance)
 	}
-	// Provenance is maintainer-facing and must not reach the agent.
-	raw, _ := json.Marshal(out)
+	// Provenance is maintainer-facing and must not reach the agent. Checked
+	// on the wire bytes, not on the decoded struct (which would drop any
+	// unknown field and so could not fail).
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "describe_howto", Arguments: map[string]any{"id": "walls-create-and-join", "instance_id": "inst-1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire, _ := json.Marshal(res.StructuredContent)
+	if !strings.Contains(string(wire), "\"script\"") {
+		t.Fatalf("wire shape missing the script: %s", wire)
+	}
 	for _, hidden := range []string{"provenance", "reviewed_by", "contributors", "\"verify\""} {
-		if strings.Contains(string(raw), hidden) {
+		if strings.Contains(string(wire), hidden) {
 			t.Errorf("response leaks %s", hidden)
 		}
 	}
@@ -219,6 +239,7 @@ func TestSearchHowTosReportsLocalCorpusProblemsAsNotices(t *testing.T) {
 	deps := searchDeps(t)
 	os.MkdirAll(deps.LocalDir, 0o755)
 	os.WriteFile(filepath.Join(deps.LocalDir, "broken.json"), []byte("{not json"), 0o644)
+	os.WriteFile(filepath.Join(deps.LocalDir, howto.SessionSidecarName), []byte("{not a stamp}\n"), 0o644)
 	cs := connectHowToClient(t, deps)
 	out, isErr := callHowToTool[SearchHowTosOut](t, cs, "search_howtos", map[string]any{"query": "create walls", "revit_version": "2027"})
 	if isErr || out.Error != nil {
@@ -228,8 +249,8 @@ func TestSearchHowTosReportsLocalCorpusProblemsAsNotices(t *testing.T) {
 	for _, n := range out.Notices {
 		if n.Code == "howto-local-corpus-problems" {
 			found = true
-			if !strings.Contains(n.Message, deps.LocalDir) {
-				t.Errorf("notice should name the directory: %q", n.Message)
+			if !strings.Contains(n.Message, deps.LocalDir) || !strings.Contains(n.Message, "broken.json") || !strings.Contains(n.Message, howto.SessionSidecarName) {
+				t.Errorf("notice should name the directory, the bad file and the bad sidecar line: %q", n.Message)
 			}
 		}
 	}

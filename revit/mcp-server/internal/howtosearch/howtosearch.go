@@ -143,6 +143,14 @@ type state struct {
 	status      Status
 }
 
+// LoadError is a failure to load or index the corpus (the embedded seed,
+// the local directory, or embedding them), as opposed to a failure while
+// ranking one query.
+type LoadError struct{ Err error }
+
+func (e *LoadError) Error() string { return e.Err.Error() }
+func (e *LoadError) Unwrap() error { return e.Err }
+
 // Service -- construct with New.
 type Service struct {
 	localDir string
@@ -262,7 +270,7 @@ func (s *Service) current(ctx context.Context) (*state, error) {
 	}
 	st, err := s.build(ctx, sig)
 	if err != nil {
-		return nil, err
+		return nil, &LoadError{Err: err}
 	}
 	s.st = st
 	s.searches = nil
@@ -307,7 +315,9 @@ func (s *Service) build(ctx context.Context, sig string) (*state, error) {
 	if embedded.NewerThanBroker > st.status.NewerThanBroker {
 		st.status.NewerThanBroker = embedded.NewerThanBroker
 	}
-	stamps = append(append([]howto.Stamp(nil), stamps...), s.localStamps(local)...)
+	localStamps, stampProblems := s.localStamps(local)
+	stamps = append(append([]howto.Stamp(nil), stamps...), localStamps...)
+	st.status.LocalProblems = append(st.status.LocalProblems, stampProblems...)
 
 	ids := map[string]bool{}
 	for _, id := range embedded.IDs() {
@@ -341,23 +351,30 @@ func (s *Service) build(ctx context.Context, sig string) (*state, error) {
 	}
 	st.fingerprint = ver.Hash + ":" + shortHash(sig)
 	s.logf("howtosearch: index ready in %v (%d documents, %d local, dense=%v)", time.Since(start).Round(time.Millisecond), len(entries), local.Len(), st.dense)
+	if len(st.status.LocalProblems) > 0 || st.status.LocalTruncated {
+		s.logf("howtosearch: local corpus %s: truncated=%v, %d skipped, problems: %s", s.localDir, st.status.LocalTruncated, st.status.LocalSkipped, strings.Join(st.status.LocalProblems, "; "))
+	}
 	return st, nil
 }
 
-// localStamps reads the session sidecar beside the local documents; a
-// missing or unreadable one is simply no stamps.
-func (s *Service) localStamps(local *howto.Corpus) []howto.Stamp {
+// localStamps reads the session sidecar beside the local documents. A
+// missing or empty one is no stamps; an unreadable or partly invalid one is
+// reported through the returned problems (never silently dropped).
+func (s *Service) localStamps(local *howto.Corpus) ([]howto.Stamp, []string) {
 	raw, err := os.ReadFile(filepath.Join(s.localDir, howto.SessionSidecarName))
 	if err != nil || len(bytes.TrimSpace(raw)) == 0 {
-		return nil
+		return nil, nil
 	}
 	sc, err := howto.LoadSidecar(bytes.NewReader(raw))
 	if err != nil {
-		s.logf("howtosearch: local sidecar: %v", err)
-		return nil
+		return nil, []string{howto.SessionSidecarName + ": " + err.Error()}
+	}
+	var problems []string
+	for _, p := range sc.Problems {
+		problems = append(problems, howto.SessionSidecarName+": "+p)
 	}
 	kept, _ := sc.Prune(local)
-	return kept
+	return kept, problems
 }
 
 func shortHash(s string) string {

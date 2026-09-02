@@ -183,9 +183,9 @@ run was verified on the version it is driving. Neither, or both, is refused with
 - `search_howtos(query, instance_id | revit_version, cursor?, top_n?)` — the same pipeline as
   `search_functions` (BM25F + static embeddings fused by reciprocal rank, cross-encoder rerank of the
   top 20) over a how-to field set: `title`, `task` (highest weight), the recorded hit `queries`,
-  `pitfalls` text, `members` as `Type.Member`, and `tags`. Within the reranked head, documents verified
-  on the resolved version are moved ahead of the rest in their ranked order; beyond it the ranked
-  order stands, so a strong but unverified match cannot be pushed past the first pages. Each hit
+  `pitfalls` text, `members` as `Type.Member`, and `tags`. Within the head of the ranked list (the
+  reranked pool of 20, or the top 20 in a lexical-only build) documents verified on the resolved
+  version are moved ahead of the rest in their ranked order; beyond it the ranked order stands, so a strong but unverified match cannot be pushed past the first pages. Each hit
   carries `id`, `rev`, `title`, `task`, `members`, `tags`, `verified_on[]`, `failed_on[]`,
   `verified_here`, `score`, `source` and, for a shadowing local document, `shared_rev`. The response
   carries `revit_version` (what the call resolved to), `ranker` (`semantic` / `semantic-no-rerank` /

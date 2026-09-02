@@ -96,29 +96,33 @@ func buildSearchCursor(offset int, scope string) string {
 	return strconv.Itoa(offset) + ":" + scope
 }
 
-func parseSearchCursor(cursor, scope string) (int, *diag.Record) {
+// parseSearchCursor validates a cursor against the scope this call would
+// mint. scopeWords names what the scope covers for the caller ("query and
+// namespace" for search_functions, "query and revit_version" for
+// search_howtos) and source is the tool's §01 source.
+func parseSearchCursor(cursor, scope, scopeWords, source string) (int, *diag.Record) {
 	if cursor == "" {
 		return 0, nil
 	}
 	i := strings.IndexByte(cursor, ':')
 	if i < 0 {
-		return 0, errInvalidCursor(cursor, "not in offset:scope form")
+		return 0, errInvalidCursor(cursor, "not in offset:scope form", scopeWords, source)
 	}
 	off, err := strconv.Atoi(cursor[:i])
 	if err != nil || off < 0 {
-		return 0, errInvalidCursor(cursor, "offset is not a non-negative integer")
+		return 0, errInvalidCursor(cursor, "offset is not a non-negative integer", scopeWords, source)
 	}
 	if cursor[i+1:] != scope {
-		return 0, errInvalidCursor(cursor, "issued for a different query or namespace")
+		return 0, errInvalidCursor(cursor, "issued for a different "+scopeWords+", or for an earlier ranking of the same one", scopeWords, source)
 	}
 	return off, nil
 }
 
-func errInvalidCursor(cursor, why string) *diag.Record {
-	return diag.New(diag.SeverityError, "invalid-cursor", discoverySource,
+func errInvalidCursor(cursor, why, scopeWords, source string) *diag.Record {
+	return diag.New(diag.SeverityError, "invalid-cursor", source,
 		fmt.Sprintf("cursor %q is not usable: %s", cursor, why)).
 		WithDetail(map[string]any{"cursor": cursor}).
-		WithRemedy("re-issue the call with the original query and namespace and the next_cursor it returned, or drop cursor to start from the first page")
+		WithRemedy("re-issue the call with the original " + scopeWords + " and the next_cursor it returned, or drop cursor to start from the first page")
 }
 
 func clampTopN(n int) int {

@@ -10,6 +10,7 @@ package mcpserver
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -202,8 +203,24 @@ func resolveHowToVersion(deps HowToDeps, instanceID, revitVersion string) (strin
 	return ver, nil
 }
 
+// howToFailed maps a Service error: a load failure is a build or
+// local-corpus problem (not retryable), anything else is a ranking failure
+// (a model call) worth one retry.
+func howToFailed(err error) *diag.Record {
+	var le *howtosearch.LoadError
+	if errors.As(err, &le) || err == nil {
+		return howToUnavailable(err)
+	}
+	return diag.New(diag.SeverityError, "howto-search-failed", howtoSource, "ranking the how-to corpus failed: "+err.Error()).
+		WithRemedy("retry once; if it fails again, fall back to search_functions and report it")
+}
+
 func howToUnavailable(err error) *diag.Record {
-	return diag.New(diag.SeverityError, "howto-corpus-unavailable", howtoSource, "the how-to corpus could not be loaded: "+err.Error()).
+	msg := "the how-to corpus could not be loaded"
+	if err != nil {
+		msg += ": " + err.Error()
+	}
+	return diag.New(diag.SeverityError, "howto-corpus-unavailable", howtoSource, msg).
 		WithRemedy("this is a broker build or local-corpus problem, not something to retry; fall back to search_functions and report it")
 }
 
@@ -213,13 +230,14 @@ func corpusNotices(st howtosearch.Status, localDir string) []*diag.Record {
 	var out []*diag.Record
 	if len(st.LocalProblems) > 0 || st.LocalSkipped > 0 {
 		out = append(out, diag.New(diag.SeverityWarning, "howto-local-corpus-problems", howtoSource,
-			fmt.Sprintf("%d local how-to file(s) under %s were skipped or flagged", st.LocalSkipped, localDir)).
+			fmt.Sprintf("the local how-to corpus under %s has %d problem(s), %d file(s) or stamp(s) skipped: %s", localDir, len(st.LocalProblems), st.LocalSkipped, strings.Join(st.LocalProblems, "; "))).
 			WithDetail(map[string]any{"problems": st.LocalProblems, "skipped": st.LocalSkipped}).
 			WithRemedy("fix or delete the named files; the rest of the corpus is served"))
 	}
 	if st.LocalTruncated {
 		out = append(out, diag.New(diag.SeverityWarning, "howto-local-corpus-truncated", howtoSource,
-			fmt.Sprintf("the local how-to directory %s exceeds %d documents; the rest are not indexed", localDir, howto.MaxLocalDocuments)))
+			fmt.Sprintf("the local how-to directory %s exceeds %d documents; the rest are not indexed", localDir, howto.MaxLocalDocuments)).
+			WithRemedy("move documents the user no longer needs out of the directory; the first files by name are the ones served"))
 	}
 	if st.NewerThanBroker > 0 {
 		out = append(out, diag.New(diag.SeverityInfo, "howto-corpus-newer-than-broker", howtoSource,
@@ -246,15 +264,15 @@ func searchHowTos(ctx context.Context, deps HowToDeps, in SearchHowTosIn) Search
 			WithRemedy("describe the task in one plain sentence naming the element type and the operation")}
 	}
 	if deps.Search == nil {
-		return SearchHowTosOut{RevitVersion: ver, Error: howToUnavailable(fmt.Errorf("no how-to index is wired into this broker"))}
+		return SearchHowTosOut{RevitVersion: ver, Error: howToUnavailable(errors.New("no how-to index is wired into this broker"))}
 	}
 	res, err := deps.Search.Search(ctx, in.Query, ver)
 	if err != nil {
-		return SearchHowTosOut{RevitVersion: ver, Error: howToUnavailable(err)}
+		return SearchHowTosOut{RevitVersion: ver, Error: howToFailed(err)}
 	}
 	ranker := rankerName(res.Dense, res.Reranked)
 	scope := searchScope(in.Query, ver, res.Fingerprint, ranker)
-	offset, drec := parseSearchCursor(in.Cursor, scope)
+	offset, drec := parseSearchCursor(in.Cursor, scope, "query and revit_version (or instance_id)", howtoSource)
 	if drec != nil {
 		return SearchHowTosOut{RevitVersion: ver, Ranker: ranker, Error: drec}
 	}
@@ -326,11 +344,11 @@ func describeHowTo(ctx context.Context, deps HowToDeps, in DescribeHowToIn) Desc
 			WithRemedy("pass the id of a search_howtos result")}
 	}
 	if deps.Search == nil {
-		return DescribeHowToOut{RevitVersion: ver, Error: howToUnavailable(fmt.Errorf("no how-to index is wired into this broker"))}
+		return DescribeHowToOut{RevitVersion: ver, Error: howToUnavailable(errors.New("no how-to index is wired into this broker"))}
 	}
 	e, from, st, ok, err := deps.Search.Describe(ctx, in.ID)
 	if err != nil {
-		return DescribeHowToOut{RevitVersion: ver, Error: howToUnavailable(err)}
+		return DescribeHowToOut{RevitVersion: ver, Error: howToFailed(err)}
 	}
 	out := DescribeHowToOut{RevitVersion: ver, Notices: corpusNotices(st, deps.LocalDir)}
 	if !ok {

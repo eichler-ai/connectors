@@ -207,9 +207,10 @@ a newer corpus, validates the fields it knows, and reports `howto-corpus-newer-t
 `.json` file (the seed plan §4b records why it is not Revit's exchange root: the broker indexes it,
 and in remote mode the two are different machines; every tool response names the path). It is indexed alongside, marked `source: "local"` on every hit so the agent knows it is
 unreviewed, and re-scanned when a file changes (mtime check on search; no watcher). An `id` collision
-between local and seed/shared resolves to local with `supersedes_shared: true` on the hit — the
-intended way to override a shared how-to for one environment; two local files with one `id` is a
-validation error naming both files. Local documents are never uploaded except through the explicit
+between local and seed/shared follows the overlay rules (`howto.Overlay`, seed plan §4d): an identical
+script serves the shared copy and reports the local file superseded; a different script serves the
+local document with `shared_rev` on the hit — the intended way to override a shared how-to for one
+environment; two local files with one `id` is a validation error naming both files. Local documents are never uploaded except through the explicit
 submit flow below.
 
 **Local documents are an injection surface.** A how-to is text the agent reads and a script it may
