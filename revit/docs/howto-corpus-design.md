@@ -256,7 +256,7 @@ submit_howto(title, task, script, members[], pitfalls[]?, queries?, notes?, conf
    wording, and opens the append PR for a human to merge. Running an arbitrary public submission
    under the `Connector` global without that label would be remote code execution from a public
    queue. Accepting appends the document to `revit/howto/corpus.jsonl` **[decided: append-only in
-   git; edits are new documents with `supersedes`]**, so the file's history is the audit trail;
+   git; an edit is the same `id` at `rev + 1`, and `supersedes` merges two lineages]**, so the file's history is the audit trail;
    uniqueness of `id` across the file is a CI check on the PR.
 
 ## 7. Relationship to the ranking note
