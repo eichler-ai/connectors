@@ -22,7 +22,12 @@
 // directory overlaid (go build -overlay adds the file to the go:embed
 // pattern without touching the checkout). The rebuilt broker runs as its
 // own primary in a temp app-data dir: search_howtos and describe_howto need
-// only revit_version, so no add-in has to attach to it.
+// only revit_version, so no add-in has to attach to it. The live half (run
+// the script, submit) goes through -broker-exe, so that binary must be built
+// from the same source as the rebuilt half or the two prove different
+// brokers. Rank 1 is required whichever ranker answers; a broker built
+// without the models fetched ranks lexically and still passes -- the ranker
+// is logged so a run's evidence says which one proved it.
 //
 // Run on every supported Revit version before a release of the series:
 //
@@ -116,8 +121,20 @@ type e2eDescribeOut struct {
 		Status       string `json:"status"`
 		By           string `json:"by"`
 		RevitVersion string `json:"revit_version"`
+		At           string `json:"at"`
 	} `json:"verification"`
 	VerifiedOn []string `json:"verified_on"`
+}
+
+// jsonEqual compares two JSON documents by value.
+func jsonEqual(a, b []byte) bool {
+	var x, y any
+	if json.Unmarshal(a, &x) != nil || json.Unmarshal(b, &y) != nil {
+		return false
+	}
+	xa, _ := json.Marshal(x)
+	ya, _ := json.Marshal(y)
+	return string(xa) == string(ya)
 }
 
 func callSubmitHowTo(t *testing.T, c *mcpclient.Client, args map[string]any) e2eSubmitOut {
@@ -186,16 +203,40 @@ func TestHowToEndToEnd(t *testing.T) {
 		"pitfalls": []map[string]any{{
 			"symptom": "Setting ProjectInfo.Name outside a block throws: the document is read-only until Connector.WithTransaction opens it.",
 			"cause":   "Every write, even to a settings-style element like ProjectInfo, is a document modification.",
-			"fix":     "Set the properties inside Connector.WithTransaction(doc, () => { ... }).",
+			// A private-looking path on purpose: the scrubber must replace it
+			// in what leaves the machine and keep it in the local copy.
+			"fix": "Set the properties inside Connector.WithTransaction(doc, () => { ... }); seen first on C:\\Projects\\Site7\\model.rvt.",
 		}},
 		"queries":            map[string]any{"hit": []map[string]any{{"text": e2eQuery, "tool": "search_howtos", "rank": 1}}},
 		"tags":               []string{"project-information", "settings"},
 		"confirm_submission": true,
 	}
+	// The gate first: without confirm_submission the document is saved
+	// locally and nothing is prepared; the tool says so and names the resend.
+	submitArgs["confirm_submission"] = false
+	gated := callSubmitHowTo(t, c, submitArgs)
+	t.Cleanup(func() { removeSubmissionFiles(t, gated) })
+	if gated.LocalPath == "" || gated.Submission != nil || !gated.hasNotice("howto-submission-confirmation-required") {
+		t.Fatalf("without confirmation submit_howto must save locally, prepare nothing and say why: %+v", gated)
+	}
+	var gatedDoc howtoDoc
+	json.Unmarshal(gated.Document, &gatedDoc)
+	if strings.HasPrefix(gatedDoc.ID, e2eID+"-") {
+		t.Fatalf("id %s: a leftover local document from an aborted run is in the way; delete %s/%s.json and re-run", gatedDoc.ID, filepath.Dir(gated.LocalPath), e2eID)
+	}
+	if gatedDoc.ID != e2eID {
+		t.Fatalf("submit_howto derived id %q, want %q", gatedDoc.ID, e2eID)
+	}
+	// Then the resend the notice asks for: same fields, confirmed. It must
+	// replace the gated save under the same id, not mint <id>-2 beside it.
+	submitArgs["confirm_submission"] = true
 	sub := callSubmitHowTo(t, c, submitArgs)
 	t.Cleanup(func() { removeSubmissionFiles(t, sub) })
 	if sub.LocalPath == "" || sub.Submission == nil || len(sub.Submission.ScrubbedDocument) == 0 {
 		t.Fatalf("submit_howto did not save + prepare: %+v", sub)
+	}
+	if sub.LocalPath != gated.LocalPath || !sub.hasNotice("howto-local-replaced") {
+		t.Fatalf("the confirmed resend must replace the gated save (%s), got %s with notices %+v", gated.LocalPath, sub.LocalPath, sub.Notices)
 	}
 	if sub.Verified == nil || sub.Verified.By != "session" || sub.Verified.RevitVersion != inst.RevitVersion || sub.Verified.Status != "passed" {
 		t.Fatalf("the exact script ran successfully in this session, so the local document should carry a session stamp for Revit %s; got %+v", inst.RevitVersion, sub.Verified)
@@ -212,6 +253,25 @@ func TestHowToEndToEnd(t *testing.T) {
 	}
 	if scrubbed.ID != e2eID || scrubbed.Rev != 1 || scrubbed.Script != e2eScript {
 		t.Fatalf("scrubbed document: id=%s rev=%d script-unchanged=%v", scrubbed.ID, scrubbed.Rev, scrubbed.Script == e2eScript)
+	}
+	// Scrubbing is visible: the path in the pitfall is replaced in what
+	// leaves the machine and kept in the local copy; the outbox document is
+	// the scrubbed one, byte for byte in content.
+	var scrubbedPitfalls struct {
+		Pitfalls []struct{ Fix string } `json:"pitfalls"`
+	}
+	json.Unmarshal(sub.Submission.ScrubbedDocument, &scrubbedPitfalls)
+	if len(scrubbedPitfalls.Pitfalls) != 1 || !strings.Contains(scrubbedPitfalls.Pitfalls[0].Fix, "<path>") || strings.Contains(scrubbedPitfalls.Pitfalls[0].Fix, "Site7") {
+		t.Errorf("the scrubbed document should carry <path> in place of the pitfall's path: %+v", scrubbedPitfalls.Pitfalls)
+	}
+	if local, err := os.ReadFile(sub.LocalPath); err != nil || !strings.Contains(string(local), "Site7") {
+		t.Errorf("the local copy keeps the original text (err=%v)", err)
+	}
+	if outbox, err := os.ReadFile(sub.Submission.OutboxDocument); err != nil || !jsonEqual(outbox, sub.Submission.ScrubbedDocument) {
+		t.Errorf("the outbox document must be the scrubbed document (err=%v)", err)
+	}
+	if body, err := os.ReadFile(sub.Submission.IssueBodyPath); err != nil || !strings.Contains(string(body), "```json") || strings.Contains(string(body), "Site7") {
+		t.Errorf("the issue body must carry the scrubbed document in a fenced json block (err=%v)", err)
 	}
 
 	// --- 2. Triage (mechanical) + 3. sweep + 4. rebuild + 5. search/describe ------------------------
@@ -248,16 +308,24 @@ func TestHowToEndToEnd(t *testing.T) {
 	}
 	accepted2 := acceptSubmission(t, rev.Submission.ScrubbedDocument, "e2e-rev2")
 	stamp2 := sweepAndStamp(t, c, inst.InstanceID, mainDoc, inst.RevitVersion, accepted2)
-	// The rev-1 stamp is kept in the sidecar on purpose: the broker must
-	// prune it as stale (wrong rev) and report only the rev-2 stamp.
+	// The rev-1 stamp is kept in the sidecar on purpose, and dated AFTER the
+	// rev-2 one: newer-wins would pick it if the broker did not prune it as
+	// stale (wrong rev), so the reported stamp's time is what proves the
+	// pruning.
+	stamp.At = time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
 	broker2 := buildOverlayBroker(t, mcpServerDir, realCorpus, e2eID, accepted2, []howtoStamp{stamp, stamp2})
-	verifyRebuiltBroker(t, broker2, inst.RevitVersion, 2, 2)
+	second := verifyRebuiltBroker(t, broker2, inst.RevitVersion, 2, 2)
+	if second.Verification.At != stamp2.At {
+		t.Errorf("the stale rev-1 stamp (dated later) must be pruned; got stamp at %s, want the rev-2 stamp at %s", second.Verification.At, stamp2.At)
+	}
 }
 
 // acceptSubmission is the mechanical part of /triage-howto-submission step
 // 6: the scrubbed document becomes the lineage's corpus file under
-// provenance "submission". The document is kept as raw JSON so the harness
-// (which cannot import the broker's howto package) never re-serialises it.
+// provenance "submission". The harness cannot import the broker's howto
+// package, so it edits the document as a generic map and re-marshals it --
+// lossless for the loader (values decode identically, unknown fields
+// survive, and the corpus hash is over the loader's own marshalling).
 func acceptSubmission(t *testing.T, scrubbed json.RawMessage, ref string) []byte {
 	t.Helper()
 	var doc map[string]any
@@ -354,6 +422,9 @@ func buildOverlayBroker(t *testing.T, mcpServerDir, realCorpus, id string, accep
 	if bi.HowToCorpus == nil {
 		t.Fatalf("the rebuilt broker cannot load its corpus: %s", bi.Err)
 	}
+	if bi.Version != "e2e" {
+		t.Fatalf("the rebuilt broker reports version %q, want the e2e build's", bi.Version)
+	}
 	baseline := len(mustGlob(t, filepath.Join(realCorpus, "*.json")))
 	if bi.HowToCorpus.Documents != baseline+1 {
 		t.Fatalf("rebuilt broker embeds %d documents, want the %d shared ones plus %s", bi.HowToCorpus.Documents, baseline, id)
@@ -395,6 +466,9 @@ func verifyRebuiltBroker(t *testing.T, exe, revitVersion string, wantRev, wantPi
 		}
 		t.Fatalf("the accepted document should rank 1 for its recorded query %q on the rebuilt broker (ranker %s); got %v", e2eQuery, search.Ranker, got)
 	}
+	t.Logf("search_howtos on the rebuilt broker: ranker %s, rank 1 = %s (score %.3f)", search.Ranker, search.Results[0].ID, search.Results[0].Score)
+	// "seed" here means served from the embedded corpus (the temp app-data
+	// dir has no local corpus to shadow it), which is the claim.
 	if !search.Results[0].VerifiedHere || search.Results[0].Source != "seed" {
 		t.Errorf("rank-1 hit: verified_here=%v source=%q (want true, seed)", search.Results[0].VerifiedHere, search.Results[0].Source)
 	}
@@ -411,7 +485,7 @@ func verifyRebuiltBroker(t *testing.T, exe, revitVersion string, wantRev, wantPi
 		t.Fatalf("describe on Revit %s: want the sweep's harness stamp, got here=%v %+v", revitVersion, desc.VerifiedHere, desc.Verification)
 	}
 	if len(desc.VerifiedOn) != 1 || desc.VerifiedOn[0] != revitVersion {
-		t.Errorf("a document swept on one version is verified on that version only (a stale rev-1 stamp must be pruned): %v", desc.VerifiedOn)
+		t.Errorf("a document swept on one version is verified on that version only: %v", desc.VerifiedOn)
 	}
 	return desc
 }

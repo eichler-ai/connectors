@@ -306,11 +306,19 @@ func Slug(title string) string {
 // or already on disk locally (seed plan §3e guideline 1).
 func ensureUniqueID(d *Document, env Env) error {
 	taken := func(id string) bool {
-		if findBase(env.Bases, id) != nil {
+		// The same submission sent again -- the gate's own remedy is "call
+		// submit_howto again with the same fields and confirm_submission:
+		// true" -- replaces its earlier local save rather than minting
+		// <id>-2 beside it (found by the step-6 batch verifier). Same title
+		// and script is the test; anything else is a different document.
+		// Checked before the bases, which include the local corpus itself.
+		if raw, err := os.ReadFile(filepath.Join(env.LocalDir, id+".json")); err == nil {
+			if prev, perr := ValidateDocument(raw); perr == nil && prev.Title == d.Title && prev.Script == d.Script {
+				return false
+			}
 			return true
 		}
-		_, err := os.Stat(filepath.Join(env.LocalDir, id+".json"))
-		return err == nil
+		return findBase(env.Bases, id) != nil
 	}
 	if !taken(d.ID) {
 		return nil
