@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "id": "collect-elements-with-filters",
+  "rev": 1,
+  "kind": "howto",
+  "title": "Find every element of a kind with FilteredElementCollector: by category, by class, in a view, by parameter value",
+  "task": "Collect elements with FilteredElementCollector: all walls by BuiltInCategory (OfCategory + WhereElementIsNotElementType), all instances of a class (OfClass), elements visible in one view (the view-scoped collector), and elements whose parameter equals a value (ElementParameterFilter with FilterStringRule); return ids and counts, never elements.",
+  "queries": {
+    "miss": [
+      {
+        "text": "get all walls",
+        "tool": "search_functions",
+        "surfaced": "Wall members and BuiltInCategory entries; the collector chain is not a member",
+        "revit_version": "2025"
+      }
+    ]
+  },
+  "members": [
+    "Autodesk.Revit.DB.FilteredElementCollector.OfCategory",
+    "Autodesk.Revit.DB.FilteredElementCollector.OfClass",
+    "Autodesk.Revit.DB.FilteredElementCollector.WhereElementIsNotElementType",
+    "Autodesk.Revit.DB.FilteredElementCollector.WherePasses",
+    "Autodesk.Revit.DB.FilteredElementCollector.GetElementCount",
+    "Autodesk.Revit.DB.FilteredElementCollector.ToElementIds",
+    "Autodesk.Revit.DB.ElementParameterFilter",
+    "Autodesk.Revit.DB.FilterStringRule",
+    "Autodesk.Revit.DB.ParameterValueProvider",
+    "Autodesk.Revit.DB.LogicalAndFilter"
+  ],
+  "script_language": "csharp-script",
+  "script": "var doc = Document;\n// Goal: find every element of a kind so the next step can act on them: all walls, the walls tagged\n// with a comment, the elements visible in a plan. Collecting is a READ and needs no transaction;\n// this script first builds three walls inside a block so the reads have something to find.\n// A blank project has levels already; take the lowest one rather than creating another.\nAutodesk.Revit.DB.Level level = null;\nforeach (Autodesk.Revit.DB.Level l in new Autodesk.Revit.DB.FilteredElementCollector(doc).OfClass(typeof(Autodesk.Revit.DB.Level))) {\n  if (level == null || l.Elevation < level.Elevation) level = l;\n}\n\nvar setup = Connector.WithTransaction(doc, () => {\n  double z = level.Elevation;\n  var pts = new[] { new Autodesk.Revit.DB.XYZ(0, 0, z), new Autodesk.Revit.DB.XYZ(30, 0, z), new Autodesk.Revit.DB.XYZ(30, 30, z) };\n  var ids = new System.Collections.Generic.List<long>();\n  for (int i = 0; i < 2; i++) {\n    var w = Autodesk.Revit.DB.Wall.Create(doc, Autodesk.Revit.DB.Line.CreateBound(pts[i], pts[i + 1]), level.Id, false);\n    ids.Add(w.Id.Value);\n  }\n  var tagged = Autodesk.Revit.DB.Wall.Create(doc, Autodesk.Revit.DB.Line.CreateBound(new Autodesk.Revit.DB.XYZ(0, 30, z), new Autodesk.Revit.DB.XYZ(0, 0, z)), level.Id, false);\n  tagged.get_Parameter(Autodesk.Revit.DB.BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS).Set(\"review\");\n  ids.Add(tagged.Id.Value);\n  doc.Regenerate();\n  return ids;\n});\n\n// 1. By category. WhereElementIsNotElementType matters: without it the collector also returns\n//    every WallType, so \"how many walls\" comes back too high.\nvar wallsByCategory = new Autodesk.Revit.DB.FilteredElementCollector(doc)\n    .OfCategory(Autodesk.Revit.DB.BuiltInCategory.OST_Walls)\n    .WhereElementIsNotElementType()\n    .ToElementIds();\nint typesToo = new Autodesk.Revit.DB.FilteredElementCollector(doc)\n    .OfCategory(Autodesk.Revit.DB.BuiltInCategory.OST_Walls).GetElementCount();\n\n// 2. By class. OfClass(typeof(Wall)) returns instances only (types are WallType). Prefer OfClass\n//    when the API class is what you mean; prefer OfCategory for things that share a class, such as\n//    FamilyInstance doors vs windows. Note Room has no native class for OfClass: collect rooms with\n//    OfCategory(BuiltInCategory.OST_Rooms).\nint wallsByClass = new Autodesk.Revit.DB.FilteredElementCollector(doc)\n    .OfClass(typeof(Autodesk.Revit.DB.Wall)).GetElementCount();\n\n// 3. Visible in one view: the (doc, viewId) constructor restricts the collector to elements the\n//    view shows. Take the first non-template floor plan; walls on the plan's level are visible in it.\nAutodesk.Revit.DB.ViewPlan plan = null;\nforeach (Autodesk.Revit.DB.ViewPlan v in new Autodesk.Revit.DB.FilteredElementCollector(doc).OfClass(typeof(Autodesk.Revit.DB.ViewPlan))) {\n  if (!v.IsTemplate && v.GenLevel != null && v.GenLevel.Id == level.Id) { plan = v; break; }\n}\nint wallsInPlan = plan == null ? -1 : new Autodesk.Revit.DB.FilteredElementCollector(doc, plan.Id)\n    .OfCategory(Autodesk.Revit.DB.BuiltInCategory.OST_Walls).WhereElementIsNotElementType().GetElementCount();\n\n// 4. By parameter value: a rule (this parameter equals \"review\") wrapped in an\n//    ElementParameterFilter, combined with the category filter by chaining. The parameter is\n//    named by its BuiltInParameter id, never by its display name.\nvar commentsId = new Autodesk.Revit.DB.ElementId(Autodesk.Revit.DB.BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS);\nvar rule = new Autodesk.Revit.DB.FilterStringRule(new Autodesk.Revit.DB.ParameterValueProvider(commentsId),\n    new Autodesk.Revit.DB.FilterStringEquals(), \"review\");\nvar byComment = new Autodesk.Revit.DB.FilteredElementCollector(doc)\n    .OfCategory(Autodesk.Revit.DB.BuiltInCategory.OST_Walls)\n    .WhereElementIsNotElementType()\n    .WherePasses(new Autodesk.Revit.DB.ElementParameterFilter(rule))\n    .ToElementIds();\n\n// 5. Combining two filters explicitly: LogicalAndFilter takes ElementFilter objects, useful when\n//    the filters are built dynamically rather than chained.\nvar both = new Autodesk.Revit.DB.LogicalAndFilter(\n    new Autodesk.Revit.DB.ElementCategoryFilter(Autodesk.Revit.DB.BuiltInCategory.OST_Walls),\n    new Autodesk.Revit.DB.ElementParameterFilter(rule));\nint viaLogicalAnd = new Autodesk.Revit.DB.FilteredElementCollector(doc).WherePasses(both).WhereElementIsNotElementType().GetElementCount();\n\n// 6. Return a projection: ids and counts. Returning the elements themselves has no display form.\nvar reviewIds = new System.Collections.Generic.List<long>();\nforeach (var id in byComment) reviewIds.Add(id.Value);\nreturn new {\n  createdWallIds = setup,\n  wallsByCategory = wallsByCategory.Count, wallsByClass, categoryCountIncludingTypes = typesToo,\n  wallsInPlan, planView = plan == null ? null : plan.Name,\n  wallsCommentedReview = reviewIds, viaLogicalAnd,\n  consistent = wallsByCategory.Count == wallsByClass && viaLogicalAnd == reviewIds.Count\n};\n",
+  "pitfalls": [
+    {
+      "symptom": "search_functions cannot answer 'get all walls': the collector idiom is a chain of calls, not one member.",
+      "cause": "FilteredElementCollector is a builder; the answer is OfCategory/OfClass + WhereElementIsNotElementType, which no single search hit shows.",
+      "fix": "Use the chain in step 1 or 2 of this script.",
+      "members": [
+        "Autodesk.Revit.DB.FilteredElementCollector.OfCategory",
+        "Autodesk.Revit.DB.FilteredElementCollector.WhereElementIsNotElementType"
+      ]
+    },
+    {
+      "symptom": "A category count is higher than the number of elements on screen.",
+      "cause": "OfCategory alone also returns the element TYPES of that category.",
+      "fix": "Add WhereElementIsNotElementType() (or WhereElementIsElementType() when types are what you want).",
+      "members": [
+        "Autodesk.Revit.DB.FilteredElementCollector.WhereElementIsNotElementType"
+      ]
+    },
+    {
+      "symptom": "OfClass(typeof(Room)) throws: 'is of an element type that exists in the API, but not in Revit's native object model'.",
+      "cause": "Room has no native class to filter on.",
+      "fix": "Collect rooms with OfCategory(BuiltInCategory.OST_Rooms), or OfClass(typeof(SpatialElement)).",
+      "members": [
+        "Autodesk.Revit.DB.FilteredElementCollector.OfClass"
+      ]
+    }
+  ],
+  "tags": [
+    "collectors",
+    "query",
+    "filters",
+    "walls"
+  ],
+  "provenance": {
+    "kind": "harness",
+    "ref": "revit/test-harness/phase_a_test.go TestPhaseACoreCRUDAndQuery/QueryElementsByCategory; phase_b_test.go CreateRoomAndTagIt (the Room/OfClass note)"
+  },
+  "verify": {
+    "mutations": {
+      "net_created": 3,
+      "by_category": {
+        "Walls": {
+          "net_created": 3
+        }
+      }
+    }
+  },
+  "created_at": "2026-09-02T00:00:00Z",
+  "updated_at": "2026-09-02T00:00:00Z"
+}

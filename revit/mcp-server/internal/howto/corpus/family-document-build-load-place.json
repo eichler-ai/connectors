@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "id": "family-document-build-load-place",
+  "rev": 1,
+  "kind": "howto",
+  "title": "Build a minimal family document, load it into the project, and place an instance",
+  "task": "Create a custom component the project lacks: make a family document from a family template (Generic Model.rft), draw an extrusion in it, load it into the project with Document.LoadFamily, activate a FamilySymbol and place a FamilyInstance with NewFamilyInstance.",
+  "members": [
+    "Autodesk.Revit.DB.Application.FamilyTemplatePath",
+    "Autodesk.Revit.DB.SketchPlane.Create",
+    "Autodesk.Revit.DB.Plane.CreateByNormalAndOrigin",
+    "Autodesk.Revit.Creation.FamilyItemFactory.NewExtrusion",
+    "Autodesk.Revit.DB.Document.LoadFamily",
+    "Autodesk.Revit.DB.Family.GetFamilySymbolIds",
+    "Autodesk.Revit.DB.FamilySymbol.Activate",
+    "Autodesk.Revit.Creation.Document.NewFamilyInstance"
+  ],
+  "script_language": "csharp-script",
+  "script": "var doc = Document;\n// Goal: the project lacks a component (here a 2 x 2 x 2 ft block); build it as a family, load it, place one.\n\n// 1. Find a family template. Application.FamilyTemplatePath is the install's template root; the\n//    template file's name is what decides the family's category (Generic Model here).\nvar app = UIApplication.Application;\nstring template = \"\";\nforeach (var f in System.IO.Directory.EnumerateFiles(app.FamilyTemplatePath, \"Generic Model.rft\", System.IO.SearchOption.AllDirectories)) { template = f; break; }\nif (template.Length == 0) { throw new System.Exception(\"no Generic Model.rft under \" + app.FamilyTemplatePath); }\n\n// 2. Create the family document through the connector (not Application.NewFamilyDocument, which\n//    would leave the connector unaware of it). It opens headless; print the cleanup marker so the\n//    caller can close it later -- Close is a lifecycle action needing confirmation, so it is not\n//    done here.\nvar famDoc = Connector.CreateFamilyDocument(template);\nSystem.Console.WriteLine(\"cleanup-title=\" + famDoc.Title + \";\");\n\n// 3. Draw the geometry INSIDE a block on the family document. Family geometry is created through\n//    famDoc.FamilyCreate (FamilyItemFactory), not doc.Create.\nvar extrusionCreated = Connector.WithTransaction(famDoc, () => {\n  var plane = Autodesk.Revit.DB.Plane.CreateByNormalAndOrigin(Autodesk.Revit.DB.XYZ.BasisZ, Autodesk.Revit.DB.XYZ.Zero);\n  var sketchPlane = Autodesk.Revit.DB.SketchPlane.Create(famDoc, plane);\n  var p1 = new Autodesk.Revit.DB.XYZ(-1, -1, 0); var p2 = new Autodesk.Revit.DB.XYZ(1, -1, 0);\n  var p3 = new Autodesk.Revit.DB.XYZ(1, 1, 0);   var p4 = new Autodesk.Revit.DB.XYZ(-1, 1, 0);\n  var profile = new Autodesk.Revit.DB.CurveArray();\n  profile.Append(Autodesk.Revit.DB.Line.CreateBound(p1, p2)); profile.Append(Autodesk.Revit.DB.Line.CreateBound(p2, p3));\n  profile.Append(Autodesk.Revit.DB.Line.CreateBound(p3, p4)); profile.Append(Autodesk.Revit.DB.Line.CreateBound(p4, p1));\n  var profiles = new Autodesk.Revit.DB.CurveArrArray(); profiles.Append(profile);\n  var extrusion = famDoc.FamilyCreate.NewExtrusion(true, profiles, sketchPlane, 2.0);\n  famDoc.Regenerate();\n  return extrusion != null;\n});\n\n// 4. Load it into the project BETWEEN blocks. LoadFamily manages its own transaction and requires\n//    the TARGET document to have no open transaction; inside Connector.WithTransaction(doc, ...) it\n//    fails with script-target-must-not-be-modifiable. The family document itself may still be\n//    unsaved and even modifiable -- only the target matters. Loading from a separate, earlier call\n//    works the same way (find the family document by Title through UIApplication.Application.Documents).\nvar family = famDoc.LoadFamily(doc);\nif (family == null) { throw new System.Exception(\"LoadFamily returned null (a family of the same name may already be loaded)\"); }\n\n// 5. Place an instance INSIDE a block on the project. A FamilySymbol must be Activate()d before its\n//    first placement or NewFamilyInstance throws; the point-based overload suits a non-hosted\n//    generic model. Compare the count after with the count before, not against an absolute.\nvar before = new Autodesk.Revit.DB.FilteredElementCollector(doc).OfCategory(Autodesk.Revit.DB.BuiltInCategory.OST_GenericModel).WhereElementIsNotElementType().GetElementCount();\nreturn Connector.WithTransaction(doc, () => {\n  Autodesk.Revit.DB.FamilySymbol symbol = null;\n  foreach (Autodesk.Revit.DB.ElementId symId in family.GetFamilySymbolIds()) { symbol = doc.GetElement(symId) as Autodesk.Revit.DB.FamilySymbol; break; }\n  if (!symbol.IsActive) { symbol.Activate(); }\n  doc.Regenerate();\n  var instance = doc.Create.NewFamilyInstance(new Autodesk.Revit.DB.XYZ(5, 5, 0), symbol, Autodesk.Revit.DB.Structure.StructuralType.NonStructural);\n  doc.Regenerate();\n  var after = new Autodesk.Revit.DB.FilteredElementCollector(doc).OfCategory(Autodesk.Revit.DB.BuiltInCategory.OST_GenericModel).WhereElementIsNotElementType().GetElementCount();\n\n  // 6. Verify: the family is in the project by name and the instance's symbol belongs to it.\n  var familyPresent = doc.GetElement(family.Id) is Autodesk.Revit.DB.Family;\n  return new { familyName = family.Name, familyPresent, extrusionCreated, symbolId = symbol.Id.Value, instanceId = instance.Id.Value, symbolBelongsToFamily = instance.Symbol.Family.Id == family.Id, placed = after - before };\n});\n",
+  "pitfalls": [
+    {
+      "symptom": "script-target-must-not-be-modifiable: 'The document must not be modifiable before calling LoadFamily' when LoadFamily is called inside Connector.WithTransaction(doc, ...).",
+      "cause": "LoadFamily commits its own transaction on the target project and refuses a target with a transaction open; the block holds one.",
+      "fix": "Call LoadFamily at top level, between blocks (step 4); place the instance in a block afterwards.",
+      "members": [
+        "Autodesk.Revit.DB.Document.LoadFamily"
+      ]
+    },
+    {
+      "symptom": "NewFamilyInstance throws for a freshly loaded family's symbol.",
+      "cause": "A FamilySymbol that has never been placed is inactive.",
+      "fix": "Check symbol.IsActive and call symbol.Activate() first (step 5).",
+      "members": [
+        "Autodesk.Revit.DB.FamilySymbol.Activate"
+      ]
+    },
+    {
+      "symptom": "LoadFamily returns null.",
+      "cause": "A family with the same name is already loaded in the project.",
+      "fix": "Use LoadFamily(doc, IFamilyLoadOptions) to overwrite, or find the existing Family by Name with a FilteredElementCollector and place from it.",
+      "members": [
+        "Autodesk.Revit.DB.Document.LoadFamily"
+      ]
+    },
+    {
+      "symptom": "The family document is still open after the run.",
+      "cause": "Document.Close is a lifecycle action, gated behind confirm_lifecycle_actions, so the script leaves it open.",
+      "fix": "Close it in a later call with confirm_lifecycle_actions: true, or leave it; a throw in this run rolls the created document back automatically."
+    }
+  ],
+  "tags": [
+    "families",
+    "creation",
+    "loading",
+    "generic-model",
+    "connector"
+  ],
+  "provenance": {
+    "kind": "harness",
+    "ref": "revit/test-harness/validation_corpus_test.go TestValidationCorpus_LoadFamilyAndPlaceInstance; external_commit_test.go TestSelfTransactingApiBetweenBlocksSurvivesTheRun"
+  },
+  "verify": {
+    "mutations": {
+      "net_deleted": 0,
+      "by_category": {
+        "Generic Models": {
+          "net_created": 2
+        }
+      }
+    },
+    "creates_documents": true
+  },
+  "created_at": "2026-09-02T00:00:00Z",
+  "updated_at": "2026-09-02T00:00:00Z"
+}

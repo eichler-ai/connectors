@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "id": "sheets-viewports-and-title-blocks",
+  "rev": 1,
+  "kind": "howto",
+  "title": "Create a sheet with the right title block and place a floor plan on it",
+  "task": "Issue a plan on a sheet: find a title block FamilySymbol (OST_TitleBlocks), ViewSheet.Create with it, check Viewport.CanAddViewToSheet, place the view with Viewport.Create and verify with ViewSheet.GetAllPlacedViews. To change a title block, create the sheet with the right type; never set SheetTitleBlockId on a live sheet.",
+  "queries": {
+    "miss": [
+      {
+        "text": "create sheet place view",
+        "tool": "search_functions",
+        "surfaced": "ViewSheet.Create never surfaced (issue #65)"
+      }
+    ]
+  },
+  "members": [
+    "Autodesk.Revit.DB.ViewSheet.Create",
+    "Autodesk.Revit.DB.Viewport.CanAddViewToSheet",
+    "Autodesk.Revit.DB.Viewport.Create",
+    "Autodesk.Revit.DB.ViewSheet.GetAllPlacedViews",
+    "Autodesk.Revit.DB.ViewPlan.Create",
+    "Autodesk.Revit.DB.FamilySymbol.Activate",
+    "Autodesk.Revit.DB.Element.GetTypeId"
+  ],
+  "script_language": "csharp-script",
+  "script": "var doc = Document;\n// Goal: a new sheet carrying the requested title block, with a floor plan placed on it.\n\n// 1. A view that is NOT already on a sheet. A view can be placed once; the default template ships\n//    sheets with views on them, so a fresh ViewPlan on a fresh level is guaranteed placeable.\nAutodesk.Revit.DB.ElementId vftId = null;\nforeach (Autodesk.Revit.DB.ViewFamilyType vft in new Autodesk.Revit.DB.FilteredElementCollector(doc).OfClass(typeof(Autodesk.Revit.DB.ViewFamilyType))) {\n  if (vft.ViewFamily == Autodesk.Revit.DB.ViewFamily.FloorPlan) { vftId = vft.Id; break; }\n}\n\n// 2. The title block TYPE: a FamilySymbol in OST_TitleBlocks. Which ones exist depends on the\n//    template; pick by name when the user named one, else the first. An absent title block family\n//    must be loaded first (family-document-build-load-place shows LoadFamily).\nAutodesk.Revit.DB.FamilySymbol tbType = null;\nforeach (Autodesk.Revit.DB.FamilySymbol s in new Autodesk.Revit.DB.FilteredElementCollector(doc).OfClass(typeof(Autodesk.Revit.DB.FamilySymbol)).OfCategory(Autodesk.Revit.DB.BuiltInCategory.OST_TitleBlocks)) { tbType = s; break; }\nvar tbTypeId = tbType != null ? tbType.Id : Autodesk.Revit.DB.ElementId.InvalidElementId;\n\nreturn Connector.WithTransaction(doc, () => {\n  var level = Autodesk.Revit.DB.Level.Create(doc, 760.0);\n  var plan = Autodesk.Revit.DB.ViewPlan.Create(doc, vftId, level.Id);\n  doc.Regenerate();\n\n  // 3. Create the sheet WITH the title block type. Activate the symbol first if it has never been\n  //    placed. Passing ElementId.InvalidElementId makes a sheet with no title block.\n  if (tbType != null && !tbType.IsActive) { tbType.Activate(); }\n  var sheet = Autodesk.Revit.DB.ViewSheet.Create(doc, tbTypeId);\n  sheet.SheetNumber = \"H-\" + System.DateTime.Now.ToString(\"HHmmss\");\n  sheet.Name = \"How-to plan\";\n\n  // 4. Ask before placing: CanAddViewToSheet is false for a view already on any sheet (and for\n  //    schedules/legends, which have their own placement API). Viewport.Create throws otherwise.\n  var canAdd = Autodesk.Revit.DB.Viewport.CanAddViewToSheet(doc, sheet.Id, plan.Id);\n  Autodesk.Revit.DB.Viewport viewport = null;\n  if (canAdd) { viewport = Autodesk.Revit.DB.Viewport.Create(doc, sheet.Id, plan.Id, new Autodesk.Revit.DB.XYZ(1, 1, 0)); }\n  doc.Regenerate();\n\n  // 5. Verify: the plan is among the sheet's placed views, and the title block instance on the\n  //    sheet is the requested type. To CHANGE a sheet's title block later, create a new sheet with\n  //    the right type and move the viewports: setting SheetTitleBlockId on a live sheet crashes Revit.\n  var placed = sheet.GetAllPlacedViews();\n  Autodesk.Revit.DB.Element tbInstance = null;\n  foreach (var e in new Autodesk.Revit.DB.FilteredElementCollector(doc, sheet.Id).OfCategory(Autodesk.Revit.DB.BuiltInCategory.OST_TitleBlocks)) { tbInstance = e; break; }\n  var canAddAgain = Autodesk.Revit.DB.Viewport.CanAddViewToSheet(doc, sheet.Id, plan.Id);\n  return new { sheetId = sheet.Id.Value, sheetNumber = sheet.SheetNumber, titleBlockType = tbType != null ? tbType.Name : \"(none loaded)\", planPlaced = placed.Contains(plan.Id), viewportId = viewport != null ? viewport.Id.Value : -1, titleBlockMatches = tbInstance != null && tbInstance.GetTypeId() == tbTypeId, viewPlaceableTwice = canAddAgain };\n});\n",
+  "pitfalls": [
+    {
+      "symptom": "Revit crashes (process exits) when a sheet's title block is changed by script.",
+      "cause": "Setting ViewSheet.SheetTitleBlockId (or swapping the title block instance's type) on a live sheet is unsafe (issue #113).",
+      "fix": "Create the sheet with the right title block type in ViewSheet.Create and move the viewports; never set SheetTitleBlockId on an existing sheet.",
+      "members": [
+        "Autodesk.Revit.DB.ViewSheet.Create"
+      ]
+    },
+    {
+      "symptom": "Viewport.Create throws ArgumentException 'viewId cannot be added to the ViewSheet'.",
+      "cause": "The view is already placed on a sheet (the default template's own sheets hold several), or it is a schedule/legend.",
+      "fix": "Check Viewport.CanAddViewToSheet first; create a fresh view, or duplicate the placed one with View.Duplicate.",
+      "members": [
+        "Autodesk.Revit.DB.Viewport.CanAddViewToSheet",
+        "Autodesk.Revit.DB.View.Duplicate"
+      ]
+    },
+    {
+      "symptom": "search_functions('create sheet place view') never surfaced ViewSheet.Create.",
+      "cause": "Recorded discovery miss (issue #65).",
+      "fix": "The members of this how-to are the route: ViewSheet.Create then Viewport.Create.",
+      "members": [
+        "Autodesk.Revit.DB.ViewSheet.Create",
+        "Autodesk.Revit.DB.Viewport.Create"
+      ]
+    }
+  ],
+  "tags": [
+    "sheets",
+    "viewports",
+    "title-blocks",
+    "views",
+    "pitfall"
+  ],
+  "provenance": {
+    "kind": "harness",
+    "ref": "revit/test-harness/phase_c_test.go TestPhaseCFloorsGridsSheetsAndText/CreateSheetAndPlaceView; interactive_findings_test.go TestSheetTitleBlockRecreateWorkaroundIsSafe"
+  },
+  "verify": {
+    "mutations": {
+      "by_category": {
+        "Sheets": {
+          "net_created": 1
+        },
+        "Title Blocks": {
+          "net_created": 1
+        }
+      }
+    }
+  },
+  "created_at": "2026-09-02T00:00:00Z",
+  "updated_at": "2026-09-02T00:00:00Z"
+}

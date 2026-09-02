@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "id": "self-transacting-calls-between-blocks",
+  "rev": 1,
+  "kind": "howto",
+  "title": "Run LoadFamily, Export, RequestViewChange and EditScope.Commit between WithTransaction blocks, not inside them",
+  "task": "Load a family (or export a view, switch the active view, commit a StairsEditScope) in the same run as a write: these Revit calls transact themselves and require the target document NOT to be modifiable, so call them at top level between Connector.WithTransaction blocks. Inside a block they fail with script-target-must-not-be-modifiable. Their commit joins the run's group: a later throw still rolls it back.",
+  "members": [
+    "Autodesk.Revit.DB.Document.LoadFamily",
+    "Eichler.Connectors.Revit.Connector.CreateFamilyDocument",
+    "Eichler.Connectors.Revit.Connector.WithTransaction",
+    "Autodesk.Revit.DB.Document.IsModifiable",
+    "Autodesk.Revit.Creation.FamilyItemFactory.NewExtrusion",
+    "Autodesk.Revit.DB.SketchPlane.Create",
+    "Autodesk.Revit.UI.UIDocument.RequestViewChange",
+    "Autodesk.Revit.DB.Document.Export"
+  ],
+  "script_language": "csharp-script",
+  "script": "var doc = Document;\n// Goal: load a family into the project in the same run as a write.\n// Rule: LoadFamily, Document.Export, UIDocument.RequestViewChange and\n// EditScope.Start/Commit run their OWN transaction and refuse a target that is\n// modifiable. Between blocks nothing is open, so they work at top level; inside a\n// Connector.WithTransaction block the target is modifiable and Revit refuses.\n// Shape: block -> self-transacting call at top level -> block.\n\n// 1. Build a family to load: a new family document from the install's Generic\n//    Model template, its geometry written inside a block ON THAT document.\nvar app = UIApplication.Application;\nstring template = null;\nforeach (var f in System.IO.Directory.EnumerateFiles(app.FamilyTemplatePath, \"Generic Model.rft\", System.IO.SearchOption.AllDirectories)) { template = f; break; }\nif (template == null) throw new System.Exception(\"no Generic Model.rft under Application.FamilyTemplatePath\");\nvar fam = Connector.CreateFamilyDocument(template);\n// The family document is headless and stays open after the run: print its title so\n// a later run (or the harness) can close it -- see documents-create-write-and-close.\nSystem.Console.WriteLine(\"cleanup-title=\" + fam.Title + \";\");\nConnector.WithTransaction(fam, () => {\n  var plane = Autodesk.Revit.DB.Plane.CreateByNormalAndOrigin(Autodesk.Revit.DB.XYZ.BasisZ, Autodesk.Revit.DB.XYZ.Zero);\n  var sketchPlane = Autodesk.Revit.DB.SketchPlane.Create(fam, plane);\n  var profile = new Autodesk.Revit.DB.CurveArray();\n  var p1 = new Autodesk.Revit.DB.XYZ(-1, -1, 0); var p2 = new Autodesk.Revit.DB.XYZ(1, -1, 0);\n  var p3 = new Autodesk.Revit.DB.XYZ(1, 1, 0);   var p4 = new Autodesk.Revit.DB.XYZ(-1, 1, 0);\n  profile.Append(Autodesk.Revit.DB.Line.CreateBound(p1, p2)); profile.Append(Autodesk.Revit.DB.Line.CreateBound(p2, p3));\n  profile.Append(Autodesk.Revit.DB.Line.CreateBound(p3, p4)); profile.Append(Autodesk.Revit.DB.Line.CreateBound(p4, p1));\n  var arr = new Autodesk.Revit.DB.CurveArrArray(); arr.Append(profile);\n  fam.FamilyCreate.NewExtrusion(true, arr, sketchPlane, 2.0);\n});\n\n// 2. THE WRONG PLACE, caught so this run can show it: LoadFamily inside a block on\n//    the TARGET. Revit throws InvalidOperationException (\"must not be modifiable\");\n//    uncaught, the connector reports it as `script-target-must-not-be-modifiable`\n//    with the remedy \"move the call OUTSIDE your Connector.WithTransaction block\".\nstring insideBlock;\ntry {\n  Connector.WithTransaction(doc, () => { fam.LoadFamily(doc); });\n  insideBlock = \"accepted (unexpected)\";\n} catch (Autodesk.Revit.Exceptions.InvalidOperationException ex) {\n  insideBlock = \"refused: \" + ex.Message;\n}\n\n// 3. THE RIGHT PLACE: at top level, between blocks. The target is not modifiable\n//    here (IsModifiable == false), so the load commits its own transaction into\n//    the run's group.\nbool targetModifiableHere = doc.IsModifiable;\nvar family = fam.LoadFamily(doc);\n\n// 4. Back inside a block for ordinary writes -- e.g. activate a symbol and place\n//    an instance (family-instances-place-hosted shows placement). Here: confirm the\n//    load is visible to a collector and rename nothing.\nint familiesNamed = Connector.WithTransaction(doc, () => {\n  int n = 0;\n  foreach (Autodesk.Revit.DB.Family f in new Autodesk.Revit.DB.FilteredElementCollector(doc).OfClass(typeof(Autodesk.Revit.DB.Family))) {\n    if (f.Name == family.Name) n++;\n  }\n  return n;\n});\n\n// 5. The same rule for the others, not run here:\n//    - UIDocument.RequestViewChange(view): top level; refused inside a block. UIDocument\n//      is null for a background/created document, so do it routed at the active one.\n//    - doc.Export(folder, name, views, new DWGExportOptions()): build the view inside a\n//      block, export between blocks (export-views-dwg).\n//    - var scope = new StairsEditScope(doc, \"...\"); scope.Start(levelId) at top level,\n//      the run inside a block, scope.Commit(new FailuresPreprocessor()) at top level\n//      (stairs-with-edit-scope).\n//    A throw AFTER the load still undoes it: the self-transacted commit sits inside\n//    the run's group, which rolls back as one.\nreturn new {\n  familyName = family.Name,\n  loadedInsideBlock = insideBlock,        // \"refused: ...\"\n  targetModifiableAtTopLevel = targetModifiableHere, // false\n  familiesNamed                           // 1\n};\n",
+  "pitfalls": [
+    {
+      "symptom": "`script-target-must-not-be-modifiable` from Document.LoadFamily, Document.Export, UIDocument.RequestViewChange or EditScope.Commit; Revit says the document must not be modifiable.",
+      "cause": "The call was made inside a Connector.WithTransaction block, where the target is modifiable; these APIs open their own transaction.",
+      "fix": "Move the call to top level, between blocks: block for writes, then the call, then another block.",
+      "members": [
+        "Autodesk.Revit.DB.Document.LoadFamily",
+        "Autodesk.Revit.UI.UIDocument.RequestViewChange",
+        "Autodesk.Revit.DB.Document.Export"
+      ]
+    },
+    {
+      "symptom": "A family loaded at top level is gone in the next run, or after a throw later in the same run.",
+      "cause": "The load's own commit is part of the run's transaction group; a throw anywhere after it rolls the whole group back (a run that succeeds keeps it).",
+      "fix": "Keep the run free of uncaught throws after the load, or reload in a later run; check with a Family collector on the next call.",
+      "members": [
+        "Autodesk.Revit.DB.Document.LoadFamily"
+      ]
+    },
+    {
+      "symptom": "NullReferenceException on UIDocument.RequestViewChange when routed at a created or background document.",
+      "cause": "UIDocument is null there: Revit has no UI document for a headless document.",
+      "fix": "Route the run at the active document (omit document_id) for view changes.",
+      "members": [
+        "Autodesk.Revit.UI.UIDocument.RequestViewChange"
+      ]
+    }
+  ],
+  "tags": [
+    "connector",
+    "transactions",
+    "families",
+    "load-family",
+    "pitfall"
+  ],
+  "provenance": {
+    "kind": "harness",
+    "ref": "revit/test-harness/external_commit_test.go TestSelfTransactingApiBetweenBlocksSurvivesTheRun, TestAThrowAfterATopLevelLoadFamilyUndoesTheLoad; interactive_findings_test.go TestTargetMustNotBeModifiableIsMappedToItsOwnCode, TestRoutingAwayFromATargetMakesItNonModifiable"
+  },
+  "verify": {
+    "creates_documents": true,
+    "mutations": {
+      "net_deleted": 0
+    }
+  },
+  "created_at": "2026-09-02T00:00:00Z",
+  "updated_at": "2026-09-02T00:00:00Z"
+}

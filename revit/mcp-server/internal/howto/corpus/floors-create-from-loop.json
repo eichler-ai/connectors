@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "id": "floors-create-from-loop",
+  "rev": 1,
+  "kind": "howto",
+  "title": "Create a floor slab of a named type from a closed footprint on a level",
+  "task": "Put a floor under an enclosed footprint: build a closed CurveLoop of Line segments, pick a FloorType by name (fallback Floor.GetDefaultFloorType) and call Floor.Create(document, loops, floorTypeId, levelId); verify the level and the sketch area.",
+  "members": [
+    "Autodesk.Revit.DB.Floor.Create",
+    "Autodesk.Revit.DB.CurveLoop.Append",
+    "Autodesk.Revit.DB.Floor.GetDefaultFloorType",
+    "Autodesk.Revit.DB.FloorType",
+    "Autodesk.Revit.DB.Line.CreateBound",
+    "Autodesk.Revit.DB.Element.LevelId"
+  ],
+  "script_language": "csharp-script",
+  "script": "var doc = Document;\n// Goal: a 20 x 20 ft floor slab on the lowest level, of a named floor type when it exists.\n\n// 1. Level and floor type. Type lookup by Name is template-dependent, so fall back to the\n//    document's default floor type (GetDefaultFloorType(doc, isFoundation: false)) when the\n//    name is absent rather than failing.\nAutodesk.Revit.DB.Level level = null;\nforeach (Autodesk.Revit.DB.Level l in new Autodesk.Revit.DB.FilteredElementCollector(doc).OfClass(typeof(Autodesk.Revit.DB.Level))) { if (level == null || l.Elevation < level.Elevation) level = l; }\nstring wantedTypeName = \"Generic 12\\\"\";\nAutodesk.Revit.DB.ElementId floorTypeId = null;\nforeach (Autodesk.Revit.DB.FloorType ft in new Autodesk.Revit.DB.FilteredElementCollector(doc).OfClass(typeof(Autodesk.Revit.DB.FloorType))) {\n  if (ft.Name == wantedTypeName && !ft.IsFoundationSlab) { floorTypeId = ft.Id; break; }\n}\nvar usedDefault = floorTypeId == null;\nif (usedDefault) { floorTypeId = Autodesk.Revit.DB.Floor.GetDefaultFloorType(doc, false); }\n\nreturn Connector.WithTransaction(doc, () => {\n  // 2. The footprint as ONE closed, planar CurveLoop: each segment starts where the previous ended\n  //    and the last returns to the first point. An open loop throws at Floor.Create.\n  var pts = new[] { new Autodesk.Revit.DB.XYZ(0, 0, 0), new Autodesk.Revit.DB.XYZ(20, 0, 0), new Autodesk.Revit.DB.XYZ(20, 20, 0), new Autodesk.Revit.DB.XYZ(0, 20, 0) };\n  var loop = new Autodesk.Revit.DB.CurveLoop();\n  for (int i = 0; i < pts.Length; i++) { loop.Append(Autodesk.Revit.DB.Line.CreateBound(pts[i], pts[(i + 1) % pts.Length])); }\n  var profile = new System.Collections.Generic.List<Autodesk.Revit.DB.CurveLoop> { loop };\n\n  // 3. Floor.Create(doc, loops, typeId, levelId) is the 2022+ API; the older\n  //    Document.Create.NewFloor(CurveArray, ...) overloads are obsolete. The loop's Z is ignored:\n  //    the slab sits at the level's elevation (plus the type's offset).\n  var floor = Autodesk.Revit.DB.Floor.Create(doc, profile, floorTypeId, level.Id);\n  doc.Regenerate();\n\n  // 4. Verify: the floor is on the level and its area equals the footprint's (400 sq ft here).\n  var areaParam = floor.get_Parameter(Autodesk.Revit.DB.BuiltInParameter.HOST_AREA_COMPUTED);\n  double area = areaParam != null ? areaParam.AsDouble() : 0.0;\n  return new { floorId = floor.Id.Value, floorType = doc.GetElement(floorTypeId).Name, usedDefaultType = usedDefault, onLevel = floor.LevelId == level.Id, areaSqFt = area, areaMatches = System.Math.Abs(area - 400.0) < 0.5 };\n});\n",
+  "pitfalls": [
+    {
+      "symptom": "Floor.Create throws ArgumentException about the profile.",
+      "cause": "The CurveLoop is open (a segment's end does not meet the next segment's start) or not planar.",
+      "fix": "Build the loop from consecutive points so each segment ends where the next begins (step 2); keep all points at one Z.",
+      "members": [
+        "Autodesk.Revit.DB.CurveLoop.Append",
+        "Autodesk.Revit.DB.Floor.Create"
+      ]
+    },
+    {
+      "symptom": "The chosen floor type is a foundation slab, or the named type is missing.",
+      "cause": "FloorType covers both floors and structural foundations; names are template-dependent.",
+      "fix": "Filter with !ft.IsFoundationSlab and fall back to Floor.GetDefaultFloorType(doc, false) (step 1).",
+      "members": [
+        "Autodesk.Revit.DB.Floor.GetDefaultFloorType",
+        "Autodesk.Revit.DB.FloorType.IsFoundationSlab"
+      ]
+    }
+  ],
+  "tags": [
+    "floors",
+    "creation",
+    "sketch"
+  ],
+  "provenance": {
+    "kind": "harness",
+    "ref": "revit/test-harness/phase_c_test.go TestPhaseCFloorsGridsSheetsAndText/CreateFloor"
+  },
+  "verify": {
+    "mutations": {
+      "by_category": {
+        "Floors": {
+          "net_created": 1
+        }
+      }
+    }
+  },
+  "created_at": "2026-09-02T00:00:00Z",
+  "updated_at": "2026-09-02T00:00:00Z"
+}

@@ -90,11 +90,22 @@ The seed is extracted from the harness, and only from tests that opt in. Mechani
 4. **Dialect is current.** #146 Phase 3 (#160) rewrote the harness to the `WithTransaction` dialect,
    so extracted scripts are already in the shipped dialect; the design note's warning that seed
    scripts would fail the sweep no longer applies to a seed extracted after #160.
-5. **Extractor is a build step**, `go run ./cmd/howto-extract`, committed output at
-   `revit/howto/corpus.jsonl` (one line per lineage, latest revision only); CI fails if the committed
-   file is stale against the tests. The sidecar `revit/howto/verified.jsonl` is written only by the
-   tier-2 sweep and committed with it; a stamp whose script hash no longer matches its document is
-   pruned by the same step.
+5. **The corpus is a directory of files inside the broker module, not a generated JSONL** [revised at
+   step 3]. Feature-level documents are authored (from the harness scripts, not extracted from them:
+   one document composes several tests' bodies into numbered steps) as one JSON file per lineage at
+   `revit/mcp-server/internal/howto/corpus/<id>.json`, embedded with `go:embed`; a file per document
+   is what makes a 6 KB script reviewable as a diff at triage. The broker joins the files into the
+   one-line-per-lineage form at load, so the JSONL loader and its checks are unchanged. The unit test
+   `TestEmbeddedCorpusIsValidAndStampsAreCurrent` fails CI on a schema problem, a file not named
+   for its id, or a sidecar stamp whose script hash no longer matches. The sidecar
+   `corpus/verified.jsonl` is written only by the tier-2 sweep `TestHowToSweep` (`-howto-stamps`;
+   `-howto-only <ids>` to iterate), which runs every document's script byte-for-byte at a fresh blank
+   fixture routed by `document_id`, requires `status: success`, and checks the document's `verify`
+   block: the **net** `mutations` the run must produce (`net_created`/`net_modified`/`net_deleted`,
+   `by_category`; `net_modified_min` where the exact count is version-dependent), extra
+   `execute_script` arguments the run needs, and `creates_documents` for scripts that print
+   `cleanup-title=` markers. The corpus version (document count, content hash, Revit versions
+   verified on) is printed by `-version` and carried in `get_skills` `build.howto_corpus`.
 6. **Then the ranking corpus.** Every recorded `queries.miss` becomes a candidate row for the how-to
    equivalent of `ranking-corpus.tsv`, once `search_howto` exists to grade it.
 

@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "id": "walls-create-and-join",
+  "rev": 1,
+  "kind": "howto",
+  "title": "Enclose a rectangular footprint with walls of a named type and confirm the corners join",
+  "task": "Create four Wall elements from Line segments on a Level with Wall.Create, choosing a WallType by name (falling back to any Basic wall type), so the footprint closes and every corner is joined. Check joins with WallUtils.IsWallJoinAllowedAtEnd, not JoinGeometryUtils.AreElementsJoined.",
+  "queries": {
+    "miss": [
+      {
+        "text": "join walls at corner",
+        "tool": "search_functions",
+        "surfaced": "BuiltInParameter and PostableCommand noise; JoinGeometryUtils did not appear",
+        "ranker": "keyword-fallback"
+      }
+    ],
+    "hit": [
+      {
+        "text": "AreElementsJoined geometry",
+        "tool": "search_functions",
+        "rank": 1,
+        "ranker": "keyword-fallback"
+      }
+    ]
+  },
+  "members": [
+    "Autodesk.Revit.DB.Wall.Create",
+    "Autodesk.Revit.DB.WallType.Kind",
+    "Autodesk.Revit.DB.Line.CreateBound",
+    "Autodesk.Revit.DB.WallUtils.IsWallJoinAllowedAtEnd",
+    "Autodesk.Revit.DB.LocationCurve.Curve",
+    "Autodesk.Revit.DB.Document.Regenerate",
+    "Autodesk.Revit.DB.FilteredElementCollector.OfClass"
+  ],
+  "script_language": "csharp-script",
+  "script": "var doc = Document;\n// Goal: enclose a 20' x 15' room footprint with walls of a named type on a level, joined at the corners.\n// Reads (finding the level and the type) happen at top level; every write sits inside one WithTransaction block.\n// A blank project has levels already; take the lowest one rather than creating another.\nAutodesk.Revit.DB.Level level = null;\nforeach (Autodesk.Revit.DB.Level l in new Autodesk.Revit.DB.FilteredElementCollector(doc).OfClass(typeof(Autodesk.Revit.DB.Level))) {\n  if (level == null || l.Elevation < level.Elevation) level = l;\n}\n\n// 1. Choose the wall type by name. Names are case-sensitive and template-dependent, so fall back to\n//    the first Basic wall type (WallKind.Basic) rather than failing on a name the template lacks.\n//    Curtain and stacked types also derive from WallType, which is why Kind is checked.\nstring wantedTypeName = \"Generic - 8\\\"\";\nAutodesk.Revit.DB.WallType wallType = null;\nAutodesk.Revit.DB.WallType firstBasic = null;\nforeach (Autodesk.Revit.DB.WallType wt in new Autodesk.Revit.DB.FilteredElementCollector(doc).OfClass(typeof(Autodesk.Revit.DB.WallType))) {\n  if (wt.Kind != Autodesk.Revit.DB.WallKind.Basic) continue;\n  if (firstBasic == null) firstBasic = wt;\n  if (wt.Name == wantedTypeName) { wallType = wt; break; }\n}\nbool usedFallback = wallType == null;\nif (wallType == null) wallType = firstBasic;\nif (wallType == null) throw new System.Exception(\"no Basic wall type in this document\");\n\n// 2. The footprint as corner points, in feet (Revit's internal length unit), on the level's elevation.\ndouble z = level.Elevation;\nvar corners = new[] {\n  new Autodesk.Revit.DB.XYZ(0, 0, z), new Autodesk.Revit.DB.XYZ(20, 0, z),\n  new Autodesk.Revit.DB.XYZ(20, 15, z), new Autodesk.Revit.DB.XYZ(0, 15, z) };\n\nreturn Connector.WithTransaction(doc, () => {\n  // 3. One wall per edge, drawn head-to-tail so each wall's end meets the next wall's start.\n  //    This Wall.Create overload takes the type, the level, a height (10'), a base offset (0),\n  //    flip=false and structural=false; the shorter overload (doc, line, levelId, structural)\n  //    uses the document's default wall type instead of a chosen one.\n  var walls = new Autodesk.Revit.DB.Wall[4];\n  for (int i = 0; i < 4; i++) {\n    var line = Autodesk.Revit.DB.Line.CreateBound(corners[i], corners[(i + 1) % 4]);\n    walls[i] = Autodesk.Revit.DB.Wall.Create(doc, line, wallType.Id, level.Id, 10.0, 0.0, false, false);\n  }\n  // 4. Regenerate before reading geometry or joins back: until then the location curves and\n  //    the end joins are not resolved.\n  doc.Regenerate();\n\n  // 5. Verify the loop closes: each wall's end point equals the next wall's start point.\n  bool loopCloses = true;\n  for (int i = 0; i < 4; i++) {\n    var a = ((Autodesk.Revit.DB.LocationCurve)walls[i].Location).Curve.GetEndPoint(1);\n    var b = ((Autodesk.Revit.DB.LocationCurve)walls[(i + 1) % 4].Location).Curve.GetEndPoint(0);\n    if (!a.IsAlmostEqualTo(b)) loopCloses = false;\n  }\n\n  // 6. Verify the corners join. For walls, \"do the corners join\" means wall-end joins, which\n  //    WallUtils answers per end (0 = start, 1 = end). JoinGeometryUtils.AreElementsJoined is a\n  //    different mechanism (the Join Geometry command) and reports false for fresh walls.\n  bool allEndsAllowJoin = true;\n  foreach (var w in walls) {\n    if (!Autodesk.Revit.DB.WallUtils.IsWallJoinAllowedAtEnd(w, 0)) allEndsAllowJoin = false;\n    if (!Autodesk.Revit.DB.WallUtils.IsWallJoinAllowedAtEnd(w, 1)) allEndsAllowJoin = false;\n  }\n\n  // 7. Return a projection, never the elements themselves.\n  var ids = new long[4];\n  for (int i = 0; i < 4; i++) ids[i] = walls[i].Id.Value;\n  return new { wallIds = ids, wallType = wallType.Name, usedFallbackType = usedFallback, level = level.Name, loopCloses, allEndsAllowJoin };\n});\n",
+  "pitfalls": [
+    {
+      "symptom": "JoinGeometryUtils.AreElementsJoined returns false for freshly created walls that visibly meet at their corners, so the task looks failed.",
+      "cause": "AreElementsJoined reports geometry joins (the Join Geometry command's effect), which newly created walls do not have; wall-end joins are a different mechanism.",
+      "fix": "Ask WallUtils.IsWallJoinAllowedAtEnd(wall, 0) and (wall, 1) for each wall.",
+      "members": [
+        "Autodesk.Revit.DB.JoinGeometryUtils.AreElementsJoined",
+        "Autodesk.Revit.DB.WallUtils.IsWallJoinAllowedAtEnd"
+      ]
+    },
+    {
+      "symptom": "The wall type lookup finds nothing and the script throws or picks a curtain wall type.",
+      "cause": "Type names are case-sensitive and differ between templates; every WallType (Basic, Curtain, Stacked) comes back from OfClass(typeof(WallType)).",
+      "fix": "Filter on WallType.Kind == WallKind.Basic and fall back to the first Basic type when the wanted name is absent.",
+      "members": [
+        "Autodesk.Revit.DB.WallType.Kind"
+      ]
+    },
+    {
+      "symptom": "Location curves or joins read back wrong immediately after Wall.Create.",
+      "cause": "Geometry is not resolved until the document regenerates.",
+      "fix": "Call doc.Regenerate() inside the block before reading geometry or joins.",
+      "members": [
+        "Autodesk.Revit.DB.Document.Regenerate"
+      ]
+    }
+  ],
+  "tags": [
+    "walls",
+    "creation",
+    "joins",
+    "geometry"
+  ],
+  "absorbs": [
+    "walls-closed-footprint-confirm-joins"
+  ],
+  "provenance": {
+    "kind": "harness",
+    "ref": "revit/test-harness/validation_corpus_test.go TestValidationCorpus_ClosedRectangularFootprint; phase_a_test.go TestPhaseACoreCRUDAndQuery/CreateWall"
+  },
+  "verify": {
+    "mutations": {
+      "net_created": 4,
+      "by_category": {
+        "Walls": {
+          "net_created": 4
+        }
+      }
+    }
+  },
+  "created_at": "2026-09-02T00:00:00Z",
+  "updated_at": "2026-09-02T00:00:00Z"
+}

@@ -1,0 +1,90 @@
+{
+  "schema_version": 1,
+  "id": "lifecycle-settle-save-close",
+  "rev": 1,
+  "kind": "howto",
+  "title": "Save the run's work under a new name, or discard it and close, with Connector.Settle and confirm_lifecycle_actions",
+  "task": "Save a document as a file or close it at the end of the run that wrote to it: call Connector.Settle(doc, keep) to end the run's transaction group in the stated direction, then Document.SaveAs or Document.Close, with execute_script confirm_lifecycle_actions: true. Without Settle Revit refuses lifecycle calls; without the flag the script is refused with script-lifecycle-confirmation-required.",
+  "members": [
+    "Eichler.Connectors.Revit.Connector.Settle",
+    "Eichler.Connectors.Revit.Connector.WithTransaction",
+    "Eichler.Connectors.Revit.Connector.CreateProjectDocument",
+    "Eichler.Connectors.Revit.Connector.ExportsDirectory",
+    "Autodesk.Revit.DB.Document.SaveAs",
+    "Autodesk.Revit.DB.Document.Close",
+    "Autodesk.Revit.DB.Document.Title",
+    "Autodesk.Revit.DB.Level.Create"
+  ],
+  "script_language": "csharp-script",
+  "script": "var doc = Document;\n// Goal: keep the run's work on disk under a new name, or throw it away and close.\n// Needs execute_script { \"confirm_lifecycle_actions\": true }: SaveAs and Close act\n// outside the transaction that rolls a failed script back, so they are gated\n// (skill.md \"What needs your confirmation\"). Demonstrated on two scratch documents\n// so the user's own model is untouched; the same calls work on `doc`.\n\n// 1. KEEP then SAVE AS. Write, then Settle(keep: true): the group ends and the writes\n//    become permanent (notice document-settled-kept). Only now does Revit allow SaveAs.\nvar keepDoc = Connector.CreateProjectDocument();\nSystem.Console.WriteLine(\"cleanup-title=\" + keepDoc.Title + \";\");\nConnector.WithTransaction(keepDoc, () => { Autodesk.Revit.DB.Level.Create(keepDoc, 21.0); });\nConnector.Settle(keepDoc, true);\n\n// 2. Save under the connector's exports directory (a path the user can fetch; never a\n//    project path typed by hand). After SaveAs the document's Title is the file's\n//    basename -- look it up by the NEW title afterwards.\nvar savedPath = System.IO.Path.Combine(Connector.ExportsDirectory, \"howto-settle-saveas-\" + System.DateTime.UtcNow.Ticks + \".rvt\");\nkeepDoc.SaveAs(savedPath);\nSystem.Console.WriteLine(\"cleanup-title=\" + keepDoc.Title + \";\");\nbool fileExists = System.IO.File.Exists(savedPath);\nstring titleAfterSaveAs = keepDoc.Title;\n\n// 3. A settled document is still readable and can be written again in a new block\n//    (a fresh group opens on the next write); here just close it, then remove the\n//    probe file so the exports folder does not fill up.\nkeepDoc.Close(false);\ntry { System.IO.File.Delete(savedPath); } catch { }\n\n// 4. DISCARD then CLOSE. Settle(keep: false) rolls the group back (notice\n//    document-settled-discarded); the run's `mutations` report leaves this document\n//    out entirely. Close(false) then closes without a save prompt.\nvar discardDoc = Connector.CreateProjectDocument();\nSystem.Console.WriteLine(\"cleanup-title=\" + discardDoc.Title + \";\");\nConnector.WithTransaction(discardDoc, () => { Autodesk.Revit.DB.Level.Create(discardDoc, 22.0); });\nstring discardTitle = discardDoc.Title; // read BEFORE Close: a closed Document's members all throw\nConnector.Settle(discardDoc, false);\ndiscardDoc.Close(false);\n\n// 5. Verify: the saved file existed before deletion, both scratch documents are gone.\nint open = 0;\nforeach (Autodesk.Revit.DB.Document d in UIApplication.Application.Documents) {\n  if (d.Title == titleAfterSaveAs || d.Title == discardTitle) open++;\n}\n// On the user's own model the shape is: writes -> Connector.Settle(doc, true) ->\n// doc.SaveAs(path) (or doc.Save()) -- and Close only when the user asked for it.\nreturn new { fileExists, titleAfterSaveAs, scratchStillOpen = open };\n",
+  "pitfalls": [
+    {
+      "symptom": "`script-lifecycle-confirmation-required`: refused before running because the script calls Document.Close, Save, SaveAs, SynchronizeWithCentral or Print.",
+      "cause": "These act on the person's session, the filesystem, the central model or a printer, outside the rollback boundary.",
+      "fix": "Ask the user, then pass confirm_lifecycle_actions: true to execute_script.",
+      "members": [
+        "Autodesk.Revit.DB.Document.SaveAs",
+        "Autodesk.Revit.DB.Document.Close"
+      ]
+    },
+    {
+      "symptom": "SaveAs/Close throws that a transaction or transaction group is still open, right after the script wrote to the document.",
+      "cause": "The run's group is open on every document it wrote to; Revit's transaction-phase check runs before the lifecycle event even fires.",
+      "fix": "Connector.Settle(doc, keep: true) before SaveAs (keep: false to discard before Close).",
+      "members": [
+        "Eichler.Connectors.Revit.Connector.Settle"
+      ]
+    },
+    {
+      "symptom": "After SaveAs the document cannot be found by its old title.",
+      "cause": "Title becomes the saved file's basename.",
+      "fix": "Read doc.Title after SaveAs and use that for later lookups and cleanup.",
+      "members": [
+        "Autodesk.Revit.DB.Document.SaveAs"
+      ]
+    },
+    {
+      "symptom": "Settle(keep: false) and the run's mutations report shows nothing for that document.",
+      "cause": "Discarded writes are rolled back before the report is built.",
+      "fix": "Expected; keep: true is what makes writes permanent.",
+      "members": [
+        "Eichler.Connectors.Revit.Connector.Settle"
+      ]
+    },
+    {
+      "symptom": "'The referenced object is not valid' right after doc.Close(false).",
+      "cause": "Close disposes the document; reading Title (or anything) from the closed wrapper throws.",
+      "fix": "Capture the title before Close and check Application.Documents by that string.",
+      "members": [
+        "Autodesk.Revit.DB.Document.Close"
+      ]
+    }
+  ],
+  "tags": [
+    "connector",
+    "lifecycle",
+    "save",
+    "close",
+    "confirmation"
+  ],
+  "provenance": {
+    "kind": "harness",
+    "ref": "revit/test-harness/interactive_findings_test.go TestSettleMakesLifecycleActionsReachableInTheSameRun (DiscardThenCloseInTheSameRun, KeepThenSaveAsInTheSameRun); harness_test.go TestConnectorSettleIsConfirmationGatedLive"
+  },
+  "verify": {
+    "creates_documents": true,
+    "execute": {
+      "confirm_lifecycle_actions": true
+    },
+    "mutations": {
+      "net_created": 1,
+      "by_category": {
+        "Levels": {
+          "net_created": 1
+        }
+      }
+    }
+  },
+  "created_at": "2026-09-02T00:00:00Z",
+  "updated_at": "2026-09-02T00:00:00Z"
+}

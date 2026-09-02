@@ -86,6 +86,10 @@ const corpusDir = "../mcp-server/internal/howto/corpus"
 // The script runs routed at the fixture by document_id, so `Document` inside
 // it IS the fixture -- exactly how an agent's own run binds `doc`. Nothing is
 // substituted into the script text: the hash stamped is the hash served.
+//
+// Run ONE sweep at a time against a Revit instance. Executions serialise on
+// Revit's UI thread, and the harness's stale-execution recovery cancels an
+// in-flight run it did not start.
 func TestHowToSweep(t *testing.T) {
 	c, instanceID, mainDocumentID := targetDocument(t)
 	var revitVersion string
@@ -159,7 +163,11 @@ func sweepOne(t *testing.T, c *mcpclient.Client, instanceID, mainDocumentID stri
 	if fixtureID == "" {
 		return "fixture document " + title + " not listed by list_instances"
 	}
-	ensureInstanceIdle(t, c, instanceID, fixtureID)
+	// No ensureInstanceIdle here, deliberately: it cancels whatever execution
+	// it finds in flight, which is right for one session's own stale run and
+	// destructive when a second sweep shares the instance (three concurrent
+	// sweeps cancelled each other until the instance went unrecoverable).
+	// The sweep is serial by design; a busy instance fails the document loudly.
 	var extra map[string]any
 	if d.Verify != nil {
 		extra = d.Verify.Execute
@@ -181,6 +189,11 @@ func sweepOne(t *testing.T, c *mcpclient.Client, instanceID, mainDocumentID stri
 	}
 	if out.Status != "success" {
 		return fmt.Sprintf("status=%s %s", out.Status, out.diag())
+	}
+	// Always log the report: it is the evidence a document's verify block is
+	// pinned from, and the only way to see what a passing run actually did.
+	if rep, err := json.Marshal(out.Mutations); err == nil {
+		t.Logf("%s mutations: %s", d.ID, rep)
 	}
 	if d.Verify == nil || d.Verify.Mutations == nil {
 		return ""

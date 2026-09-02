@@ -310,7 +310,8 @@ functions too**, indexed like any add-in's and ranked below Revit's: anything un
   script ran: `title`, one-sentence `task`, `script`, `members`, `pitfalls` (symptom → cause → fix).
   Saves to the user's local how-to corpus; `confirm_submission: true` scrubs it into a review-queue
   issue, filed by the connector if the user set a GitHub token, else by you from the returned `issue`
-  fields with your GitHub tool (ask first). `id` + `change_note` improves an existing how-to.
+  fields with your GitHub tool (ask first). If a how-to you followed was wrong or missed a pitfall,
+  submit the fix as `id` + `change_note`: that is how the next agent avoids what you just hit.
 - **`list_functions`** — drill down. Omit `namespace` for the namespace list; pass `namespace` for its
   types; pass `namespace` + `type_name` for that type's members.
 - **`describe_function`** — full signature, parameters and docs for one member
@@ -367,7 +368,7 @@ local mode; in remote mode it moves to the shared drive — ask a human where th
 | `search_functions` | yes | find an API member by intent |
 | `list_functions` | yes | enumerate namespaces / types / members |
 | `describe_function` | yes | signature + docs for one member |
-| `submit_howto` | no | record a how-to after a task that taught you something |
+| `submit_howto` | no | record a how-to, or fix one that misled you |
 | `get_skills` | no | this document |
 
 **Starting from nothing:** `list_instances` → pick an instance and document → `execute_script`.

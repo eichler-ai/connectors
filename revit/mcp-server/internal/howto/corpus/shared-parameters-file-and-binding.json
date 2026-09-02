@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "id": "shared-parameters-file-and-binding",
+  "rev": 1,
+  "kind": "howto",
+  "title": "Add a shared parameter to walls and doors: write the definition file, open it, bind it to categories",
+  "task": "Create a shared parameter and bind it as an instance parameter to the Walls and Doors categories: there is no Application.CreateSharedParameterFile, so write the tab-delimited shared-parameter file with System.IO, set Application.SharedParametersFilename, OpenSharedParameterFile, read the ExternalDefinition, then BindingMap.Insert with an InstanceBinding under a GroupTypeId (BuiltInParameterGroup is gone in Revit 2025+).",
+  "members": [
+    "Autodesk.Revit.ApplicationServices.Application.OpenSharedParameterFile",
+    "Autodesk.Revit.ApplicationServices.Application.SharedParametersFilename",
+    "Autodesk.Revit.DB.DefinitionFile.Groups",
+    "Autodesk.Revit.DB.Definitions.get_Item",
+    "Autodesk.Revit.DB.ExternalDefinition",
+    "Autodesk.Revit.Creation.Application.NewCategorySet",
+    "Autodesk.Revit.Creation.Application.NewInstanceBinding",
+    "Autodesk.Revit.DB.BindingMap.Insert",
+    "Autodesk.Revit.DB.GroupTypeId.Data",
+    "Autodesk.Revit.DB.Element.LookupParameter"
+  ],
+  "script_language": "csharp-script",
+  "script": "var doc = Document;\n// Goal: add a project-wide shared parameter, \"Fire Rating Note\", to every wall and door so\n// schedules and tags can show it. Shared parameters live in a text file Revit reads; the API\n// cannot create that file, only open one.\nvar app = UIApplication.Application;\n// A blank project has levels already; take the lowest one rather than creating another.\nAutodesk.Revit.DB.Level level = null;\nforeach (Autodesk.Revit.DB.Level l in new Autodesk.Revit.DB.FilteredElementCollector(doc).OfClass(typeof(Autodesk.Revit.DB.Level))) {\n  if (level == null || l.Elevation < level.Elevation) level = l;\n}\n\n// 1. Write the shared-parameter file. There is NO Application.CreateSharedParameterFile: the\n//    format is plain tab-delimited text (META, GROUP and PARAM rows) and System.IO writes it.\n//    Keep it under the connector's exports directory so no user path is touched, with a unique\n//    name so reruns cannot collide. The GUID is the parameter's permanent identity across projects.\nstring paramName = \"Fire Rating Note\";\nstring groupName = \"Connector\";\nstring guid = System.Guid.NewGuid().ToString();\nstring filePath = System.IO.Path.Combine(Connector.ExportsDirectory, \"shared-parameters-\" + System.Guid.NewGuid().ToString(\"N\") + \".txt\");\nstring content = \"# This is a Revit shared parameter file.\\n# Do not edit manually.\\n\"\n  + \"*META\\tVERSION\\tMINVERSION\\nMETA\\t2\\t1\\n\"\n  + \"*GROUP\\tID\\tNAME\\nGROUP\\t1\\t\" + groupName + \"\\n\"\n  + \"*PARAM\\tGUID\\tNAME\\tDATATYPE\\tDATACATEGORY\\tGROUP\\tVISIBLE\\tDESCRIPTION\\tUSERMODIFIABLE\\n\"\n  + \"PARAM\\t\" + guid + \"\\t\" + paramName + \"\\tTEXT\\t\\t1\\t1\\t\\t1\\n\";\nSystem.IO.File.WriteAllText(filePath, content);\n\n// 2. Point the application at the file and open it. SharedParametersFilename is a process-wide\n//    Revit setting: remember the previous value and restore it in a finally, and delete the\n//    temporary file, so the session is left as found even if a later step throws.\nstring previousFile = app.SharedParametersFilename;\ntry {\n  app.SharedParametersFilename = filePath;\n  var defFile = app.OpenSharedParameterFile();\n  if (defFile == null) throw new System.Exception(\"OpenSharedParameterFile returned null; the file is not a valid shared-parameter file\");\n  var definition = defFile.Groups.get_Item(groupName).Definitions.get_Item(paramName) as Autodesk.Revit.DB.ExternalDefinition;\n  if (definition == null) throw new System.Exception(\"definition not found in the shared-parameter file\");\n\n  return Connector.WithTransaction(doc, () => {\n    // 3. Bind the definition to categories. A CategorySet names which categories carry the\n    //    parameter; an InstanceBinding puts it on instances (TypeBinding would put it on types).\n    var categories = app.Create.NewCategorySet();\n    categories.Insert(doc.Settings.Categories.get_Item(Autodesk.Revit.DB.BuiltInCategory.OST_Walls));\n    categories.Insert(doc.Settings.Categories.get_Item(Autodesk.Revit.DB.BuiltInCategory.OST_Doors));\n    var binding = app.Create.NewInstanceBinding(categories);\n    // 4. The third argument is the parameter group shown in the Properties palette. In Revit 2025+\n    //    it is a ForgeTypeId from GroupTypeId (Data, IdentityData, Text, ...); the old\n    //    BuiltInParameterGroup enum no longer exists.\n    bool bound = doc.ParameterBindings.Insert(definition, binding, Autodesk.Revit.DB.GroupTypeId.Data);\n    if (!bound) throw new System.Exception(\"ParameterBindings.Insert returned false (already bound?)\");\n\n    // 5. Verify on a real element: a new wall now has the parameter and accepts a value.\n    var wall = Autodesk.Revit.DB.Wall.Create(doc, Autodesk.Revit.DB.Line.CreateBound(\n        new Autodesk.Revit.DB.XYZ(0, 0, level.Elevation), new Autodesk.Revit.DB.XYZ(10, 0, level.Elevation)), level.Id, false);\n    doc.Regenerate();\n    var p = wall.LookupParameter(paramName);\n    bool present = p != null && p.IsShared;\n    if (present && !p.IsReadOnly) p.Set(\"2 HR\");\n    string readBack = present ? wall.LookupParameter(paramName).AsString() : null;\n\n    return new { bound, parameter = paramName, guid, present, readBack, wallId = wall.Id.Value, groupShown = \"Data\" };\n  });\n} finally {\n  app.SharedParametersFilename = previousFile;\n  try { System.IO.File.Delete(filePath); } catch { }\n}\n",
+  "pitfalls": [
+    {
+      "symptom": "Looking for Application.CreateSharedParameterFile finds nothing; the API cannot create a shared-parameter file.",
+      "cause": "Only OpenSharedParameterFile and the SharedParametersFilename property exist; the file is plain tab-delimited text.",
+      "fix": "Write the file with System.IO (META, GROUP, PARAM rows as in step 1), then open it.",
+      "members": [
+        "Autodesk.Revit.ApplicationServices.Application.OpenSharedParameterFile"
+      ]
+    },
+    {
+      "symptom": "BuiltInParameterGroup does not compile (Revit 2025+).",
+      "cause": "BindingMap.Insert's group argument is a ForgeTypeId now.",
+      "fix": "Pass GroupTypeId.Data (or another GroupTypeId member).",
+      "members": [
+        "Autodesk.Revit.DB.GroupTypeId.Data",
+        "Autodesk.Revit.DB.BindingMap.Insert"
+      ]
+    },
+    {
+      "symptom": "After the run, the user's own shared-parameter file is no longer selected in Revit.",
+      "cause": "SharedParametersFilename is a process-wide setting the script changed.",
+      "fix": "Capture it before, restore it in a finally block, and delete the temporary file.",
+      "members": [
+        "Autodesk.Revit.ApplicationServices.Application.SharedParametersFilename"
+      ]
+    }
+  ],
+  "tags": [
+    "parameters",
+    "shared-parameters",
+    "binding",
+    "walls",
+    "doors"
+  ],
+  "provenance": {
+    "kind": "harness",
+    "ref": "revit/test-harness/phase_a_test.go TestPhaseACoreCRUDAndQuery/CreateSharedParameter"
+  },
+  "verify": {
+    "mutations": {
+      "by_category": {
+        "Walls": {
+          "net_created": 1
+        }
+      }
+    }
+  },
+  "created_at": "2026-09-02T00:00:00Z",
+  "updated_at": "2026-09-02T00:00:00Z"
+}

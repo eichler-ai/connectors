@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "id": "stairs-with-edit-scope",
+  "rev": 1,
+  "kind": "howto",
+  "title": "Create a straight stair between two levels with StairsEditScope",
+  "task": "Add a stair between two levels: StairsEditScope.Start(baseLevelId, topLevelId) at top level, StairsRun.CreateStraightRun inside a Connector.WithTransaction block, then scope.Commit(IFailuresPreprocessor) between blocks; verify Stairs.GetStairsRuns and ActualRisersNumber.",
+  "members": [
+    "Autodesk.Revit.DB.StairsEditScope.Start",
+    "Autodesk.Revit.DB.StairsEditScope.Commit",
+    "Autodesk.Revit.DB.Architecture.StairsRun.CreateStraightRun",
+    "Autodesk.Revit.DB.Architecture.Stairs.GetStairsRuns",
+    "Autodesk.Revit.DB.Architecture.Stairs.ActualRisersNumber",
+    "Autodesk.Revit.DB.IFailuresPreprocessor",
+    "Autodesk.Revit.DB.Document.IsInEditMode"
+  ],
+  "script_language": "csharp-script",
+  "script": "var doc = Document;\n// Goal: a straight stair from the lowest level to the one above it.\n\n// 1. Base and top levels: the two lowest levels of the document (created with Level.Create when a\n//    project lacks them).\nAutodesk.Revit.DB.Level l1 = null, l2 = null;\nforeach (Autodesk.Revit.DB.Level lv in new Autodesk.Revit.DB.FilteredElementCollector(doc).OfClass(typeof(Autodesk.Revit.DB.Level))) {\n  if (l1 == null || lv.Elevation < l1.Elevation) { l2 = l1; l1 = lv; }\n  else if (l2 == null || lv.Elevation < l2.Elevation) { l2 = lv; }\n}\nif (l1 == null || l2 == null) { throw new System.Exception(\"two levels are needed\"); }\n\n// 2. Start the edit scope at TOP LEVEL, with no block open: Start() opens Revit's own stairs edit\n//    mode and needs the document not modifiable. It returns the new Stairs element's id.\nvar scope = new Autodesk.Revit.DB.StairsEditScope(doc, \"how-to straight stair\");\nvar stairsId = scope.Start(l1.Id, l2.Id);\n\n// 3. Build the run INSIDE a block. The run's path is a line in plan; Center justification puts the\n//    run's centreline on it. Landings and more runs go in the same block.\nConnector.WithTransaction(doc, () => {\n  var path = Autodesk.Revit.DB.Line.CreateBound(new Autodesk.Revit.DB.XYZ(0, 0, 0), new Autodesk.Revit.DB.XYZ(20, 0, 0));\n  Autodesk.Revit.DB.Architecture.StairsRun.CreateStraightRun(doc, stairsId, path, Autodesk.Revit.DB.Architecture.StairsRunJustification.Center);\n});\n\n// 4. Commit BETWEEN blocks. Commit closes the edit mode and commits its own transaction; while a\n//    connector block is open it throws 'EditScope cannot be closed' (script-target-must-not-be-modifiable),\n//    and the run above was silently discarded. The preprocessor swallows Revit's warnings (e.g.\n//    riser count outside the type's range), which would otherwise block the commit.\nscope.Commit(new SwallowWarnings());\n\n// 5. Verify: the stairs exists with one run and a non-zero riser count, and the document is no\n//    longer in edit mode. An empty stairs (no risers) means the run was never built.\nvar stairs = doc.GetElement(stairsId) as Autodesk.Revit.DB.Architecture.Stairs;\nvar runCount = stairs != null ? stairs.GetStairsRuns().Count : -1;\nvar risers = stairs != null ? stairs.ActualRisersNumber : -1;\nreturn new { stairsId = stairsId.Value, runCount, risers, baseLevel = l1.Name, topLevel = l2.Name, inEditMode = doc.IsInEditMode(), ok = runCount == 1 && risers > 0 && !doc.IsInEditMode() };\n\nclass SwallowWarnings : Autodesk.Revit.DB.IFailuresPreprocessor {\n  public Autodesk.Revit.DB.FailureProcessingResult PreprocessFailures(Autodesk.Revit.DB.FailuresAccessor a) {\n    a.DeleteAllWarnings();\n    return Autodesk.Revit.DB.FailureProcessingResult.Continue;\n  }\n}\n",
+  "pitfalls": [
+    {
+      "symptom": "scope.Commit throws InvalidOperationException 'EditScope cannot be closed' (script-target-must-not-be-modifiable) and the run reports success with no stairs in the model.",
+      "cause": "Commit was called inside Connector.WithTransaction; the block's open transaction blocks closing the edit scope, and the connector's unwind discards the run.",
+      "fix": "Commit at top level after the block (step 4); check Document.IsInEditMode() and the stairs' risers to confirm.",
+      "members": [
+        "Autodesk.Revit.DB.StairsEditScope.Commit",
+        "Autodesk.Revit.DB.Document.IsInEditMode"
+      ]
+    },
+    {
+      "symptom": "scope.Start throws.",
+      "cause": "Start needs the document not modifiable, or the two level ids are the same/inverted.",
+      "fix": "Call Start at top level between blocks with base below top (step 2).",
+      "members": [
+        "Autodesk.Revit.DB.StairsEditScope.Start"
+      ]
+    },
+    {
+      "symptom": "Commit is refused by a warning about the number of risers or run length.",
+      "cause": "Revit posts stairs warnings at commit; without a preprocessor they abort the commit.",
+      "fix": "Pass an IFailuresPreprocessor that deletes warnings (step 4), or size the run to the stair type's riser limits.",
+      "members": [
+        "Autodesk.Revit.DB.IFailuresPreprocessor"
+      ]
+    }
+  ],
+  "tags": [
+    "stairs",
+    "creation",
+    "edit-scope",
+    "connector"
+  ],
+  "provenance": {
+    "kind": "harness",
+    "ref": "revit/test-harness/interactive_findings_test.go TestStairsAreCreatableWithSettleOnRequest; TestStairsEditScopeCannotCommitWhileAConnectorTransactionIsOpen"
+  },
+  "verify": {
+    "mutations": {
+      "by_category": {
+        "Stairs": {
+          "net_created": 1
+        },
+        "Runs": {
+          "net_created": 1
+        }
+      }
+    }
+  },
+  "created_at": "2026-09-02T00:00:00Z",
+  "updated_at": "2026-09-02T00:00:00Z"
+}

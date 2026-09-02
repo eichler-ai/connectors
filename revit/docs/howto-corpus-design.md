@@ -131,10 +131,16 @@ A passing run proves the script executes without error and returns a non-empty v
 prove the result is *right*; that is what review (§6) is for, and why a `fix` sentence can go stale
 while its script still passes (§9).
 
-At query time the connected instance's `revit_version` is a **pre-ranking preference**, not a filter:
-documents verified on that version rank first; others are still returned, labelled with the versions
-they were verified on, because a 2027-verified how-to is usually still the right starting point on
-2025.
+At query time the Revit version is **always known and always applied** [decided 2026-09-02]:
+`search_howto` and `describe_howto` require exactly one of `instance_id` (the broker resolves the
+version from the registry, so the answer matches the Revit the agent is actually driving) or
+`revit_version` (for an agent working ahead of a connection). The version is a **pre-ranking
+preference**, not a filter: documents verified on that version rank first; others are still
+returned, each labelled `verified_on[]` plus `verified_here: false`, because a 2027-verified how-to
+is usually still the right starting point on 2025 — but the agent is never handed a script without
+being told whether it ran on its version. A call with neither, or with both, is refused with
+`howto-version-required`. Consequently the seed sweep runs on **every supported version** (2025 and
+2027 today) before a corpus ships, so "verified here" is true for the common case.
 
 `api_since` / `api_until` are optional declared hints for members that appear or disappear across
 versions; they are not verification and are shown as such.
@@ -152,10 +158,13 @@ corpus that embeds in ~1.1 s (§10.3 of the ranking note), so rebuilding on ever
 
 Two tools **[proposed]**, mirroring the API pair:
 
-- `search_howto(query, revit_version?, cursor?, top_n?)` → short hits: `id`, `title`, `task`,
-  `members`, `verified_on[]` (from the sidecar), `score`, `source` (`seed` / `shared` / `local`), plus
-  the same `ranker`, `guidance` and `notices[]` fields `search_functions` carries.
-- `describe_howto(id)` → the full document.
+- `search_howto(query, instance_id | revit_version, cursor?, top_n?)` → short hits: `id`, `title`,
+  `task`, `members`, `verified_on[]` (from the sidecar), `verified_here` (for the resolved version),
+  `score`, `source` (`seed` / `shared` / `local`), plus the same `ranker`, `guidance` and `notices[]`
+  fields `search_functions` carries, and `revit_version` (the one the call resolved to).
+- `describe_howto(id, instance_id | revit_version)` → the full document, with `verification` for the
+  resolved version (stamp status, `by`, `at`, connector version) and `api_since`/`api_until` warnings
+  evaluated against it.
 
 **Cross-promotion [open]:** `search_functions` could surface the top how-to hit when its rerank
 score beats the API hits — the idiom queries are exactly where this helps. Deferred until the corpus

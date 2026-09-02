@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "id": "element-parameters-read-write-delete",
+  "rev": 1,
+  "kind": "howto",
+  "title": "Read and set an element's parameters by name or BuiltInParameter, and delete an element",
+  "task": "Read an element parameter with Element.LookupParameter (display name) or Element.get_Parameter(BuiltInParameter), check StorageType and IsReadOnly before Parameter.Set, convert a length with UnitUtils.ConvertToInternalUnits, then delete an element with Document.Delete and confirm GetElement returns null.",
+  "members": [
+    "Autodesk.Revit.DB.Element.LookupParameter",
+    "Autodesk.Revit.DB.Element.get_Parameter",
+    "Autodesk.Revit.DB.Parameter.Set",
+    "Autodesk.Revit.DB.Parameter.AsString",
+    "Autodesk.Revit.DB.Parameter.AsDouble",
+    "Autodesk.Revit.DB.Parameter.StorageType",
+    "Autodesk.Revit.DB.Parameter.IsReadOnly",
+    "Autodesk.Revit.DB.UnitUtils.ConvertToInternalUnits",
+    "Autodesk.Revit.DB.UnitUtils.ConvertFromInternalUnits",
+    "Autodesk.Revit.DB.Document.Delete",
+    "Autodesk.Revit.DB.Document.GetElement"
+  ],
+  "script_language": "csharp-script",
+  "script": "var doc = Document;\n// Goal: read a wall's parameters, change two of them (a text and a length), and remove an element\n// the user no longer wants. Reads at top level; the writes inside one WithTransaction block.\n// A blank project has levels already; take the lowest one rather than creating another.\nAutodesk.Revit.DB.Level level = null;\nforeach (Autodesk.Revit.DB.Level l in new Autodesk.Revit.DB.FilteredElementCollector(doc).OfClass(typeof(Autodesk.Revit.DB.Level))) {\n  if (level == null || l.Elevation < level.Elevation) level = l;\n}\n\ndouble z = level.Elevation;\nreturn Connector.WithTransaction(doc, () => {\n  var wall = Autodesk.Revit.DB.Wall.Create(doc, Autodesk.Revit.DB.Line.CreateBound(new Autodesk.Revit.DB.XYZ(0, 0, z), new Autodesk.Revit.DB.XYZ(12, 0, z)), level.Id, false);\n  var scratch = Autodesk.Revit.DB.Wall.Create(doc, Autodesk.Revit.DB.Line.CreateBound(new Autodesk.Revit.DB.XYZ(0, 40, z), new Autodesk.Revit.DB.XYZ(12, 40, z)), level.Id, false);\n  doc.Regenerate();\n\n  // 1. Two ways to reach a parameter. By display name (LookupParameter) is what a user says, but\n  //    the name is localized and can be shared by several parameters; by BuiltInParameter id is\n  //    exact. Prefer the id for built-ins, the name for project or shared parameters.\n  var byName = wall.LookupParameter(\"Comments\");\n  var byId = wall.get_Parameter(Autodesk.Revit.DB.BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS);\n  bool sameParameter = byName != null && byId != null && byName.Id == byId.Id;\n\n  // 2. Before writing, check the storage type and that it is not read-only: Set on a read-only\n  //    parameter throws (Autodesk.Revit.Exceptions.InvalidOperationException), which rolls the\n  //    block back. Choose the Set overload by StorageType: String, Double, Integer or ElementId.\n  string commentsStorage = byId.StorageType.ToString();\n  bool commentsWritable = !byId.IsReadOnly;\n  if (commentsWritable) byId.Set(\"fire-rated partition\");\n  string commentReadBack = wall.get_Parameter(Autodesk.Revit.DB.BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS).AsString();\n\n  // 3. A length parameter is a Double in Revit's internal unit (decimal feet), whatever the\n  //    project's display units are. Convert from the user's unit with UnitUtils and UnitTypeId.\n  var height = wall.get_Parameter(Autodesk.Revit.DB.BuiltInParameter.WALL_USER_HEIGHT_PARAM);\n  double wantedMm = 3000.0;\n  double internalFeet = Autodesk.Revit.DB.UnitUtils.ConvertToInternalUnits(wantedMm, Autodesk.Revit.DB.UnitTypeId.Millimeters);\n  bool heightWritable = height != null && !height.IsReadOnly && height.StorageType == Autodesk.Revit.DB.StorageType.Double;\n  if (heightWritable) height.Set(internalFeet);\n  doc.Regenerate();\n  double heightMmReadBack = Autodesk.Revit.DB.UnitUtils.ConvertFromInternalUnits(\n      wall.get_Parameter(Autodesk.Revit.DB.BuiltInParameter.WALL_USER_HEIGHT_PARAM).AsDouble(), Autodesk.Revit.DB.UnitTypeId.Millimeters);\n\n  // 4. A read-only parameter, for contrast: the wall's computed Length. Reading is fine; Set throws.\n  var length = wall.get_Parameter(Autodesk.Revit.DB.BuiltInParameter.CURVE_ELEM_LENGTH);\n  bool lengthReadOnly = length != null && length.IsReadOnly;\n\n  // 5. Delete an element: Document.Delete takes the id and returns every id removed with it\n  //    (hosted elements, dimensions referencing it). Afterwards GetElement returns null.\n  var scratchId = scratch.Id;\n  var removed = doc.Delete(scratchId);\n  bool gone = doc.GetElement(scratchId) == null;\n\n  // 6. Return a projection of what changed.\n  return new {\n    wallId = wall.Id.Value, sameParameter, commentsStorage, commentsWritable, commentReadBack,\n    heightMmRequested = wantedMm, heightMmReadBack, heightRoundTripped = System.Math.Abs(heightMmReadBack - wantedMm) < 0.01,\n    lengthReadOnly, deletedCount = removed.Count, scratchGone = gone\n  };\n});\n",
+  "pitfalls": [
+    {
+      "symptom": "Parameter.Set throws InvalidOperationException and the whole block rolls back.",
+      "cause": "The parameter is read-only (a computed value such as Length or Area), or the Set overload does not match its StorageType.",
+      "fix": "Check IsReadOnly and StorageType first and pick the matching Set overload.",
+      "members": [
+        "Autodesk.Revit.DB.Parameter.IsReadOnly",
+        "Autodesk.Revit.DB.Parameter.StorageType"
+      ]
+    },
+    {
+      "symptom": "A length set to 3000 becomes 3000 feet (914 m).",
+      "cause": "Double parameters are in Revit's internal units (decimal feet), not the project's display units.",
+      "fix": "Convert with UnitUtils.ConvertToInternalUnits(value, UnitTypeId.Millimeters) before Set, and ConvertFromInternalUnits after AsDouble.",
+      "members": [
+        "Autodesk.Revit.DB.UnitUtils.ConvertToInternalUnits"
+      ]
+    },
+    {
+      "symptom": "LookupParameter returns null or the wrong parameter.",
+      "cause": "Display names are localized and can be shared by a type and an instance parameter.",
+      "fix": "Use get_Parameter(BuiltInParameter.X) for built-ins; keep LookupParameter for project and shared parameters.",
+      "members": [
+        "Autodesk.Revit.DB.Element.get_Parameter"
+      ]
+    }
+  ],
+  "tags": [
+    "parameters",
+    "editing",
+    "delete",
+    "units"
+  ],
+  "provenance": {
+    "kind": "harness",
+    "ref": "revit/test-harness/phase_a_test.go TestPhaseACoreCRUDAndQuery/GetSetParameter and /DeleteElement"
+  },
+  "verify": {
+    "mutations": {
+      "net_created": 1,
+      "by_category": {
+        "Walls": {
+          "net_created": 1
+        }
+      }
+    }
+  },
+  "created_at": "2026-09-02T00:00:00Z",
+  "updated_at": "2026-09-02T00:00:00Z"
+}
