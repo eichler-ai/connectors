@@ -303,11 +303,15 @@ jobs:
           } else {
             Write-Host "no previous release tag; treating this as the first corpus release"
           }
+          # Built, not `go run`: go run folds the tool's exit 2 into exit 1. The tool writes the
+          # file itself (-o): Windows PowerShell would re-encode piped UTF-8 stdout and Out-File
+          # would add a BOM, both of which reach the release body verbatim.
           $notesPath = "$env:RUNNER_TEMP\howto-notes.md"
-          if ($oldDir) { go run ./cmd/howto-corpus-notes -old $oldDir | Out-File $notesPath -Encoding utf8 }
-          else { go run ./cmd/howto-corpus-notes | Out-File $notesPath -Encoding utf8 }
-          if ($LASTEXITCODE -ne 0) { throw "howto-corpus-notes failed (exit $LASTEXITCODE); see above" }
-          Get-Content $notesPath | Write-Host
+          go build -o "$env:RUNNER_TEMP\howto-corpus-notes.exe" ./cmd/howto-corpus-notes
+          if ($oldDir) { & "$env:RUNNER_TEMP\howto-corpus-notes.exe" -old $oldDir -o $notesPath | Out-Null }
+          else { & "$env:RUNNER_TEMP\howto-corpus-notes.exe" -o $notesPath | Out-Null }
+          if ($LASTEXITCODE -ne 0) { throw "howto-corpus-notes failed (exit $LASTEXITCODE; 2 = a script changed without a rev bump); see above" }
+          Get-Content $notesPath -Encoding UTF8 | Write-Host
           echo "HOWTO_NOTES_PATH=$notesPath" >> $env:GITHUB_ENV
 
       - name: Publish GitHub Release

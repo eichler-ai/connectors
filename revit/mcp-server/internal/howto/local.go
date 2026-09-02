@@ -57,5 +57,6 @@ func LoadLocalDir(dir string) (*Corpus, error) {
 		c.docs[d.ID] = d
 		c.order = append(c.order, d.ID)
 	}
+	c.indexAbsorbs()
 	return c, nil
 }

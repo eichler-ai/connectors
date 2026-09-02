@@ -18,6 +18,7 @@ import (
 func main() {
 	oldDir := flag.String("old", "", "previous release's corpus directory (one <id>.json per lineage); empty for a first release")
 	newDir := flag.String("new", "", "this release's corpus directory (default: the corpus embedded in this binary)")
+	outPath := flag.String("o", "", "write the notes to this file (UTF-8, no BOM) instead of stdout -- Windows PowerShell re-encodes piped stdout")
 	flag.Parse()
 
 	var cur *howto.Corpus
@@ -47,7 +48,14 @@ func main() {
 		}
 	}
 	ch := howto.DiffCorpus(old, cur)
-	fmt.Print(howto.ReleaseNotes(ch, cur, ver))
+	notes := howto.ReleaseNotes(ch, cur, ver)
+	if *outPath != "" {
+		if err := os.WriteFile(*outPath, []byte(notes), 0o644); err != nil {
+			fmt.Fprintln(os.Stderr, "howto-corpus-notes:", err)
+			os.Exit(1)
+		}
+	}
+	fmt.Print(notes)
 	if len(ch.ScriptOnly) > 0 {
 		fmt.Fprintf(os.Stderr, "howto-corpus-notes: %d document(s) changed their script without bumping rev: %v\n", len(ch.ScriptOnly), ch.ScriptOnly)
 		os.Exit(2)

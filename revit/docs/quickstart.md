@@ -1,10 +1,8 @@
 # Quickstart — build, install, run a first script
 
-There is no packaged release yet (the release pipeline is PRD §12's own known gap), so today's
-honest install path is **build from source, then feed the installer a locally built package**
-via its `-LocalPackagePath` escape hatch. Everything below is the path that actually works
-now; when GitHub Releases exist, step 3 collapses to the one-liner in
-[`install.md`](../install.md).
+This is the from-source path: **build, then feed the installer a locally built package** via
+its `-LocalPackagePath` escape hatch. It is what a developer runs to try an unreleased build;
+a user installs a published release with the one-liner in [`install.md`](../install.md).
 
 ## What you need
 

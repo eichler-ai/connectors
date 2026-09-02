@@ -114,12 +114,19 @@ Describe 'Install-BrokerStaged' {
         Get-Content (Join-Path $app 'mcp-server.exe') -Raw | Should -Be 'new-exe'
         Get-Content (Join-Path $app 'mcp-server.exe.old') -Raw | Should -Be 'old-exe'
     }
-    It 'reports pending and keeps the .new when the swap is refused, and a later run completes it' {
+    It 'reports pending and keeps the .new when the first move is refused' {
         New-Payload $app @{ 'mcp-server.exe' = 'old-exe' }
         Mock Move-Item { throw 'locked' } -ParameterFilter { $Path -like '*mcp-server.exe' -and $Destination -like '*.old' }
         Install-BrokerStaged $payload $app | Should -Be 'pending'
         Get-Content (Join-Path $app 'mcp-server.exe') -Raw | Should -Be 'old-exe'
         Get-Content (Join-Path $app 'mcp-server.exe.new') -Raw | Should -Be 'new-exe'
+    }
+    It 'Complete-PendingBrokerSwap recovers the moved-aside state (no exe, .old and .new present)' {
+        New-Payload $app @{ 'mcp-server.exe.old' = 'old-exe'; 'mcp-server.exe.new' = 'new-exe' }
+        Complete-PendingBrokerSwap $app | Should -BeTrue
+        Get-Content (Join-Path $app 'mcp-server.exe') -Raw | Should -Be 'new-exe'
+        Test-Path (Join-Path $app 'mcp-server.exe.old') | Should -BeFalse
+        Test-Path (Join-Path $app 'mcp-server.exe.new') | Should -BeFalse
     }
     It 'Complete-PendingBrokerSwap finishes a pending swap only when no broker is running' {
         New-Payload $app @{ 'mcp-server.exe' = 'old-exe'; 'mcp-server.exe.new' = 'new-exe' }
