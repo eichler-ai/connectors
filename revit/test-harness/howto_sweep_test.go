@@ -114,6 +114,7 @@ func TestHowToSweep(t *testing.T) {
 	sort.Strings(files)
 
 	var results []howtoStamp
+	seen := map[string]bool{}
 	for _, file := range files {
 		raw, err := os.ReadFile(file)
 		if err != nil {
@@ -126,6 +127,7 @@ func TestHowToSweep(t *testing.T) {
 		if len(only) > 0 && !only[d.ID] {
 			continue
 		}
+		seen[d.ID] = true
 		t.Run(d.ID, func(t *testing.T) {
 			stamp := howtoStamp{ID: d.ID, Rev: d.Rev, ScriptSHA256: scriptSHA256(d.Script), RevitVersion: revitVersion, At: time.Now().UTC().Format(time.RFC3339), By: "harness"}
 			diag := sweepOne(t, c, instanceID, mainDocumentID, &d)
@@ -137,6 +139,11 @@ func TestHowToSweep(t *testing.T) {
 			}
 			results = append(results, stamp)
 		})
+	}
+	for id := range only {
+		if !seen[id] {
+			t.Errorf("-howto-only: no document with id %q under %s", id, corpusDir)
+		}
 	}
 	if *howtoStamps && len(results) > 0 {
 		writeStamps(t, results)
@@ -183,6 +190,24 @@ func sweepOne(t *testing.T, c *mcpclient.Client, instanceID, mainDocumentID stri
 	var out executeScriptOut
 	if err := json.Unmarshal(env.StructuredContent, &out); err != nil {
 		return "undecodable structured result: " + err.Error()
+	}
+	// A how-to that creates documents or saves can outlive execute_script's
+	// default 30 s wait; the connector then answers pending/running and the
+	// run carries on. Poll it to its terminal state, as an agent would, up to
+	// four minutes -- leaving it running would make every later document's
+	// fixture creation come back busy.
+	for polls := 0; (out.Status == "pending" || out.Status == "running") && polls < 8; polls++ {
+		raw := callPollExecution(t, c, out.ExecutionID, 30000)
+		var penv toolResult
+		if err := json.Unmarshal(raw, &penv); err != nil {
+			return "undecodable poll_execution result: " + err.Error()
+		}
+		if penv.IsError {
+			return "poll_execution rejected: " + rejectionOf(t, raw).Text
+		}
+		if err := json.Unmarshal(penv.StructuredContent, &out); err != nil {
+			return "undecodable poll result: " + err.Error()
+		}
 	}
 	if d.Verify != nil && d.Verify.CreatesDocuments {
 		registerCreatedDocumentCleanup(t, c, instanceID, mainDocumentID, out.Output)
@@ -247,12 +272,18 @@ func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
-	return s[:n-1] + "…"
+	r := []rune(s)
+	for len(r) > 0 && len(string(r)) > n-len("…") {
+		r = r[:len(r)-1]
+	}
+	return string(r) + "…"
 }
 
-// writeStamps merges this run's stamps into the sidecar: an earlier stamp
-// for the same id, rev, script hash and Revit version is replaced, anything
-// else is kept, and the file is rewritten in id order.
+// writeStamps merges this run's stamps into the sidecar. For every id this
+// run swept, earlier stamps for the SAME Revit version are replaced whatever
+// their rev or hash (an edited script's old stamp is stale and must not
+// survive a rerun -- the broker's unit test fails CI on it); stamps for ids
+// not run, and for other versions, are kept. Rewritten in id order.
 func writeStamps(t *testing.T, fresh []howtoStamp) {
 	t.Helper()
 	path := filepath.Join(corpusDir, "verified.jsonl")
@@ -269,9 +300,7 @@ func writeStamps(t *testing.T, fresh []howtoStamp) {
 			kept = append(kept, s)
 		}
 	}
-	key := func(s howtoStamp) string {
-		return s.ID + "|" + fmt.Sprint(s.Rev) + "|" + s.ScriptSHA256 + "|" + s.RevitVersion
-	}
+	key := func(s howtoStamp) string { return s.ID + "|" + s.RevitVersion }
 	replaced := map[string]bool{}
 	for _, s := range fresh {
 		replaced[key(s)] = true

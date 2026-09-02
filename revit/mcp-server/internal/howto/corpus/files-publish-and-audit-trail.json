@@ -35,8 +35,8 @@
     },
     {
       "symptom": "The published path is not visible from the agent's machine.",
-      "cause": "The workspace is on the machine running Revit; in remote mode that is not the agent's host.",
-      "fix": "Report the files[] path to the user; the connector's file tools fetch it.",
+      "cause": "The workspace is on the machine running Revit; in remote mode that is not the agent's host, and there is no file-transfer tool: files move through the filesystem (skill.md \"Exchanging files\").",
+      "fix": "Report the path from files[] to the user; in remote mode they reach it through the shared folder the workspace sits on.",
       "members": [
         "Eichler.Connectors.Revit.Connector.ExportsDirectory"
       ]

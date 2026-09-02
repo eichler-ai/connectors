@@ -41,8 +41,12 @@ func TestEmbeddedCorpusIsValidAndStampsAreCurrent(t *testing.T) {
 	// section titles, which no longer exist.
 	for _, id := range c.IDs() {
 		d, _, _ := c.Get(id)
+		text := d.Script + "\n" + d.Task + "\n" + d.Title
+		for _, p := range d.Pitfalls {
+			text += "\n" + p.Symptom + "\n" + p.Cause + "\n" + p.Fix
+		}
 		for _, old := range []string{"Writing: one block per batch", "What you may not do", "Calls that need their target not modifiable"} {
-			if strings.Contains(d.Script, old) || strings.Contains(d.Task, old) {
+			if strings.Contains(text, old) {
 				t.Errorf("%s cites the removed skill.md section %q", id, old)
 			}
 		}

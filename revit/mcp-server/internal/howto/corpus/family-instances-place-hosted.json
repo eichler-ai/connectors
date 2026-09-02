@@ -4,7 +4,7 @@
   "rev": 1,
   "kind": "howto",
   "title": "Place a door of a given type into an existing wall",
-  "task": "Place a hosted FamilyInstance (a door) in a wall: find the FamilySymbol by category and name, call FamilySymbol.Activate() before use, then Document.Create.NewFamilyInstance(point, symbol, hostWall, level, StructuralType.NonStructural) at a point on the wall's location line; verify FamilyInstance.Host.",
+  "task": "Place a hosted FamilyInstance (a door) in a wall: find the FamilySymbol by category and name, call FamilySymbol.Activate() before use, then Document.Create.NewFamilyInstance(point, symbol, hostWall, level, StructuralType.NonStructural) at a point on the wall's location line; verify FamilyInstance.Host. The script creates one scratch host wall.",
   "members": [
     "Autodesk.Revit.Creation.Document.NewFamilyInstance",
     "Autodesk.Revit.DB.FamilySymbol.Activate",

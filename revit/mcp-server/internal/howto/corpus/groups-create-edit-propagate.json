@@ -60,7 +60,17 @@
     "ref": "revit/test-harness/phase_a_test.go TestPhaseACoreCRUDAndQuery/EditGroupPropagatesToAllInstances (and its recorded MoveElement finding)"
   },
   "verify": {
-    "mutations": {}
+    "mutations": {
+      "net_created": 6,
+      "by_category": {
+        "Model Groups": {
+          "net_created": 4
+        },
+        "Walls": {
+          "net_created": 2
+        }
+      }
+    }
   },
   "created_at": "2026-09-02T00:00:00Z",
   "updated_at": "2026-09-02T00:00:00Z"

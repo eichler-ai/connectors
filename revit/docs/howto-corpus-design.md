@@ -102,7 +102,7 @@ What the harness already records, and the extractor keeps:
   became `ranking-corpus.tsv`'s first asserted row).
 
 Extraction is a build step, not runtime: the JSONL it produces is committed under
-`revit/howto/corpus.jsonl` and reviewed like code.
+`revit/mcp-server/internal/howto/corpus/<id>.json` and reviewed like code.
 
 ## 3. Version tags are earned by running, not declared
 
@@ -178,7 +178,7 @@ query returns only members.
 |---|---|---|---|
 | **shared** | `howto-corpus.jsonl`, a release asset of this repo | the review queue (§6), published by the release pipeline | reviewed, harness-verified |
 | **local** | `<app-data>/howto/local/*.json`, one document per file | `submit_howto` writes here first; a person can also drop files | unreviewed, the user's own |
-| **seed** | `revit/howto/corpus.jsonl` in the repo, embedded in the broker | harness extraction (§2) | reviewed, harness-verified; the offline floor |
+| **seed** | `revit/mcp-server/internal/howto/corpus/<id>.json` in the repo, embedded in the broker | harness extraction (§2) | reviewed, harness-verified; the offline floor |
 
 **Distribution [decided in the seed plan §1]:** the shared corpus is **embedded in the broker**, like
 `skill.md`, and ships with every connector release; there is no runtime fetch, cache, or separate
@@ -255,7 +255,7 @@ submit_howto(title, task, script, members[], pitfalls[]?, queries?, notes?, conf
    then de-duplicates (same `members` set plus similar `task` embedding), edits `task`/`pitfalls`
    wording, and opens the append PR for a human to merge. Running an arbitrary public submission
    under the `Connector` global without that label would be remote code execution from a public
-   queue. Accepting appends the document to `revit/howto/corpus.jsonl` **[decided: one line per
+   queue. Accepting appends the document to `revit/mcp-server/internal/howto/corpus/<id>.json` **[decided: one line per
    lineage, latest revision only; an edit is the same `id` at `rev + 1` replacing that line, and
    `supersedes` merges two lineages]**, so git history is the audit trail and readers never resolve
    revisions;
@@ -300,7 +300,7 @@ entry for 8.5 points here.
 ## 10. Implementation order [proposed]
 
 1. Schemas + validator package (Go; document and sidecar), and the harness extractor producing the
-   seed `revit/howto/corpus.jsonl` from the annotated tests (≈ a dozen documents), with a check that a
+   seed `revit/mcp-server/internal/howto/corpus/<id>.json` from the annotated tests (≈ a dozen documents), with a check that a
    seed document's script hash matches its source test. Tier-1 tests on the validator and extractor.
 2. Generalise `semsearch.Index` (field set per corpus, version preference) + `search_howto` /
    `describe_howto`; `skill.md` gains one bullet. Live: the pitfall queries recorded in the harness

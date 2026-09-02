@@ -4,7 +4,7 @@
   "rev": 1,
   "kind": "howto",
   "title": "Add a shared parameter to walls and doors: write the definition file, open it, bind it to categories",
-  "task": "Create a shared parameter and bind it as an instance parameter to the Walls and Doors categories: there is no Application.CreateSharedParameterFile, so write the tab-delimited shared-parameter file with System.IO, set Application.SharedParametersFilename, OpenSharedParameterFile, read the ExternalDefinition, then BindingMap.Insert with an InstanceBinding under a GroupTypeId (BuiltInParameterGroup is gone in Revit 2025+).",
+  "task": "Create a shared parameter and bind it as an instance parameter to the Walls and Doors categories: there is no Application.CreateSharedParameterFile, so write the tab-delimited shared-parameter file with System.IO, set Application.SharedParametersFilename, OpenSharedParameterFile, read the ExternalDefinition, then BindingMap.Insert with an InstanceBinding under a GroupTypeId (BuiltInParameterGroup is gone in Revit 2025+). The binding is permanent in the document; the script adds one scratch wall to verify.",
   "members": [
     "Autodesk.Revit.ApplicationServices.Application.OpenSharedParameterFile",
     "Autodesk.Revit.ApplicationServices.Application.SharedParametersFilename",
