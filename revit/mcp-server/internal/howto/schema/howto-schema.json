@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/eichler-ai/connectors/revit/docs/howto-schema.json",
+  "$id": "https://github.com/eichler-ai/connectors/revit/mcp-server/internal/howto/schema/howto-schema.json",
   "title": "Revit connector how-to document",
   "description": "One task, the shortest correct path to doing it on a given Revit version, and the mistakes that path avoids. Interchange format for the how-to corpus (see howto-corpus-design.md). One document per JSONL line. Unknown top-level fields are ALLOWED so an older broker can still read a newer corpus (it ignores what it does not know and reports the newer corpus_version in guidance); the fields it does know are validated strictly. Cross-field rules the Go validator enforces beyond this schema: absorbs excludes own id; contributors[].rev <= rev; updated_at >= created_at; hit/miss query shape.",
   "type": "object",

@@ -46,7 +46,11 @@ func TestPublishedExamplesValidateAndMatchDocs(t *testing.T) {
 			t.Errorf("%s: id=%q rev=%d", name, d.ID, d.Rev)
 		}
 		docsCopy := filepath.Join("..", "..", "..", "docs", name)
-		if b, err := os.ReadFile(docsCopy); err == nil && !bytes.Equal(b, raw) {
+		b, err := os.ReadFile(docsCopy)
+		if err != nil {
+			t.Fatalf("%s: the revit/docs copy this fixture mirrors is missing: %v", name, err)
+		}
+		if !bytes.Equal(b, raw) {
 			t.Errorf("%s differs between internal/howto/testdata and revit/docs; copy one over the other", name)
 		}
 	}
@@ -74,11 +78,28 @@ func TestValidateDocumentRejects(t *testing.T) {
 	}{
 		{"missing script on a howto", func(m map[string]any) { delete(m, "script") }, "script"},
 		{"empty script", func(m map[string]any) { m["script"] = "" }, "script"},
-		{"bad id", func(m map[string]any) { m["id"] = "Bad_ID" }, "id"},
-		{"rev zero", func(m map[string]any) { m["rev"] = 0 }, "rev"},
+		{"bad id", func(m map[string]any) { m["id"] = "Bad_ID" }, "/id:"},
+		{"rev zero", func(m map[string]any) { m["rev"] = 0 }, "/rev:"},
 		{"unqualified member", func(m map[string]any) { m["members"] = []any{"Wall.Create"} }, "members"},
-		{"bad kind", func(m map[string]any) { m["kind"] = "recipe" }, "kind"},
-		{"bad created_at", func(m map[string]any) { m["created_at"] = "yesterday" }, "created_at"},
+		{"bad kind", func(m map[string]any) { m["kind"] = "recipe" }, "/kind:"},
+		{"bad created_at", func(m map[string]any) { m["created_at"] = "yesterday" }, "/created_at:"},
+		{"missing created_at", func(m map[string]any) { delete(m, "created_at") }, "created_at"},
+		{"zero updated_at", func(m map[string]any) { m["updated_at"] = "0001-01-01T00:00:00Z" }, "updated_at is missing or zero"},
+		{"null members", func(m map[string]any) { m["members"] = nil }, "/members:"},
+		{"duplicate members", func(m map[string]any) { m["members"] = []any{"A.B.C", "A.B.C"} }, "/members:"},
+		{"title too short", func(m map[string]any) { m["title"] = "short" }, "/title:"},
+		{"script_language wrong", func(m map[string]any) { m["script_language"] = "python" }, "/script_language:"},
+		{"pitfall missing fix", func(m map[string]any) {
+			m["pitfalls"] = []any{map[string]any{"symptom": "something bad", "cause": "some cause"}}
+		}, "/pitfalls/0:"},
+		{"bad tag", func(m map[string]any) { m["tags"] = []any{"Not Valid"} }, "/tags/0:"},
+		{"bad absorbs id", func(m map[string]any) { m["absorbs"] = []any{"X"} }, "/absorbs/0:"},
+		{"hit with surfaced", func(m map[string]any) {
+			m["queries"] = map[string]any{"hit": []any{map[string]any{"text": "x", "rank": 1, "surfaced": "y"}}}
+		}, "must not carry surfaced"},
+		{"miss with rank", func(m map[string]any) {
+			m["queries"] = map[string]any{"miss": []any{map[string]any{"text": "x", "surfaced": "y", "rank": 2}}}
+		}, "must not carry rank"},
 		{"email handle", func(m map[string]any) {
 			m["contributors"] = []any{map[string]any{"handle": "a@b.c", "role": "author", "rev": 1}}
 		}, "handle"},
@@ -96,13 +117,13 @@ func TestValidateDocumentRejects(t *testing.T) {
 		{"miss without surfaced", func(m map[string]any) {
 			m["queries"] = map[string]any{"miss": []any{map[string]any{"text": "x"}}}
 		}, "needs surfaced"},
-		{"submission without ref", func(m map[string]any) { m["provenance"] = map[string]any{"kind": "submission"} }, "ref"},
+		{"submission without ref", func(m map[string]any) { m["provenance"] = map[string]any{"kind": "submission"} }, "provenance.ref"},
 		{"local with reviewer", func(m map[string]any) {
 			m["provenance"] = map[string]any{"kind": "local", "reviewed_by": "x"}
 		}, "reviewed_by"},
 		{"bad ranker", func(m map[string]any) {
 			m["queries"] = map[string]any{"miss": []any{map[string]any{"text": "x", "surfaced": "y", "ranker": "legacy"}}}
-		}, "ranker"},
+		}, "/ranker:"},
 	}
 	for _, c := range cases {
 		_, err := ValidateDocument(mutate(t, base, c.f))
@@ -204,12 +225,12 @@ func TestPutIsAnEditAtRevPlusOne(t *testing.T) {
 		t.Fatal("same rev accepted as an edit")
 	}
 	edit.Rev = 2
-	edit.Title = "Edited"
+	edit.Title = "Edited title"
 	if err := c.Put(&edit); err != nil {
 		t.Fatal(err)
 	}
 	got, _, _ := c.Get("group-edit-propagates")
-	if got.Rev != 2 || got.Title != "Edited" || c.Len() != 3 {
+	if got.Rev != 2 || got.Title != "Edited title" || c.Len() != 3 {
 		t.Fatalf("edit did not replace the line: rev=%d title=%q len=%d", got.Rev, got.Title, c.Len())
 	}
 	fresh := *d
@@ -306,7 +327,7 @@ func TestOverlayLocalOverSharedRules(t *testing.T) {
 	same.Provenance = Provenance{Kind: ProvenanceLocal}
 	local := &Corpus{Source: SourceLocal, docs: map[string]*Document{same.ID: &same}, order: []string{same.ID}, absorbed: map[string]string{}}
 	o, ok := Overlay(shared, local, sd.ID)
-	if !ok || o.Source != SourceSeed || o.Doc != sd || !strings.Contains(o.Notice, "identical") {
+	if !ok || o.Source != SourceSeed || o.Doc != sd || o.Code != CodeLocalSupersededByShared {
 		t.Fatalf("identical local: %+v", o)
 	}
 
@@ -316,16 +337,24 @@ func TestOverlayLocalOverSharedRules(t *testing.T) {
 	diff.Rev = 1
 	local.docs[sd.ID] = &diff
 	o, ok = Overlay(shared, local, sd.ID)
-	if !ok || o.Source != SourceLocal || o.Doc != &diff || o.SharedRev != 1 || o.Notice != "" {
+	if !ok || o.Source != SourceLocal || o.Doc != &diff || o.SharedRev != 1 || o.Code != "" {
 		t.Fatalf("differing local at same rev: %+v", o)
 	}
-	// Shared moved on: notice names both revisions.
+	// Shared moved on: shadowing notice with its code names both revisions.
 	moved := *sd
 	moved.Rev = 3
 	shared.docs[sd.ID] = &moved
 	o, _ = Overlay(shared, local, sd.ID)
-	if o.SharedRev != 3 || !strings.Contains(o.Notice, "rev 3") {
+	if o.SharedRev != 3 || o.Code != CodeLocalShadowsShared || !strings.Contains(o.Notice, "rev 3") {
 		t.Fatalf("shared moved on: %+v", o)
+	}
+	// A local copy AHEAD of shared (rev 2 vs 1) is an override, not a shadow.
+	ahead := diff
+	ahead.Rev = 5
+	local.docs[sd.ID] = &ahead
+	shared.docs[sd.ID] = sd
+	if o, _ := Overlay(shared, local, sd.ID); o.Code != "" || o.SharedRev != 1 {
+		t.Fatalf("local ahead of shared: %+v", o)
 	}
 	// Local-only and shared-only.
 	if o, ok := Overlay(shared, local, "group-member-move-silently-does-nothing"); !ok || o.Source != SourceSeed {
@@ -339,5 +368,102 @@ func TestOverlayLocalOverSharedRules(t *testing.T) {
 	}
 	if _, ok := Overlay(shared, local, "nope"); ok {
 		t.Fatal("unknown id reported present")
+	}
+}
+
+func TestGoBuiltDocumentRoundTripsWithEmptyMembers(t *testing.T) {
+	c := corpusFromExamples(t)
+	d, _, _ := c.Get("group-member-move-silently-does-nothing")
+	now := time.Date(2026, 9, 2, 0, 0, 0, 0, time.UTC)
+	fresh := &Document{SchemaVersion: 1, ID: "a-new-negative", Rev: 1, Kind: KindNegative, Title: "A negative with no members",
+		Task: "There is no API for this; here is what to do instead, in enough words to pass.", Members: nil,
+		Provenance: Provenance{Kind: ProvenanceMaintainer}, CreatedAt: now, UpdatedAt: now}
+	_ = d
+	if err := c.Put(fresh); err != nil {
+		t.Fatalf("Put of a Go-built document with nil members: %v", err)
+	}
+	var out bytes.Buffer
+	if err := WriteCorpus(&out, c); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), `"members":[]`) {
+		t.Fatalf("nil members must be written as []: %s", out.String())
+	}
+	if _, err := LoadCorpus(&out, SourceShared); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	// Put validates: a Go-built document with a zero time is refused.
+	bad := *fresh
+	bad.ID = "zero-time"
+	bad.CreatedAt = time.Time{}
+	if err := c.Put(&bad); err == nil || !strings.Contains(err.Error(), "created_at") {
+		t.Fatalf("zero created_at accepted by Put: %v", err)
+	}
+}
+
+func TestPutRequiresExactlyRevPlusOne(t *testing.T) {
+	c := corpusFromExamples(t)
+	d, _, _ := c.Get("group-edit-propagates")
+	skip := *d
+	skip.Rev = 3
+	if err := c.Put(&skip); err == nil || !strings.Contains(err.Error(), "must be rev 2") {
+		t.Fatalf("rev 1 -> 3 accepted: %v", err)
+	}
+}
+
+func TestAbsorbChainsRedirectToTheFinalSurvivor(t *testing.T) {
+	c := corpusFromExamples(t)
+	// join-walls absorbs the pitfall doc, then group-edit absorbs join-walls.
+	if err := c.Absorb("walls-closed-footprint-confirm-joins", "group-member-move-silently-does-nothing"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Absorb("group-edit-propagates", "walls-closed-footprint-confirm-joins"); err != nil {
+		t.Fatal(err)
+	}
+	if c.Len() != 1 {
+		t.Fatalf("len = %d", c.Len())
+	}
+	for _, old := range []string{"group-member-move-silently-does-nothing", "walls-closed-footprint-confirm-joins"} {
+		d, redirected, ok := c.Get(old)
+		if !ok || d == nil || redirected != "group-edit-propagates" {
+			t.Fatalf("Get(%s) = doc=%v redirected=%q ok=%v", old, d != nil, redirected, ok)
+		}
+	}
+	s, _, _ := c.Get("group-edit-propagates")
+	if len(s.Absorbs) != 2 {
+		t.Fatalf("survivor absorbs = %v, want both merged ids", s.Absorbs)
+	}
+	// Prune tolerates stamps on absorbed ids (they are dropped, not a panic).
+	side := &Sidecar{Stamps: []Stamp{{ID: "walls-closed-footprint-confirm-joins", Rev: 1, ScriptSHA256: ScriptSHA256(""), RevitVersion: "2025", Status: StampPassed, At: time.Now(), By: ByHarness}}}
+	if kept, dropped := side.Prune(c); len(kept) != 0 || dropped != 1 {
+		t.Fatalf("prune on absorbed id: kept=%d dropped=%d", len(kept), dropped)
+	}
+	// A new lineage cannot reuse an absorbed id.
+	reuse := *s
+	reuse.ID = "walls-closed-footprint-confirm-joins"
+	reuse.Rev = 1
+	reuse.Absorbs = nil
+	if err := c.Put(&reuse); err == nil || !strings.Contains(err.Error(), "merged into") {
+		t.Fatalf("absorbed id reused: %v", err)
+	}
+}
+
+func TestOversizedLineIsSkippedNotFatal(t *testing.T) {
+	line := compactLine(t, readExample(t, "howto-example-join-walls.json"))
+	var buf bytes.Buffer
+	buf.Write(line)
+	buf.WriteByte('\n')
+	buf.WriteString(`{"id":"huge","pad":"` + strings.Repeat("x", MaxLineBytes) + `"}` + "\n")
+	buf.Write(compactLine(t, readExample(t, "howto-example-group-edit-propagates.json")))
+	buf.WriteByte('\n')
+	c, err := LoadCorpus(&buf, SourceShared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Len() != 2 || c.Skipped != 1 || c.Truncated {
+		t.Fatalf("len=%d skipped=%d truncated=%v problems=%v", c.Len(), c.Skipped, c.Truncated, c.Problems)
+	}
+	if !strings.Contains(c.Problems[0], "exceeds") {
+		t.Fatalf("problem does not name the bound: %v", c.Problems)
 	}
 }

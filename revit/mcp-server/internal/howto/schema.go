@@ -144,6 +144,12 @@ func crossFieldProblems(d *Document) []string {
 	if d.Provenance.Kind == ProvenanceSubmission && d.Provenance.Ref == "" {
 		p = append(p, "a submission must carry provenance.ref (the issue URL)")
 	}
+	if d.CreatedAt.IsZero() {
+		p = append(p, "created_at is missing or zero")
+	}
+	if d.UpdatedAt.IsZero() {
+		p = append(p, "updated_at is missing or zero")
+	}
 	if !d.CreatedAt.IsZero() && !d.UpdatedAt.IsZero() && d.UpdatedAt.Before(d.CreatedAt) {
 		p = append(p, "updated_at is before created_at")
 	}
@@ -219,10 +225,16 @@ func extraFields(raw []byte, known map[string]bool) map[string]any {
 	return extra
 }
 
-// MarshalDocument writes a document as one JSON object, known fields first,
-// preserved unknown fields after, with no trailing newline (the JSONL writer
-// adds it).
+// MarshalDocument writes a document as one JSON object with no trailing
+// newline (the JSONL writer adds it). A nil Members slice is written as [],
+// since the schema requires the array; preserved unknown fields ride along
+// (key order is then alphabetical -- Go maps -- which is fine for JSONL).
 func MarshalDocument(d *Document) ([]byte, error) {
+	if d.Members == nil {
+		cp := *d
+		cp.Members = []string{}
+		d = &cp
+	}
 	b, err := json.Marshal(d)
 	if err != nil {
 		return nil, err
