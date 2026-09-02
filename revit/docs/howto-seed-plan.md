@@ -501,4 +501,10 @@ Nothing is annotated or extracted until this table is settled.
    version, and `search_howtos` returns the document at rank 1 for its recorded query while
    `describe_howto` shows the stamp for the version it ran on; then a revision of the same lineage
    goes round again and replaces the line. Per-PR gates stay as they are (CI, review, harness where
-   discovery is touched); this test is what says the pieces work *together*.
+   discovery is touched); this test is what says the pieces work *together*. **Done** (2026-09-02):
+   `TestHowToEndToEnd` in the harness — the triage step is mechanical (accept as a new lineage under
+   provenance `submission`), the sweep reuses the corpus sweep's `sweepOne`, and the broker is rebuilt
+   with the corpus directory overlaid via `go build -overlay` (the checkout is never modified) and
+   run as its own primary in a temp app-data dir. Its first run caught a real defect: the document
+   schema's `queries[].tool` enum still named `search_howto`, so any submission recording a
+   `search_howtos` hit was refused.

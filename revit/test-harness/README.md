@@ -120,6 +120,10 @@ the way to target one bundle/subtest during focused iteration, same as always; `
 - `mcpclient/` — the MCP-over-stdio client the tests use (subprocess spawn, JSON-RPC framing,
   `tools/call`). Deliberately hand-rolled and minimal rather than pulling in an SDK, so it's
   obvious exactly what's being exercised.
+- `howto_end_to_end_test.go` — `TestHowToEndToEnd`, the how-to corpus series' batch verifier
+  (seed plan §6 step 6): submit → mechanical triage → sweep → broker rebuilt with the corpus
+  overlaid → search/describe, then a revision round. Needs `go` on PATH (it builds a broker) and
+  the models assets fetched for semantic ranking (lexical-only still passes).
 - `harness_test.go` — the shared client/setup helpers plus the capability cases, currently:
   `TestCreateLevel`, `TestScriptGlobalsExposeRealRevitObjects`, `TestDenylistRejectsOwnTransaction`,
   `TestLifecycleGateRequiresConfirmation`, `TestLifecycleGateCoversTheNewlyAddedMembers`,

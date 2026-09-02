@@ -379,7 +379,7 @@
           "type": "string",
           "enum": [
             "search_functions",
-            "search_howto"
+            "search_howtos"
           ],
           "default": "search_functions"
         },
