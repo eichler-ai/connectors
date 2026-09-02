@@ -1,27 +1,26 @@
 # Working with Revit through this connector
 
-You drive one or more **live Revit sessions**. There is no fixed catalog of "create wall" /
-"export IFC" tools — you run C# with `execute_script`, and three discovery tools let you read
-Revit's own API documentation on demand. Read this once at the start of a Revit task; it is
-orientation, not reference.
+You drive one or more **live Revit sessions**: you run C# with `execute_script`, and three discovery
+tools let you read Revit's own API documentation on demand. Read this once at the start of a Revit
+task; it is orientation, not reference.
 
-> **Two facts to carry into every script.**
->
-> 1. **The globals are the real Revit types.** `Document` **is** `Autodesk.Revit.DB.Document`, not a
-> wrapper; `UIApplication` and `UIDocument` are the real `Autodesk.Revit.UI` types (`UIDocument` may
-> be null). Pass them straight into any Revit API.
-> 2. **You never open a Revit transaction — you open a block.** Every document is readable but **not
-> modifiable** until you write inside `Connector.WithTransaction(doc, () => { ... })`. The connector
-> opens that transaction (with warning/error capture) and commits it when the block ends. What a run
-> commits is kept if the script returns normally and **undone as one unit if it throws**.
->
-> ```csharp
-> var walls = new FilteredElementCollector(Document)
->     .OfClass(typeof(Wall)).GetElementCount();          // reads need nothing
-> var level = Connector.WithTransaction(Document, () =>  // writes go in a block
->     Level.Create(Document, 42.0));
-> return new { walls, levelId = level.Id.Value };
-> ```
+**Two facts to carry into every script.**
+
+1. **The globals are the real Revit types.** `Document` **is** `Autodesk.Revit.DB.Document`, not a
+   wrapper; `UIApplication` and `UIDocument` are the real `Autodesk.Revit.UI` types (`UIDocument` may
+   be null). Pass them straight into any Revit API.
+2. **You never open a Revit transaction — you open a block.** Every document is readable but **not
+   modifiable** until you write inside `Connector.WithTransaction(doc, () => { ... })`. The connector
+   opens that transaction (with warning/error capture) and commits it when the block ends. What a run
+   commits is kept if the script returns normally and **undone as one unit if it throws**.
+
+```csharp
+var walls = new FilteredElementCollector(Document)
+    .OfClass(typeof(Wall)).GetElementCount();          // reads need nothing
+var level = Connector.WithTransaction(Document, () =>  // writes go in a block
+    Level.Create(Document, 42.0));
+return new { walls, levelId = level.Id.Value };
+```
 
 ---
 
@@ -77,8 +76,9 @@ and anonymous types as JSON, anything else as a self-explaining `<...>` marker. 
 (Revit's own writes too). `notices[]` carries everything the run wants to tell you besides the return
 value — dialogs auto-answered, documents created, a partial commit, a `Settle` (see "Reading errors")
 — and appears on failed runs too. `files[]` is what you published (see "Exchanging files"). A
-successful run that changed anything carries **`mutations`**: `net_created`/`net_modified`/`net_deleted` across every document it touched, plus
-`by_category` (elements with no Revit category tally under `(uncategorized)`). **Net, not activity**
+successful run that changed anything carries **`mutations`**: `net_created`/`net_modified`/
+`net_deleted` across every document it touched, plus `by_category` (elements with no Revit category
+tally under `(uncategorized)`). **Net, not activity**
 — what is different in the model now, exactly what one Undo of this run would revert: an element
 created then deleted contributes nothing, created then edited counts once as created. Revit itself
 reports each committed block's net effect, so no gross count exists. Skip the read-after-write check.
@@ -176,8 +176,7 @@ Connector.WithTransaction(doc, () => { Autodesk.Revit.DB.Level.Create(doc, 10.0)
 - **It is headless**: in memory, no window, never the active document — writable by script, invisible
   to the person. Making it visible takes two calls: `Connector.Settle(doc, true)` then `SaveAs` in the
   creating run (both need `confirm_lifecycle_actions: true`; `OpenAndActivateDocument` needs a path),
-  then activate in a later call. Activation is
-  refused only inside a block on the *active* document.
+  then activate in a later call. Activation is refused only inside a block on the *active* document.
 - **Templates**: ask Revit rather than guessing. `Application.DefaultProjectTemplate` is a full `.rte`
   path; `Application.FamilyTemplatePath` is the **root** of the family-template tree — search it with
   `SearchOption.AllDirectories`.
@@ -192,9 +191,9 @@ Connector.WithTransaction(doc, () => { Autodesk.Revit.DB.Level.Create(doc, 10.0)
   notice (on a **failed** result) naming which kept their changes; an adopted document may be a real,
   saved model, so don't assume what survived was scratch.
 
-**Finishing a document mid-run — `Connector.Settle(doc, keep:)`.** Revit refuses `Close`, `Save`, `SaveAs`
-and `SynchronizeWithCentral` while the connector holds a group open on the document, so settle it first (gated on
-`confirm_lifecycle_actions`, like the members it enables). `keep: true` makes everything written to it
+**Finishing a document mid-run — `Connector.Settle(doc, keep:)`.** Revit refuses `Close`, `Save`,
+`SaveAs` and `SynchronizeWithCentral` while the connector holds a group open on the document, so settle
+it first (gated on `confirm_lifecycle_actions`, like the members it enables). `keep: true` makes everything written to it
 so far **permanent immediately** — a later failure no longer undoes it. `keep: false` discards it,
 which is what you want before closing a scratch document. Either way you get a notice. Writing again
 afterwards (a new block) is fine and rolls back as usual; nothing settled comes back.
@@ -222,8 +221,9 @@ another document, activate the one you want to keep, then close the other on the
 **If your script threw, whatever it created is still open** — writes roll back, documents don't
 disappear. Every run that created a document carries a `script-created-documents` notice naming it by
 title and `tmp-` id, so you have a handle even when the script threw before returning one. Nothing
-tidies up for you, and a pile of scratch documents exhausts the memory of the Revit a person is working in
-(a modal "Virtual Memory - High Usage" box, which the connector auto-dismisses and reports in `notices[]`).
+tidies up for you, and a pile of scratch documents exhausts the memory of the Revit a person is
+working in (a modal "Virtual Memory - High Usage" box, which the connector auto-dismisses and reports
+in `notices[]`).
 
 ## What needs your confirmation
 
@@ -321,7 +321,6 @@ functions too**, indexed like any add-in's and ranked below Revit's: anything un
 `Eichler.Connectors.Revit` is reached through the `Connector` global, so
 `Eichler.Connectors.Revit.Connector.Publish` is written `Connector.Publish(path)`.
 
-- **`search_functions`** — start here when you know *what* you want, not the name. Ranking fuses a
 - **`search_functions`** — start here when you know *what* you want, not the name. Ranking fuses a
   sentence-embedding pass with a keyword pass, then a cross-encoder reranks, so write `query` as **one
   plain sentence naming the element type and the operation** (`"move an element to a new location"`,
