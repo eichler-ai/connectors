@@ -333,7 +333,7 @@ Three constraints that are not obvious, each found by violating it:
 Deploying it needs the **`.xml` sidecar beside the `.dll`**, and this is load-bearing rather than
 tidy: `DiscoveryReflector` treats a *missing* sidecar as "everything is documented", so a DLL-only
 deploy yields discovery with empty summaries — which looks like working discovery. `install.ps1`
-copies the whole build output and is fine; `redeploy-and-verify.ps1` copies files **by name** and has
+copies the whole build output and is fine; `deploy-and-verify.ps1` copies files **by name** and has
 to be extended when a project is added.
 
 **Verify the rendered text live, not the source.** Reading `describe_function`'s actual output is what

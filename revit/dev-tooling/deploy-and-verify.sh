@@ -18,21 +18,21 @@
 # launcher agent (launcher-agent.ps1) resident -- this script only drops signal files for it.
 #
 # Usage:
-#   revit/dev-tooling/redeploy-and-verify.sh [options]
+#   revit/dev-tooling/deploy-and-verify.sh [options]
 #
 # Examples:
 #   # Full cycle: build, redeploy, relaunch with a pristine fixture copy, verify the document
 #   # actually registered (--marker proves the deployed DLL contains that string, i.e. is fresh):
-#   revit/dev-tooling/redeploy-and-verify.sh --build --marker 'SomeStringUniqueToYourChange' \
+#   revit/dev-tooling/deploy-and-verify.sh --build --marker 'SomeStringUniqueToYourChange' \
 #     --doc-source 'C:\dev\fixtures\harness-live.rvt' --doc-dest 'C:\dev\fixtures\work.rvt'
 #
 #   # Fast relaunch-only cycle, no document (DLLs already deployed):
-#   revit/dev-tooling/redeploy-and-verify.sh --skip-copy
+#   revit/dev-tooling/deploy-and-verify.sh --skip-copy
 #
 #   # Redeploy DLLs only, leave the running Revit alone:
-#   revit/dev-tooling/redeploy-and-verify.sh --skip-relaunch
+#   revit/dev-tooling/deploy-and-verify.sh --skip-relaunch
 #
-# Output contract: streams all progress live; the VM side prints "REDEPLOY_RESULT: PASS|FAIL" and
+# Output contract: streams all progress live; the VM side prints "DEPLOY_RESULT: PASS|FAIL" and
 # this script exits 0 only on PASS (on PASS it also prints a ready-to-paste `go test -tags harness`
 # command with the right remote-mode flags). Safe to pipe (`... | tee`, a pipeline consumer that
 # waits for EOF): the brokers this script starts are fully detached from its own stdout/stderr, so
@@ -153,7 +153,7 @@ if [[ -z "$MAC_BIND" ]]; then
   fi
 fi
 
-BROKER_LOG=/tmp/redeploy-and-verify-broker.log
+BROKER_LOG=/tmp/deploy-and-verify-broker.log
 BROKER_ARGS_PATTERN="$(basename "$BROKER_EXE") -mode remote -bind $MAC_BIND -shared-root $SHARED_ROOT"
 
 # Restart the standalone Mac broker and confirm the replacement actually became PRIMARY -- the
@@ -174,7 +174,7 @@ restart_broker() {
     # Shape matters here, found the hard way (live hang, reproduced in isolation):
     #   ( cd ... && nohup ... & disown )   -- the PREVIOUS form -- left the parenthesized subshell
     # alive for the broker's entire lifetime, still holding this script's inherited stdout/stderr.
-    # Run as `redeploy-and-verify.sh | anything`, the consumer then never saw EOF: the script
+    # Run as `deploy-and-verify.sh | anything`, the consumer then never saw EOF: the script
     # exited but the pipe stayed open, hanging the pipeline indefinitely (the disown inside the
     # parens was also disowning in the WRONG shell -- the inner one -- which is what produced the
     # stray "Terminated: 15" job-control noise on each restart cycle). This form fixes all of it:
@@ -327,7 +327,7 @@ if ! $SKIP_BROKER_RESTART; then
   # the first run in a fresh git worktree (it is a build output, and only this block creates it),
   # and under `set -o pipefail` a failing shasum makes the whole pipeline fail, which `set -e` then
   # turns into a SILENT exit -- no message, exit 1, right after the share-identity line. Cost a
-  # tier-2 run to diagnose, twice, because the script's own failure contract (REDEPLOY_RESULT:
+  # tier-2 run to diagnose, twice, because the script's own failure contract (DEPLOY_RESULT:
   # PASS|FAIL) never gets a chance to print. An empty hash then correctly reads as "changed" below.
   broker_hash_before="$(shasum -a 256 "$BROKER_EXE" 2>/dev/null | awk '{print $1}' || true)"
   say "rebuilding the Mac broker from this checkout -> $BROKER_EXE"
@@ -367,8 +367,8 @@ $SKIP_RELAUNCH && PS_ARGS+=(-SkipRelaunch)
 # pushes a live snapshot refresh on document open/close/create/activate, and the ps1's wait
 # accepts the "register refreshed" line directly. The streamed output below is a plain
 # passthrough.)
-say "running redeploy-and-verify.ps1 on the VM (one prlctl exec call, output streamed live)"
-if prlctl exec "$VM_NAME" powershell -ExecutionPolicy Bypass -File "$UNC_ROOT\\revit\\dev-tooling\\redeploy-and-verify.ps1" "${PS_ARGS[@]}" 2>&1; then
+say "running deploy-and-verify.ps1 on the VM (one prlctl exec call, output streamed live)"
+if prlctl exec "$VM_NAME" powershell -ExecutionPolicy Bypass -File "$UNC_ROOT\\revit\\dev-tooling\\deploy-and-verify.ps1" "${PS_ARGS[@]}" 2>&1; then
   echo
   say "ready. Harness command:"
   echo

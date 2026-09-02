@@ -1,5 +1,5 @@
-# One-shot redeploy+relaunch+verify, run entirely on the VM via a SINGLE `prlctl exec` call from
-# the Mac (see redeploy-and-verify.sh, the wrapper that actually invokes this). Consolidates a
+# One-shot deploy (fresh install or DLL refresh) + relaunch + verify, run entirely on the VM via a SINGLE `prlctl exec` call from
+# the Mac (see deploy-and-verify.sh, the wrapper that actually invokes this). Consolidates a
 # sequence that used to take five-plus separate `prlctl exec` round trips per dev-loop cycle (kill,
 # copy DLLs -- often retried by hand on a file lock, launch, then several manual polls of
 # connection.log, sometimes a manual broker restart on top) into one call with a single PASS/FAIL
@@ -16,7 +16,7 @@
 # live document-snapshot refresh ("register refreshed: N document(s)" in connection.log) the moment
 # a document finishes opening (issue #30's fix), and this script's registration wait accepts that
 # line the same as a connect-time register. The old flow -- a STALE_REGISTRATION marker emitted here,
-# with redeploy-and-verify.sh reacting by force-restarting the Mac-side broker per marker (issue
+# with deploy-and-verify.sh reacting by force-restarting the Mac-side broker per marker (issue
 # #32's workaround) -- is deleted; this file works standalone in document mode now.
 
 # SCOPE, stated because it has already been guessed wrong: this file deploys the ADD-IN and
@@ -26,11 +26,11 @@
 # a stale tool schema is NEVER fixed by redeploying from here, and a hash check here could not
 # detect one either: go:embed is resolved at compile time, so a built binary's embedded copy always
 # matches the source file it was built from -- the only drift possible is binary vs repo. That is
-# handled where the broker is actually built, in redeploy-and-verify.sh's broker-freshness step,
+# handled where the broker is actually built, in deploy-and-verify.sh's broker-freshness step,
 # and reported at runtime by get_skills' build field and `mcp-server -version` (issue #116).
 #
-# Output contract: every progress line is prefixed "[redeploy +<elapsed>s]"; the very last line is
-# "REDEPLOY_RESULT: PASS" or "REDEPLOY_RESULT: FAIL", and the exit code matches (0/1). PASS in a
+# Output contract: every progress line is prefixed "[deploy +<elapsed>s]"; the very last line is
+# "DEPLOY_RESULT: PASS" or "DEPLOY_RESULT: FAIL", and the exit code matches (0/1). PASS in a
 # document launch means a registration with the expected document count was actually observed in
 # connection.log -- not merely that Revit started.
 param(
@@ -86,14 +86,14 @@ if ($MinDocuments -lt 0) { $MinDocuments = if ($DocDest) { 1 } else { 0 } }
 # Elapsed-seconds prefix on every line: phase costs stay visible at a glance (cold Revit launch
 # ~50s is the expected dominant chunk of any relaunch cycle -- see the wrapper's own timing notes).
 $scriptStart = Get-Date
-function Say([string]$msg) { Write-Output "[redeploy +$([int]((Get-Date) - $scriptStart).TotalSeconds)s] $msg" }
+function Say([string]$msg) { Write-Output "[deploy +$([int]((Get-Date) - $scriptStart).TotalSeconds)s] $msg" }
 
 # Drops a signal file the way the launcher agent's own doc comment asks callers to (its SETTLE
 # GUARD section): write under a non-matching name, then rename into place, so the agent's poll loop
 # can never observe a half-written file and misread empty-so-far as deliberately empty (the exact
 # "launched with no document because the payload hadn't landed yet" bug issue #26 root-caused).
 function Drop-Signal([string]$Extension, [string[]]$Lines) {
-    $base = "claude-redeploy-$PID-$(Get-Random)"
+    $base = "claude-deploy-$PID-$(Get-Random)"
     $tmp = Join-Path $signalDir "$base.tmp"
     $final = Join-Path $signalDir "$base.$Extension"
     if ($Lines -and $Lines.Count -gt 0) {
@@ -285,7 +285,7 @@ function Wait-ForFreshConnection([string]$LogPath, [int]$MinDocuments, [int]$Tim
                 # what usually completes a document-launch cycle now: the add-in connects with 0
                 # documents while the .rvt is still opening, then pushes the refresh the moment the
                 # open completes -- no broker restart involved. (This function once emitted a
-                # STALE_REGISTRATION marker here for redeploy-and-verify.sh to react to with forced
+                # STALE_REGISTRATION marker here for deploy-and-verify.sh to react to with forced
                 # Mac-broker restarts -- issue #32's workaround for the one-shot snapshot race. That
                 # scaffolding is deleted, as its own comments always said it should be once the add-in
                 # pushed live snapshot updates.)
@@ -318,34 +318,58 @@ if (-not $SkipRelaunch) {
 }
 
 if (-not $SkipCopy) {
-    Say "deploying DLLs to $addinsDir (TFM=$Tfm)"
     New-Item -ItemType Directory -Force -Path $addinsDir | Out-Null
-    # This list is explicit rather than a wildcard because it deploys ONTO a live Revit install and a
-    # stray copy is how a shadowing DLL gets there (see caveats.md). It therefore has to be extended
-    # when a project is added: Eichler.Connectors.Revit was added by issue #91 and its absence here
-    # was caught only by the --marker check, which is exactly what that check is for. Without it Revit
-    # loads an add-in whose Core references an assembly that is not present.
-    #
-    # install.ps1 needs no equivalent change: it copies the AddIn's whole build output ($payloadDir\*),
-    # which already carries both files.
-    foreach ($proj in 'MCPBridge.AddIn', 'MCPBridge.Core', 'MCPBridge.RevitAdapter', 'Eichler.Connectors.Revit') {
-        $src = Join-Path $SrcRoot "$proj\bin\Debug\$Tfm\$proj.dll"
-        if (-not (Test-Path $src)) {
-            Say "FAIL: build output not found: $src -- run dotnet build first"
-            Write-Output "REDEPLOY_RESULT: FAIL"
+
+    # Fresh install vs. refresh. The selective per-project copy below deploys ONLY the built DLLs and
+    # assumes the rest of the add-in payload is ALREADY in place -- the MCPBridge.addin manifest, the
+    # dependency closure (Roslyn, SQLite), the localization satellites and runtimes\ -- as it is after
+    # install.ps1, or an earlier fresh deploy from here. On a clean Addins folder that assumption is
+    # false: with no manifest Revit never loads the add-in, and a refresh leaves a broken half-install
+    # that only the reconnect timeout reports (found live -- see this script's rename from
+    # "deploy-and-verify"). So when the manifest is absent, deploy the AddIn project's WHOLE build
+    # output -- the same payload install.ps1 ships as addin-<version>\. The <Assembly> in the manifest
+    # is a relative filename, so the folder is self-contained and portable.
+    $addinBuildDir = Join-Path $SrcRoot "MCPBridge.AddIn\bin\Debug\$Tfm"
+    $freshInstall = -not (Test-Path (Join-Path $addinsDir 'MCPBridge.addin'))
+    if ($freshInstall) {
+        if (-not (Test-Path (Join-Path $addinBuildDir 'MCPBridge.addin'))) {
+            Say "FAIL: fresh install needs the full add-in build output, not found: $addinBuildDir -- build first (pass --build)"
+            Write-Output "DEPLOY_RESULT: FAIL"
             exit 1
         }
-        Copy-WithRetry -Src $src -Dst (Join-Path $addinsDir "$proj.dll")
+        Say "fresh install (no manifest in place): deploying the whole add-in payload to $addinsDir (TFM=$Tfm)"
+        # A clean slate means no loaded add-in holds any of these files, so a plain recursive copy is
+        # safe -- Copy-WithRetry's lock backoff is for the refresh-onto-live-Revit case below.
+        Copy-Item -Path (Join-Path $addinBuildDir '*') -Destination $addinsDir -Recurse -Force
+    } else {
+        Say "deploying DLLs to $addinsDir (TFM=$Tfm)"
+        # This list is explicit rather than a wildcard because it deploys ONTO a live Revit install and a
+        # stray copy is how a shadowing DLL gets there (see caveats.md). It therefore has to be extended
+        # when a project is added: Eichler.Connectors.Revit was added by issue #91 and its absence here
+        # was caught only by the --marker check, which is exactly what that check is for. Without it Revit
+        # loads an add-in whose Core references an assembly that is not present.
+        #
+        # install.ps1 needs no equivalent change: it copies the AddIn's whole build output ($payloadDir\*),
+        # which already carries both files -- as does the fresh-install branch above.
+        foreach ($proj in 'MCPBridge.AddIn', 'MCPBridge.Core', 'MCPBridge.RevitAdapter', 'Eichler.Connectors.Revit') {
+            $src = Join-Path $SrcRoot "$proj\bin\Debug\$Tfm\$proj.dll"
+            if (-not (Test-Path $src)) {
+                Say "FAIL: build output not found: $src -- run dotnet build first"
+                Write-Output "DEPLOY_RESULT: FAIL"
+                exit 1
+            }
+            Copy-WithRetry -Src $src -Dst (Join-Path $addinsDir "$proj.dll")
 
-        # The XML-doc sidecar, where one exists. LOAD-BEARING for Eichler.Connectors.Revit, not a
-        # nicety: DiscoveryReflector joins each synced assembly against its sidecar and treats a
-        # MISSING file as "everything is documented", so deploying the DLL without the .xml makes the
-        # connector's own API discoverable with empty summaries -- which looks like working discovery
-        # and is worse than none. Only that project sets GenerateDocumentationFile, so this is a no-op
-        # for the others; written generically so the next one to set it is covered without a fix.
-        $docSrc = Join-Path $SrcRoot "$proj\bin\Debug\$Tfm\$proj.xml"
-        if (Test-Path $docSrc) {
-            Copy-WithRetry -Src $docSrc -Dst (Join-Path $addinsDir "$proj.xml")
+            # The XML-doc sidecar, where one exists. LOAD-BEARING for Eichler.Connectors.Revit, not a
+            # nicety: DiscoveryReflector joins each synced assembly against its sidecar and treats a
+            # MISSING file as "everything is documented", so deploying the DLL without the .xml makes the
+            # connector's own API discoverable with empty summaries -- which looks like working discovery
+            # and is worse than none. Only that project sets GenerateDocumentationFile, so this is a no-op
+            # for the others; written generically so the next one to set it is covered without a fix.
+            $docSrc = Join-Path $SrcRoot "$proj\bin\Debug\$Tfm\$proj.xml"
+            if (Test-Path $docSrc) {
+                Copy-WithRetry -Src $docSrc -Dst (Join-Path $addinsDir "$proj.xml")
+            }
         }
     }
 
@@ -353,7 +377,7 @@ if (-not $SkipCopy) {
         $corePath = Join-Path $addinsDir 'MCPBridge.Core.dll'
         if (-not (Test-MarkerPresent -DllPath $corePath -MarkerText $Marker)) {
             Say "FAIL: marker '$Marker' not found in deployed $corePath -- deploy likely stale (see this function's own doc comment)"
-            Write-Output "REDEPLOY_RESULT: FAIL"
+            Write-Output "DEPLOY_RESULT: FAIL"
             exit 1
         }
         Say "marker '$Marker' confirmed present in deployed MCPBridge.Core.dll"
@@ -415,16 +439,16 @@ if (-not $SkipRelaunch) {
             Say "         run's first case fails on a wire timeout, re-run it before believing it."
         }
 
-        Write-Output "REDEPLOY_RESULT: PASS"
+        Write-Output "DEPLOY_RESULT: PASS"
         exit 0
     }
 
     Say "FAIL: no matching registration within ${TimeoutSec}s. Last log lines:"
     Get-Content $connectionLog -Tail 5 -ErrorAction SilentlyContinue | ForEach-Object { Say "  $_" }
     Say "If a document was expected and registration shows 0, a MODAL dialog may be wedging Revit's idle loop -- a memory warning, a file-version refusal, a link-reload prompt. Capture the VM screen (prlctl capture), but note the non-modal trial splash covers whatever is really blocking, so move it or read the timeout notice's window inventory instead of trusting the screenshot alone."
-    Write-Output "REDEPLOY_RESULT: FAIL"
+    Write-Output "DEPLOY_RESULT: FAIL"
     exit 1
 }
 
-Write-Output "REDEPLOY_RESULT: PASS"
+Write-Output "DEPLOY_RESULT: PASS"
 exit 0
