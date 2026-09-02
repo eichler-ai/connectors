@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "id": "group-edit-propagates",
+  "kind": "howto",
+  "title": "Change a group's contents so every placed instance picks up the edit",
+  "task": "Edit the elements inside a model group so that all other placed instances of that group change too. Revit has no group-edit-mode API; the route is ungroup, edit, regroup into a new GroupType, then reassign the other instances to it.",
+  "summary": "Ungroup the instance you want to change (Group.UngroupMembers), edit the now-loose elements, regroup them (Document.Create.NewGroup) to mint a new GroupType, then set Group.GroupType = newType on every other placed instance. After reassignment Revit re-creates those instances' member elements, so any member ElementIds captured earlier are stale.",
+  "queries": {
+    "miss": [
+      {
+        "text": "edit group",
+        "tool": "search_functions",
+        "surfaced": "nothing resembling a group edit mode; there is no such API",
+        "ranker": "keyword-fallback"
+      }
+    ],
+    "hit": [
+      {
+        "text": "Group.GroupType set",
+        "tool": "search_functions",
+        "rank": 1,
+        "ranker": "keyword-fallback"
+      }
+    ]
+  },
+  "members": [
+    "Autodesk.Revit.DB.Group.UngroupMembers",
+    "Autodesk.Revit.Creation.Document.NewGroup",
+    "Autodesk.Revit.Creation.Document.PlaceGroup",
+    "Autodesk.Revit.DB.Group.GroupType",
+    "Autodesk.Revit.DB.Group.GetMemberIds",
+    "Autodesk.Revit.DB.LocationCurve.Curve",
+    "Autodesk.Revit.DB.Document.Regenerate"
+  ],
+  "script_language": "csharp-script",
+  "script": "var doc = Document;\nreturn Connector.WithTransaction(doc, () => {\n  // Setup: one wall in a group, placed twice. In a real task you already have\n  // the placed instances; start at step 1 below.\n  var level = Autodesk.Revit.DB.Level.Create(doc, 50.0);\n  var wall = Autodesk.Revit.DB.Wall.Create(doc,\n      Autodesk.Revit.DB.Line.CreateBound(new Autodesk.Revit.DB.XYZ(400, 0, 0), new Autodesk.Revit.DB.XYZ(410, 0, 0)),\n      level.Id, false);\n  doc.Regenerate();\n  var group1 = doc.Create.NewGroup(new System.Collections.Generic.List<Autodesk.Revit.DB.ElementId> { wall.Id });\n  doc.Regenerate();\n  var group2 = doc.Create.PlaceGroup(new Autodesk.Revit.DB.XYZ(400, 300, 0), group1.GroupType);\n  doc.Regenerate();\n  var group2Id = group2.Id;\n\n  // 1. Ungroup the instance you want to change. Its members become ordinary\n  //    loose elements with no group restrictions.\n  var looseIds = group1.UngroupMembers();\n\n  // 2. Edit the loose elements freely.\n  Autodesk.Revit.DB.ElementId looseWallId = null;\n  foreach (var id in looseIds) { if (doc.GetElement(id) is Autodesk.Revit.DB.Wall) looseWallId = id; }\n  var lc = (doc.GetElement(looseWallId) as Autodesk.Revit.DB.Wall).Location as Autodesk.Revit.DB.LocationCurve;\n  lc.Curve = Autodesk.Revit.DB.Line.CreateBound(new Autodesk.Revit.DB.XYZ(403, 0, 0), new Autodesk.Revit.DB.XYZ(413, 0, 0));\n  doc.Regenerate();\n\n  // 3. Regroup them: this mints a NEW GroupType that reflects the edit.\n  var newGroup = doc.Create.NewGroup(new System.Collections.Generic.List<Autodesk.Revit.DB.ElementId> { looseWallId });\n  doc.Regenerate();\n  var newType = newGroup.GroupType;\n\n  // 4. Point every other placed instance at the new type. This is the\n  //    propagation step: Group.GroupType has a public setter.\n  var other = doc.GetElement(group2Id) as Autodesk.Revit.DB.Group;\n  other.GroupType = newType;\n  doc.Regenerate();\n\n  // Revit re-creates the reassigned instance's members: re-fetch their ids.\n  var memberIds = (doc.GetElement(group2Id) as Autodesk.Revit.DB.Group).GetMemberIds();\n  return new { newGroupTypeId = newType.Id.Value, reassignedInstanceId = group2Id.Value, memberCount = memberIds.Count };\n});\n",
+  "pitfalls": [
+    {
+      "symptom": "Editing a group member directly fails with 'Changes to groups are allowed only in group edit mode... Use the Ungroup option' and the run ends with status=error (rolled back).",
+      "cause": "With two or more placed instances of the GroupType, Revit refuses member edits outside group edit mode to keep the instances consistent. With exactly one instance it allows the edit with a warning instead.",
+      "fix": "Ungroup the instance first (Group.UngroupMembers), edit the loose elements, regroup them into a new GroupType, and reassign the other instances.",
+      "members": [
+        "Autodesk.Revit.DB.Group.UngroupMembers"
+      ]
+    },
+    {
+      "symptom": "After setting Group.GroupType, ElementIds of that instance's members captured before the reassignment no longer resolve or point at the wrong elements.",
+      "cause": "Revit re-creates a reassigned instance's member elements; their ElementIds change.",
+      "fix": "Call Group.GetMemberIds() again after the reassignment; never reuse ids captured beforehand.",
+      "members": [
+        "Autodesk.Revit.DB.Group.GetMemberIds"
+      ]
+    },
+    {
+      "symptom": "Checking whether the edit propagated by comparing a member's coordinates against the absolute values you expected from PlaceGroup's origin argument reports a false negative.",
+      "cause": "A placed instance's members are not at the absolute coordinates implied by the origin argument alone.",
+      "fix": "Compare two instances of the same GroupType against each other (for example a freshly placed one at the same origin), not against an assumed absolute coordinate.",
+      "members": [
+        "Autodesk.Revit.Creation.Document.PlaceGroup"
+      ]
+    }
+  ],
+  "tags": [
+    "groups",
+    "editing",
+    "propagation"
+  ],
+  "provenance": {
+    "kind": "harness",
+    "ref": "revit/test-harness/phase_a_test.go TestPhaseACoreCRUDAndQuery/EditGroupPropagatesToAllInstances"
+  },
+  "created_at": "2026-09-02T00:00:00Z",
+  "updated_at": "2026-09-02T00:00:00Z"
+}

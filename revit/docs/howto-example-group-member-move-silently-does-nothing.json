@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "id": "group-member-move-silently-does-nothing",
+  "kind": "pitfall",
+  "title": "Moving a group member by its own ElementId silently does nothing",
+  "task": "Move an element that belongs to a placed group. ElementTransformUtils.MoveElement on the member's own ElementId has no effect at all; move the group instance instead.",
+  "members": [
+    "Autodesk.Revit.DB.ElementTransformUtils.MoveElement",
+    "Autodesk.Revit.DB.ElementTransformUtils.MoveElements"
+  ],
+  "pitfalls": [
+    {
+      "symptom": "ElementTransformUtils.MoveElement(doc, memberId, translation) returns normally with no warning, no error and no notice, and the element has not moved.",
+      "cause": "A group member's own id is not a movable target while it is in the group; Revit ignores the call. Confirmed live and matching an independent report of the same behaviour for detail groups.",
+      "fix": "Move the group instance's ElementId (a rigid-body move of the whole placed instance), or MoveElements with the group id plus its member ids. To move one member on its own, ungroup first.",
+      "members": [
+        "Autodesk.Revit.DB.ElementTransformUtils.MoveElement"
+      ]
+    }
+  ],
+  "tags": [
+    "groups",
+    "transform",
+    "silent-failure"
+  ],
+  "provenance": {
+    "kind": "harness",
+    "ref": "revit/test-harness/phase_a_test.go TestPhaseACoreCRUDAndQuery/EditGroupPropagatesToAllInstances (comment; the subtest deliberately does not exercise this path)"
+  },
+  "created_at": "2026-09-02T00:00:00Z",
+  "updated_at": "2026-09-02T00:00:00Z"
+}

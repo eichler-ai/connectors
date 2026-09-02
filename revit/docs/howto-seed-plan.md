@@ -140,6 +140,45 @@ ranker always returns something:
 - no floor-plan view is created with a level (from #7)
 - `BuiltInParameterGroup` / `ParameterType` gone in 2025+ (`GroupTypeId` / `SpecTypeId`; from #5 and the skill's own rule)
 
+### 3e. Worked example: `group-edit-propagates`, fleshed out
+
+Audit row #6 is written out in full as the level-of-detail reference, split as the audit proposed:
+
+- [`howto-example-group-edit-propagates.json`](howto-example-group-edit-propagates.json) — the how-to
+  (kind `howto`, ~2 KB script, three pitfalls, one recorded miss, one recorded hit).
+- [`howto-example-group-edit-mode-api-does-not-exist.json`](howto-example-group-edit-mode-api-does-not-exist.json)
+  — the negative (kind `negative`, no members, the "stop looking" answer with the route to take).
+- [`howto-example-group-member-move-silently-does-nothing.json`](howto-example-group-member-move-silently-does-nothing.json)
+  — the pitfall (kind `pitfall`, no script, one symptom → cause → fix).
+
+All three validate against the schema. None carries a verification stamp: the how-to's script is the
+test's script minus the test-only proof scaffolding (a third instance placed for comparison), so no
+harness run has executed this exact text — the sweep will.
+
+**Level-of-detail guidelines the example sets** (these are what `/triage-howto-submission` enforces
+at its edit step, §4c):
+
+1. `task` is two sentences: the task as an agent would phrase it, then the one-line shape of the
+   answer. It is the embedding text, so it names the element type, the operation and the key member
+   nouns (`GroupType`, `ungroup`) in plain words.
+2. `summary` is the recipe in prose, four to six lines, naming members in order. It is what
+   `describe_howto` shows first; the script is what the agent copies.
+3. `script` is complete and runnable against a blank document: any setup a real task would already
+   have is included but labelled as setup, and numbered comments mark the steps that *are* the
+   how-to. Test-only assertions and comparison scaffolding are removed. Target: under 3 KB; the
+   16 KB bound is for exceptional cases.
+4. One `pitfalls[]` entry per distinct mistake, each with the symptom the agent actually sees
+   (error text quoted where the test recorded it), the cause, and the fix as an instruction. A
+   pitfall that is a task in its own right (the silent `MoveElement`) becomes its own `pitfall`
+   document instead of a fourth entry.
+5. A "this does not exist" result is its own `negative` document, with the member it names as free
+   text in `pitfalls[].members` (since it is not a real member) and the route to take in `summary`.
+6. `queries` records only what a session actually typed and saw, in the words used; nothing is
+   invented to make the record look complete. Where the source is a test comment rather than a
+   transcript, the entry is kept minimal.
+7. `provenance.ref` names the test function, and — for a document derived from a *comment* rather
+   than from executed code (the pitfall here) — says so.
+
 ## 4. Growth: `submit_howto` → tagged issue → `/triage-howto-submission` → corpus
 
 The seed is a one-off; the corpus grows because agents that just learned something can hand it in.
