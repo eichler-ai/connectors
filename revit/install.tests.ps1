@@ -131,7 +131,10 @@ Describe 'Install-BrokerStaged' {
         Get-Content (Join-Path $app 'mcp-server.exe') -Raw | Should -Be 'new-exe'
         Test-Path (Join-Path $app 'mcp-server.exe.new') | Should -BeFalse
     }
-    It 'is a no-op when nothing is pending' {
+    It 'is a no-op when nothing is pending, but still removes a stale .old image' {
+        New-Payload $app @{ 'mcp-server.exe' = 'exe'; 'mcp-server.exe.old' = 'stale' }
         Complete-PendingBrokerSwap $app | Should -BeFalse
+        Test-Path (Join-Path $app 'mcp-server.exe.old') | Should -BeFalse
+        Get-Content (Join-Path $app 'mcp-server.exe') -Raw | Should -Be 'exe'
     }
 }

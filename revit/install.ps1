@@ -326,9 +326,14 @@ function Install-BrokerStaged([string]$ServerPayloadDir, [string]$AppDir) {
 }
 
 function Complete-PendingBrokerSwap([string]$AppDir) {
-    # Finishes a 'pending' outcome from an earlier run. Returns $true when a swap happened.
+    # Finishes a 'pending' outcome from an earlier run, and tidies the .old image a 'staged' swap
+    # left behind once its broker has exited (the removal is refused, harmlessly, while it is still
+    # mapped). Runs on every install, not only when the server changes -- found live: a run that
+    # skipped an unchanged broker left the previous run's .old in place. Returns $true when a swap
+    # happened.
     $exe = Join-Path $AppDir 'mcp-server.exe'
     $new = "$exe.new"
+    Remove-Item "$exe.old" -Force -ErrorAction SilentlyContinue
     if (-not (Test-Path $new)) { return $false }
     if (Get-BrokerProcess $AppDir) { return $false }
     try {
