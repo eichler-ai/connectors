@@ -107,7 +107,7 @@ The seed is extracted from the harness, and only from tests that opt in. Mechani
    `cleanup-title=` markers. The corpus version (document count, content hash, Revit versions
    verified on) is printed by `-version` and carried in `get_skills` `build.howto_corpus`.
 6. **Then the ranking corpus.** Every recorded `queries.miss` becomes a candidate row for the how-to
-   equivalent of `ranking-corpus.tsv`, once `search_howto` exists to grade it.
+   equivalent of `ranking-corpus.tsv`, once `search_howtos` exists to grade it.
 
 ## 3. Audit: candidate documents
 
@@ -226,10 +226,12 @@ should either help the ranker find the document or help the agent do the task.
    the record look complete.
 7. **`provenance` is maintainer-facing**: never returned to an agent, never indexed. It names the
    source test and, for a document derived from a comment rather than executed code, says so.
-8. **Indexed fields**: `title`, `task`, `pitfalls` text, `members`, `tags` (low weight), and the
-   script's comment lines (code stripped). What `search_howto` returns per hit: `id`, `rev`, `title`,
-   `task`, `members`, `tags`, `verified_on`, `source`. What `describe_howto` returns: those plus
-   `script`, `pitfalls` and `contributors`.
+8. **Indexed fields**: `title`, `task` (highest weight), the recorded hit `queries`, `pitfalls`
+   text, `members` as `Type.Member`, and `tags` (low weight); the script is not indexed. What
+   `search_howtos` returns per hit: `id`, `rev`, `title`, `task`, `members`, `tags`, `verified_on`,
+   `failed_on`, `verified_here`, `source`, `shared_rev`. What `describe_howto` returns: those plus
+   `script`, `pitfalls`, `api_since`/`api_until`, `absorbs` and the verification for the caller's
+   version — never `provenance`, `verify` or `contributors`.
 9. **Credit is opt-in and cumulative.** `contributors[]` records `{handle, role, rev}` per revision:
    `author` for rev 1, `contributor` for each later revision, `reviewer` optionally for the maintainer
    who triaged it. A new revision appends to the list it inherits, so a lineage improved by several
@@ -243,7 +245,7 @@ should either help the ranker find the document or help the agent do the task.
 The seed is a one-off; the corpus grows because agents that just learned something can hand it in.
 That path is as important as the seed and moves **ahead of** search in the implementation order
 (§6): both the extractor and the submit tool emit schema documents, and a review queue can start
-filling before `search_howto` exists to serve it.
+filling before `search_howtos` exists to serve it.
 
 **Rejection is immediate and instructive [decided, implemented in step 2]:** a non-compliant
 submission is refused before anything is written, with `howto-invalid` listing every field and rule
@@ -315,7 +317,7 @@ Behaviour, in order:
 1. **Validate** against `howto-schema.json` (in `revit/mcp-server/internal/howto/schema/`, embedded in the broker); a failing field is a `howto-invalid` error naming it.
    With `id`, also check the target exists and is the lineage's latest revision (else base the edit
    on the latest and say so).
-2. **Write locally first** (`provenance.kind: "local"`), so the submitter's own `search_howto` serves
+2. **Write locally first** (`provenance.kind: "local"`), so the submitter's own `search_howtos` serves
    it immediately. Re-submitting the same `id` overwrites the local file and says so.
 3. **Session stamp**: if this session executed exactly this `script` text and it succeeded, append
    a `by: "session"` line to the local sidecar. This needs the broker to keep the sha256 of every
@@ -371,7 +373,7 @@ choose issues itself, and loads `revit-connector-development` for the harness ru
    value, and record the outcome as a comment. A failure is not a rejection by itself — the fix may be
    a one-line edit — but nothing enters the corpus without a passing run on at least one version.
    This is the `howto-reviewed` gate made concrete: the human reads before the script runs.
-4. **De-duplicate, or apply the edit.** For a new document, search the existing corpus (`search_howto`
+4. **De-duplicate, or apply the edit.** For a new document, search the existing corpus (`search_howtos`
    once it exists; a `members`-set match until then): a near-duplicate is either folded into the
    existing lineage as its next revision — the surviving document lists the merged-away id in
    `absorbs`, the merged-away line is deleted, and `describe_howto(<old id>)` follows the pointer —
@@ -479,7 +481,9 @@ Nothing is annotated or extracted until this table is settled.
 3. The 23-document seed (`howto-seed-list.md`) authored under `internal/howto/corpus/`, the tier-2
    sweep `TestHowToSweep` writing the sidecar, the corpus embedded in the broker with its version in
    `-version` / `get_skills`. **Done:** every document verified on Revit 2025 and 2027 (2026-09-02).
-4. Generalised index + `search_howto` / `describe_howto`; local corpus indexed alongside.
+4. Generalised index + `search_howtos` / `describe_howto`; local corpus indexed alongside. **Done**
+   (2026-09-02): `semsearch.IndexOf[T]` + `internal/howtosearch`; both tools require exactly one of
+   `instance_id` / `revit_version` (design note §3) and are pinned live by `TestHowToSearchLive`.
 5. Release manifest + install.ps1 per-component skip + broker stage-and-swap and reconnect
    messaging (the full scope is in §1); release-notes diff of the corpus. Prerequisite for frequent
    corpus-only releases.
@@ -488,7 +492,7 @@ Nothing is annotated or extracted until this table is settled.
    calls `submit_howto` for a new how-to (local write, session stamp, gate, scrub, outbox), the
    triage command takes the outbox document through fixture-run, edit and write into
    `corpus.jsonl` plus the sidecar, the broker is rebuilt with the corpus embedded and reports its
-   version, and `search_howto` returns the document at rank 1 for its recorded query while
+   version, and `search_howtos` returns the document at rank 1 for its recorded query while
    `describe_howto` shows the stamp for the version it ran on; then a revision of the same lineage
    goes round again and replaces the line. Per-PR gates stay as they are (CI, review, harness where
    discovery is touched); this test is what says the pieces work *together*.

@@ -28,7 +28,7 @@ Per issue, in this order:
 
 3. **Decide the outcome before running anything.** Three outcomes, and the second is the one to
    reach for first:
-   - **Fold into an existing how-to.** Search the corpus (`search_howto` once it exists; until
+   - **Fold into an existing how-to.** Search the corpus (`search_howtos` once it exists; until
      then, a `members`-set and `tags` match over the files in `revit/mcp-server/internal/howto/corpus/`) for a document that
      teaches the same concept. The default is to fold: a good pitfall, a better step, or a version
      note joins that document as its next revision. Each document teaches one Revit feature or

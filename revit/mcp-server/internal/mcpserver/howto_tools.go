@@ -2,8 +2,8 @@
 // how-to it just learned. The broker validates it, writes it to the user's
 // local corpus, stamps it if the exact script ran successfully in this
 // session, and -- only with confirm_submission -- scrubs it and prepares the
-// review-queue hand-off. The broker never files the issue: the agent does,
-// with its own gh, under its own permission prompt.
+// review-queue hand-off, filing it only with the user's own opt-in token.
+// The read side (search_howtos, describe_howto) is in howto_search_tools.go.
 package mcpserver
 
 import (
@@ -22,13 +22,17 @@ import (
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/discovery"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/execution"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/howto"
+	"github.com/eichler-ai/connectors/revit/mcp-server/internal/howtosearch"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/registry"
 )
 
 const howtoSource = "mcp-server.internal.mcpserver.howto"
 
-// HowToDeps is what submit_howto needs from the rest of the broker.
+// HowToDeps is what the how-to tools need from the rest of the broker.
 type HowToDeps struct {
+	// Search serves search_howtos and describe_howto; nil makes both report
+	// howto-corpus-unavailable.
+	Search *howtosearch.Service
 	// LocalDir is the local corpus directory (<app-data>/howto/local);
 	// OutboxDir the prepared-submission directory (<app-data>/howto/outbox).
 	LocalDir  string
@@ -112,8 +116,9 @@ type SubmitHowToOut struct {
 	Error      *diag.Record           `json:"error,omitempty"`
 }
 
-// RegisterHowTo adds submit_howto to s.
+// RegisterHowTo adds submit_howto, search_howtos and describe_howto to s.
 func RegisterHowTo(s *mcp.Server, deps HowToDeps) {
+	registerHowToSearch(s, deps)
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "submit_howto",
 		Description: "Hand in a how-to you just learned (or improve an existing one by id): saved to the user's local how-to corpus immediately, validated against the corpus schema with every problem named, and -- with confirm_submission -- scrubbed of paths/names and prepared as a review-queue issue: filed by the connector when the user configured a GitHub token, otherwise handed to you as a prefilled issue URL plus the body file. Submit after the script ran successfully, never speculatively.",

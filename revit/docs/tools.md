@@ -21,6 +21,8 @@ Design rationale for all of it: [`PRD.md`](PRD.md) §06 (execution), §07 (dialo
 | `search_functions` | yes | ranked search over member names + XML docs |
 | `describe_function` | yes | full signature/params/docs for one member |
 | `get_skills` | no | the built-in agent guide for using all of the above |
+| `search_howtos` | no | ranked search over the how-to corpus (embedded seed + the user's local documents); needs exactly one of `instance_id` / `revit_version` |
+| `describe_howto` | no | one how-to in full, with its verification for the caller's Revit version |
 | `submit_howto` | no | hand in a how-to the agent just learned (saved to the user's local corpus; optionally prepared for the maintainers' review queue) |
 
 > **Everything above is compiled into the broker binary** — the guide, these schemas, the
@@ -163,14 +165,53 @@ carries the `revit_version` that answered.
   from a `search_functions` result) is the reliable way to pick exactly one overload, and can be
   passed on its own.
 
+### `search_howtos` / `describe_howto`
+
+The read side of the how-to corpus (design: [`howto-corpus-design.md`](howto-corpus-design.md) §3-§5).
+The corpus served is the seed embedded in the broker (`revit/mcp-server/internal/howto/corpus/`,
+reviewed and harness-verified, `source: "seed"`) overlaid with the user's own documents under
+`<app-data>\howto\local\` (`source: "local"`, unreviewed, re-scanned on every call by a
+name/size/mtime signature). A local file with a seed's `id` and an identical script is reported
+superseded (`howto-local-superseded-by-shared`); one with a different script is served instead of the
+seed with `shared_rev` alongside (and `howto-local-shadows-shared` when the seed has moved past it).
+Neither tool needs a live Revit, but **both require exactly one of `instance_id` or `revit_version`**:
+verification is per Revit version, and the agent must always be told whether the script it is about to
+run was verified on the version it is driving. Neither, or both, is refused with
+`howto-version-required`; a malformed `revit_version` with `howto-version-invalid`. The version is a
+*preference*, never a filter.
+
+- `search_howtos(query, instance_id | revit_version, cursor?, top_n?)` — the same pipeline as
+  `search_functions` (BM25F + static embeddings fused by reciprocal rank, cross-encoder rerank of the
+  top 20) over a how-to field set: `title`, `task` (highest weight), the recorded hit `queries`,
+  `pitfalls` text, `members` as `Type.Member`, and `tags`. Within the head of the ranked list (the
+  reranked pool of 20, or the top 20 in a lexical-only build) documents verified on the resolved
+  version are moved ahead of the rest in their ranked order; beyond it the ranked order stands, so a strong but unverified match cannot be pushed past the first pages. Each hit
+  carries `id`, `rev`, `title`, `task`, `members`, `tags`, `verified_on[]`, `failed_on[]`,
+  `verified_here`, `score`, `source` and, for a shadowing local document, `shared_rev`. The response
+  carries `revit_version` (what the call resolved to), `ranker` (`semantic` / `semantic-no-rerank` /
+  `lexical` — there is no add-in fallback), `guidance`, `total_matched`, `next_cursor` (bound to the
+  query, version and corpus fingerprint, like `search_functions`'), and `notices[]` for anything the
+  loader skipped or flagged (`howto-local-corpus-problems`, `howto-local-corpus-truncated`,
+  `howto-corpus-newer-than-broker`) plus the overlay notices above for hits on the page. `top_n`
+  defaults to 5 (a hit is a paragraph), max 50.
+- `describe_howto(id, instance_id | revit_version)` — the document as the agent acts on it: `id`,
+  `rev`, `kind`, `title`, `task`, `members`, `script`, `pitfalls`, `tags`, `api_since`/`api_until`,
+  `absorbs`, `updated_at`; never `provenance`, `verify` or `contributors` (maintainer-facing). With it:
+  `source`, `verified_here`, `verification` (the winning stamp for the resolved version — `status`,
+  `by` harness/session, `at`, `connector_version`, `diagnostic` — or absent when never swept on it),
+  `verified_on[]` / `failed_on[]`, `api_warnings[]` (declared hints evaluated against the version),
+  `shared_rev`, and `guidance` that says plainly whether to run it as-is, read it first (local or
+  session-verified), or expect to adapt it (failed / unverified here). An id merged into another
+  lineage resolves to the survivor with `redirected_from` and a `howto-redirected` notice; an unknown
+  id is `howto-not-found`.
+
 ### `submit_howto`
 
 The growth mechanism of the how-to corpus (design: [`howto-corpus-design.md`](howto-corpus-design.md),
 plan: [`howto-seed-plan.md`](howto-seed-plan.md) §4). The agent hands in `title`, `task`, `script`,
 `members`, `pitfalls[]`, optional `queries`/`tags`, optional `credit_as`; to improve an existing
 how-to it passes that document's `id` with only the changed fields and a `change_note`, and the
-result is the next revision (until the embedded seed corpus lands in step 3, only the user's own
-local documents can be improved this way). The document is validated against the corpus schema first — a
+result is the next revision (the embedded seed and the user's own local documents can both be improved this way). The document is validated against the corpus schema first — a
 non-compliant submission is refused with `howto-invalid` naming every field to fix, and nothing is
 written — then saved to `<app-data>\howto\local\<id>.json`, with a `session` verification stamp if
 that exact script ran successfully in this session. Without `confirm_submission: true` that is all;

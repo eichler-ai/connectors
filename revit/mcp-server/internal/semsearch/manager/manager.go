@@ -248,7 +248,7 @@ func (m *Manager) Search(ctx context.Context, instanceID, query, namespace strin
 		res.Hits = hits
 		return res, nil
 	}
-	q := semsearch.Query{Text: query, Namespace: namespace, Reranker: m.reranker}
+	q := semsearch.Query{Text: query, Mask: semsearch.InNamespace(namespace), Reranker: m.reranker}
 	if e.dense {
 		q.Embedder = m.embedder
 	}

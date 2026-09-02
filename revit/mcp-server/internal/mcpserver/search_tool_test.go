@@ -30,16 +30,16 @@ func TestSearchCursorRoundTripAndScope(t *testing.T) {
 		t.Fatal("scope must include the ranked set's identity (fingerprint and ranker)")
 	}
 	c := buildSearchCursor(40, scope)
-	off, drec := parseSearchCursor(c, scope)
+	off, drec := parseSearchCursor(c, scope, "query and namespace", discoverySource)
 	if drec != nil || off != 40 {
 		t.Fatalf("parse(%q) = %d, %+v", c, off, drec)
 	}
 	for _, bad := range []string{"garbage", "-1:" + scope, "x:" + scope, "40:otherscope"} {
-		if _, drec := parseSearchCursor(bad, scope); drec == nil || drec.Code != "invalid-cursor" {
+		if _, drec := parseSearchCursor(bad, scope, "query and namespace", discoverySource); drec == nil || drec.Code != "invalid-cursor" {
 			t.Errorf("parse(%q) should be invalid-cursor, got %+v", bad, drec)
 		}
 	}
-	if off, drec := parseSearchCursor("", scope); off != 0 || drec != nil {
+	if off, drec := parseSearchCursor("", scope, "query and namespace", discoverySource); off != 0 || drec != nil {
 		t.Fatalf("empty cursor = %d, %+v", off, drec)
 	}
 }

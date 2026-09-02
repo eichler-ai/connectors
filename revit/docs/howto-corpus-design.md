@@ -65,7 +65,7 @@ dialect if it was extracted from a pre-#160 test; the seed is extracted post-#16
 the stamps go `failed` with the diagnostic naming the fix, the seed is re-extracted from the harness
 tests once they are updated, and the sidecar's `connector_version` records which broker verified
 what. It also means the sweep must key stamps by connector version as well as Revit version, and
-`search_howto` should prefer documents verified on the *running* connector's version — added to §9
+`search_howtos` should prefer documents verified on the *running* connector's version — added to §9
 as D6.
 
 The full schema is `howto-schema.json`; the example document shows every field populated from a
@@ -132,7 +132,7 @@ prove the result is *right*; that is what review (§6) is for, and why a `fix` s
 while its script still passes (§9).
 
 At query time the Revit version is **always known and always applied** [decided 2026-09-02]:
-`search_howto` and `describe_howto` require exactly one of `instance_id` (the broker resolves the
+`search_howtos` and `describe_howto` require exactly one of `instance_id` (the broker resolves the
 version from the registry, so the answer matches the Revit the agent is actually driving) or
 `revit_version` (for an agent working ahead of a connection). The version is a **pre-ranking
 preference**, not a filter: documents verified on that version rank first; others are still
@@ -156,11 +156,24 @@ agent already suspects a member). The cross-encoder reranks the fused top 20 exa
 Cost is negligible: a few thousand documents is two orders of magnitude below the 68k-member API
 corpus that embeds in ~1.1 s (§10.3 of the ranking note), so rebuilding on every update is fine.
 
-Two tools **[proposed]**, mirroring the API pair:
+**Implemented (step 4, 2026-09-02):** `semsearch.Index` became `semsearch.IndexOf[T]` with a
+`Schema[T]` (fields with lexical/dense weights, junk, tie-break, rerank text); the API index is the
+`Doc` instantiation under `APISchema`, unchanged in behaviour. The how-to index is
+`internal/howtosearch` (schema: title 1.0/0.6, task 1.2/1.0, recorded hit queries 0.8/0.6, pitfalls
+0.5/0.6, members as `Type.Member` 0.8/0.2, tags 0.5/0.2 — initial weights, to be tuned once a
+queries corpus exists). The version preference is `QueryOf.Prefer`: a stable partition of the
+**reranked head** (the pool of 20) so verified-here documents lead it, with the tail left in ranked
+order — bounded on purpose, so a strong but unverified match is never pushed beyond the first pages
+by weakly matching verified ones. The index is built lazily on first use and rebuilt when the local
+directory's name/size/mtime signature changes. The tool is named `search_howtos` (plural, matching
+`search_functions`); `describe_howto` stays singular like `describe_function`.
 
-- `search_howto(query, instance_id | revit_version, cursor?, top_n?)` → short hits: `id`, `title`,
-  `task`, `members`, `verified_on[]` (from the sidecar), `verified_here` (for the resolved version),
-  `score`, `source` (`seed` / `shared` / `local`), plus the same `ranker`, `guidance` and `notices[]`
+Two tools, mirroring the API pair:
+
+- `search_howtos(query, instance_id | revit_version, cursor?, top_n?)` → short hits: `id`, `rev`,
+  `title`, `task`, `members`, `tags`, `verified_on[]` / `failed_on[]` (from the sidecars),
+  `verified_here` (for the resolved version), `score`, `source` (`seed` / `shared` / `local`),
+  `shared_rev` for a shadowing local document, plus the same `ranker`, `guidance` and `notices[]`
   fields `search_functions` carries, and `revit_version` (the one the call resolved to).
 - `describe_howto(id, instance_id | revit_version)` → the full document, with `verification` for the
   resolved version (stamp status, `by`, `at`, connector version) and `api_since`/`api_until` warnings
@@ -169,7 +182,7 @@ Two tools **[proposed]**, mirroring the API pair:
 **Cross-promotion [open]:** `search_functions` could surface the top how-to hit when its rerank
 score beats the API hits — the idiom queries are exactly where this helps. Deferred until the corpus
 has enough documents for the reranker's cross-corpus scores to be trusted; until then the agent is
-told (in `skill.md` and in `search_functions`' guidance) to try `search_howto` when a task-shaped
+told (in `skill.md` and in `search_functions`' guidance) to try `search_howtos` when a task-shaped
 query returns only members.
 
 ## 5. Three sources, one index
@@ -194,9 +207,10 @@ a newer corpus, validates the fields it knows, and reports `howto-corpus-newer-t
 `.json` file (the seed plan §4b records why it is not Revit's exchange root: the broker indexes it,
 and in remote mode the two are different machines; every tool response names the path). It is indexed alongside, marked `source: "local"` on every hit so the agent knows it is
 unreviewed, and re-scanned when a file changes (mtime check on search; no watcher). An `id` collision
-between local and seed/shared resolves to local with `supersedes_shared: true` on the hit — the
-intended way to override a shared how-to for one environment; two local files with one `id` is a
-validation error naming both files. Local documents are never uploaded except through the explicit
+between local and seed/shared follows the overlay rules (`howto.Overlay`, seed plan §4d): an identical
+script serves the shared copy and reports the local file superseded; a different script serves the
+local document with `shared_rev` on the hit — the intended way to override a shared how-to for one
+environment; two local files with one `id` is a validation error naming both files. Local documents are never uploaded except through the explicit
 submit flow below.
 
 **Local documents are an injection surface.** A how-to is text the agent reads and a script it may
@@ -206,7 +220,7 @@ read before being run. Whether that is enough is §9 D4.
 
 **Bounds** (CONVENTIONS.md): a document's `script` ≤ 16 KB; a corpus ≤ 20,000 documents / 64 MB;
 the local directory ≤ 2,000 files. Beyond any bound the broker stops loading, logs, and reports the
-truncation as a `notices[]` record on every `search_howto` response (the precedent is
+truncation as a `notices[]` record on every `search_howtos` response (the precedent is
 `search_functions`' `search-index-building` notice), never silently.
 
 ## 6. Submission: `submit_howto` → review queue → shared corpus
@@ -302,7 +316,7 @@ entry for 8.5 points here.
 1. Schemas + validator package (Go; document and sidecar), and the harness extractor producing the
    seed `revit/mcp-server/internal/howto/corpus/<id>.json` from the annotated tests (≈ a dozen documents), with a check that a
    seed document's script hash matches its source test. Tier-1 tests on the validator and extractor.
-2. Generalise `semsearch.Index` (field set per corpus, version preference) + `search_howto` /
+2. Generalise `semsearch.Index` (field set per corpus, version preference) + `search_howtos` /
    `describe_howto`; `skill.md` gains one bullet. Live: the pitfall queries recorded in the harness
    must return their document at rank 1.
 3. `TestHowToCorpusScriptsStillRun` with the fixture rule, writing the sidecar; local corpus directory.

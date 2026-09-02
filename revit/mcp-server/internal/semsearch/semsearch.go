@@ -8,8 +8,12 @@
 //	                                               ├─► namespace mask ─► RRF ─► cross-encoder rerank (pool) ─► hits
 //	vector  ──► cosine over per-field embeddings ──┘
 //
-// The encoder and the reranker are interfaces so the pipeline is unit-tested
-// with deterministic fakes; the real models live in sibling packages.
+// The pipeline is generic over the document type: a Schema names the text
+// fields, their weights and the tie-break, so the same code ranks the API
+// member corpus (Doc, APISchema, Build) and the how-to corpus
+// (internal/howtosearch), each with its own field set. The encoder and the
+// reranker are interfaces so the pipeline is unit-tested with deterministic
+// fakes; the real models live in sibling packages.
 // Every constant below was chosen by measurement in the POC, and is named
 // rather than inlined so the design note's numbers can be traced to code.
 package semsearch
@@ -74,26 +78,49 @@ type Reranker interface {
 	Score(ctx context.Context, query string, docs []string) ([]float32, error)
 }
 
-// Query is one search_functions call.
-type Query struct {
+// QueryOf is one search over an IndexOf[T].
+type QueryOf[T any] struct {
 	Text string
-	// Namespace, when non-empty, is an exact-match pre-ranking mask: docs in
-	// any other namespace are excluded before scoring, so scoping never costs
-	// relevance (design note §3.4).
-	Namespace string
+	// Mask, when non-nil, is a pre-ranking eligibility test: docs it rejects
+	// are excluded before scoring, so scoping never costs relevance (design
+	// note §3.4). InNamespace is the API corpus's mask.
+	Mask func(T) bool
+	// Prefer, when non-nil, is a post-ranking preference: within the head of
+	// the ranked list (the rerank pool, RerankPool or DefaultRerankPool) docs
+	// it accepts are moved ahead of those it rejects, in their existing
+	// relative order. It is a preference, never a filter: a rejected doc is
+	// still returned, just later. The window is bounded so a preferred but
+	// weak match cannot bury a strong one beyond the first pages: the
+	// how-to corpus prefers documents verified on the caller's Revit version.
+	Prefer func(T) bool
 	// Embedder enables the dense retriever; nil means lexical only. Must be
-	// the same embedder the index was built with (Index.Embed).
+	// the same embedder the index was built with (IndexOf.Embed).
 	Embedder Embedder
 	// Reranker, when non-nil, re-scores the top RerankPool fused candidates.
 	Reranker   Reranker
 	RerankPool int
 }
 
-// Hit is one ranked result.
-type Hit struct {
-	Doc   Doc
+// Query is a search over the API member index.
+type Query = QueryOf[Doc]
+
+// InNamespace is the API corpus's mask: exact namespace match, or every doc
+// when namespace is empty.
+func InNamespace(namespace string) func(Doc) bool {
+	if namespace == "" {
+		return nil
+	}
+	return func(d Doc) bool { return d.Namespace == namespace }
+}
+
+// HitOf is one ranked result.
+type HitOf[T any] struct {
+	Doc   T
 	Score float64
 }
+
+// Hit is one ranked API member.
+type Hit = HitOf[Doc]
 
 // Measured constants (design note §3; scratchpad eval_expanded.py /
 // eval_pool.py / eval_static.py).
@@ -115,60 +142,77 @@ const (
 	DefaultRerankPool = 20
 )
 
-// Per-field weights, lexical (BM25F) and dense (cosine), from the POC.
-var (
-	lexicalFieldWeights = [numFields]float64{fieldName: 1.0, fieldPath: 0.4, fieldDesc: 0.5}
-	denseFieldWeights   = [numFields]float64{fieldName: 0.6, fieldPath: 0.2, fieldDesc: 1.0}
-)
-
-const (
-	fieldName = iota
-	fieldPath
-	fieldDesc
-	numFields
-)
-
-// fieldText is the text indexed for each field, used identically by the
-// lexical and dense sides so the two retrievers see one corpus.
-func fieldText(d Doc, field int) string {
-	switch field {
-	case fieldName:
-		return d.ShortType() + " " + d.Name
-	case fieldPath:
-		return d.Namespace
-	default:
-		return d.Summary
-	}
+// Field is one indexed text field of a Schema: what text it holds and how
+// much it weighs on the lexical (BM25F) and dense (cosine) sides. Text is
+// used identically by both retrievers so they see one corpus.
+type Field[T any] struct {
+	Name    string
+	Text    func(T) string
+	Lexical float64
+	Dense   float64
 }
 
-// Index is a built corpus. Build once per (Revit version, add-in set); the
-// dense side is attached separately by Embed because it needs a model and
-// the lexical side does not. Junk docs (IsJunk) are dropped at Build, so
-// they cost nothing per query and can never be returned.
-type Index struct {
-	docs []Doc
-	lex  *lexicalIndex
+// Schema describes a corpus to the pipeline.
+type Schema[T any] struct {
+	Fields []Field[T]
+	// Junk, when non-nil, marks docs dropped at Build so they cost nothing
+	// per query and can never be returned.
+	Junk func(T) bool
+	// Before, when non-nil, breaks exact score ties: true when a should
+	// precede b. The original index breaks the remaining ties, so the order
+	// is total. It lives inside each retriever so it can only ever act on
+	// genuinely equal scores -- never across a real relevance difference.
+	Before func(a, b T) bool
+	// RerankText is what the cross-encoder reads for a candidate.
+	RerankText func(T) string
+}
+
+// APISchema is the API member corpus: per-field weights from the POC.
+var APISchema = Schema[Doc]{
+	Fields: []Field[Doc]{
+		{Name: "name", Text: func(d Doc) string { return d.ShortType() + " " + d.Name }, Lexical: 1.0, Dense: 0.6},
+		{Name: "path", Text: func(d Doc) string { return d.Namespace }, Lexical: 0.4, Dense: 0.2},
+		{Name: "summary", Text: func(d Doc) string { return d.Summary }, Lexical: 0.5, Dense: 1.0},
+	},
+	Junk: IsJunk,
+	// PRD §08: boost core, never exclude add-ins.
+	Before:     func(a, b Doc) bool { return a.Core && !b.Core },
+	RerankText: RerankText,
+}
+
+// IndexOf is a built corpus. Build once per corpus; the dense side is
+// attached separately by Embed because it needs a model and the lexical
+// side does not.
+type IndexOf[T any] struct {
+	schema Schema[T]
+	docs   []T
+	lex    *lexicalIndex
 
 	denseMu sync.RWMutex
 	dense   *denseIndex
 }
 
-// Build indexes the non-junk docs for lexical retrieval.
-func Build(docs []Doc) *Index {
-	kept := make([]Doc, 0, len(docs))
+// Index is the API member index. Build once per (Revit version, add-in set).
+type Index = IndexOf[Doc]
+
+// Build indexes the non-junk API docs for lexical retrieval.
+func Build(docs []Doc) *Index { return BuildWith(APISchema, docs) }
+
+// BuildWith indexes docs under schema for lexical retrieval, dropping the
+// ones schema.Junk rejects.
+func BuildWith[T any](schema Schema[T], docs []T) *IndexOf[T] {
+	kept := make([]T, 0, len(docs))
 	for _, d := range docs {
-		if !IsJunk(d) {
+		if schema.Junk == nil || !schema.Junk(d) {
 			kept = append(kept, d)
 		}
 	}
-	ix := &Index{docs: kept}
-	fields := make([][][]string, numFields)
+	ix := &IndexOf[T]{schema: schema, docs: kept}
+	fields := make([][][]string, len(schema.Fields))
 	for f := range fields {
 		fields[f] = make([][]string, len(kept))
-	}
-	for i, d := range kept {
-		for f := 0; f < numFields; f++ {
-			fields[f][i] = Tokenize(fieldText(d, f))
+		for i, d := range kept {
+			fields[f][i] = Tokenize(schema.Fields[f].Text(d))
 		}
 	}
 	ix.lex = newLexicalIndex(fields)
@@ -176,12 +220,19 @@ func Build(docs []Doc) *Index {
 }
 
 // Len is the number of indexed (non-junk) docs.
-func (ix *Index) Len() int { return len(ix.docs) }
+func (ix *IndexOf[T]) Len() int { return len(ix.docs) }
+
+// Docs returns the indexed docs in index order.
+func (ix *IndexOf[T]) Docs() []T { return ix.docs }
 
 // Embed attaches the dense retriever by embedding every doc's fields with
 // emb. Docs with an empty field get the zero vector there (scores 0).
-func (ix *Index) Embed(ctx context.Context, emb Embedder) error {
-	d, err := buildDenseIndex(ctx, emb, ix.docs)
+func (ix *IndexOf[T]) Embed(ctx context.Context, emb Embedder) error {
+	texts := make([]func(int) string, len(ix.schema.Fields))
+	for f, field := range ix.schema.Fields {
+		texts[f] = func(i int) string { return field.Text(ix.docs[i]) }
+	}
+	d, err := buildDenseIndex(ctx, emb, len(ix.docs), texts)
 	if err != nil {
 		return err
 	}
@@ -192,22 +243,34 @@ func (ix *Index) Embed(ctx context.Context, emb Embedder) error {
 }
 
 // HasDense reports whether Embed has completed.
-func (ix *Index) HasDense() bool {
+func (ix *IndexOf[T]) HasDense() bool {
 	ix.denseMu.RLock()
 	defer ix.denseMu.RUnlock()
 	return ix.dense != nil
 }
 
+func (ix *IndexOf[T]) weights(dense bool) []float64 {
+	w := make([]float64, len(ix.schema.Fields))
+	for f, field := range ix.schema.Fields {
+		if dense {
+			w[f] = field.Dense
+		} else {
+			w[f] = field.Lexical
+		}
+	}
+	return w
+}
+
 // Search runs the pipeline and returns up to candidateDepth*2 hits, best
-// first. It never returns junk docs or docs outside q.Namespace.
-func (ix *Index) Search(ctx context.Context, q Query) ([]Hit, error) {
+// first. It never returns junk docs or docs q.Mask rejects.
+func (ix *IndexOf[T]) Search(ctx context.Context, q QueryOf[T]) ([]HitOf[T], error) {
 	tokens := Tokenize(q.Text)
 	if len(tokens) == 0 {
 		return nil, nil
 	}
-	mask := ix.mask(q.Namespace)
+	mask := ix.mask(q.Mask)
 
-	lexScores := ix.lex.score(tokens, lexicalFieldWeights)
+	lexScores := ix.lex.score(tokens, ix.weights(false))
 	lexOrder := ix.topIdx(lexScores, mask, candidateDepth)
 
 	fused := lexOrder
@@ -219,7 +282,7 @@ func (ix *Index) Search(ctx context.Context, q Query) ([]Hit, error) {
 		if err != nil {
 			return nil, err
 		}
-		denseScores := dense.score(qv[0], denseFieldWeights)
+		denseScores := dense.score(qv[0], ix.weights(true))
 		denseOrder := ix.topIdx(denseScores, mask, candidateDepth)
 		fused = ix.rrf([][]int{lexOrder, denseOrder}, []float64{rrfLexicalWeight, rrfDenseWeight}, rrfK)
 	}
@@ -227,24 +290,24 @@ func (ix *Index) Search(ctx context.Context, q Query) ([]Hit, error) {
 		return nil, nil
 	}
 
-	hits := make([]Hit, len(fused))
+	hits := make([]HitOf[T], len(fused))
 	for i, id := range fused {
 		// Without a reranker the score is position-derived (1/rank): fused
 		// RRF scores are not meaningful to a caller, order is.
-		hits[i] = Hit{Doc: ix.docs[id], Score: 1.0 / float64(i+1)}
+		hits[i] = HitOf[T]{Doc: ix.docs[id], Score: 1.0 / float64(i+1)}
 	}
 
+	pool := q.RerankPool
+	if pool <= 0 {
+		pool = DefaultRerankPool
+	}
+	if pool > len(hits) {
+		pool = len(hits)
+	}
 	if q.Reranker != nil {
-		pool := q.RerankPool
-		if pool <= 0 {
-			pool = DefaultRerankPool
-		}
-		if pool > len(hits) {
-			pool = len(hits)
-		}
 		texts := make([]string, pool)
 		for i := 0; i < pool; i++ {
-			texts[i] = RerankText(hits[i].Doc)
+			texts[i] = ix.schema.RerankText(hits[i].Doc)
 		}
 		scores, err := q.Reranker.Score(ctx, q.Text, texts)
 		if err != nil {
@@ -256,26 +319,32 @@ func (ix *Index) Search(ctx context.Context, q Query) ([]Hit, error) {
 			order[i] = i
 		}
 		sort.SliceStable(order, func(a, b int) bool { return scores[order[a]] > scores[order[b]] })
-		reordered := make([]Hit, pool)
+		reordered := make([]HitOf[T], pool)
 		for i, j := range order {
-			reordered[i] = Hit{Doc: head[j].Doc, Score: float64(scores[j])}
+			reordered[i] = HitOf[T]{Doc: head[j].Doc, Score: float64(scores[j])}
 		}
 		copy(hits[:pool], reordered)
+	}
+	if q.Prefer != nil {
+		// Stable partition of the head: preferred first, each side in its
+		// ranked order. Scores travel with their docs.
+		head := hits[:pool]
+		sort.SliceStable(head, func(a, b int) bool { return q.Prefer(head[a].Doc) && !q.Prefer(head[b].Doc) })
 	}
 	return hits, nil
 }
 
-// mask returns the per-doc eligibility vector for q: in the requested
-// namespace (exact match), or every doc when none is given.
-func (ix *Index) mask(namespace string) []bool {
+// mask returns the per-doc eligibility vector: what accept says, or every
+// doc when accept is nil.
+func (ix *IndexOf[T]) mask(accept func(T) bool) []bool {
 	m := make([]bool, len(ix.docs))
 	for i, d := range ix.docs {
-		m[i] = namespace == "" || d.Namespace == namespace
+		m[i] = accept == nil || accept(d)
 	}
 	return m
 }
 
-// RerankText is what the cross-encoder reads for a candidate: the
+// RerankText is what the cross-encoder reads for an API candidate: the
 // Type.Member identifier and its summary, matching the POC's pair format.
 func RerankText(d Doc) string {
 	s := d.ShortType() + "." + d.Name
@@ -394,13 +463,14 @@ type bm25Field struct {
 }
 
 type lexicalIndex struct {
-	fields [numFields]*bm25Field
+	fields []*bm25Field
+	n      int
 }
 
 func newLexicalIndex(fields [][][]string) *lexicalIndex {
-	ix := &lexicalIndex{}
-	for f := 0; f < numFields; f++ {
-		docs := fields[f]
+	ix := &lexicalIndex{fields: make([]*bm25Field, len(fields))}
+	for f, docs := range fields {
+		ix.n = len(docs)
 		bf := &bm25Field{n: len(docs), dl: make([]int, len(docs)), post: make(map[string][]posting)}
 		total := 0
 		for i, toks := range docs {
@@ -423,17 +493,15 @@ func newLexicalIndex(fields [][][]string) *lexicalIndex {
 }
 
 // score returns one BM25F score per doc for the given query tokens.
-func (ix *lexicalIndex) score(tokens []string, weights [numFields]float64) []float64 {
-	n := ix.fields[0].n
-	scores := make([]float64, n)
+func (ix *lexicalIndex) score(tokens []string, weights []float64) []float64 {
+	scores := make([]float64, ix.n)
 	seen := make(map[string]bool, len(tokens))
 	for _, t := range tokens {
 		if seen[t] {
 			continue
 		}
 		seen[t] = true
-		for f := 0; f < numFields; f++ {
-			bf := ix.fields[f]
+		for f, bf := range ix.fields {
 			posts := bf.post[t]
 			if len(posts) == 0 {
 				continue
@@ -454,7 +522,7 @@ func (ix *lexicalIndex) score(tokens []string, weights [numFields]float64) []flo
 
 type denseIndex struct {
 	dim  int
-	vecs [numFields][]float32 // flat n*dim per field; zero rows for empty fields
+	vecs [][]float32 // flat n*dim per field; zero rows for empty fields
 	n    int
 }
 
@@ -462,10 +530,12 @@ type denseIndex struct {
 // transformer ones want small batches, so this is a modest middle.
 const embedBatch = 256
 
-func buildDenseIndex(ctx context.Context, emb Embedder, docs []Doc) (*denseIndex, error) {
-	d := &denseIndex{dim: emb.Dim(), n: len(docs)}
-	for f := 0; f < numFields; f++ {
-		d.vecs[f] = make([]float32, len(docs)*d.dim)
+// buildDenseIndex embeds n docs over the given fields; text(f)(i) is doc i's
+// text for field f.
+func buildDenseIndex(ctx context.Context, emb Embedder, n int, text []func(int) string) (*denseIndex, error) {
+	d := &denseIndex{dim: emb.Dim(), n: n, vecs: make([][]float32, len(text))}
+	for f := range text {
+		d.vecs[f] = make([]float32, n*d.dim)
 		// Embed only non-empty texts; empty fields keep the zero vector.
 		var idx []int
 		var texts []string
@@ -483,8 +553,8 @@ func buildDenseIndex(ctx context.Context, emb Embedder, docs []Doc) (*denseIndex
 			idx, texts = idx[:0], texts[:0]
 			return nil
 		}
-		for i, doc := range docs {
-			t := fieldText(doc, f)
+		for i := 0; i < n; i++ {
+			t := text[f](i)
 			if strings.TrimSpace(t) == "" {
 				continue
 			}
@@ -504,11 +574,10 @@ func buildDenseIndex(ctx context.Context, emb Embedder, docs []Doc) (*denseIndex
 }
 
 // score returns the weighted cosine score of qv against every doc.
-func (d *denseIndex) score(qv []float32, weights [numFields]float64) []float64 {
+func (d *denseIndex) score(qv []float32, weights []float64) []float64 {
 	scores := make([]float64, d.n)
-	for f := 0; f < numFields; f++ {
+	for f, vecs := range d.vecs {
 		w := weights[f]
-		vecs := d.vecs[f]
 		for i := 0; i < d.n; i++ {
 			row := vecs[i*d.dim : (i+1)*d.dim]
 			var dot float32
@@ -523,24 +592,27 @@ func (d *denseIndex) score(qv []float32, weights [numFields]float64) []float64 {
 
 // --- fusion ------------------------------------------------------------------
 
-// less orders two docs by score, best first; on an exact score tie a core
-// member precedes an add-in one (PRD §08: boost core, never exclude add-ins),
-// and the original index breaks the remaining ties so the order is total.
-// The tie-break lives here, inside each retriever, so it can only ever act on
-// genuinely equal scores -- never across a real relevance difference.
-func (ix *Index) less(a, b int, sa, sb float64) bool {
+// less orders two docs by score, best first; on an exact score tie
+// schema.Before decides, and the original index breaks the remaining ties
+// so the order is total.
+func (ix *IndexOf[T]) less(a, b int, sa, sb float64) bool {
 	if sa != sb {
 		return sa > sb
 	}
-	if ca, cb := ix.docs[a].Core, ix.docs[b].Core; ca != cb {
-		return ca
+	if ix.schema.Before != nil {
+		if ix.schema.Before(ix.docs[a], ix.docs[b]) {
+			return true
+		}
+		if ix.schema.Before(ix.docs[b], ix.docs[a]) {
+			return false
+		}
 	}
 	return a < b
 }
 
 // topIdx returns the indices of the k highest-scoring eligible docs with a
 // strictly positive score, best first.
-func (ix *Index) topIdx(scores []float64, mask []bool, k int) []int {
+func (ix *IndexOf[T]) topIdx(scores []float64, mask []bool, k int) []int {
 	var ids []int
 	for i, s := range scores {
 		if mask[i] && s > 0 {
@@ -555,7 +627,7 @@ func (ix *Index) topIdx(scores []float64, mask []bool, k int) []int {
 }
 
 // rrf fuses ranked lists by reciprocal rank: score(doc) = Σ w_l / (k + rank_l).
-func (ix *Index) rrf(lists [][]int, weights []float64, k int) []int {
+func (ix *IndexOf[T]) rrf(lists [][]int, weights []float64, k int) []int {
 	score := make(map[int]float64)
 	var order []int
 	for l, list := range lists {

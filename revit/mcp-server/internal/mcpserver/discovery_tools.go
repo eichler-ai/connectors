@@ -325,7 +325,7 @@ func searchViaIndex(ctx context.Context, r *discovery.Router, search *manager.Ma
 	}
 	ranker := rankerName(res.Dense, res.Reranked)
 	scope := searchScope(in.Query, in.Namespace, res.Fingerprint, ranker)
-	offset, cdrec := parseSearchCursor(in.Cursor, scope)
+	offset, cdrec := parseSearchCursor(in.Cursor, scope, "query and namespace", discoverySource)
 	if cdrec != nil {
 		return SearchFunctionsOut{Error: cdrec}, true
 	}

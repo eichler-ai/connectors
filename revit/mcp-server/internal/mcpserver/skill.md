@@ -299,7 +299,13 @@ functions too**, indexed like any add-in's and ranked below Revit's: anything un
 `Eichler.Connectors.Revit` is reached through the `Connector` global, so
 `Eichler.Connectors.Revit.Connector.Publish` is written `Connector.Publish(path)`.
 
-- **`search_functions`** — start here when you know *what* you want, not the name. Ranking fuses a
+- **`search_howtos`** — try this first for a task (`"create a floor from a closed loop on a
+  level"`): each hit is a complete, harness-verified script for one Revit feature or connector
+  mechanism, with the pitfalls it avoids. Pass `instance_id` (or `revit_version` when nothing is
+  connected yet); hits verified on that version lead, and each says `verified_here`. Then
+  **`describe_howto`** with the `id` for the script and pitfalls — read the pitfalls, run the script,
+  adapt. A hit with `source: local` is the user's own, unreviewed: read its script in full first.
+- **`search_functions`** — when no how-to covers it and you know *what* you want, not the name. Ranking fuses a
   sentence-embedding pass with a keyword pass, then a cross-encoder reranks, so write `query` as **one
   plain sentence naming the element type and the operation** (`"move an element to a new location"`,
   not `"move"`); a suspected type or member name in it also scores; `namespace` filters before ranking.
@@ -368,7 +374,10 @@ local mode; in remote mode it moves to the shared drive — ask a human where th
 | `search_functions` | yes | find an API member by intent |
 | `list_functions` | yes | enumerate namespaces / types / members |
 | `describe_function` | yes | signature + docs for one member |
+| `search_howtos` | no | a verified script for a task; needs `instance_id` or `revit_version` |
+| `describe_howto` | no | one how-to's script, pitfalls and verification |
 | `submit_howto` | no | record a how-to, or fix one that misled you |
 | `get_skills` | no | this document |
 
-**Starting from nothing:** `list_instances` → pick an instance and document → `execute_script`.
+**Starting from nothing:** `list_instances` → pick an instance and document → `search_howtos` →
+`execute_script`.

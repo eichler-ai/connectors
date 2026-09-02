@@ -37,8 +37,10 @@ import (
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/discovery"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/execution"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/howto"
+	"github.com/eichler-ai/connectors/revit/mcp-server/internal/howtosearch"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/mcpserver"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/registry"
+	"github.com/eichler-ai/connectors/revit/mcp-server/internal/semsearch"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/semsearch/crossenc"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/semsearch/manager"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/semsearch/models"
@@ -486,10 +488,16 @@ func runPrimary(ctx context.Context, bindAddr string, port int, dataDir string, 
 	mcpserver.Register(mcpServer, execMgr)
 	reg := registry.New()
 	discoveryRouter := discovery.NewRouter(reg)
-	searchIndex := newSearchManager(discoveryRouter, dataDir, logger)
+	embedder, reranker := loadSearchModels(dataDir, logger)
+	searchIndex := manager.New(discoveryRouter, embedder, reranker, logger.Printf)
 	mcpserver.RegisterDiscovery(mcpServer, discoveryRouter, searchIndex)
 	mcpserver.RegisterInstances(mcpServer, reg, execMgr)
+	// The how-to index shares the models; it is built lazily on the first
+	// search_howtos/describe_howto call and rebuilt when the local
+	// directory changes.
+	howtoIndex := howtosearch.New(mcpserver.LocalCorpusDir(dataDir), embedder, reranker, logger.Printf)
 	mcpserver.RegisterHowTo(mcpServer, mcpserver.HowToDeps{
+		Search:      howtoIndex,
 		LocalDir:    mcpserver.LocalCorpusDir(dataDir),
 		OutboxDir:   mcpserver.OutboxDir(dataDir),
 		GitHubToken: os.Getenv("REVIT_MCP_GITHUB_TOKEN"),
@@ -497,6 +505,14 @@ func runPrimary(ctx context.Context, bindAddr string, port int, dataDir string, 
 		Router:      discoveryRouter,
 		Exec:        execMgr,
 		Version:     versionLine(),
+		// An edit by id (submit_howto with id + change_note) targets the
+		// embedded seed as well as the user's local documents.
+		Bases: func() []*howto.Corpus {
+			if c := howtoIndex.Embedded(); c != nil {
+				return []*howto.Corpus{c}
+			}
+			return nil
+		},
 	})
 	// No dependencies and no Revit needed: get_skills answers even with nothing connected.
 	mcpserver.RegisterSkills(mcpServer, version)
@@ -658,14 +674,14 @@ func runSecondary(ctx context.Context, dataDir string, logger *log.Logger, stdin
 	}
 }
 
-// newSearchManager wires the broker-side search_functions index (issue #107,
-// revit/docs/search-ranking-redesign.md). The two models are embedded in the
-// binary by internal/semsearch/models; a build made without fetching them
-// still serves search, lexical-only, and says so in every response's
-// guidance -- observability over silence (PRD §01) -- rather than failing
-// or silently ranking worse.
-func newSearchManager(router *discovery.Router, dataDir string, logger *log.Logger) *manager.Manager {
-	logf := logger.Printf
+// loadSearchModels loads the ranking models shared by the search_functions
+// index (issue #107, revit/docs/search-ranking-redesign.md) and the how-to
+// index. The two models are embedded in the binary by
+// internal/semsearch/models; a build made without fetching them still
+// serves search, lexical-only, and says so in every response's guidance --
+// observability over silence (PRD §01) -- rather than failing or silently
+// ranking worse. Either return may be nil.
+func loadSearchModels(dataDir string, logger *log.Logger) (semsearch.Embedder, semsearch.Reranker) {
 	// Model loading is synchronous on the startup path; the log line makes
 	// its cost visible so a slow machine's "broker took N seconds to come
 	// up" has an attribution.
@@ -676,23 +692,23 @@ func newSearchManager(router *discovery.Router, dataDir string, logger *log.Logg
 	tok, st, normalize, err := models.Embedder()
 	if err != nil {
 		// Covers the not-fetched build: read() names the fetch step.
-		logger.Printf("semsearch: %v; search_functions ranks lexical-only", err)
-		return manager.New(router, nil, nil, logf)
+		logger.Printf("semsearch: %v; search ranks lexical-only", err)
+		return nil, nil
 	}
 	emb, err := staticembed.Load(tok, st, normalize)
 	if err != nil {
-		logger.Printf("semsearch: loading static embedder: %v; search_functions ranks lexical-only", err)
-		return manager.New(router, nil, nil, logf)
+		logger.Printf("semsearch: loading static embedder: %v; search ranks lexical-only", err)
+		return nil, nil
 	}
 	modelDir, err := models.Materialize(filepath.Join(dataDir, "models"))
 	if err != nil {
-		logger.Printf("semsearch: materializing reranker model: %v; search_functions ranks without the cross-encoder", err)
-		return manager.New(router, emb, nil, logf)
+		logger.Printf("semsearch: materializing reranker model: %v; search ranks without the cross-encoder", err)
+		return emb, nil
 	}
 	rr, err := crossenc.Load(context.Background(), modelDir)
 	if err != nil {
-		logger.Printf("semsearch: loading cross-encoder: %v; search_functions ranks without the cross-encoder", err)
-		return manager.New(router, emb, nil, logf)
+		logger.Printf("semsearch: loading cross-encoder: %v; search ranks without the cross-encoder", err)
+		return emb, nil
 	}
-	return manager.New(router, emb, rr, logf)
+	return emb, rr
 }
