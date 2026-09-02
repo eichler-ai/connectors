@@ -15,6 +15,8 @@ package execution
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -132,6 +134,11 @@ type record struct {
 	instanceID string
 	status     Status
 	result     *Result
+	// scriptSHA256 is the hash of the script text this execution ran, kept
+	// so submit_howto can stamp a how-to whose exact script just succeeded
+	// in this session (revit/docs/howto-seed-plan.md §4b step 3). Bounded
+	// by the record's own lifetime; never the script text itself.
+	scriptSHA256 string
 	// settledAt is stamped when status turns terminal; zero while the
 	// execution is still live. It drives pruneSettledLocked's eviction.
 	settledAt time.Time
@@ -398,6 +405,9 @@ type ScriptOptions struct {
 // fresh instance_id (§05).
 func (m *Manager) ExecuteScript(ctx context.Context, instanceID, documentID, script string, timeoutMs, maxDurationMs int, opts ScriptOptions) (*Result, *diag.Record) {
 	conn, executionID, early, drec := m.beginExecution(ctx, instanceID)
+	if drec == nil && early == nil {
+		m.noteScript(executionID, script)
+	}
 	if early != nil || drec != nil {
 		return early, drec
 	}
@@ -969,4 +979,35 @@ func (m *Manager) pruneSettledLocked(now time.Time) {
 	for _, s := range kept[:len(kept)-maxSettledExecutions] {
 		delete(m.executions, s.id)
 	}
+}
+
+// noteScript records the hash of the script an execution is running.
+func (m *Manager) noteScript(executionID, script string) {
+	sum := sha256.Sum256([]byte(script))
+	m.mu.Lock()
+	if rec, ok := m.executions[executionID]; ok {
+		rec.scriptSHA256 = hex.EncodeToString(sum[:])
+	}
+	m.mu.Unlock()
+}
+
+// SucceededRecently reports whether an execution on instanceID whose script
+// hashed to scriptSHA256 reached StatusSuccess and is still within the
+// retained record window (settledRetention / maxSettledExecutions), and when
+// it settled. This is the evidence behind a how-to's session-level
+// verification stamp: the exact script text, run here, succeeded.
+func (m *Manager) SucceededRecently(instanceID, scriptSHA256 string) (time.Time, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var best time.Time
+	found := false
+	for _, rec := range m.executions {
+		if rec.instanceID != instanceID || rec.status != StatusSuccess || rec.scriptSHA256 != scriptSHA256 {
+			continue
+		}
+		if !found || rec.settledAt.After(best) {
+			best, found = rec.settledAt, true
+		}
+	}
+	return best, found
 }

@@ -265,7 +265,7 @@ submit_howto(
   confirm_submission: bool                  # outward half; default false
 ) -> {
   document,        # the schema-valid document as written locally (id assigned: slug of title)
-  local_path,      # <local-corpus>/<id>.json  (the local corpus directory, design note §5)
+  local_path,      # <local-corpus>/<id>.json  -- <broker app-data>/howto/local, see the note below
   verified,        # the session stamp, if the exact script ran successfully this session, else null
   submission?: {   # only with confirm_submission: true
     scrubbed_document,   # what leaves the machine, shown in full
@@ -275,6 +275,13 @@ submit_howto(
   notices[], guidance
 }
 ```
+
+**Where the local corpus lives [decided at step 2].** `<broker app-data>/howto/local/` (on Windows
+`%LOCALAPPDATA%\Connectors\Revit\howto\local`), not Revit's exchange root as §4d of the design note
+first said: the broker is what indexes and serves it, and in remote mode the exchange root is on the
+Revit machine while the broker runs on another. The tool returns the path on every call so a person
+can find and edit the files; the design note's §5 is corrected to match. The outbox is
+`<broker app-data>/howto/outbox/`, the session sidecar `<broker app-data>/howto/local/verified.jsonl`.
 
 **Improving an existing how-to.** With `id: <existing id>`, the tool loads that document (local
 first, then the embedded/shared corpus), overlays only the fields the call supplied, and produces

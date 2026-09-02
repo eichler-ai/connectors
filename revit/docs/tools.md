@@ -21,6 +21,7 @@ Design rationale for all of it: [`PRD.md`](PRD.md) §06 (execution), §07 (dialo
 | `search_functions` | yes | ranked search over member names + XML docs |
 | `describe_function` | yes | full signature/params/docs for one member |
 | `get_skills` | no | the built-in agent guide for using all of the above |
+| `submit_howto` | no | hand in a how-to the agent just learned (saved to the user's local corpus; optionally prepared for the maintainers' review queue) |
 
 > **Everything above is compiled into the broker binary** — the guide, these schemas, the
 > descriptions — so a broker left running from an older build serves an older connector
@@ -155,6 +156,23 @@ carries the `revit_version` that answered.
   `member_id` returns its overload list to pick from instead — `member_id` (from that list or
   from a `search_functions` result) is the reliable way to pick exactly one overload, and can be
   passed on its own.
+
+### `submit_howto`
+
+The growth mechanism of the how-to corpus (design: [`howto-corpus-design.md`](howto-corpus-design.md),
+plan: [`howto-seed-plan.md`](howto-seed-plan.md) §4). The agent hands in `title`, `task`, `script`,
+`members`, `pitfalls[]`, optional `queries`/`tags`, optional `credit_as`; to improve an existing
+how-to it passes that document's `id` with only the changed fields and a `change_note`, and the
+result is the next revision. The document is validated against the corpus schema first — a
+non-compliant submission is refused with `howto-invalid` naming every field to fix, and nothing is
+written — then saved to `<app-data>\howto\local\<id>.json`, with a `session` verification stamp if
+that exact script ran successfully in this session. Without `confirm_submission: true` that is all;
+with it, the document is scrubbed (paths, UNC, emails, addresses, the machine and user names, open
+document titles — every text field including the script's comments and literals; residue refuses
+the submission with `howto-submission-unscrubbed`) and an issue body is written to
+`<app-data>\howto\outbox\<id>.md` with a prefilled issue URL and the `gh issue create` command the
+agent runs itself. The broker never files the issue and holds no token; while the repository is
+private only collaborators can file, and the outbox file is the hand-off for anyone else.
 
 ## Script globals
 

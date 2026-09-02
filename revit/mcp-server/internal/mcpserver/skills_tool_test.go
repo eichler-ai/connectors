@@ -150,6 +150,7 @@ var registeredToolNames = []string{
 	"get_skills",
 	"undo",
 	"redo",
+	"submit_howto",
 }
 
 func TestSkillFileDocumentsEveryRegisteredTool(t *testing.T) {
