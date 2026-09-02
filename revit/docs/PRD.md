@@ -469,7 +469,7 @@ Beyond tutorial-sourced cases, the corpus explicitly includes one task per fixed
 
 The first five gaps below were identified while first drafting this PRD and resolved before the adversarial review further down ever ran. A sixth was added later, from live research rather than drafting or that review, and is still open rather than resolved — see its own status marker.
 
-**Non-Revit-framework modal dialogs** *(resolved)* — Two-stage plan (see §07): v1 ships timeout + window-inventory diagnostic only, no auto-action. v2's allowlist-based auto-dismiss has now shipped its mechanism with its first entry (the `#32770` "Virtual Memory - High Usage" box, #134) — sequenced deliberately so the heuristics are built from observed cases, not guessed.
+**Non-Revit-framework modal dialogs** *(resolved)* — Two-stage plan (see §07): v1 ships timeout + window-inventory diagnostic only, no auto-action (since #149, a pending answer whose inventory was dropped by the #138 wire-budget cap says so with a `window-inventory-skipped` notice rather than carrying nothing). v2's allowlist-based auto-dismiss has now shipped its mechanism with its first entry (the `#32770` "Virtual Memory - High Usage" box, #134) — sequenced deliberately so the heuristics are built from observed cases, not guessed.
 
 **Long-running or runaway scripts** *(resolved)* — `execute_script` takes an optional `timeout_ms`; on lapse it returns `{status:"pending"|"running", execution_id}` instead of hanging, and `poll_execution` is called until the script completes (see §06). A second `execute_script` against a still-busy instance returns `{status:"busy", execution_id}` rather than queuing silently.
 

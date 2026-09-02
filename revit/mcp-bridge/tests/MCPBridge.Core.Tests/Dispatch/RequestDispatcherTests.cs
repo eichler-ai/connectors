@@ -874,6 +874,8 @@ public class RequestDispatcherTests
         Assert.Equal("window-inventory-skipped", notice.Code);
         Assert.Equal(DiagnosticSeverity.Info, notice.Severity);
         Assert.Contains("was not attempted", notice.Message);
+        Assert.Contains("over by 24000ms", notice.Message);   // the negative budget is worded, not printed raw
+        Assert.DoesNotContain("longer timeout_ms", string.Join(" ", notice.Remedy!));
         Assert.Equal("wire-budget-too-small", notice.Detail!["reason"]);
         Assert.Contains(notice.Remedy!, r => r.Contains("Check Revit's screen"));
     }
@@ -913,6 +915,9 @@ public class RequestDispatcherTests
             Assert.Contains("\"status\":\"pending\"", json);
             // The dismissal survived the abandon; the diagnostic inventory notice did not.
             Assert.Contains("\"code\":\"dialog-auto-dismissed\"", json);
+        // #149: the dropped inventory is stated on the same answer -- both notices ride it, and neither
+        // overclaims about the other (the skipped notice says no inventory was TAKEN, not that no dialog exists).
+        Assert.Contains("\"code\":\"window-inventory-skipped\"", json);
             Assert.DoesNotContain("window-inventory-timeout-fallback", json);
         }
         finally

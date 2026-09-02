@@ -471,19 +471,25 @@ public sealed class RequestDispatcher
             reason == "ui-thread-busy"
                 ? $"poll/execute timed out while the execution was still pending/running, and the window inventory " +
                   $"was dropped after its {budgetMs}ms wire-budget slice elapsed -- a script is holding Revit's UI " +
-                  "thread, so windows could not be read in time. Nothing is known about open dialogs."
-                : $"poll/execute timed out while the execution was still pending/running, and the window inventory " +
-                  $"was not attempted: only {budgetMs}ms of the wire budget remained (timeout_ms={timeoutMs}).",
+                  "thread, so windows could not be read in time. No window inventory was taken for this answer."
+                : "poll/execute timed out while the execution was still pending/running, and the window inventory " +
+                  $"was not attempted: the wire budget for it was already exhausted (over by {Math.Max(0, -budgetMs)}ms, " +
+                  $"timeout_ms={timeoutMs}). No window inventory was taken for this answer.",
             detail: new Dictionary<string, object?>
             {
                 ["reason"] = reason,
                 ["budget_ms"] = budgetMs,
                 ["timeout_ms"] = timeoutMs,
             },
+            // ONE remedy line, and not "use a longer timeout_ms" (independent review): the inventory's budget is
+            // min(hard cap, timeout_ms + wire buffer - handler elapsed - write reserve), and on the timeout path
+            // the handler has elapsed ~timeout_ms, so timeout_ms cancels out -- a longer one changes nothing.
+            // The inventory is simply re-attempted on every timed-out poll and reports once the UI thread answers.
             remedy: new[]
             {
-                "Check Revit's screen for a modal dialog and dismiss it manually; if none, the script is simply still running.",
-                "A longer timeout_ms leaves more budget for the inventory on the next poll.",
+                "Check Revit's screen for a modal dialog and dismiss it manually; if none, the script is simply " +
+                "still running. The inventory is re-attempted on each timed-out poll and will report once the UI " +
+                "thread is free enough to answer.",
             });
 
     /// <summary>
