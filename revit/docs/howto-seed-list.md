@@ -8,7 +8,9 @@ extracted until the list is settled; edit ids, splits and merges in place.
 
 Conventions the seed follows, decided earlier and repeated so the review can check them:
 
-- `task` is one retrieval-optimised sentence; script comments carry the explanation (no `summary`).
+- Each how-to is framed as a **user task**: a modelling goal, its start point, its end point, and how
+  the result is verified (§3). `task` is that goal in one retrieval-optimised sentence; the script's
+  numbered comments carry the route and the explanation (no `summary`).
 - A "this does not exist" fact lives in the `task` sentence and a step comment of the document that
   carries the route; no standalone negative documents.
 - `pitfalls[]` reference the connector's error `code` where one exists (`script-write-outside-transaction`,
@@ -67,147 +69,175 @@ Conventions the seed follows, decided earlier and repeated so the review can che
 - **Kinds**: everything is `howto`; the `pitfall` rows (#19, #20, #29, #33) become `pitfalls[]`
   entries in the document that teaches the feature, with `code` where one applies.
 
-## 3. Per-document outline
+## 3. Per-document outline, framed as a user task
 
-Each entry: the steps the script will number, the pitfalls it carries, the expected net mutations
-the stamp asserts, and any open point for the reviewer.
+Each how-to teaches an aspect of the Revit API in service of a modelling goal the user actually has.
+So each entry is framed as that task: the **goal** in the user's words, the **start point** (what the
+model holds and what the script assumes it can find), the **end point** (what exists afterwards),
+and the **verification** (how the script proves it, and what the sweep's stamp asserts). The
+numbered steps and the pitfalls follow from that frame. The document's `task` sentence is the goal
+line; the steps are the script's comments.
 
 ### 1. `walls-create-and-join`
-Steps: find a level and a Basic wall type by name (fallback to the first `WallType` of kind Basic);
-create four walls from a closed footprint; confirm each corner joined (`AreElementsJoined`, and why
-`IsWallJoinAllowedAtEnd` is the wrong check); return ids and join results.
-Pitfalls: type lookup by name is case-sensitive and template-dependent; `Wall.Create` with `structural: false`.
-Net: `net_created: 4`, category `Walls`.
+- **Goal:** enclose a rectangular room footprint with walls of a named type on a level, joined at the corners.
+- **Start:** a project with at least one level and a Basic wall type; the footprint as four corner points in feet.
+- **End:** four walls on that level, each corner joined.
+- **Verify:** `AreElementsJoined` per corner (and why `IsWallJoinAllowedAtEnd` is the wrong check); return ids and join results. Stamp: `net_created: 4`, category `Walls`.
+- **Pitfalls:** type lookup by name is case-sensitive and template-dependent, fall back to the first Basic `WallType`; `Wall.Create` with `structural: false`.
 
 ### 2. `collect-elements-with-filters`
-Steps: all elements of a category (`OfCategory` + `WhereElementIsNotElementType`); all instances of a
-class (`OfClass`); scoped to a view; a parameter filter (`ElementParameterFilter`); counts and a
-projection back. Pitfalls: `search_functions` cannot return the collector idiom as a member (the
-recorded miss); forgetting `WhereElementIsNotElementType` doubles counts with types.
-Net: zero (read-only; `mutations` absent). Open: include a `LogicalAndFilter` step or leave for a submission.
+- **Goal:** find every element of a kind so the next step can act on them: all walls, all doors on a level, all elements visible in a view.
+- **Start:** any project; nothing is created.
+- **End:** unchanged model; a list of ids and names.
+- **Verify:** counts per filter agree with a second, independent collector (e.g. category vs class for walls); returns a projection. Stamp: no `mutations` (read-only).
+- **Pitfalls:** the collector idiom cannot come back from `search_functions` as a member (the recorded miss); omitting `WhereElementIsNotElementType` counts types too.
 
 ### 3. `element-parameters-read-write-delete`
-Steps: `LookupParameter` by name vs `get_Parameter(BuiltInParameter)`; check `StorageType` and
-`IsReadOnly` before `Set`; set a string and a double (internal units); create a scratch element,
-delete it, confirm it is gone. Pitfalls: set on a read-only parameter throws; doubles are internal
-feet, convert with `UnitUtils`. Net: zero (the scratch element is created and deleted).
+- **Goal:** read an element's parameter, change it, and remove an element the user no longer wants.
+- **Start:** a project with at least one wall; a scratch element the script creates itself.
+- **End:** the parameter set; the scratch element gone.
+- **Verify:** read the parameter back after `Set`; `GetElement` of the deleted id returns null. Stamp: zero net (created then deleted), `net_modified: 1`.
+- **Pitfalls:** `IsReadOnly`/`StorageType` before `Set`; doubles are internal feet (`UnitUtils`); `LookupParameter` by name vs `get_Parameter(BuiltInParameter)`.
 
 ### 4. `shared-parameters-file-and-binding`
-Steps: write the tab-delimited shared-parameter file with `System.IO` (there is no
-`Application.CreateSharedParameterFile`); `OpenSharedParameterFile`; create a group and definition;
-bind to a category set with `InstanceBinding` under `GroupTypeId` (2025+); verify on an instance.
-Pitfalls: `BuiltInParameterGroup` is gone; the file path must be writable and is per-machine. Net:
-`net_created` for the binding is version-dependent, assert `net_modified >= 0` only. Open: the file is
-written under the connector's files directory, not a user path, so the script stays scrub-clean.
+- **Goal:** add a project-wide shared parameter (say "Fire Rating Note") to every wall and door so schedules and tags can show it.
+- **Start:** a project with no shared-parameter file set.
+- **End:** a shared-parameter file on disk, the definition in it, bound as an instance parameter to Walls and Doors under a parameter group.
+- **Verify:** `LookupParameter` on a wall finds it and it accepts a value. Stamp: `net_modified >= 1` (binding counts are version-dependent).
+- **Pitfalls:** no `Application.CreateSharedParameterFile`, write the tab-delimited file with `System.IO` then `OpenSharedParameterFile`; `BuiltInParameterGroup` is gone, use `GroupTypeId` (2025+); the file lives under the connector's files directory so the script stays scrub-clean.
 
 ### 5. `groups-create-edit-propagate`
-The §3e draft, as written. Steps: create a group from elements, place two instances, edit through the
-group type so both change, then the two traps. Pitfalls: no group-edit-scope API; editing a member
-directly is refused with two or more placed instances (rolled back, `status=error`);
-`MoveElement` on a member's own id does nothing, move the group's id. Net: `net_created` = elements +
-group instances.
+- **Goal:** make a repeated assembly (say a furniture group) and change it once so every placed copy updates.
+- **Start:** a project with a level; the script creates the members.
+- **End:** a group type with two placed instances, both showing the edit.
+- **Verify:** read the edited property from each instance's members. Stamp: `net_created` = members + 2 instances.
+- **Pitfalls:** no group-edit-scope API; editing a member directly is refused once two or more instances are placed (rolled back, `status=error`); `MoveElement` on a member's own id silently does nothing, move the group instance's id.
 
 ### 6. `levels-grids-and-plan-views`
-Steps: `Level.Create`; find a `ViewFamilyType` for floor plans and `ViewPlan.Create` (the view does
-not come for free); look a plan up by `GenLevel`; `Grid.Create` from a line; return ids. Pitfalls:
-no plan view is created with a level; `NewRoomTag`/`NewDimension` in a non-level view fail with a
-deep `ArgumentNullException`. Net: `net_created: 3` (level, view, grid).
+- **Goal:** add a new storey with its own floor plan and structural grid so later work has somewhere to draw.
+- **Start:** a project with at least one level (for the elevation offset).
+- **End:** a level, a floor plan for it, and a grid line.
+- **Verify:** a plan view whose `GenLevel` is the new level exists; the grid is on it. Stamp: `net_created: 3`.
+- **Pitfalls:** `Level.Create` does not create a plan view, `ViewPlan.Create` with a floor-plan `ViewFamilyType` does; annotating in a view not scoped to the level fails with a deep `ArgumentNullException`.
 
 ### 7. `rooms-create-tag-area`
-Steps: pick or create a level and its plan (cites 6); `NewRoom` at a point inside a closed footprint;
-`NewRoomTag` in the plan; read `Area`; on a script-created level set `LEVEL_ROOM_COMPUTATION_HEIGHT`
-first. Pitfalls: a room on a script-created level reports zero area until the computation height is
-set; an unenclosed room has no area. Net: `net_created: 2` plus the level pieces if created.
+- **Goal:** turn an enclosed footprint into a named room with a tag and a reported area.
+- **Start:** an enclosed footprint (cites 1) on a level that has a plan view (cites 6).
+- **End:** a room, its tag in the plan, a non-zero area.
+- **Verify:** `Room.Area > 0` and the tag's `Room` is the room. Stamp: `net_created: 2`.
+- **Pitfalls:** a room on a script-created level reports zero area until `LEVEL_ROOM_COMPUTATION_HEIGHT` is set; an unenclosed room has no area.
 
 ### 8. `family-instances-place-hosted`
-Steps: find a door `FamilySymbol` by family and type name; `Activate()` it; find a host wall and its
-level; `NewFamilyInstance` with the hosted overload; verify `Host`. Pitfalls: an unactivated symbol
-throws; the point must lie on the host's location line. Net: `net_created: 1`, `net_modified: 1` (host).
+- **Goal:** put a door of a given type into an existing wall.
+- **Start:** a project with a wall and a loaded door family.
+- **End:** a door instance hosted by that wall on its level.
+- **Verify:** the instance's `Host` is the wall; its level matches. Stamp: `net_created: 1`, `net_modified: 1`.
+- **Pitfalls:** `FamilySymbol.Activate()` before `NewFamilyInstance` or it throws; the point must lie on the host's location line; symbol lookup by family and type name.
 
 ### 9. `family-document-build-load-place`
-Steps: `NewFamilyDocument` from a template; add an extrusion inside a block on that document; save
-under the connector's files directory; `LoadFamily` into the project **between** blocks (cites 18);
-place an instance inside a block. Pitfalls: `LoadFamily` needs the target not modifiable; the two-call
-split; the created family document is headless (cites 19). Net: `net_created: 2` on the project
-(family + instance). Open: this is the largest document; it stays one because the feature is one.
+- **Goal:** create a custom component the project lacks (a simple block), bring it in, and place one.
+- **Start:** a project and a family template on the Revit install.
+- **End:** a saved family file, loaded into the project, one instance placed.
+- **Verify:** `Family` by name exists in the project; the instance's symbol belongs to it. Stamp: `net_created: 2` on the project.
+- **Pitfalls:** `LoadFamily` needs the target not modifiable, load between blocks (cites 18); the two-call split; the created family document is headless (cites 19).
 
 ### 10. `dimensions-in-plan-views`
-Steps: level-scoped plan (cites 6); references from two walls' location lines; `NewDimension` with a
-`ReferenceArray`; optional dimension type. Pitfalls: needs a view of the walls' level; references
-from `GetGeometryObjectFromReference` vs location-curve references. Net: `net_created: 1`.
+- **Goal:** annotate the distance between two walls on the floor plan.
+- **Start:** two parallel walls on a level with a plan view (cites 1, 6).
+- **End:** a dimension between them in that plan.
+- **Verify:** the dimension's value equals the wall spacing within tolerance. Stamp: `net_created: 1`.
+- **Pitfalls:** the view must be scoped to the walls' level; location-curve references vs geometry references.
 
 ### 11. `schedules-create-with-fields`
-Steps: `ViewSchedule.CreateSchedule` for a category; add fields from `GetSchedulableFields`; a sort
-field; read the body back with `GetTableData`/`GetCellText`. Pitfalls: field lookup by parameter id,
-not name. Net: `net_created: 1`.
+- **Goal:** produce a wall schedule with the columns the user asked for, sorted.
+- **Start:** a project with walls.
+- **End:** a schedule view with those fields, sorted by one of them.
+- **Verify:** read the body back with `GetTableData`/`GetCellText` and check the header row and row count. Stamp: `net_created: 1`.
+- **Pitfalls:** fields come from `GetSchedulableFields` by parameter id, not by display name.
 
 ### 12. `floors-create-from-loop`
-Steps: a closed `CurveLoop`; floor type lookup; `Floor.Create(doc, loops, typeId, levelId)` (2022+
-signature); return the id. Pitfalls: open loops throw; the loop must be planar. Net: `net_created: 1`.
+- **Goal:** put a floor slab of a named type under an enclosed footprint.
+- **Start:** a level and a closed footprint (cites 1).
+- **End:** a floor on that level.
+- **Verify:** the floor's `LevelId` and its sketch area against the footprint. Stamp: `net_created: 1`.
+- **Pitfalls:** open or non-planar loops throw; the 2022+ `Floor.Create(doc, loops, typeId, levelId)` signature.
 
 ### 13. `sheets-viewports-and-title-blocks`
-Steps: find a title-block symbol, `ViewSheet.Create`; find a placeable view; `Viewport.CanAddViewToSheet`
-then `Viewport.Create`; to change the title block, create the sheet with the right type (never set
-`SheetTitleBlockId` on a live sheet: Revit crash, issue #113). Pitfalls: the recorded search miss for
-`ViewSheet.Create` (issue #65); `Viewport.Create` throws for a view already on a sheet. Net:
-`net_created: 2`.
+- **Goal:** issue a floor plan on a sheet with the right title block.
+- **Start:** a project with a title-block family and a plan view not yet on a sheet.
+- **End:** a sheet with that title block and the plan placed on it.
+- **Verify:** `GetAllPlacedViews` contains the view; the title block instance on the sheet is the requested type. Stamp: `net_created: 2`.
+- **Pitfalls:** create the sheet with the right title block, never set `SheetTitleBlockId` on a live sheet (Revit crash, issue #113); `Viewport.CanAddViewToSheet` first, a view already on a sheet throws; the recorded search miss for `ViewSheet.Create` (issue #65).
 
 ### 14. `text-notes-and-annotation-text`
-Steps: `TextNote.Create` in a view with a type; read `Text` back and trim the appended `\r`. Pitfalls:
-the undocumented trailing `\r`. Net: `net_created: 1`.
+- **Goal:** add a note to a drawing and read notes back for review.
+- **Start:** a view and a text note type.
+- **End:** the note in the view.
+- **Verify:** read `Text` back and compare after trimming. Stamp: `net_created: 1`.
+- **Pitfalls:** `TextNote.Text` comes back with an undocumented trailing `\r`.
 
 ### 15. `export-views-dwg`
-Steps: inside a block, create or find the view to export; between blocks, `Document.Export` with
-`DWGExportOptions` to the connector's files directory; publish the file (cites 21). Pitfalls:
-`Export` inside a block fails with `script-target-must-not-be-modifiable` (cites 18); the recorded
-query hit (`Document.Export` rank 6). Net: zero or `net_created: 1` if the view was created.
+- **Goal:** hand a consultant a DWG of a plan.
+- **Start:** a plan view (created in a block if absent).
+- **End:** a DWG file the user can fetch (cites 21).
+- **Verify:** the file exists with non-zero size; publish it. Stamp: zero, or `net_created: 1` if the view was created.
+- **Pitfalls:** `Document.Export` inside a block fails with `script-target-must-not-be-modifiable`, run it between blocks (cites 18); the recorded query hit ranks.
 
 ### 16. `stairs-with-edit-scope`
-Steps: `StairsEditScope.Start` between blocks; the run and landing inside one `WithTransaction`;
-`Commit` between blocks; verify the stairs. Pitfalls: `Commit` while a connector transaction is open
-(`script-target-must-not-be-modifiable`); `Connector.Settle` ordering. Net: `net_created` ≥ 1 (stairs).
+- **Goal:** add a straight stair between two levels.
+- **Start:** two levels (cites 6).
+- **End:** a stairs element with a run and landing.
+- **Verify:** the stairs' base and top levels match; `mutations` shows the stairs category. Stamp: `net_created >= 1`.
+- **Pitfalls:** `StairsEditScope.Start` and `Commit` between blocks, the run inside one (`script-target-must-not-be-modifiable` otherwise); `Connector.Settle` ordering.
 
 ### 17. `transactions-write-inside-blocks`
-Steps: a read at top level; a write outside a block and its code (`script-write-outside-transaction`);
-the same write inside `Connector.WithTransaction`; the `Func<T>` form returning the body's value; a
-body that throws is rolled back even though the script catches, the document stays usable; a
-`SubTransaction` savepoint with `using` + `Commit`/`RollBack`. Pitfalls: those codes;
-`script-subtransaction-needs-transaction`; `Dispose` alone rolls back. Net: exactly what the
-committed blocks created, nothing from the rolled-back ones.
+- **Goal:** make a change safely so a mistake rolls back and a success is one undo step.
+- **Start:** any project.
+- **End:** exactly the committed changes, nothing from the rolled-back attempts.
+- **Verify:** counts before/after each block; the returned value from the `Func<T>` form. Stamp: only what the committed blocks created.
+- **Pitfalls:** `script-write-outside-transaction`; a body that throws is rolled back even if the script catches, and the document stays usable; `SubTransaction` as a savepoint (`script-subtransaction-needs-transaction`; `Dispose` alone rolls back).
 
 ### 18. `self-transacting-calls-between-blocks`
-Steps: the rule and the shape (block, then the call at top level, then a block); `LoadFamily` and
-`RequestViewChange` as the worked examples; what the error looks like. Pitfalls:
-`script-target-must-not-be-modifiable`; #160's finding that these commits used to be rolled back.
-Net: `net_created: 1` (the loaded family).
+- **Goal:** load a family or switch the active view in the same run as a write.
+- **Start:** a project with a family file available and a second view.
+- **End:** the family loaded, the view changed, the write committed.
+- **Verify:** family present; `ActiveView` changed. Stamp: `net_created: 1`.
+- **Pitfalls:** `LoadFamily`, `Export`, `RequestViewChange`, `EditScope.Commit` inside a block fail with `script-target-must-not-be-modifiable`; run them between blocks (#160's finding that such commits used to be rolled back).
 
 ### 19. `documents-create-write-and-close`
-Steps: `Application.NewProjectDocument`; the created document is headless (`active: false`, no
-window); write into it in the same run; on a later run route by `document_id` (`UIDocument` is null);
-close it by routing the call elsewhere and finding it by title. Pitfalls: closing while routed at it
-fails for that call only; activation is refused inside a block; a throw rolls created documents back
-too; an unknown `document_id` fails with the candidate list. Net: on the created document,
-`net_created` of what it wrote.
+- **Goal:** build something in a fresh scratch project, keep it on disk, and tidy up.
+- **Start:** a connected Revit; no scratch document.
+- **End:** a new document written to, reachable later by `document_id`, then closed.
+- **Verify:** the document appears in `list_instances` with `active: false`; the write is visible on the next run; it is absent after the close. Stamp: on the created document, what it wrote.
+- **Pitfalls:** the created document is headless (no window); `UIDocument` is null when routed there; closing while routed at it fails for that call only, route elsewhere and find it by title; a throw rolls created documents back; an unknown `document_id` fails with the candidate list.
 
 ### 20. `lifecycle-settle-save-close`
-Steps: write; `Connector.Settle(keep)`; `SaveAs` under the connector's files directory with
-`confirm_lifecycle`; the discard-then-close variant. Pitfalls: `script-lifecycle-confirmation-required`;
-Revit's transaction-phase check precedes event dispatch. Net: zero after discard, the writes after keep.
+- **Goal:** save the work under a new name (or discard it and close) at the end of the run.
+- **Start:** a document with uncommitted work in the run.
+- **End:** the file saved as, or the document closed clean.
+- **Verify:** the saved file exists; the discarded document shows zero mutations. Stamp: zero after discard, the writes after keep.
+- **Pitfalls:** `Connector.Settle` first; `script-lifecycle-confirmation-required` without `confirm_lifecycle`; Revit's transaction-phase check precedes event dispatch.
 
 ### 21. `files-publish-and-audit-trail`
-Steps: write a file under `Connector.FilesDirectory`; publish it; the overwrite flag; where the run's
-script and log are kept. Pitfalls: overwrite fails per file unless the flag is set. Net: zero.
+- **Goal:** get a report file the script wrote into the user's hands, and find the run later.
+- **Start:** any project.
+- **End:** the file published; the run's script and log located.
+- **Verify:** the published path listed by the files tool; overwrite refused without the flag then accepted with it. Stamp: zero.
+- **Pitfalls:** overwrite fails per file unless the flag is set.
 
 ### 22. `results-return-values-and-mutations`
-Steps: return a projection (`new { id, name }` list) not an element; `output` (console) vs
-`return_value`; read `mutations` (`net_*`, `by_category`, the `(uncategorized)` bucket) to confirm
-the run did what it says. Pitfalls: an element return is a no-display-form marker; caught throws
-contribute nothing to the report. Net: `net_created: 1` with the category named.
+- **Goal:** report what the run found and prove what it changed.
+- **Start:** any project; the script creates one element.
+- **End:** a projection returned; `mutations` naming the created category.
+- **Verify:** `return_value` is the projection, `output` is the console text, `mutations.net_created: 1`. Stamp: `net_created: 1` with the category.
+- **Pitfalls:** an element return is a no-display-form marker; caught throws contribute nothing to the report; the `(uncategorized)` bucket.
 
 ### 23. `undo-redo-and-run-labels`
-Steps: run with a label; `undo_last_run` with confirmation; `redo`; how the label distinguishes the
-agent's work in Revit's undo history. Pitfalls: undo without confirmation is refused. Net: `net_created: 1`
-by the labelled run, and zero on the model after the undo.
+- **Goal:** try a change, look at it, and take it back without touching the person's own work.
+- **Start:** any project.
+- **End:** the model as found.
+- **Verify:** the labelled run's element exists, is gone after undo, back after redo, gone again. Stamp: `net_created: 1` by the run; zero on the model after the final undo.
+- **Pitfalls:** undo without confirmation is refused; the label is how the agent's step is told from the person's in Revit's undo history.
 
 ## 4. Questions for the reviewer
 
