@@ -17,6 +17,7 @@ Plus:
 
 - [`docs/quickstart.md`](./docs/quickstart.md) — build from source, install, run a first script
 - [`docs/tools.md`](./docs/tools.md) — the MCP tools, script globals, and error codes
+- [`docs/howto-corpus-design.md`](./docs/howto-corpus-design.md) / [`docs/howto-seed-plan.md`](./docs/howto-seed-plan.md) — the how-to corpus: design rationale, and how it is seeded, verified and shipped
 
 ## Design
 
@@ -28,8 +29,10 @@ See the `revit-connector-development` skill (`.claude/skills/revit-connector-dev
 
 ## Status
 
-Phases 1–3 shipped and merged: core execution loop, dialog suppression + multi-instance, API
-discovery + file exchange, plus Revit 2025 multi-version support (Phase 6, partial — 2026 and
-Marketplace submission remain open). Validation corpus (Phase 4) has its harness scaffolding but
-no corpus yet; signed distribution (Phase 5) hasn't started. See the PRD's Phased Roadmap (§15)
-for the authoritative per-phase status.
+Shipped and merged: core execution loop, dialog suppression + multi-instance, API discovery +
+file exchange, Revit 2025 alongside 2027 (Phase 6, partial — 2026 and Marketplace submission
+remain open), the release pipeline with self-signed builds and a per-component installer
+(Phase 5; a CA certificate is deferred), and the how-to corpus (Phase 8: `search_howtos` /
+`describe_howto` / `submit_howto`, seeded from the harness and verified per Revit version).
+The validation corpus (Phase 4) is in progress. See the PRD's Phased Roadmap (§15) for the
+authoritative per-phase status.

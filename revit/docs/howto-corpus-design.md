@@ -1,6 +1,6 @@
 # How-to corpus — searchable, versioned, community-fed worked examples
 
-**Status: design (no code).** Resolves the open point left by
+**Status: implemented** (PRs #159, #161, #165, #166, #170–#175, 2026-09-02; what landed per step is in [`howto-seed-plan.md`](howto-seed-plan.md) §6, the agent-facing summary in [`PRD.md`](PRD.md) §08 "How-to corpus", and the tool contracts in [`tools.md`](tools.md)). Where this note and the code differ, the code and the seed plan win; the note is kept as the design rationale. Originally it resolved the open point left by
 [`search-ranking-redesign.md`](search-ranking-redesign.md) §8.5 / §10.4: `search_functions` now
 finds API *members* by meaning, but the idiom-shaped tasks it still misses ("get all walls" is a
 `FilteredElementCollector` pattern, not a member) are how-to territory, and `get_skills` cannot grow
@@ -14,7 +14,7 @@ sidecar, §3) and [`howto-example-join-walls.json`](howto-example-join-walls.jso
 extracted by hand from `test-harness/validation_corpus_test.go` case #2 and validated against the
 schema). The example carries **no verification**: its `script` replaces the test's fixture preamble
 with `var doc = Document;`, so no harness run has executed that exact text, and a stamp for it would be
-declared rather than earned — which §3 forbids. The first sweep (§3) will write the stamp.
+declared rather than earned — which §3 forbids. The shipped seed document for this task is `walls-create-and-join`, which the first sweep stamped on both versions.
 
 This note was revised after an independent review (PR #159); the review's design questions are
 carried in §9 rather than answered by assertion.
@@ -293,9 +293,9 @@ entry for 8.5 points here.
 
 ## 9. Open decisions (from review)
 
-- **D1 — corpus cadence.** Does the shared corpus really ship more often than the broker? If not,
-  drop §5's fetch machinery and ship the corpus embedded, in the broker release. Decide from the
-  submission rate after the seed lands; the design works either way.
+- **D1 — corpus cadence.** **Resolved "bundled"** (seed plan §1): the corpus ships embedded in the
+  broker release, and the release manifest's per-component install makes a corpus-only release
+  cheap. §5's fetch channel was not built; revisit if the submission rate outgrows release cadence.
 - **D2 — trust model for stamps.** The sidecar makes it structural (only the harness writes it), but
   who runs the harness that writes the *shared* sidecar, and how does the broker know a sidecar line
   came from it? Today: it ships in the same digest-checked release asset. A signed sidecar is the
@@ -311,7 +311,10 @@ entry for 8.5 points here.
   on a post-#146 broker), and should the sweep run on every connector release, not only on Revit
   version changes? #146's transaction-model change is the first concrete case.
 
-## 10. Implementation order [proposed]
+## 10. Implementation order [superseded]
+
+Superseded by the seed plan's §6, which is the order that was actually followed and records what
+landed in each step. Kept for the record:
 
 1. Schemas + validator package (Go; document and sidecar), and the harness extractor producing the
    seed `revit/mcp-server/internal/howto/corpus/<id>.json` from the annotated tests (≈ a dozen documents), with a check that a
