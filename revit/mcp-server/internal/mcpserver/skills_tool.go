@@ -17,10 +17,12 @@ package mcpserver
 import (
 	"context"
 	_ "embed"
+	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/buildinfo"
+	"github.com/eichler-ai/connectors/revit/mcp-server/internal/howto"
 )
 
 //go:embed skill.md
@@ -61,6 +63,10 @@ type SkillBuild struct {
 	// Note tells the reader how to check this build against their checkout,
 	// and what to do when it is behind.
 	Note string `json:"note"`
+	// HowToCorpus identifies the shared how-to corpus compiled into this
+	// broker (document count, content hash, Revit versions verified on), so
+	// an agent and a maintainer can tell which corpus answered.
+	HowToCorpus *howto.Version `json:"howto_corpus,omitempty"`
 }
 
 // GetSkillsOut carries the document plus its format, so a caller doesn't have
@@ -79,6 +85,10 @@ type GetSkillsOut struct {
 // only ever cover the degraded path.
 func buildSkillsOut(version string, info buildinfo.Info) GetSkillsOut {
 	hash := buildinfo.ContentHash(skillFile)
+	var corpus *howto.Version
+	if _, _, ver, err := howto.Embedded(); err == nil {
+		corpus = &ver
+	}
 	return GetSkillsOut{
 		Format: "markdown",
 		Skill:  skillFile,
@@ -89,6 +99,7 @@ func buildSkillsOut(version string, info buildinfo.Info) GetSkillsOut {
 			Modified:     info.Modified,
 			SkillHash:    hash,
 			Note:         skillNote(version, info, hash),
+			HowToCorpus:  corpus,
 		},
 	}
 }
@@ -131,8 +142,12 @@ func skillFooter(b SkillBuild) string {
 		// running -- so it must not be presented as if it did.
 		rev += ", tree not clean"
 	}
+	corpus := ""
+	if b.HowToCorpus != nil {
+		corpus = " " + strings.ToUpper(b.HowToCorpus.String()[:1]) + b.HowToCorpus.String()[1:] + "."
+	}
 	return "\n\n---\n\n**Provenance.** Served by revit-mcp-server " + b.Version +
-		" (revision " + rev + "). " + b.Note + "\n"
+		" (revision " + rev + ")." + corpus + " " + b.Note + "\n"
 }
 
 // RegisterSkills adds get_skills to s. version is the broker's own release

@@ -83,8 +83,9 @@ func startClient(t *testing.T) (*mcpclient.Client, listInstancesOut) {
 
 type listInstancesOut struct {
 	Instances []struct {
-		InstanceID string `json:"instance_id"`
-		Documents  []struct {
+		InstanceID   string `json:"instance_id"`
+		RevitVersion string `json:"revit_version"`
+		Documents    []struct {
 			DocumentID string `json:"document_id"`
 			Title      string `json:"title"`
 			Active     bool   `json:"active"`

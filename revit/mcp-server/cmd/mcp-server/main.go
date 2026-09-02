@@ -36,6 +36,7 @@ import (
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/buildinfo"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/discovery"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/execution"
+	"github.com/eichler-ai/connectors/revit/mcp-server/internal/howto"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/mcpserver"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/registry"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/semsearch/crossenc"
@@ -279,6 +280,11 @@ func main() {
 
 	if *showVersion {
 		fmt.Println(serverName + " " + versionLine())
+		if _, _, ver, err := howto.Embedded(); err == nil {
+			fmt.Println(ver.String())
+		} else {
+			fmt.Println("how-to corpus: unavailable: " + err.Error())
+		}
 		return
 	}
 	if *showSearchModels {
