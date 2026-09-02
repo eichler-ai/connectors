@@ -1389,15 +1389,14 @@ return "discarded";
 
 // TestUndoLabelIsAcceptedByRevit is the live half of #146 Phase 2b. Revit's
 // Undo history is not API-inspectable, so what a person SEES ("MCP: create
-// L1 walls" instead of "MCP Bridge Script") is a visual check, recorded on
-// the epic. What CAN be pinned live is that both label paths run to
-// completion against real Revit: an agent label names the transaction and
-// group from creation (Revit must accept the sanitised string as a
-// transaction name), and the derived path calls TransactionGroup.SetName
-// between the ambient commit and Assimilate -- a call whose legality at that
-// moment only Revit can confirm. SetName failures are swallowed by design,
-// so this test also asserts the write itself landed, which a rejected
-// rename could not have undone but a thrown-and-unswallowed one would.
+// L1 walls" instead of "MCP Bridge Script") is a visual check, to be recorded
+// on the epic by whoever performs it. What CAN be pinned live is that both
+// label paths run to completion against real Revit AND that the derived
+// path's TransactionGroup.SetName -- called between the ambient commit and
+// Assimilate, a moment whose legality only Revit can confirm -- was accepted:
+// a refused rename is reported as an `undo-label-not-applied` notice, so its
+// absence here is the assertion (the first version of this test could not
+// tell a refused rename from an applied one; independent review).
 func TestUndoLabelIsAcceptedByRevit(t *testing.T) {
 	c, instanceID, documentID := targetDocument(t)
 	fixtureTitle := createBlankFixtureDocument(t, c, instanceID, documentID)
@@ -1427,6 +1426,11 @@ return "derived";
 		}
 		if out.Mutations == nil || out.Mutations.Created != 2 {
 			t.Errorf("want created:2 so the derived label would read 'MCP: 2 Levels created': %+v", out.Mutations)
+		}
+		for _, n := range out.Notices {
+			if n.Code == "undo-label-not-applied" {
+				t.Errorf("Revit refused TransactionGroup.SetName between commit and Assimilate -- the derived-label tier is a no-op live: %s", n.Message)
+			}
 		}
 	})
 }

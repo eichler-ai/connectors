@@ -156,7 +156,7 @@ internal sealed class TransactionScriptExecutor
             var commit = transactions.CommitAll(
                 undoLabel: agentLabel is not null
                     ? null
-                    : () => UndoLabel.FromReport(BuildMutationReport(mutations, transactions)));
+                    : documentId => UndoLabel.FromReport(mutations.BuildForDocument(documentId)));
             var notices = CombinedNotices(commit.CommitFailures);
             notices.AddRange(settlements.Select(SettleNotice));
             // #122: report created documents on the success path too -- they remain open and unsaved, and a
@@ -181,6 +181,20 @@ internal sealed class TransactionScriptExecutor
             // DocumentChanged for that rollback is not something this code should have to know (the live
             // harness records it); the tracker drops them by name either way. Named by DESCRIPTION rather
             // than id in SettlementRecord, so match on the ids the transaction set tracked for them.
+            // #146 Phase 2b: a rename that Revit refused is reported, not hidden -- the label is the human's
+            // signal, and the only way to learn the premise (SetName legal here, group name shown) has
+            // broken is to say so.
+            foreach (var failure in transactions.UndoLabelFailures)
+            {
+                notices.Add(DiagnosticRecord.Create(
+                    DiagnosticSeverity.Info,
+                    "undo-label-not-applied",
+                    DiagnosticSource.Execution,
+                    $"The run's Undo entry could not be renamed for {failure}; it keeps its default name. The writes themselves are unaffected.",
+                    detail: null,
+                    remedy: null));
+            }
+
             var report = BuildMutationReport(mutations, transactions);
             return ScriptExecutionOutcome.Completed(outcome.ReturnValue, outcome.StdOut, notices, globals.PublishedFiles, report);
         }

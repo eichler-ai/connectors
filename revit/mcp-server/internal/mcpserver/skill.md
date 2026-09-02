@@ -122,7 +122,7 @@ Autodesk.Revit.DB.Level.Create(doc, 10.0);       // just write to it — no tran
 invisible to the person. Making it visible takes **two calls**:
 `UIApplication.OpenAndActivateDocument` needs a path, so `Connector.Settle(doc, true)` then `SaveAs` in
 the creating run, then activate from a second call routed at any document **other than the active one**
-(activation is refused while the *active* document is modifiable, and your call's target always is).
+(activation is refused only while the *active* document is modifiable, and your call's target always is).
 
 **The raw `UIApplication.Application.NewProjectDocument`/`NewFamilyDocument` still work but return a
 document nothing has opened for writing** — writing to it throws

@@ -198,9 +198,6 @@ public sealed class RequestDispatcher
         string? label;
         try
         {
-            // #146 Phase 2b: optional, agent-supplied name for this run's Undo entry. Read per request
-            // like the flags below -- it is about THIS run, not the script text.
-            label = request.GetOptionalString("label");
             executionId = request.GetRequiredString("execution_id");
             script = request.GetRequiredString("script");
             documentId = request.GetOptionalString("document_id") ?? "";
@@ -218,6 +215,11 @@ public sealed class RequestDispatcher
             // cache. Defaults to false -- an agent that never heard of the flag cannot trip these members
             // by accident, which is the entire point of gating them.
             confirmLifecycleActions = request.GetOptionalBool("confirm_lifecycle_actions", false);
+
+            // #146 Phase 2b: optional, agent-supplied name for this run's Undo entry. Read per request
+            // like the flags above -- it is about THIS run, not the script text -- and after the required
+            // params, so a request missing one is told about that first.
+            label = request.GetOptionalString("label");
 
             // document_id now ROUTES (v1 integrated review; this closed the long-standing
             // accepted-but-ignored gap CONVENTIONS.md's advertised-but-unimplemented clause was written

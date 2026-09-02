@@ -110,6 +110,27 @@ public class TransactionScriptExecutorTests
     }
 
     [Fact]
+    public async Task ARefusedRename_IsReportedAsANotice_AndTheRunStillSucceeds()
+    {
+        var executor = NewExecutor();
+        var document = new FakeDocumentAdapter();
+        var uiApp = new FakeUiApplicationAdapter { ActiveUiDocument = new FakeUiDocumentAdapter { Document = document } };
+        document.OnTransactionCommit = () =>
+        {
+            document.LastTransactionGroup!.ThrowOnSetName = true;
+            uiApp.EmitChange(new DocumentChange(document.DocumentId, DocumentChangeOperation.Committed, "TransactionCommitted", Array.Empty<string>(),
+                new[] { new ChangedElement(1, "Walls") }, Array.Empty<ChangedElement>(), Array.Empty<long>(), categoriesTruncated: false));
+        };
+
+        var outcome = await executor.ExecuteAsync(document, uiApp, null, "1 + 1", CancellationToken.None);
+
+        Assert.True(outcome.Success);
+        var notice = Assert.Single(outcome.Notices, n => n.Code == "undo-label-not-applied");
+        Assert.Contains("simulated SetName refusal", notice.Message);
+        Assert.NotNull(outcome.Mutations);   // the writes themselves are unaffected
+    }
+
+    [Fact]
     public async Task WithoutALabelAndWithoutChanges_TheGroupKeepsItsDefaultName()
     {
         var executor = NewExecutor();

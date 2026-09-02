@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Linq;
 using MCPBridge.Core.Execution;
 using Xunit;
 
@@ -41,10 +42,29 @@ public class UndoLabelTests
     }
 
     [Fact]
+    public void FromAgentLabel_DropsUnicodeLineSeparatorsAndFormatCharacters()
+    {
+        // U+2028/U+2029 are not char.IsControl but still break a line; U+202E (bidi override) and U+200D
+        // (zero-width joiner) are invisible and can make the entry render as something other than what it
+        // says -- in the one UI element that exists so a person can see what the agent did.
+        Assert.Equal("MCP: a b c", UndoLabel.FromAgentLabel("a\u2028b\u2029c"));
+        Assert.Equal("MCP: safe text", UndoLabel.FromAgentLabel("safe\u202E \u200Dtext"));
+    }
+
+    [Fact]
     public void FromAgentLabel_CapsLength_WithAnEllipsis()
     {
         var label = UndoLabel.FromAgentLabel(new string('x', 500))!;
         Assert.Equal(UndoLabel.MaxLength, label.Length);
+        Assert.EndsWith("\u2026", label);
+    }
+
+    [Fact]
+    public void FromAgentLabel_NeverSplitsASurrogatePair()
+    {
+        var label = UndoLabel.FromAgentLabel(string.Concat(Enumerable.Repeat("\U0001F600", 200)))!;
+        Assert.True(label.Length <= UndoLabel.MaxLength);
+        Assert.False(char.IsHighSurrogate(label[label.Length - 2]), "a lone high surrogate was left before the ellipsis");
         Assert.EndsWith("\u2026", label);
     }
 
@@ -66,8 +86,15 @@ public class UndoLabelTests
     [Fact]
     public void FromReport_ListsEveryKindOfChange_InCreatedModifiedDeletedOrder()
     {
+        // Category names are plural in Revit, so a count of one is phrased around "element".
         var report = Report(created: 2, modified: 1, deleted: 4, categories: new[] { ("Levels", 2, 1) });
-        Assert.Equal("MCP: 2 Levels created, 1 Levels modified, 4 elements deleted", UndoLabel.FromReport(report));
+        Assert.Equal("MCP: 2 Levels created, 1 element modified (Levels), 4 elements deleted", UndoLabel.FromReport(report));
+    }
+
+    [Fact]
+    public void FromReport_DoesNotNameTheUncategorisedBucketAsACategory()
+    {
+        Assert.Equal("MCP: 3 elements created", UndoLabel.FromReport(Report(created: 3, categories: ("(none)", 3, 0))));
     }
 
     [Fact]

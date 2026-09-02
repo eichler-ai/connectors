@@ -21,9 +21,16 @@ internal sealed class FakeTransactionGroupAdapter : ITransactionGroupAdapter
 
     public string? LastName { get; private set; }
 
+    public bool ThrowOnSetName { get; set; }
+
     public void SetName(string name)
     {
         Calls.Add("SetName");
+        if (ThrowOnSetName)
+        {
+            throw new InvalidOperationException("simulated SetName refusal");
+        }
+
         LastName = name;
     }
 
