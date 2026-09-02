@@ -67,11 +67,12 @@ running some other script (one at a time per instance, it's Revit's UI thread); 
 `execution_id` is that script's.
 
 > **`mutations`** (present only on a `success` that changed something): the run's NET effect across
-> every document it changed — `created`, `modified`, `deleted` counts, `by_category` created/modified
-> tallies keyed by Revit category name, and `truncated` (a per-run cap on category resolution or id
+> every document it changed — `net_created`, `net_modified`, `net_deleted` counts, `by_category`
+> `net_created`/`net_modified` tallies keyed by Revit category name (`(uncategorized)` for elements with
+> no category), and `truncated` (a per-run cap on category resolution or id
 > retention was hit; totals still exact). Net means an element created and deleted in the same run
 > contributes nothing, and a created-then-edited one counts once, as created. Documents the script
-> settled with `keep: false` are left out. `modified` is noisy by nature (Revit marks dependents modified
+> settled with `keep: false` are left out. `net_modified` is noisy by nature (Revit marks dependents modified
 > on regeneration). Absent on a read-only run and on every failed one — including a partial commit or a
 > failure after `Settle(keep: true)`, where some writes may still have landed; `notices[]` says so.
 > Use it instead of a read-after-write script.

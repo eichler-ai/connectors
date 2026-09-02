@@ -39,7 +39,7 @@ public class ExecutionResultMessageTests
 
         var json = ExecutionResultMessage.FromRecord(Id, record);
 
-        Assert.Contains("\"mutations\":{\"created\":2,\"modified\":1,\"deleted\":0,\"by_category\":{\"Walls\":{\"created\":2,\"modified\":0},\"Levels\":{\"created\":0,\"modified\":1}},\"truncated\":false}", json);
+        Assert.Contains("\"mutations\":{\"net_created\":2,\"net_modified\":1,\"net_deleted\":0,\"by_category\":{\"Walls\":{\"net_created\":2,\"net_modified\":0},\"Levels\":{\"net_created\":0,\"net_modified\":1}},\"truncated\":false}", json);
 
         var readOnly = ExecutionRecord.CreatePending("exec-2", "1+1", 600_000, Now);
         readOnly.MarkRunning(Now);

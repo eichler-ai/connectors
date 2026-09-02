@@ -42,7 +42,7 @@ internal sealed class MutationTracker
     /// <summary>Per-document cap on ids kept for netting and categorisation. 200k longs plus category references is a few MB, an acceptable ceiling for a per-run object.</summary>
     internal const int RetainedIdCap = 200_000;
 
-    private const string NoCategory = "(none)";
+    private const string NoCategory = "(uncategorized)";
 
     private sealed class DocumentTally
     {

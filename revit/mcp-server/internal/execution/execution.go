@@ -104,17 +104,17 @@ type Result struct {
 // resolution hit the add-in's cap, so by_category undercounts while the
 // totals stay exact. Keep in step with MCPBridge.Core.Execution.MutationReport.
 type MutationReport struct {
-	Created    int                      `json:"created"`
-	Modified   int                      `json:"modified"`
-	Deleted    int                      `json:"deleted"`
+	Created    int                      `json:"net_created"`
+	Modified   int                      `json:"net_modified"`
+	Deleted    int                      `json:"net_deleted"`
 	ByCategory map[string]CategoryTally `json:"by_category"`
 	Truncated  bool                     `json:"truncated"`
 }
 
 // CategoryTally is one by_category entry of a MutationReport.
 type CategoryTally struct {
-	Created  int `json:"created"`
-	Modified int `json:"modified"`
+	Created  int `json:"net_created"`
+	Modified int `json:"net_modified"`
 }
 
 // FileRecord mirrors the add-in's per-published-file report (PRD §09):
