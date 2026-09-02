@@ -441,7 +441,6 @@ func TestDenylistRejectsOwnTransaction(t *testing.T) {
 	for _, tc := range []struct{ name, member, script string }{
 		{"Transaction", "Autodesk.Revit.DB.Transaction", `using (var tx = new Autodesk.Revit.DB.Transaction(Document, "mine")) { tx.Start(); tx.Commit(); } return "ran";`},
 		{"TransactionGroup", "Autodesk.Revit.DB.TransactionGroup", `using (var tg = new Autodesk.Revit.DB.TransactionGroup(Document, "mine")) { tg.Start(); tg.Assimilate(); } return "ran";`},
-		{"SubTransaction", "Autodesk.Revit.DB.SubTransaction", `using (var st = new Autodesk.Revit.DB.SubTransaction(Document)) { st.Start(); st.Commit(); } return "ran";`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rej := runRejectedScript(t, c, instanceID, documentID, tc.script)

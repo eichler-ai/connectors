@@ -16,7 +16,7 @@ namespace MCPBridge.Core.Execution;
 /// 1. TRANSACTION OWNERSHIP -- the load-bearing one. TransactionScriptExecutor opens an ambient
 ///    TransactionGroup + Transaction around every script run, before compilation even happens, and
 ///    Revit permits only one open Transaction per Document. A script constructing its own
-///    Transaction/TransactionGroup/SubTransaction against that same document therefore always fails,
+///    Transaction/TransactionGroup against that same document therefore always fails,
 ///    and worse, could leave the executor's own transaction state ambiguous. This check is what makes
 ///    exposing the real Document safe at all; everything else a script does with the real API (reads,
 ///    writes, element queries, geometry) rides the ambient transaction correctly with no new
@@ -102,16 +102,29 @@ internal static class ScriptApiDenylist
 {
     private const string TransactionType = "Autodesk.Revit.DB.Transaction";
     private const string TransactionGroupType = "Autodesk.Revit.DB.TransactionGroup";
-    private const string SubTransactionType = "Autodesk.Revit.DB.SubTransaction";
 
     /// <summary>
     /// Types a script must never construct -- see check 1 in the class doc comment.
+    ///
+    /// <c>Autodesk.Revit.DB.SubTransaction</c> is DELIBERATELY ABSENT (#146 Phase 1, #143). It sat here
+    /// from the first version by association -- "no transaction of any kind" -- but it fails check 1's
+    /// own test: it is not a competing transaction. A SubTransaction can only be started INSIDE an open
+    /// Transaction, commits into that transaction (so the §07 failure preprocessor installed on the
+    /// connector's commit still sees every write), and cannot escape the run's rollback boundary. What
+    /// it adds is the one thing a connector-owned transaction otherwise lacks: an intra-run SAVEPOINT --
+    /// try a slice, roll just that slice back, carry on. Verified live (Revit 2025): create-in-sub,
+    /// RollBack, element gone, ambient writes intact. Its "no open transaction" failure is mapped by
+    /// RequestDispatcher to name Connector.WithTransaction. The one hazard, also live-verified: a
+    /// SubTransaction LEFT OPEN when the enclosing block commits is accepted silently (slice kept, no
+    /// exception) and Revit 2025 then crashed on the next Document.Close -- the connector cannot see the
+    /// script's SubTransaction objects to guard it, so skill.md and the remedies insist on `using` +
+    /// Commit/RollBack before the block ends. A connector-owned savepoint wrapper would close this
+    /// (#146, Phase 4 candidate).
     /// </summary>
     private static readonly HashSet<string> DeniedConstructedTypes = new()
     {
         TransactionType,
         TransactionGroupType,
-        SubTransactionType,
     };
 
     /// <summary>
@@ -461,7 +474,9 @@ internal static class ScriptApiDenylist
             "for you, and Revit allows only one open Transaction per document at a time, so opening " +
             "your own always fails.",
             "Just make your changes directly -- they are committed automatically if the script succeeds " +
-            "and rolled back if it throws.");
+            "and rolled back if it throws. For a savepoint inside the run, a native " +
+            "Autodesk.Revit.DB.SubTransaction is permitted: hold it in a using, Start it, and RollBack " +
+            "or Commit it before the enclosing block ends -- one left open destabilizes Revit.");
     }
 
     /// <summary>

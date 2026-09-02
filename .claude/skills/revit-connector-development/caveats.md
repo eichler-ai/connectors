@@ -114,6 +114,12 @@ is. So the missing capability is closing a connector-owned transaction mid-scrip
 do. Worse, the run above returns `status: "success"` having created nothing, so this fails **silently**
 — check `Document.IsInEditMode()` before believing an edit-scope result.
 
+## Symptom: Revit crashes ("closed unexpectedly") on a Document.Close some seconds after a script ran
+
+| Cause | Definitive check |
+|---|---|
+| A script started a native `SubTransaction` inside a connector-managed transaction and left it OPEN (no `Commit`/`RollBack`, no `using`) when the block committed | Observed once, live, Revit 2025 (#146 Phase 1 / H8 probe): the commit raised nothing, the slice was kept, the next `WithTransaction` block ran -- and the fixture document's `Close(false)` ~45s later took Revit down with the crash-report dialog. The connector cannot see the script's `SubTransaction` objects, so nothing guards this; skill.md and the `script-api-denied` remedy tell agents to `using` + end it before the block ends. The harness deliberately has NO live pin for this shape (it crashes the shared session) -- the evidence is recorded in `interactive_findings_test.go` beside `TestSubTransactionIsASavepointInsideTheConnectorsTransaction` |
+
 ## Symptom: tests are green but prove nothing
 
 | Cause | Definitive check |

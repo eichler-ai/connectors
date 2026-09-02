@@ -226,13 +226,17 @@ Two different things here, and the difference matters. Both are caught **before 
 semantic check over the compiled code — so a refused script changes nothing and the transaction it would
 have run in is rolled back cleanly.
 
-**1. Flatly rejected — `new Transaction(...)`, `new TransactionGroup(...)`, `new SubTransaction(...)`.**
+**1. Flatly rejected — `new Transaction(...)`, `new TransactionGroup(...)`.**
 Your script is already inside one, and Revit allows only one open transaction per document, so your own
 can never work. There is no flag for this. Just make your changes directly; they commit on success and
 roll back on failure. The error record's `code` is `script-api-denied`. The refusal ignores *which*
 document you meant it for, including one you just created. That is not a gap to work around: use
 `Connector.CreateProjectDocument`/`Connector.CreateFamilyDocument` above and the connector owns that document's transaction
-for you, so there is never a reason to construct one.
+for you, so there is never a reason to construct one. A native `SubTransaction` **is** allowed: it is a
+savepoint inside the open transaction — `using (var st = new SubTransaction(doc)) { st.Start(); …
+st.Commit(); }` (or `RollBack()`). **Always dispose it and end it before the block ends**: one left open
+is accepted silently and crashed Revit on the next document close. Starting one where no transaction is
+open fails with `script-subtransaction-needs-transaction`.
 
 **2. Allowed, but only if you confirm — the document-lifecycle and worksharing calls.**
 

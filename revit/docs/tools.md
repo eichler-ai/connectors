@@ -133,8 +133,9 @@ imports and exports directories of also carries a per-run audit trail beside the
 
 **Transactions are never yours to open.** Every script runs inside a connector-managed
 `Transaction`/`TransactionGroup`: changes commit when the script returns and roll back if it
-throws. Constructing `Transaction`/`TransactionGroup`/`SubTransaction` is rejected at
-compile time, unconditionally (`script-api-denied`).
+throws. Constructing `Transaction`/`TransactionGroup` is rejected at compile time,
+unconditionally (`script-api-denied`). A native `SubTransaction` is permitted as a savepoint
+inside the connector's transaction (#146 Phase 1).
 
 **Confirmation-gated members** (`confirm_lifecycle_actions: true` required): `Document.Close`
 / `.Dispose` / `.Save` / `.SaveAs` / `.SaveAsCloudModel` / `.SynchronizeWithCentral` /
