@@ -8,6 +8,7 @@ package mcpserver
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -59,13 +60,29 @@ func RegisterInstances(s *mcp.Server, reg *registry.Registry, mgr *execution.Man
 		Description: "List every Revit instance currently connected to the broker, with each instance's live status and open documents. Call this before targeting {instance_id, document_id} in execute_script if you don't already have them from a recent register/reconnect.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in ListInstancesIn) (*mcp.CallToolResult, ListInstancesOut, error) {
 		out := ListInstancesOut{Instances: []InstanceEntry{}}
-		for _, inst := range reg.List() {
+		insts := reg.List()
+		// Issue #54: statuses are reconciled against the add-in (one zero-wait
+		// poll per busy instance), concurrently and under ONE window for the
+		// whole call, so N busy instances cost one bounded wait, not N.
+		statuses := make([]execution.Status, len(insts))
+		sctx, cancel := context.WithTimeout(ctx, statusReconcileWindow)
+		defer cancel()
+		var wg sync.WaitGroup
+		for i, inst := range insts {
+			wg.Add(1)
+			go func(i int, id string) {
+				defer wg.Done()
+				statuses[i] = mergedStatus(sctx, reg, mgr, id)
+			}(i, inst.InstanceID)
+		}
+		wg.Wait()
+		for i, inst := range insts {
 			out.Instances = append(out.Instances, InstanceEntry{
 				InstanceID:     inst.InstanceID,
 				RevitVersion:   inst.RevitVersion,
 				PID:            inst.PID,
 				ConnectedSince: inst.ConnectedSince,
-				Status:         string(mergedStatus(reg, mgr, inst.InstanceID)),
+				Status:         string(statuses[i]),
 				Memory:         inst.Memory,
 				Documents:      instanceDocuments(inst.Documents),
 			})
@@ -81,16 +98,25 @@ func RegisterInstances(s *mcp.Server, reg *registry.Registry, mgr *execution.Man
 // thread — a missed one means something more severe than "a script is
 // running," and the caller shouldn't just poll-and-wait on the strength of
 // a busy/pending status that may itself be stale.
-func mergedStatus(reg *registry.Registry, mgr *execution.Manager, instanceID string) execution.Status {
-	execStatus := mgr.StatusForInstance(instanceID)
-	if execStatus == execution.StatusUnrecoverable {
-		return execStatus
+func mergedStatus(ctx context.Context, reg *registry.Registry, mgr *execution.Manager, instanceID string) execution.Status {
+	if mgr.StatusForInstance(instanceID) == execution.StatusUnrecoverable {
+		return execution.StatusUnrecoverable
 	}
 	if !reg.IsResponsive(instanceID, time.Now()) {
+		// Unresponsive wins over busy/pending regardless, so asking the add-in
+		// would burn the whole reconcile budget for an answer that is discarded.
 		return statusUnresponsive
 	}
-	return execStatus
+	// Issue #54: a run that completed with nobody polling holds the busy latch
+	// until something asks; ask now, so the status reported is current.
+	mgr.ReconcileBusy(ctx, instanceID)
+	return mgr.StatusForInstance(instanceID)
 }
+
+// statusReconcileWindow bounds the whole list_instances reconciliation pass.
+// Matches the manager's own per-poll budget: one bounded wait for the call,
+// however many instances are busy.
+const statusReconcileWindow = 2 * time.Second
 
 // statusUnresponsive is list_instances-only (PRD §05) — it's derived from
 // heartbeat liveness, not execution state, so it doesn't belong in

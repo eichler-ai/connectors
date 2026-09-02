@@ -996,6 +996,36 @@ public class RequestDispatcherTests
     }
 
     [Fact]
+    public async Task PollExecution_ZeroWait_AnswersFromTheRecord_WithoutTheWindowInventory()
+    {
+        // Issue #54: the broker reconciles its busy latch with a timeout_ms:0 poll before answering a
+        // caller. That poll asks only "what is the status right now" -- the inventory is the TIMED-OUT
+        // branch's diagnostic and costs up to InventoryHardCapMs against a busy UI thread, which the
+        // independent review of PR #164 measured as ~1.5s on every busy answer.
+        var executionManager = NewExecutionManager();
+        var bridge = new ExternalEventBridge<ScriptExecutionOutcome>(new FakeExternalEventRaiser());
+        var now = DateTimeOffset.UtcNow;
+        var windowInventory = new FakeWindowInventory { Windows = new[] { new WindowInfo("Warning", "#32770", Array.Empty<string>()) } };
+        var delays = 0;
+        var dispatcher = new RequestDispatcher(
+            executionManager,
+            bridge,
+            NewScriptExecutor(),
+            now: () => now,
+            delay: _ => { delays++; now = now.AddMilliseconds(200); return Task.CompletedTask; },
+            windowInventory: windowInventory);
+
+        executionManager.Start("exec-1", "1 + 1", 600_000, now);
+
+        var json = await dispatcher.DispatchAsync(PollRequest(1, "exec-1", timeoutMs: 0));
+
+        Assert.Contains("\"status\":\"pending\"", json);
+        Assert.DoesNotContain("window-inventory", json);
+        Assert.Equal(0, delays);
+        Assert.Equal(0, windowInventory.EnumerateCallCount);
+    }
+
+    [Fact]
     public async Task PollExecution_DeadlineElapsedWhileStillPending_AttachesWindowInventoryNotice()
     {
         var executionManager = NewExecutionManager();

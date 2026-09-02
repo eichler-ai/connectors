@@ -1250,6 +1250,16 @@ public sealed class RequestDispatcher
                 return ExecutionResultMessage.FromRecord(request.Id, record);
             }
 
+            if (timeoutMs <= 0)
+            {
+                // A ZERO-WAIT poll (issue #54: the broker reconciling its busy latch before answering a
+                // caller) asks only "what is the status right now". The window inventory below is the
+                // TIMED-OUT branch's diagnostic -- #149's notice even says "poll/execute timed out" -- and
+                // it costs up to InventoryHardCapMs against a UI thread that is, by construction here,
+                // busy. Answer from the record and nothing else, so the reconcile is one round trip.
+                return ExecutionResultMessage.FromRecord(request.Id, record);
+            }
+
             if (_now() >= deadline)
             {
                 // #136: same wire-budget cap as the execute_script timeout branch -- poll_execution carries

@@ -165,6 +165,19 @@ type Manager struct {
 	newID func() string
 	now   func() time.Time
 
+	// Logf, when set, receives one line per busy-latch reconciliation (issue
+	// #54) naming the outcome -- freed, still running, or the failure code --
+	// so a persistently failing reconcile is visible to an operator even
+	// though the caller only ever sees the honest busy answer.
+	Logf func(format string, args ...any)
+
+	// reconcileInFlight and reconciledAt give reconcileBusy single-flight
+	// semantics and a short suppression window per instance, so a
+	// list_instances loop and an execute_script racing the same busy
+	// instance cost one poll between them, not one each.
+	reconcileInFlight map[string]bool
+	reconciledAt      map[string]time.Time
+
 	// graceMs is how long, per PRD §06 ("Cancellation starts a grace
 	// timer (default ~5-10s)"), a cancelled-but-not-yet-terminal execution
 	// gets before the broker gives up on it and flips the owning instance
@@ -184,14 +197,16 @@ type Manager struct {
 // NewManager builds an empty Manager.
 func NewManager() *Manager {
 	return &Manager{
-		conns:            make(map[string]*transport.Conn),
-		executions:       make(map[string]*record),
-		activeByInstance: make(map[string]string),
-		unrecoverable:    make(map[string]bool),
-		newID:            func() string { return "exec-" + uuid.NewString() },
-		now:              time.Now,
-		graceMs:          10_000,
-		afterFunc:        time.AfterFunc,
+		conns:             make(map[string]*transport.Conn),
+		executions:        make(map[string]*record),
+		activeByInstance:  make(map[string]string),
+		unrecoverable:     make(map[string]bool),
+		reconcileInFlight: make(map[string]bool),
+		reconciledAt:      make(map[string]time.Time),
+		newID:             func() string { return "exec-" + uuid.NewString() },
+		now:               time.Now,
+		graceMs:           10_000,
+		afterFunc:         time.AfterFunc,
 	}
 }
 
@@ -382,24 +397,10 @@ type ScriptOptions struct {
 // per §06 — the instance stays unrecoverable until a Revit restart mints a
 // fresh instance_id (§05).
 func (m *Manager) ExecuteScript(ctx context.Context, instanceID, documentID, script string, timeoutMs, maxDurationMs int, opts ScriptOptions) (*Result, *diag.Record) {
-	m.mu.Lock()
-	if m.unrecoverable[instanceID] {
-		m.mu.Unlock()
-		return nil, errInstanceUnrecoverable(instanceID)
+	conn, executionID, early, drec := m.beginExecution(ctx, instanceID)
+	if early != nil || drec != nil {
+		return early, drec
 	}
-	if existingID, busy := m.activeByInstance[instanceID]; busy {
-		m.mu.Unlock()
-		return &Result{Status: StatusBusy, ExecutionID: existingID}, nil
-	}
-	conn, ok := m.conns[instanceID]
-	if !ok {
-		m.mu.Unlock()
-		return nil, errInstanceNotFound(instanceID)
-	}
-	executionID := m.newID()
-	m.executions[executionID] = &record{instanceID: instanceID, status: StatusPending}
-	m.activeByInstance[instanceID] = executionID
-	m.mu.Unlock()
 
 	if maxDurationMs > 0 {
 		m.scheduleAutoCancel(executionID, maxDurationMs)
@@ -446,6 +447,133 @@ func (m *Manager) ExecuteScript(ctx context.Context, instanceID, documentID, scr
 	return res, nil
 }
 
+// beginExecution is the shared prologue of ExecuteScript and UndoRedo: the
+// unrecoverable check, the busy gate, the connection lookup, and the minting
+// and latching of a new execution record. Exactly one of the three results is
+// meaningful: a non-nil early Result (busy), a non-nil diag (unrecoverable or
+// not found), or a conn + executionID to forward with.
+//
+// The busy gate RECONCILES before it answers (issue #54). The wire protocol is
+// request/response, so a script that completed add-in-side with nobody polling
+// leaves the latch set until something asks; before this, the next caller was
+// told busy about an execution that had already finished and paid a poll
+// round trip to learn the instance was free. Now the broker asks the add-in
+// itself, once, with a zero wait, and proceeds if the answer is terminal. No
+// wire-protocol addition, so older add-ins keep working unchanged, and the
+// forwarded poll carries the same connection-identity guards every poll does.
+func (m *Manager) beginExecution(ctx context.Context, instanceID string) (*transport.Conn, string, *Result, *diag.Record) {
+	for attempt := 0; ; attempt++ {
+		m.mu.Lock()
+		if m.unrecoverable[instanceID] {
+			m.mu.Unlock()
+			return nil, "", nil, errInstanceUnrecoverable(instanceID)
+		}
+		if existingID, busy := m.activeByInstance[instanceID]; busy {
+			m.mu.Unlock()
+			busyAnswer := &Result{Status: StatusBusy, ExecutionID: existingID}
+			if attempt == 0 {
+				freed, drec := m.reconcileBusy(ctx, instanceID)
+				if freed {
+					continue
+				}
+				if drec != nil {
+					// The caller gets the honest busy answer either way; the failed
+					// reconciliation rides along as a notice so it is not silent.
+					busyAnswer.Notices = []diag.Record{*drec}
+				}
+			}
+			return nil, "", busyAnswer, nil
+		}
+		conn, ok := m.conns[instanceID]
+		if !ok {
+			m.mu.Unlock()
+			return nil, "", nil, errInstanceNotFound(instanceID)
+		}
+		executionID := m.newID()
+		m.executions[executionID] = &record{instanceID: instanceID, status: StatusPending}
+		m.activeByInstance[instanceID] = executionID
+		m.mu.Unlock()
+		return conn, executionID, nil, nil
+	}
+}
+
+// reconcileBusyBudget bounds the one-shot reconciliation poll. Short on
+// purpose: it runs on the caller's critical path, and an add-in that cannot
+// answer a zero-wait poll inside it is one whose latch should stay set. The
+// add-in answers a timeout_ms:0 poll from its in-memory record without the
+// §07 window inventory (RequestDispatcher.HandlePollExecutionAsync), so the
+// expected cost is one network round trip; an older add-in that still runs
+// the inventory on a zero-wait poll answers inside ~1.5s, which this budget
+// also covers.
+const reconcileBusyBudget = 2 * time.Second
+
+// reconcileSuppression is how long after one reconciliation attempt the next
+// for the same instance is skipped. A list_instances loop must not turn into a
+// poll loop against a busy add-in.
+const reconcileSuppression = 500 * time.Millisecond
+
+// reconcileBusy asks instanceID's add-in, once and without waiting, whether the
+// execution holding its busy latch has already finished, and settles it if so.
+// Returns whether the latch was freed and, when the poll itself failed, the
+// diagnostic -- so the caller can surface it rather than let a persistently
+// failing add-in stay silent. Freed is false and the diagnostic nil when the
+// instance is not busy, when another reconciliation is already in flight, or
+// when one ran within reconcileSuppression. The poll's outcome is never
+// asserted beyond what the add-in said: still running leaves the latch; a
+// wire failure leaves the latch; an add-in reporting unknown-execution-id is
+// forwardExisting's existing execution-lost settle (#42), which frees the
+// latch on the strength of the add-in's own live connection saying it is not
+// running that execution -- the same verdict a real poll would reach.
+func (m *Manager) reconcileBusy(ctx context.Context, instanceID string) (bool, *diag.Record) {
+	m.mu.Lock()
+	executionID, busy := m.activeByInstance[instanceID]
+	if !busy || m.reconcileInFlight[instanceID] || m.now().Sub(m.reconciledAt[instanceID]) < reconcileSuppression {
+		m.mu.Unlock()
+		return false, nil
+	}
+	m.reconcileInFlight[instanceID] = true
+	m.mu.Unlock()
+
+	rctx, cancel := context.WithTimeout(ctx, reconcileBusyBudget)
+	defer cancel()
+	_, drec := m.forwardExisting(rctx, executionID, "poll_execution", 0, map[string]any{
+		"execution_id": executionID,
+		"timeout_ms":   0,
+	})
+
+	m.mu.Lock()
+	delete(m.reconcileInFlight, instanceID)
+	m.reconciledAt[instanceID] = m.now()
+	freed := m.activeByInstance[instanceID] != executionID
+	m.mu.Unlock()
+
+	switch {
+	case freed:
+		m.logf("reconcile: instance %s freed; execution %s had finished unpolled", instanceID, executionID)
+	case drec != nil:
+		m.logf("reconcile: instance %s still latched on %s; poll failed: %s: %s", instanceID, executionID, drec.Code, drec.Message)
+	default:
+		m.logf("reconcile: instance %s still running %s", instanceID, executionID)
+	}
+	if freed {
+		return true, nil
+	}
+	return false, drec
+}
+
+func (m *Manager) logf(format string, args ...any) {
+	if m.Logf != nil {
+		m.Logf(format, args...)
+	}
+}
+
+// ReconcileBusy is reconcileBusy for callers outside this package that report
+// instance state rather than start work -- list_instances (PRD §05), so an
+// instance whose last run completed unpolled reads idle instead of busy.
+func (m *Manager) ReconcileBusy(ctx context.Context, instanceID string) {
+	m.reconcileBusy(ctx, instanceID)
+}
+
 // scheduleAutoCancel arranges for executionID to be cancelled on the
 // agent's behalf once maxDurationMs elapses, per PRD §06: "a hard ceiling
 // on total runtime ... the broker auto-issues the same cancellation signal
@@ -477,24 +605,10 @@ func (m *Manager) scheduleAutoCancel(executionID string, maxDurationMs int) {
 // other. confirm and document_id are forwarded, not enforced here: the
 // add-in owns the refusals and their wording.
 func (m *Manager) UndoRedo(ctx context.Context, instanceID, direction string, confirm bool, timeoutMs int, documentID string) (*Result, *diag.Record) {
-	m.mu.Lock()
-	if m.unrecoverable[instanceID] {
-		m.mu.Unlock()
-		return nil, errInstanceUnrecoverable(instanceID)
+	conn, executionID, early, drec := m.beginExecution(ctx, instanceID)
+	if early != nil || drec != nil {
+		return early, drec
 	}
-	if existingID, busy := m.activeByInstance[instanceID]; busy {
-		m.mu.Unlock()
-		return &Result{Status: StatusBusy, ExecutionID: existingID}, nil
-	}
-	conn, ok := m.conns[instanceID]
-	if !ok {
-		m.mu.Unlock()
-		return nil, errInstanceNotFound(instanceID)
-	}
-	executionID := m.newID()
-	m.executions[executionID] = &record{instanceID: instanceID, status: StatusPending}
-	m.activeByInstance[instanceID] = executionID
-	m.mu.Unlock()
 
 	params := map[string]any{
 		"execution_id": executionID,

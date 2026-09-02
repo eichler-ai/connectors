@@ -476,6 +476,7 @@ func runPrimary(ctx context.Context, bindAddr string, port int, dataDir string, 
 
 	mcpServer := mcp.NewServer(&mcp.Implementation{Name: serverName, Version: versionLine()}, nil)
 	execMgr := execution.NewManager()
+	execMgr.Logf = logger.Printf
 	mcpserver.Register(mcpServer, execMgr)
 	reg := registry.New()
 	discoveryRouter := discovery.NewRouter(reg)
