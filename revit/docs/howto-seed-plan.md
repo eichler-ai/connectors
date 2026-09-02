@@ -19,30 +19,53 @@ checksummed asset as the code).
 What "bundled" means concretely:
 
 - **One version line.** A release tag `vX.Y.Z` covers add-in, broker and corpus. A release can change
-  any subset; the tag moves regardless. `mcp-server -version` and `get_skills`' `build` field gain a
-  `howto_corpus` version (the corpus's own monotonic `corpus_version`, stamped at build) beside the
-  source revision, so "which how-tos is this broker serving" is answerable the same way "which
-  skill.md" already is (issue #116).
-- **The corpus is embedded in the broker** (`go:embed` of `revit/howto/corpus.jsonl` and its
-  verification sidecar), the same way `skill.md` is. Single binary stays true; no runtime fetch, no
-  cache, no offline case.
-- **Per-component change detection in the release**, so a corpus-only release costs the user nothing
-  but a broker restart. The release zip gains `manifest.json`: `{ addin-2025, addin-2027, server,
-  howto }` → sha256 of each payload. `install.ps1` records those hashes in `installed-version.json`
-  and, on update, **skips any component whose hash is unchanged** — so a release that changed only
-  the corpus (or only the broker) does not touch the add-in folder and never asks to close Revit.
-  Today the script copies every payload on every version change and closes Revit for it.
+  any subset; the tag moves regardless. `mcp-server -version` and `get_skills`' `build` field
+  (`skills_tool.go`) gain a `howto_corpus` version — the corpus's monotonic `corpus_version`, stamped
+  at build — beside the source revision, so "which how-tos is this broker serving" is answerable the
+  same way "which skill.md" already is (issue #116).
+- **The corpus is embedded in the broker** (`go:embed` of `revit/howto/corpus.jsonl` and the
+  verification sidecar), like `skill.md`. There is **no separate corpus payload** in the release zip:
+  a corpus change is a broker change, and the `server` component's hash changes with it. Single
+  binary stays true; no runtime fetch, no cache, no offline case.
 - **Release notes name what changed.** The release workflow diffs `corpus.jsonl` against the previous
-  tag and lists added / superseded document ids under a "How-tos" heading, beside the code changes.
-  That is the human-facing change detection; the manifest is the machine-facing one.
-- **The update check stays one check.** The broker's existing 6-hourly poll compares the release tag
-  as it does now; the ribbon's "update available" is right for a corpus-only release too, because the
-  install it triggers is a cheap no-Revit-close one.
+  tag and lists added / revised / merged document ids under a "How-tos" heading beside the code
+  changes — the human-facing change detection.
+- **The update check is unchanged.** The broker's 6-hourly poll (`internal/updatecheck`) writes the
+  latest release tag into `broker.json`; the add-in reads it and the ribbon shows "Update available".
+  A corpus-only release is a broker release, so the same prompt is right for it.
 
-Cost of this choice: a corpus edit needs a release. That is the point while churn is high — every
-change is reviewed, signed and recorded — and the release pipeline already exists. If corpus churn
-outpaces what the release cadence tolerates once the code settles, the design note's fetch channel is
-the escape hatch, unchanged.
+**What a corpus-only release costs the user today, honestly.** The installer (`install.ps1`) is not
+yet able to deliver a cheap corpus-only update, and the independent review of this plan (#161)
+walked the path: the deploy loop copies every add-in payload on every version change and closes
+Revit for it; `mcp-server.exe` is copied over in place with no stop / stage / swap, so a running
+broker (any open Claude Code session holds one) locks the file and the copy throws *after* the
+add-in was redeployed and *before* the version marker is written; the ribbon then stays "Update
+available" until the broker restarts, because the add-in compares the version written into
+`broker.json` at broker start; and `UpdateTrigger.cs` hard-codes "Revit will close shortly". So
+**step 5 of §6 is a prerequisite for frequent corpus releases**, and its scope is:
+
+1. A `manifest.json` in the release zip with a sha256 per component (`addin-2025`, `addin-2027`,
+   `server`), recorded in `installed-version.json`, and a deploy loop that skips an unchanged
+   component — with the three paths the review named fixed alongside: the "doesn't support any of
+   them" throw when nothing needed deploying, the marker written only when something was deployed
+   (which would re-download forever), and the Revit relaunch that assumes something was redeployed.
+2. **Broker stage-and-swap.** The installer writes `mcp-server.exe.new` beside the running exe and
+   never overwrites a locked file; the swap happens when the broker is not running, or the
+   installer stops the broker and restarts it. Stopping the broker breaks every attached MCP client
+   session (the documented singleton hazard; Claude Code does not auto-recover), so the user must be
+   told to reconnect — the ribbon and the installer's summary both say so, and the update should
+   prefer a moment with no client attached. The message in `UpdateTrigger.cs` becomes accurate:
+   "Revit will close" only when an add-in payload changed.
+3. After the swap the broker's start rewrites `broker.json` with the new version, which is what
+   clears the ribbon.
+
+Until step 5 lands, corpus releases ride ordinary connector releases (add-in + broker), which is
+fine for the seed and the first submissions; the frequency the user wants comes with step 5.
+
+Cost of the bundled choice: a corpus edit needs a release. That is the point while churn is high —
+every change is reviewed, signed (self-signed today, PRD §12) and recorded — and the release pipeline
+already exists. If corpus churn outpaces what the release cadence tolerates once the code settles,
+the design note's fetch channel is the escape hatch, unchanged.
 
 **Local corpus** (design note §5) is unaffected: it is per-machine and never versioned by the release.
 
