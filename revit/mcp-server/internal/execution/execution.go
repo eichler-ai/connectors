@@ -467,6 +467,55 @@ func (m *Manager) scheduleAutoCancel(executionID string, maxDurationMs int) {
 	})
 }
 
+// UndoRedo posts Revit's Undo or Redo command on instanceID and returns
+// what it reverted (#146 Phase 2c). Tracked AS AN EXECUTION -- a minted id,
+// the instance marked busy for its duration, settled on the answer -- for
+// the same reason on both sides: an undo posted mid-script would land after
+// that script's commit and revert it, and a script arriving mid-undo would
+// collide with the add-in's pending UI-thread work item. Making it an
+// execution gives both cases the ordinary `busy` answer pointing at the
+// other. confirm and document_id are forwarded, not enforced here: the
+// add-in owns the refusals and their wording.
+func (m *Manager) UndoRedo(ctx context.Context, instanceID, direction string, confirm bool, timeoutMs int, documentID string) (*Result, *diag.Record) {
+	m.mu.Lock()
+	if m.unrecoverable[instanceID] {
+		m.mu.Unlock()
+		return nil, errInstanceUnrecoverable(instanceID)
+	}
+	if existingID, busy := m.activeByInstance[instanceID]; busy {
+		m.mu.Unlock()
+		return &Result{Status: StatusBusy, ExecutionID: existingID}, nil
+	}
+	conn, ok := m.conns[instanceID]
+	if !ok {
+		m.mu.Unlock()
+		return nil, errInstanceNotFound(instanceID)
+	}
+	executionID := m.newID()
+	m.executions[executionID] = &record{instanceID: instanceID, status: StatusPending}
+	m.activeByInstance[instanceID] = executionID
+	m.mu.Unlock()
+
+	params := map[string]any{
+		"execution_id": executionID,
+		"direction":    direction,
+		"confirm":      confirm,
+		"timeout_ms":   timeoutMs,
+	}
+	if documentID != "" {
+		params["document_id"] = documentID
+	}
+	res, drec := m.callWire(ctx, conn, "undo_redo", executionID, timeoutMs, params)
+	if drec != nil {
+		// Same posture as ExecuteScript: a wire failure does not say whether
+		// the add-in ran the undo, so leave the busy state for poll/detach to
+		// resolve rather than guess.
+		return nil, drec
+	}
+	m.settle(instanceID, executionID, res)
+	return res, nil
+}
+
 // forwardExisting looks up executionID, returns its cached terminal result
 // if it's already settled, otherwise forwards wireMethod to the owning
 // instance's connection with the given timeout/params and settles the

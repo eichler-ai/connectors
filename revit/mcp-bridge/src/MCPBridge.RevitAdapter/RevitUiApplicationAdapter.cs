@@ -13,8 +13,13 @@ namespace MCPBridge.RevitAdapter;
 /// IDocumentCreationSource members below hand back an IDocumentAdapter whose CreateTransaction a script
 /// could then call. Public, it was a one-line route to an unmanaged transaction on a brand-new document.
 /// </summary>
-internal sealed class RevitUiApplicationAdapter : IUiApplicationAdapter, IRawUiApplicationSource, IDocumentCreationSource, IExistingDocumentSource, IDocumentChangeSource
+internal sealed class RevitUiApplicationAdapter : IUiApplicationAdapter, IRawUiApplicationSource, IDocumentCreationSource, IExistingDocumentSource, IDocumentChangeSource, IPostableCommandSource
 {
+    /// <summary>See <see cref="IPostableCommandSource"/>. PostCommand throws if Revit cannot accept a command right now (a modal state); that propagates as a refusal.</summary>
+    public void PostUndo() => _uiApplication.PostCommand(RevitCommandId.LookupPostableCommandId(PostableCommand.Undo));
+
+    public void PostRedo() => _uiApplication.PostCommand(RevitCommandId.LookupPostableCommandId(PostableCommand.Redo));
+
     /// <summary>
     /// Category resolution cap per event (#146 Phase 2). Resolving a category is a Document.GetElement
     /// per id, on the UI thread, inside the commit that raised the event; a script that touches a whole
@@ -22,6 +27,16 @@ internal sealed class RevitUiApplicationAdapter : IUiApplicationAdapter, IRawUiA
     /// and the event is flagged truncated so by_category is known to undercount.
     /// </summary>
     private const int CategoryResolutionCap = 20_000;
+
+    /// <summary>
+    /// Connection-log sink for events this adapter DROPS (identity unresolved, translation threw) -- the
+    /// swallow-by-contract in the handler below would otherwise make a missed event undiagnosable.
+    /// Static because the adapter is constructed per ExternalEvent callback while the log lives for the
+    /// add-in's lifetime. Set by the AddIn's host at start and cleared at Stop; last writer wins, and no
+    /// Revit object ever crosses it (an Action&lt;string&gt; a script cannot observe or route around -- not the
+    /// ActiveDialogContext shape).
+    /// </summary>
+    internal static Action<string>? DiagnosticTrace { get; set; }
 
     /// <summary>
     /// See <see cref="IDocumentChangeSource"/>. The handler NEVER throws -- translation AND the
@@ -53,15 +68,32 @@ internal sealed class RevitUiApplicationAdapter : IUiApplicationAdapter, IRawUiA
                 {
                     onChange(change);
                 }
+                else
+                {
+                    DiagnosticTrace?.Invoke($"DocumentChanged dropped: document identity unresolved (op={SafeOperationName(e)})");
+                }
             }
-            catch
+            catch (Exception ex)
             {
-                // By contract -- see the doc comment.
+                // By contract -- see the doc comment. Traced, not silent.
+                DiagnosticTrace?.Invoke($"DocumentChanged dropped: {ex.GetType().Name}: {ex.Message} (op={SafeOperationName(e)})");
             }
         };
 
         application.DocumentChanged += handler;
         return new Unsubscriber(() => application.DocumentChanged -= handler);
+    }
+
+    private static string SafeOperationName(Autodesk.Revit.DB.Events.DocumentChangedEventArgs e)
+    {
+        try
+        {
+            return e.Operation.ToString();
+        }
+        catch
+        {
+            return "?";
+        }
     }
 
     /// <summary>

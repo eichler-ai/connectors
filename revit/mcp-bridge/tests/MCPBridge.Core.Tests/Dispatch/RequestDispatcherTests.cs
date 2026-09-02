@@ -329,6 +329,248 @@ public class RequestDispatcherTests
         Assert.Contains("\"code\":\"script-execution-failed\"", json);
     }
 
+    // ------------------------------------------------------------------------------------------
+    // #146 Phase 2c: undo / redo
+    // ------------------------------------------------------------------------------------------
+
+    private static JsonRpcRequest UndoRedoRequest(int id, string direction, bool? confirm = true, long? timeoutMs = null, string executionId = "undo-1", string? documentId = null)
+    {
+        var p = new Dictionary<string, object?> { ["direction"] = direction, ["execution_id"] = executionId };
+        if (confirm is not null) p["confirm"] = confirm;
+        if (timeoutMs is not null) p["timeout_ms"] = timeoutMs;
+        if (documentId is not null) p["document_id"] = documentId;
+        return Parse(new { jsonrpc = "2.0", id, method = "undo_redo", @params = p });
+    }
+
+    private static DocumentChange Reverted(string operation, long[] deleted, long[] added, params string[] names) =>
+        new("doc-fake0000000000", operation == "TransactionUndone" ? DocumentChangeOperation.Undone : DocumentChangeOperation.Redone, operation, names,
+            added.Select(id => new ChangedElement(id, "Levels")).ToArray(), Array.Empty<ChangedElement>(), deleted, categoriesTruncated: false);
+
+    [Fact]
+    public async Task Undo_WithoutConfirm_IsRefusedWithItsOwnCode_AndStartsNoExecution()
+    {
+        var executionManager = NewExecutionManager();
+        var raiser = new FakeExternalEventRaiser();
+        var bridge = new ExternalEventBridge<ScriptExecutionOutcome>(raiser);
+        var dispatcher = new RequestDispatcher(executionManager, bridge, NewScriptExecutor());
+
+        var json = await dispatcher.DispatchAsync(UndoRedoRequest(1, "undo", confirm: null));
+
+        Assert.Contains("\"status\":\"error\"", json);
+        Assert.Contains("\"code\":\"undo-confirmation-required\"", json);
+        // The freshness signal a confirming caller needs: nothing has run here yet.
+        Assert.Contains("no connector run has completed on this instance", json);
+        // Refused before anything was raised or recorded.
+        Assert.Equal(0, raiser.RaiseCallCount);
+        Assert.Null(executionManager.Poll("undo-1"));
+    }
+
+    [Fact]
+    public async Task Undo_WithoutConfirm_NamesHowLongAgoTheConnectorLastRanHere()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var executionManager = NewExecutionManager();
+        var bridge = new ExternalEventBridge<ScriptExecutionOutcome>(new FakeExternalEventRaiser());
+        var dispatcher = new RequestDispatcher(executionManager, bridge, NewScriptExecutor(), now: () => now);
+        executionManager.Start("exec-old", "1", 600_000, now.AddMinutes(-47));
+        executionManager.MarkRunning("exec-old", now.AddMinutes(-47));
+        executionManager.CompleteSuccess("exec-old", now.AddMinutes(-47), "1", null, Array.Empty<DiagnosticRecord>());
+
+        var json = await dispatcher.DispatchAsync(UndoRedoRequest(1, "undo", confirm: null));
+
+        Assert.Contains("completed 47 min ago", json);
+    }
+
+    [Fact]
+    public async Task Undo_PostsTheCommand_WaitsForTheUndoneEvent_AndReportsTheRevertedDelta()
+    {
+        var executionManager = NewExecutionManager();
+        var bridge = new ExternalEventBridge<ScriptExecutionOutcome>(new FakeExternalEventRaiser());
+        var dispatcher = new RequestDispatcher(executionManager, bridge, NewScriptExecutor());
+        // The fake "runs" the posted command by raising what Revit raises: an Undone event naming the
+        // reverted transaction, listing the elements the undo removed as deleted.
+        var uiApp = new FakeUiApplicationAdapter
+        {
+            OnPostCommand = (direction, self) => self.EmitChange(Reverted("TransactionUndone", deleted: new long[] { 42 }, added: Array.Empty<long>(), "MCP: 1 Levels created")),
+        };
+
+        var task = dispatcher.DispatchAsync(UndoRedoRequest(1, "undo"));
+        bridge.OnExecute(uiApp);
+        var json = await task;
+
+        Assert.Equal(new[] { "undo" }, uiApp.PostedCommands);
+        Assert.Contains("\"status\":\"success\"", json);
+        Assert.Contains("\"execution_id\":\"undo-1\"", json);
+        Assert.Contains("\"mutations\":{\"created\":0,\"modified\":0,\"deleted\":1", json);
+        Assert.Contains("\"code\":\"undo-reverted-connector-work\"", json);
+        Assert.Contains("MCP: 1 Levels created", json);
+        Assert.Contains("\"document_id\":\"doc-fake0000000000\"", json);
+        // The listener released itself on the UI thread once it had what it needed.
+        Assert.Equal(0, uiApp.ChangeSubscribers);
+        // The undo was an execution: terminal now, so the instance is free again.
+        Assert.True(executionManager.Poll("undo-1")!.Status.IsTerminal());
+    }
+
+    [Fact]
+    public async Task Undo_ThatRevertsSomethingOtherThanConnectorWork_WarnsAndNamesIt()
+    {
+        var bridge = new ExternalEventBridge<ScriptExecutionOutcome>(new FakeExternalEventRaiser());
+        var dispatcher = new RequestDispatcher(NewExecutionManager(), bridge, NewScriptExecutor());
+        var uiApp = new FakeUiApplicationAdapter
+        {
+            OnPostCommand = (_, self) => self.EmitChange(Reverted("TransactionUndone", new long[] { 7 }, Array.Empty<long>(), "Detail Lines")),
+        };
+
+        var task = dispatcher.DispatchAsync(UndoRedoRequest(1, "undo"));
+        bridge.OnExecute(uiApp);
+        var json = await task;
+
+        Assert.Contains("\"status\":\"success\"", json);
+        Assert.Contains("\"code\":\"undo-reverted-other-work\"", json);
+        Assert.Contains("\"severity\":\"warning\"", json);
+        Assert.Contains("Detail Lines", json);
+    }
+
+    [Fact]
+    public async Task Redo_IgnoresAnUndoneEvent_AndCompletesOnRedone()
+    {
+        var bridge = new ExternalEventBridge<ScriptExecutionOutcome>(new FakeExternalEventRaiser());
+        var dispatcher = new RequestDispatcher(NewExecutionManager(), bridge, NewScriptExecutor());
+        var uiApp = new FakeUiApplicationAdapter
+        {
+            OnPostCommand = (_, self) =>
+            {
+                self.EmitChange(Reverted("TransactionUndone", new long[] { 1 }, Array.Empty<long>(), "noise"));
+                self.EmitChange(Reverted("TransactionRedone", Array.Empty<long>(), new long[] { 42 }, "MCP: create L1"));
+            },
+        };
+
+        var task = dispatcher.DispatchAsync(UndoRedoRequest(1, "redo"));
+        bridge.OnExecute(uiApp);
+        var json = await task;
+
+        Assert.Equal(new[] { "redo" }, uiApp.PostedCommands);
+        Assert.Contains("\"mutations\":{\"created\":1,\"modified\":0,\"deleted\":0", json);
+        Assert.Contains("MCP: create L1", json);
+    }
+
+    [Fact]
+    public async Task Undo_WhenNothingFollowsThePost_ReportsNoChangeObserved_NudgesRevit_AndLeavesTheBridgeFree()
+    {
+        var raiser = new FakeExternalEventRaiser();
+        var bridge = new ExternalEventBridge<ScriptExecutionOutcome>(raiser);
+        var dispatcher = new RequestDispatcher(NewExecutionManager(), bridge, NewScriptExecutor());
+        var uiApp = new FakeUiApplicationAdapter();   // posts, but nothing ever happens
+
+        // MinWait floors the wait at 1s, so this takes a second: the price of pinning the nudge loop.
+        var task = dispatcher.DispatchAsync(UndoRedoRequest(1, "undo", timeoutMs: 1));
+        bridge.OnExecute(uiApp);
+        var json = await task;
+
+        Assert.Contains("\"status\":\"error\"", json);
+        Assert.Contains("\"code\":\"undo-no-change-observed\"", json);
+        // The wording must never invite a blind retry (a second post would revert the NEXT action).
+        Assert.Contains("WAS POSTED", json);
+        Assert.Contains("Do NOT retry blindly", json);
+        Assert.DoesNotContain("retry with a longer", json);
+        // The nudges happened: more than the one Raise() the work item itself needed.
+        Assert.True(raiser.RaiseCallCount > 1, $"expected nudges, saw {raiser.RaiseCallCount} raise(s)");
+        // And the last un-run nudge was abandoned, so the bridge is free for the next request.
+        var probe = bridge.RunAsync("probe", _ => ScriptExecutionOutcome.Completed(null, ""));
+        Assert.False(probe.IsFaulted, "the bridge still held an abandoned nudge");
+        bridge.OnExecute(uiApp);
+        await probe;
+        // Still subscribed (Revit calls are UI-thread-only, so the waiter cannot unsubscribe) ...
+        Assert.Equal(1, uiApp.ChangeSubscribers);
+        // ... but disarmed: the next event, whatever it is, releases it.
+        uiApp.EmitChange(Reverted("TransactionCommitted", Array.Empty<long>(), new long[] { 9 }, "later"));
+        Assert.Equal(0, uiApp.ChangeSubscribers);
+    }
+
+    [Fact]
+    public async Task Undo_WhenADifferentDocumentIsActive_RefusesBeforePosting()
+    {
+        var bridge = new ExternalEventBridge<ScriptExecutionOutcome>(new FakeExternalEventRaiser());
+        var dispatcher = new RequestDispatcher(NewExecutionManager(), bridge, NewScriptExecutor());
+        var uiApp = new FakeUiApplicationAdapter { ActiveUiDocument = new FakeUiDocumentAdapter { Document = new FakeDocumentAdapter { DocumentId = "doc-active000000000" } } };
+
+        var task = dispatcher.DispatchAsync(UndoRedoRequest(1, "undo", documentId: "doc-expected0000000"));
+        bridge.OnExecute(uiApp);
+        var json = await task;
+
+        Assert.Contains("\"code\":\"undo-wrong-active-document\"", json);
+        Assert.Contains("doc-active000000000", json);
+        Assert.Empty(uiApp.PostedCommands);
+        Assert.Equal(0, uiApp.ChangeSubscribers);
+    }
+
+    [Fact]
+    public async Task ExecuteScript_WhileAnUndoIsInFlight_AnswersBusy_PointingAtTheUndo()
+    {
+        // The other half of the busy gate: the undo is an execution, so a script arriving mid-undo is told
+        // so -- rather than colliding with the pending bridge work item and failing as a bridge fault.
+        var executionManager = NewExecutionManager();
+        var bridge = new ExternalEventBridge<ScriptExecutionOutcome>(new FakeExternalEventRaiser());
+        var dispatcher = new RequestDispatcher(executionManager, bridge, NewScriptExecutor());
+        var uiApp = new FakeUiApplicationAdapter
+        {
+            OnPostCommand = (_, self) => self.EmitChange(Reverted("TransactionUndone", new long[] { 1 }, Array.Empty<long>(), "MCP: x")),
+        };
+
+        var undo = dispatcher.DispatchAsync(UndoRedoRequest(1, "undo"));   // queued; OnExecute not yet called
+        var script = await dispatcher.DispatchAsync(ExecuteScriptRequest(2, "exec-2", "1 + 1", timeoutMs: 50));
+
+        Assert.Contains("\"status\":\"busy\"", script);
+        Assert.Contains("undo-1", script);
+
+        bridge.OnExecute(uiApp);
+        Assert.Contains("\"status\":\"success\"", await undo);
+    }
+
+    [Fact]
+    public async Task Undo_WhenRevitRefusesToPost_ReportsNotPosted_AndReleasesTheListener()
+    {
+        var bridge = new ExternalEventBridge<ScriptExecutionOutcome>(new FakeExternalEventRaiser());
+        var dispatcher = new RequestDispatcher(NewExecutionManager(), bridge, NewScriptExecutor());
+        var uiApp = new FakeUiApplicationAdapter { OnPostCommand = (_, _) => throw new InvalidOperationException("modal state") };
+
+        var task = dispatcher.DispatchAsync(UndoRedoRequest(1, "undo"));
+        bridge.OnExecute(uiApp);
+        var json = await task;
+
+        Assert.Contains("\"code\":\"undo-not-posted\"", json);
+        Assert.Contains("modal state", json);
+        Assert.Equal(0, uiApp.ChangeSubscribers);
+    }
+
+    [Fact]
+    public async Task Undo_WhileAScriptIsInFlight_AnswersBusy_PointingAtIt()
+    {
+        var executionManager = NewExecutionManager();
+        var bridge = new ExternalEventBridge<ScriptExecutionOutcome>(new FakeExternalEventRaiser());
+        var dispatcher = new RequestDispatcher(executionManager, bridge, NewScriptExecutor());
+        // Start a script and leave it queued (OnExecute never called), so an execution is active.
+        var inFlight = dispatcher.DispatchAsync(ExecuteScriptRequest(1, "exec-busy", "1 + 1", timeoutMs: 50));
+
+        var json = await dispatcher.DispatchAsync(UndoRedoRequest(2, "undo"));
+
+        Assert.Contains("\"status\":\"busy\"", json);
+        Assert.Contains("exec-busy", json);
+        await inFlight;
+    }
+
+    [Fact]
+    public async Task UndoRedo_WithAnUnknownDirection_IsAnInvalidParamsError()
+    {
+        var bridge = new ExternalEventBridge<ScriptExecutionOutcome>(new FakeExternalEventRaiser());
+        var dispatcher = new RequestDispatcher(NewExecutionManager(), bridge, NewScriptExecutor());
+
+        var json = await dispatcher.DispatchAsync(UndoRedoRequest(1, "sideways"));
+
+        Assert.Contains("\"code\":\"invalid-params\"", json);
+        Assert.Contains("sideways", json);
+    }
+
     // PRD §01/§14, from an independent PR review: the two denylist refusals define their own codes and
     // skill.md tells agents to match on them -- but every script failure was reported with a hardcoded
     // code of "script-execution-failed", so those codes only ever appeared as a SUBSTRING of `message`

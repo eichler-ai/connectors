@@ -3,6 +3,7 @@
 package harness_test
 
 import (
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -1431,6 +1432,115 @@ return "derived";
 			if n.Code == "undo-label-not-applied" {
 				t.Errorf("Revit refused TransactionGroup.SetName between commit and Assimilate -- the derived-label tier is a no-op live: %s", n.Message)
 			}
+		}
+	})
+}
+
+// TestUndoAndRedoToolsRevertAndRestoreTheLastRun is the live half of #146
+// Phase 2c. Revit's undo stack is per document and the tools act on the
+// ACTIVE document's stack, so -- unlike every other case in this file -- this
+// one writes to the routed (active) document on purpose and then uses the
+// tools themselves to leave it as it found it: create -> undo -> redo -> undo.
+// What only Revit can confirm: PostCommand(Undo) posted from inside an
+// ExternalEvent runs after that event returns and raises DocumentChanged with
+// the reverted transaction's NAME -- which is what lets the connector tell an
+// agent whether it undid its own work or a person's.
+func TestUndoAndRedoToolsRevertAndRestoreTheLastRun(t *testing.T) {
+	c, instanceID, documentID := targetDocument(t)
+
+	callUndoRedo := func(t *testing.T, tool string, args map[string]any) json.RawMessage {
+		t.Helper()
+		args["instance_id"] = instanceID
+		raw, err := c.CallTool(tool, args, 40*time.Second)
+		if err != nil {
+			t.Fatalf("%s: %v", tool, err)
+		}
+		return raw
+	}
+	levelCount := func(t *testing.T) string {
+		t.Helper()
+		out := runScript(t, c, instanceID, documentID, `
+int n = 0;
+foreach (var e in new Autodesk.Revit.DB.FilteredElementCollector(Document).OfClass(typeof(Autodesk.Revit.DB.Level))) {
+  var lvl = e as Autodesk.Revit.DB.Level;
+  if (lvl != null && System.Math.Abs(lvl.Elevation - 93.3) < 0.01) n++;
+}
+return n;
+`)
+		return strings.TrimSpace(out.ReturnValue)
+	}
+
+	t.Run("WithoutConfirmIsRefused", func(t *testing.T) {
+		rej := rejectionOf(t, callUndoRedo(t, "undo", map[string]any{}))
+		if rej.Error.Code != "undo-confirmation-required" {
+			t.Fatalf("undo without confirm must be refused with undo-confirmation-required, got %q: %s", rej.Error.Code, rej.Error.Message)
+		}
+	})
+
+	// The labelled write the tools will act on. Routed at the ACTIVE document.
+	created := decodeToolResult[executeScriptOut](t, callExecuteScriptWith(t, c, instanceID, documentID,
+		`Autodesk.Revit.DB.Level.Create(Document, 93.3); return "created";`,
+		map[string]any{"label": "harness undo probe"}))
+	if created.Status != "success" || created.Mutations == nil || created.Mutations.Created != 1 {
+		t.Fatalf("the probe write must succeed with created:1; status=%q mutations=%+v (%s)", created.Status, created.Mutations, created.diag())
+	}
+	// Whatever happens below, do not leave the probe level in the person's model.
+	t.Cleanup(func() {
+		if levelCount(t) != "0" {
+			runScript(t, c, instanceID, documentID, `
+foreach (var e in new Autodesk.Revit.DB.FilteredElementCollector(Document).OfClass(typeof(Autodesk.Revit.DB.Level)).ToElements()) {
+  var lvl = e as Autodesk.Revit.DB.Level;
+  if (lvl != null && System.Math.Abs(lvl.Elevation - 93.3) < 0.01) Document.Delete(lvl.Id);
+}
+return "cleaned";`)
+		}
+	})
+
+	t.Run("UndoRevertsTheLabelledRun", func(t *testing.T) {
+		out := decodeToolResult[executeScriptOut](t, callUndoRedo(t, "undo", map[string]any{"confirm": true}))
+		if out.Status != "success" {
+			t.Fatalf("undo: status=%q (%s)", out.Status, out.diag())
+		}
+		if out.Mutations == nil || out.Mutations.Deleted != 1 {
+			t.Errorf("the undo's reverted delta must show the level removed (deleted:1): %+v", out.Mutations)
+		}
+		var found bool
+		for _, n := range out.Notices {
+			if n.Code == "undo-reverted-connector-work" && strings.Contains(n.Message, "MCP: harness undo probe") {
+				found = true
+			}
+			if n.Code == "undo-reverted-other-work" {
+				t.Errorf("the undo reverted something other than the connector's labelled run: %s", n.Message)
+			}
+		}
+		if !found {
+			t.Errorf("expected an undo-reverted-connector-work notice naming 'MCP: harness undo probe'; notices=%+v", out.Notices)
+		}
+		if got := levelCount(t); got != "0" {
+			t.Errorf("after undo the probe level must be gone, found %s", got)
+		}
+	})
+
+	t.Run("RedoRestoresIt", func(t *testing.T) {
+		out := decodeToolResult[executeScriptOut](t, callUndoRedo(t, "redo", map[string]any{"confirm": true}))
+		if out.Status != "success" {
+			t.Fatalf("redo: status=%q (%s)", out.Status, out.diag())
+		}
+		if out.Mutations == nil || out.Mutations.Created != 1 {
+			t.Errorf("the redo's delta must show the level back (created:1): %+v", out.Mutations)
+		}
+		if got := levelCount(t); got != "1" {
+			t.Errorf("after redo the probe level must be back, found %s", got)
+		}
+	})
+
+	t.Run("UndoAgainLeavesTheModelAsFound", func(t *testing.T) {
+		out := decodeToolResult[executeScriptOut](t, callUndoRedo(t, "undo", map[string]any{"confirm": true}))
+		if out.Status != "success" {
+			t.Fatalf("second undo: status=%q (%s)", out.Status, out.diag())
+		}
+		if got := levelCount(t); got != "0" {
+			t.Errorf("after the second undo the probe level must be gone, found %s", got)
 		}
 	})
 }

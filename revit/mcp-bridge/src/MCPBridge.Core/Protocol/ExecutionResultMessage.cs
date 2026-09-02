@@ -139,6 +139,21 @@ public static class ExecutionResultMessage
         return Serialize(id, dto);
     }
 
+    /// <summary>
+    /// #146 Phase 2c: the result of an operation that is not an execution (undo/redo) but shares the wire
+    /// shape -- status, an optional mutation report describing what changed, notices, and an error. No
+    /// execution_id: nothing to poll.
+    /// </summary>
+    public static string Adhoc(JsonElement id, string status, MutationReport? mutations, IReadOnlyList<DiagnosticRecord>? notices, DiagnosticRecord? error) =>
+        Serialize(id, new ResultDto
+        {
+            Status = status,
+            ExecutionId = "",
+            Mutations = mutations,
+            Notices = notices is { Count: > 0 } ? new List<DiagnosticRecord>(notices) : null,
+            Error = error,
+        });
+
     /// <summary>Builds the wire result for ExecuteOutcomeKind.Busy: points at the execution already in flight, no output/error.</summary>
     public static string Busy(JsonElement id, string existingExecutionId) =>
         Serialize(id, new ResultDto { Status = "busy", ExecutionId = existingExecutionId });

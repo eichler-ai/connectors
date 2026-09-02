@@ -13,8 +13,24 @@ namespace MCPBridge.Core.Tests.Fakes;
 /// assembly; IDocumentCreationSource returns an IDocumentAdapter, so the create-and-track logic stays
 /// tier-1 testable while only the final unwrap to a real Document remains tier-2.
 /// </summary>
-internal sealed class FakeUiApplicationAdapter : IUiApplicationAdapter, IDocumentCreationSource, IDocumentChangeSource
+internal sealed class FakeUiApplicationAdapter : IUiApplicationAdapter, IDocumentCreationSource, IDocumentChangeSource, IPostableCommandSource
 {
+    /// <summary>Every PostUndo/PostRedo, in order (#146 Phase 2c).</summary>
+    public List<string> PostedCommands { get; } = new();
+
+    /// <summary>Runs on each post -- a test's chance to emit the DocumentChanged the command would raise, or to throw like Revit refusing.</summary>
+    public Action<string, FakeUiApplicationAdapter>? OnPostCommand { get; init; }
+
+    public void PostUndo() => Post("undo");
+
+    public void PostRedo() => Post("redo");
+
+    private void Post(string direction)
+    {
+        PostedCommands.Add(direction);
+        OnPostCommand?.Invoke(direction, this);
+    }
+
     public IUiDocumentAdapter? ActiveUiDocument { get; init; }
 
     private readonly List<Action<DocumentChange>> _changeSubscribers = new();

@@ -129,9 +129,10 @@ public sealed class RequestDispatcher
         _auditTrailTrace = auditTrailTrace;
     }
 
-    // Where an audit-trail failure's §01-style trace goes (the AddIn passes the connection-log
-    // writer); null (tests, or nothing wired) means the failure is silently swallowed, which the
-    // audit trail's never-affect-the-run contract permits.
+    // The connection-log diagnostic sink (the AddIn passes its writer). Originally for audit-trail
+    // failures only; it also carries the #136 window-inventory lines and the #146 undo/redo timeline --
+    // maintainer diagnostics that never reach an agent. Null (tests, or nothing wired) means those lines
+    // are simply not written, which every caller's never-affect-the-run contract permits.
     private readonly Action<string>? _auditTrailTrace;
 
     /// <summary>How often <see cref="HandlePollExecutionAsync"/> re-checks the record while waiting out timeout_ms.</summary>
@@ -142,6 +143,7 @@ public sealed class RequestDispatcher
         "execute_script" => HandleExecuteScriptAsync(request),
         "poll_execution" => HandlePollExecutionAsync(request),
         "cancel_execution" => Task.FromResult(HandleCancelExecution(request)),
+        "undo_redo" => HandleUndoRedoAsync(request),
         "list_functions" => Task.FromResult(HandleListFunctions(request)),
         "search_functions" => Task.FromResult(HandleSearchFunctions(request)),
         "describe_function" => Task.FromResult(HandleDescribeFunction(request)),
@@ -179,9 +181,178 @@ public sealed class RequestDispatcher
     /// </summary>
     private static readonly string[] SupportedMethods =
     {
-        "execute_script", "poll_execution", "cancel_execution",
+        "execute_script", "poll_execution", "cancel_execution", "undo_redo",
         "list_functions", "search_functions", "describe_function", "dump_members",
     };
+
+    /// <summary>
+    /// #146 Phase 2c: the `undo`/`redo` tools' wire method. Params: execution_id (broker-minted, like a
+    /// script's), direction ("undo"|"redo"), confirm (bool, required true), timeout_ms, document_id
+    /// (optional: the document the caller expects to be active).
+    ///
+    /// AN UNDO IS AN EXECUTION for the purposes of the busy gate (independent review): it goes through
+    /// <see cref="ExecutionManager.Start"/> like a script, so a script arriving mid-undo gets Busy pointing
+    /// at the undo, an undo arriving mid-script gets Busy pointing at the script, and the decision is made
+    /// under the manager's lock rather than racing the bridge (where the loser would have hit "work item
+    /// already pending" and been reported as a bridge fault). The record is completed with the outcome, so
+    /// the answer is the ordinary result shape and is even pollable.
+    ///
+    /// GATED on `confirm` because it acts on Revit's GLOBAL undo stack: it reverts the most recent action
+    /// in the session, which is a person's if they acted after the agent. The stack is not
+    /// API-inspectable, so the connector cannot promise to revert only its own work; the refusal carries
+    /// the one freshness signal it does have (when the connector last completed a run here), the optional
+    /// document_id is checked against the active document BEFORE posting, and the reverted transactions'
+    /// names are reported afterwards -- with a Warning when any was not the connector's.
+    /// </summary>
+    private async Task<string> HandleUndoRedoAsync(JsonRpcRequest request)
+    {
+        string executionId;
+        string directionText;
+        bool confirm;
+        long timeoutMs;
+        string? expectedDocumentId;
+        try
+        {
+            executionId = request.GetRequiredString("execution_id");
+            directionText = request.GetRequiredString("direction");
+            confirm = request.GetOptionalBool("confirm", false);
+            timeoutMs = request.GetOptionalInt64("timeout_ms", (long)UndoRedoCoordinator.DefaultWait.TotalMilliseconds);
+            expectedDocumentId = request.GetOptionalString("document_id");
+        }
+        catch (JsonRpcParamException ex)
+        {
+            return JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InvalidParams, ex.Message, ex.Diagnostic);
+        }
+
+        if (directionText is not ("undo" or "redo"))
+        {
+            var bad = DiagnosticRecord.Create(DiagnosticSeverity.Error, "invalid-params", DiagnosticSource.Execution,
+                $"direction must be \"undo\" or \"redo\", got \"{directionText}\".", detail: null, remedy: new[] { "Pass direction: \"undo\" or \"redo\"." });
+            return JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InvalidParams, bad.Message, bad);
+        }
+
+        var direction = directionText == "undo" ? UndoRedoDirection.Undo : UndoRedoDirection.Redo;
+        var now = _now();
+
+        if (!confirm)
+        {
+            var last = _executionManager.LastCompletedAt;
+            var freshness = last is null
+                ? "no connector run has completed on this instance this session"
+                : $"the connector's last run on this instance completed {FormatAge(now - last.Value)} ago";
+            return ExecutionResultMessage.Adhoc(request.Id, "error", null, null, DiagnosticRecord.Create(
+                DiagnosticSeverity.Error,
+                "undo-confirmation-required",
+                DiagnosticSource.Execution,
+                $"{directionText} acts on Revit's global undo stack: it reverts the most recent action in the session, " +
+                $"which may be a person's, not the connector's ({freshness}). Nothing was done.",
+                detail: new Dictionary<string, object?> { ["last_connector_run_completed_at"] = last?.ToString("o") },
+                remedy: new[]
+                {
+                    "Resend with confirm: true if reverting the latest action in Revit is genuinely intended; pass " +
+                    "document_id to refuse if a different document has become active.",
+                    "To undo only a mistake inside a script, roll back there instead: throw, or use a SubTransaction.",
+                }));
+        }
+
+        var wait = TimeSpan.FromMilliseconds(Math.Clamp(timeoutMs,
+            (long)UndoRedoCoordinator.MinWait.TotalMilliseconds, (long)UndoRedoCoordinator.MaxWait.TotalMilliseconds));
+
+        ExecuteOutcome started;
+        try
+        {
+            // maxDuration comfortably past the wait: CheckMaxDuration must never cancel a live undo.
+            started = _executionManager.Start(executionId, $"<{directionText}>", (long)wait.TotalMilliseconds + 30_000, now);
+        }
+        catch (ArgumentException ex)
+        {
+            return JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InvalidParams, ex.Message, null);
+        }
+
+        switch (started.Kind)
+        {
+            case ExecuteOutcomeKind.Busy:
+                return ExecutionResultMessage.Busy(request.Id, started.Record!.ExecutionId);
+            case ExecuteOutcomeKind.InstanceUnrecoverable:
+                return ExecutionResultMessage.FromInstanceUnrecoverable(request.Id, started.Diagnostic!);
+        }
+
+        _executionManager.MarkRunning(executionId, _now());
+        var outcome = await new UndoRedoCoordinator(_bridge, _auditTrailTrace)
+            .RunAsync(direction, wait, executionId, expectedDocumentId)
+            .ConfigureAwait(false);
+
+        if (outcome.Refusal is UndoRedoDocumentMismatchException mismatch)
+        {
+            _executionManager.CompleteError(executionId, _now(), DiagnosticRecord.Create(
+                DiagnosticSeverity.Error,
+                "undo-wrong-active-document",
+                DiagnosticSource.Execution,
+                $"{directionText} refused: {mismatch.Message}",
+                detail: new Dictionary<string, object?> { ["expected_document_id"] = mismatch.ExpectedDocumentId, ["active_document_id"] = mismatch.ActiveDocumentId },
+                remedy: new[] { "Activate the intended document (or omit document_id to act on whichever is active), then retry." }), null);
+        }
+        else if (outcome.Refusal is not null)
+        {
+            _executionManager.CompleteError(executionId, _now(), DiagnosticRecord.Create(
+                DiagnosticSeverity.Error,
+                "undo-not-posted",
+                DiagnosticSource.Execution,
+                $"Revit did not accept the {directionText} command: {outcome.Refusal.Message}",
+                detail: new Dictionary<string, object?> { ["exception_type"] = outcome.Refusal.GetType().FullName },
+                remedy: new[] { "Check Revit's screen for a modal dialog or an active edit mode, then retry." }), null);
+        }
+        else if (outcome.Change is null)
+        {
+            // WORDED SO NOBODY RETRIES BLINDLY (independent review): the command WAS posted and, on a slow
+            // loop, can still run moments after this answer. A retry would then post a SECOND undo and
+            // revert something else -- plausibly a person's work -- with no notice for the first.
+            _executionManager.CompleteError(executionId, _now(), DiagnosticRecord.Create(
+                DiagnosticSeverity.Error,
+                "undo-no-change-observed",
+                DiagnosticSource.Execution,
+                $"The {directionText} command WAS POSTED, but no document change followed within " +
+                $"{outcome.Waited!.Value.TotalSeconds:F0}s. Either there was nothing to {directionText}, or Revit has not " +
+                "run it yet -- it may still take effect. Do NOT retry blindly: a second post would revert the next action too.",
+                detail: null,
+                remedy: new[]
+                {
+                    "Inspect the model (or Revit's Undo/Redo menu) to see whether the action has been reverted after all.",
+                    $"If it was reverted and that was not intended, call {(direction == UndoRedoDirection.Undo ? "redo" : "undo")}.",
+                    "If nothing changed and Revit is idle with nothing to " + directionText + ", there is nothing to revert.",
+                }), null);
+        }
+        else
+        {
+            var names = outcome.RevertedTransactionNames;
+            var connectorWork = outcome.RevertedOnlyConnectorWork;
+            var notice = DiagnosticRecord.Create(
+                connectorWork ? DiagnosticSeverity.Info : DiagnosticSeverity.Warning,
+                connectorWork ? "undo-reverted-connector-work" : "undo-reverted-other-work",
+                DiagnosticSource.Execution,
+                connectorWork
+                    ? $"{directionText} reverted the connector's own work: {string.Join(", ", names.Select(n => "'" + n + "'"))} in document {outcome.Change.DocumentId}."
+                    : $"{directionText} reverted {(names.Count == 0 ? "an unnamed action" : string.Join(", ", names.Select(n => "'" + n + "'")))} in document {outcome.Change.DocumentId}, which was NOT (only) the connector's work -- a person's action may have been reverted.",
+                detail: new Dictionary<string, object?>
+                {
+                    ["transaction_names"] = names,
+                    ["direction"] = directionText,
+                    ["document_id"] = outcome.Change.DocumentId,
+                },
+                remedy: connectorWork ? null : new[] { $"If that was not intended, call {(direction == UndoRedoDirection.Undo ? "redo" : "undo")} now, before anything else changes." });
+            _executionManager.CompleteSuccess(executionId, _now(), null, null, new[] { notice }, null, outcome.RevertedDelta());
+        }
+
+        var record = _executionManager.Poll(executionId);
+        return record is null
+            ? JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InvalidParams, $"execution_id '{executionId}' vanished.", UnknownExecutionDiagnostic(executionId))
+            : ExecutionResultMessage.FromRecord(request.Id, record);
+    }
+
+    private static string FormatAge(TimeSpan age) =>
+        age.TotalMinutes < 1 ? $"{(int)age.TotalSeconds}s"
+        : age.TotalHours < 1 ? $"{(int)age.TotalMinutes} min"
+        : $"{age.TotalHours:F1} h";
 
     private async Task<string> HandleExecuteScriptAsync(JsonRpcRequest request)
     {

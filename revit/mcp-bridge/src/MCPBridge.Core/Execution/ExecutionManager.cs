@@ -153,7 +153,26 @@ public sealed class ExecutionManager
     /// The parameter type is string, not object, precisely so that can't regress silently.
     /// </summary>
     public DiagnosticRecord? CompleteSuccess(string executionId, DateTimeOffset now, string? result, string? stdOut, IReadOnlyList<DiagnosticRecord> notices, IReadOnlyList<PublishedFileRecord>? files = null, MutationReport? mutations = null) =>
-        Transition(executionId, "complete-success", record => record.MarkCompleted(now, result, stdOut, notices, files, mutations), clearActive: true);
+        Transition(executionId, "complete-success", record => { record.MarkCompleted(now, result, stdOut, notices, files, mutations); _lastCompletedAt = now; }, clearActive: true);
+
+    private DateTimeOffset? _lastCompletedAt;
+
+    /// <summary>
+    /// When a run last completed SUCCESSFULLY on this instance, or null (#146 Phase 2c). The one freshness
+    /// signal the undo tool's refusal can offer: Revit's undo stack is not inspectable, so "the connector
+    /// last wrote here 47 minutes ago" is what lets a caller judge whether the top of the stack is likely
+    /// theirs. Success only -- a failed run rolled back and left nothing on the stack.
+    /// </summary>
+    public DateTimeOffset? LastCompletedAt
+    {
+        get
+        {
+            lock (_lock)
+            {
+                return _lastCompletedAt;
+            }
+        }
+    }
 
     /// <summary>See <see cref="Transition"/> for why this never throws on a terminal race.</summary>
     public DiagnosticRecord? CompleteError(string executionId, DateTimeOffset now, DiagnosticRecord error, string? stdOut, IReadOnlyList<DiagnosticRecord>? notices = null, IReadOnlyList<PublishedFileRecord>? files = null) =>
