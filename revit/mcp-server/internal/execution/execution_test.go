@@ -1320,3 +1320,132 @@ func TestGraceEscalationDeclinesWhenTheConnectionWasDisplaced(t *testing.T) {
 		t.Errorf("res = %+v, want success from the displacing connection", res)
 	}
 }
+
+// Issue #54: an execution that completed add-in-side with nobody polling used
+// to hold the busy latch until the NEXT poll or execute_script, which then
+// answered busy about a finished run. The broker now reconciles first.
+func TestExecuteScriptReconcilesAnUnpolledCompletionInsteadOfAnsweringBusy(t *testing.T) {
+	var polls int32
+	fi, conn := newFakeInstance(t, func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
+		var p map[string]any
+		json.Unmarshal(params, &p)
+		switch method {
+		case "execute_script":
+			if p["script"] == "slow" {
+				return Result{Status: StatusRunning, ExecutionID: p["execution_id"].(string)}, nil
+			}
+			return Result{Status: StatusSuccess, ExecutionID: p["execution_id"].(string), Output: "second"}, nil
+		case "poll_execution":
+			atomic.AddInt32(&polls, 1)
+			// The add-in finished the slow script in the meantime; a zero-wait poll says so.
+			if p["timeout_ms"] != float64(0) {
+				t.Errorf("reconciliation poll must not wait: timeout_ms = %v", p["timeout_ms"])
+			}
+			return Result{Status: StatusSuccess, ExecutionID: p["execution_id"].(string), Output: "first"}, nil
+		}
+		return nil, &transport.RPCError{Code: -32601, Message: "unexpected " + method}
+	})
+	m := NewManager()
+	m.AttachInstance("inst-1", conn)
+
+	first, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "slow", 100, 60000, ScriptOptions{})
+	if drec != nil || first.Status != StatusRunning {
+		t.Fatalf("first: %+v %+v", first, drec)
+	}
+
+	second, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "fast", 5000, 60000, ScriptOptions{})
+	if drec != nil {
+		t.Fatalf("second: %+v", drec)
+	}
+	if second.Status != StatusSuccess || second.Output != "second" {
+		t.Fatalf("second = %+v, want the new script to have run (not busy)", second)
+	}
+	if second.ExecutionID == first.ExecutionID {
+		t.Errorf("the second call must mint its own execution, got the first's id %q", second.ExecutionID)
+	}
+	if atomic.LoadInt32(&polls) != 1 {
+		t.Errorf("expected exactly one reconciliation poll, got %d", polls)
+	}
+	if atomic.LoadInt32(&fi.requests) != 3 {
+		t.Errorf("expected 3 wire requests (execute, reconcile poll, execute), got %d", fi.requests)
+	}
+
+	// The first run's result is retained and pollable, exactly as if the agent had polled it.
+	res, drec := m.PollExecution(context.Background(), first.ExecutionID, 1000)
+	if drec != nil || res.Status != StatusSuccess || res.Output != "first" {
+		t.Fatalf("first run's settled result = %+v %+v", res, drec)
+	}
+}
+
+func TestExecuteScriptStillAnswersBusyWhileTheAddInReportsRunning(t *testing.T) {
+	fi, conn := newFakeInstance(t, func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
+		var p map[string]any
+		json.Unmarshal(params, &p)
+		return Result{Status: StatusRunning, ExecutionID: p["execution_id"].(string)}, nil
+	})
+	m := NewManager()
+	m.AttachInstance("inst-1", conn)
+
+	first, _ := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "slow", 100, 60000, ScriptOptions{})
+	second, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "another", 100, 60000, ScriptOptions{})
+	if drec != nil {
+		t.Fatalf("second: %+v", drec)
+	}
+	if second.Status != StatusBusy || second.ExecutionID != first.ExecutionID {
+		t.Fatalf("second = %+v, want busy pointing at %q", second, first.ExecutionID)
+	}
+	// execute, reconcile poll, and nothing else: the second script was never forwarded.
+	if atomic.LoadInt32(&fi.requests) != 2 {
+		t.Errorf("expected 2 wire requests, got %d", fi.requests)
+	}
+}
+
+func TestReconcileBusyFreesTheLatchForStatusReporting(t *testing.T) {
+	_, conn := newFakeInstance(t, func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
+		var p map[string]any
+		json.Unmarshal(params, &p)
+		if method == "poll_execution" {
+			return Result{Status: StatusSuccess, ExecutionID: p["execution_id"].(string)}, nil
+		}
+		return Result{Status: StatusPending, ExecutionID: p["execution_id"].(string)}, nil
+	})
+	m := NewManager()
+	m.AttachInstance("inst-1", conn)
+	if _, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "slow", 100, 60000, ScriptOptions{}); drec != nil {
+		t.Fatal(drec)
+	}
+	if got := m.StatusForInstance("inst-1"); got != StatusPending {
+		t.Fatalf("before reconcile: %q", got)
+	}
+
+	m.ReconcileBusy(context.Background(), "inst-1")
+
+	if got := m.StatusForInstance("inst-1"); got != StatusIdle {
+		t.Errorf("after reconcile: %q, want idle", got)
+	}
+	// Idle instance: a no-op, no wire traffic implied.
+	m.ReconcileBusy(context.Background(), "inst-1")
+	m.ReconcileBusy(context.Background(), "inst-never-seen")
+}
+
+func TestReconcileBusyLeavesTheLatchWhenTheWireCallFails(t *testing.T) {
+	_, conn := newFakeInstance(t, func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
+		var p map[string]any
+		json.Unmarshal(params, &p)
+		if method == "poll_execution" {
+			return nil, &transport.RPCError{Code: -32000, Message: "simulated add-in failure"}
+		}
+		return Result{Status: StatusRunning, ExecutionID: p["execution_id"].(string)}, nil
+	})
+	m := NewManager()
+	m.AttachInstance("inst-1", conn)
+	first, _ := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "slow", 100, 60000, ScriptOptions{})
+
+	second, drec := m.ExecuteScript(context.Background(), "inst-1", "doc-1", "another", 100, 60000, ScriptOptions{})
+	if drec != nil {
+		t.Fatalf("a failed reconciliation must not surface as the caller's error: %+v", drec)
+	}
+	if second.Status != StatusBusy || second.ExecutionID != first.ExecutionID {
+		t.Fatalf("second = %+v, want the honest busy answer", second)
+	}
+}

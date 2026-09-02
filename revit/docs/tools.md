@@ -64,7 +64,10 @@ Results are one of two shapes (all three execution tools share it): a terminal r
 `notices[]`, `files[]`, `mutations`, and `error` as relevant — or a non-terminal `pending` / `running` / `busy` status
 carrying the `execution_id` to pass to `poll_execution`. `busy` means the instance is already
 running some other script (one at a time per instance, it's Revit's UI thread); the returned
-`execution_id` is that script's.
+`execution_id` is that script's. Before answering `busy` the broker asks the add-in, once and
+without waiting, whether that script has in fact finished (#54), so a run that completed with
+nobody polling never blocks the next caller; `list_instances` does the same before reporting
+`busy`/`pending`.
 
 > **`mutations`** (present only on a `success` that changed something): the run's NET effect across
 > every document it changed — `net_created`, `net_modified`, `net_deleted` counts, `by_category`

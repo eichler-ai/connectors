@@ -382,24 +382,10 @@ type ScriptOptions struct {
 // per §06 — the instance stays unrecoverable until a Revit restart mints a
 // fresh instance_id (§05).
 func (m *Manager) ExecuteScript(ctx context.Context, instanceID, documentID, script string, timeoutMs, maxDurationMs int, opts ScriptOptions) (*Result, *diag.Record) {
-	m.mu.Lock()
-	if m.unrecoverable[instanceID] {
-		m.mu.Unlock()
-		return nil, errInstanceUnrecoverable(instanceID)
+	conn, executionID, early, drec := m.beginExecution(ctx, instanceID)
+	if early != nil || drec != nil {
+		return early, drec
 	}
-	if existingID, busy := m.activeByInstance[instanceID]; busy {
-		m.mu.Unlock()
-		return &Result{Status: StatusBusy, ExecutionID: existingID}, nil
-	}
-	conn, ok := m.conns[instanceID]
-	if !ok {
-		m.mu.Unlock()
-		return nil, errInstanceNotFound(instanceID)
-	}
-	executionID := m.newID()
-	m.executions[executionID] = &record{instanceID: instanceID, status: StatusPending}
-	m.activeByInstance[instanceID] = executionID
-	m.mu.Unlock()
 
 	if maxDurationMs > 0 {
 		m.scheduleAutoCancel(executionID, maxDurationMs)
@@ -446,6 +432,88 @@ func (m *Manager) ExecuteScript(ctx context.Context, instanceID, documentID, scr
 	return res, nil
 }
 
+// beginExecution is the shared prologue of ExecuteScript and UndoRedo: the
+// unrecoverable check, the busy gate, the connection lookup, and the minting
+// and latching of a new execution record. Exactly one of the three results is
+// meaningful: a non-nil early Result (busy), a non-nil diag (unrecoverable or
+// not found), or a conn + executionID to forward with.
+//
+// The busy gate RECONCILES before it answers (issue #54). The wire protocol is
+// request/response, so a script that completed add-in-side with nobody polling
+// leaves the latch set until something asks; before this, the next caller was
+// told busy about an execution that had already finished and paid a poll
+// round trip to learn the instance was free. Now the broker asks the add-in
+// itself, once, with a zero wait, and proceeds if the answer is terminal. No
+// wire-protocol addition, so older add-ins keep working unchanged, and the
+// forwarded poll carries the same connection-identity guards every poll does.
+func (m *Manager) beginExecution(ctx context.Context, instanceID string) (*transport.Conn, string, *Result, *diag.Record) {
+	for attempt := 0; ; attempt++ {
+		m.mu.Lock()
+		if m.unrecoverable[instanceID] {
+			m.mu.Unlock()
+			return nil, "", nil, errInstanceUnrecoverable(instanceID)
+		}
+		if existingID, busy := m.activeByInstance[instanceID]; busy {
+			m.mu.Unlock()
+			if attempt == 0 && m.reconcileBusy(ctx, instanceID) {
+				continue
+			}
+			return nil, "", &Result{Status: StatusBusy, ExecutionID: existingID}, nil
+		}
+		conn, ok := m.conns[instanceID]
+		if !ok {
+			m.mu.Unlock()
+			return nil, "", nil, errInstanceNotFound(instanceID)
+		}
+		executionID := m.newID()
+		m.executions[executionID] = &record{instanceID: instanceID, status: StatusPending}
+		m.activeByInstance[instanceID] = executionID
+		m.mu.Unlock()
+		return conn, executionID, nil, nil
+	}
+}
+
+// reconcileBusyBudget bounds the one-shot reconciliation poll. Short on
+// purpose: it runs on the caller's critical path, and an add-in that cannot
+// answer a zero-wait poll inside it is one whose latch should stay set.
+const reconcileBusyBudget = 2 * time.Second
+
+// reconcileBusy asks instanceID's add-in, once and without waiting, whether the
+// execution holding its busy latch has already finished, and settles it if so.
+// Reports whether the latch was freed. A no-op (false) when the instance is
+// not busy. Errors are deliberately swallowed: this is an optimisation of the
+// answer the caller is about to get, and every failure mode (wire error,
+// still running, disconnected) leaves the caller with the same honest busy
+// or not-found answer it would have had anyway. An add-in reporting
+// unknown-execution-id is handled by forwardExisting's existing execution-lost
+// settle, which also frees the latch.
+func (m *Manager) reconcileBusy(ctx context.Context, instanceID string) bool {
+	m.mu.Lock()
+	executionID, busy := m.activeByInstance[instanceID]
+	m.mu.Unlock()
+	if !busy {
+		return false
+	}
+
+	rctx, cancel := context.WithTimeout(ctx, reconcileBusyBudget)
+	defer cancel()
+	_, _ = m.forwardExisting(rctx, executionID, "poll_execution", 0, map[string]any{
+		"execution_id": executionID,
+		"timeout_ms":   0,
+	})
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.activeByInstance[instanceID] != executionID
+}
+
+// ReconcileBusy is reconcileBusy for callers outside this package that report
+// instance state rather than start work -- list_instances (PRD §05), so an
+// instance whose last run completed unpolled reads idle instead of busy.
+func (m *Manager) ReconcileBusy(ctx context.Context, instanceID string) {
+	m.reconcileBusy(ctx, instanceID)
+}
+
 // scheduleAutoCancel arranges for executionID to be cancelled on the
 // agent's behalf once maxDurationMs elapses, per PRD §06: "a hard ceiling
 // on total runtime ... the broker auto-issues the same cancellation signal
@@ -477,24 +545,10 @@ func (m *Manager) scheduleAutoCancel(executionID string, maxDurationMs int) {
 // other. confirm and document_id are forwarded, not enforced here: the
 // add-in owns the refusals and their wording.
 func (m *Manager) UndoRedo(ctx context.Context, instanceID, direction string, confirm bool, timeoutMs int, documentID string) (*Result, *diag.Record) {
-	m.mu.Lock()
-	if m.unrecoverable[instanceID] {
-		m.mu.Unlock()
-		return nil, errInstanceUnrecoverable(instanceID)
+	conn, executionID, early, drec := m.beginExecution(ctx, instanceID)
+	if early != nil || drec != nil {
+		return early, drec
 	}
-	if existingID, busy := m.activeByInstance[instanceID]; busy {
-		m.mu.Unlock()
-		return &Result{Status: StatusBusy, ExecutionID: existingID}, nil
-	}
-	conn, ok := m.conns[instanceID]
-	if !ok {
-		m.mu.Unlock()
-		return nil, errInstanceNotFound(instanceID)
-	}
-	executionID := m.newID()
-	m.executions[executionID] = &record{instanceID: instanceID, status: StatusPending}
-	m.activeByInstance[instanceID] = executionID
-	m.mu.Unlock()
 
 	params := map[string]any{
 		"execution_id": executionID,

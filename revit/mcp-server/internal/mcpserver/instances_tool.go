@@ -65,7 +65,7 @@ func RegisterInstances(s *mcp.Server, reg *registry.Registry, mgr *execution.Man
 				RevitVersion:   inst.RevitVersion,
 				PID:            inst.PID,
 				ConnectedSince: inst.ConnectedSince,
-				Status:         string(mergedStatus(reg, mgr, inst.InstanceID)),
+				Status:         string(mergedStatus(ctx, reg, mgr, inst.InstanceID)),
 				Memory:         inst.Memory,
 				Documents:      instanceDocuments(inst.Documents),
 			})
@@ -81,7 +81,10 @@ func RegisterInstances(s *mcp.Server, reg *registry.Registry, mgr *execution.Man
 // thread — a missed one means something more severe than "a script is
 // running," and the caller shouldn't just poll-and-wait on the strength of
 // a busy/pending status that may itself be stale.
-func mergedStatus(reg *registry.Registry, mgr *execution.Manager, instanceID string) execution.Status {
+func mergedStatus(ctx context.Context, reg *registry.Registry, mgr *execution.Manager, instanceID string) execution.Status {
+	// Issue #54: a run that completed with nobody polling holds the busy latch
+	// until something asks; ask now, so the status reported is current.
+	mgr.ReconcileBusy(ctx, instanceID)
 	execStatus := mgr.StatusForInstance(instanceID)
 	if execStatus == execution.StatusUnrecoverable {
 		return execStatus
