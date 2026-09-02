@@ -56,7 +56,10 @@
 #                             (\\psf\ vs \\Mac\) is still resolved automatically either way.
 #   --mac-bind IP            This Mac's address the VM can reach (default: auto-detected, first
 #                             10.211.55.x address from ifconfig -- override if that ever changes)
-#   --app-data-dir PATH      Shared broker app-data dir (default: <repo>/Connectors/Revit)
+#   --shared-root PATH       Shared broker.json rendezvous dir, passed to the broker as
+#                             -shared-root (default: <repo>/Connectors/Revit). The broker's own
+#                             private state (models cache, how-to corpus) stays on this Mac's
+#                             platform app-data, NOT here. (--app-data-dir is a deprecated alias.)
 #   --broker-exe PATH        Mac broker binary (default: <repo>/revit/mcp-server/mcp-server-mac).
 #                             This is a BUILD OUTPUT, not just an input: unless --skip-broker-restart
 #                             is given, the broker is rebuilt from this checkout and written here,
@@ -97,7 +100,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 VM_NAME="Windows 11"
 SHARE_NAME="$(basename "$REPO_ROOT")"
 MAC_BIND=""
-APP_DATA_DIR="$REPO_ROOT/Connectors/Revit"
+SHARED_ROOT="$REPO_ROOT/Connectors/Revit"
 BROKER_EXE="$REPO_ROOT/revit/mcp-server/mcp-server-mac"
 REVIT_EXE=""
 TFM="net10.0-windows"
@@ -123,7 +126,7 @@ while [[ $# -gt 0 ]]; do
     --vm) VM_NAME="$2"; shift 2 ;;
     --share-name) SHARE_NAME="$2"; shift 2 ;;
     --mac-bind) MAC_BIND="$2"; shift 2 ;;
-    --app-data-dir) APP_DATA_DIR="$2"; shift 2 ;;
+    --shared-root|--app-data-dir) SHARED_ROOT="$2"; shift 2 ;;
     --broker-exe) BROKER_EXE="$2"; shift 2 ;;
     --revit-exe) REVIT_EXE="$2"; shift 2 ;;
     --tfm) TFM="$2"; shift 2 ;;
@@ -151,7 +154,7 @@ if [[ -z "$MAC_BIND" ]]; then
 fi
 
 BROKER_LOG=/tmp/redeploy-and-verify-broker.log
-BROKER_ARGS_PATTERN="$(basename "$BROKER_EXE") -mode remote -bind $MAC_BIND -app-data-dir $APP_DATA_DIR"
+BROKER_ARGS_PATTERN="$(basename "$BROKER_EXE") -mode remote -bind $MAC_BIND -shared-root $SHARED_ROOT"
 
 # Restart the standalone Mac broker and confirm the replacement actually became PRIMARY -- the
 # same broker-lock-race guard the VM launcher agent applies on its side (issue #26): the singleton
@@ -191,7 +194,7 @@ restart_broker() {
       # pipeline, and set -e kills the script silently one line after "broker binary changed --
       # restarting". The loop's own comment already anticipated a missing/unparsable broker.json;
       # only the shell disagreed.
-      pid="$(sed -n 's/.*"pid": *\([0-9][0-9]*\).*/\1/p' "$APP_DATA_DIR/broker.json" 2>/dev/null | head -1 || true)"
+      pid="$(sed -n 's/.*"pid": *\([0-9][0-9]*\).*/\1/p' "$SHARED_ROOT/broker.json" 2>/dev/null | head -1 || true)"
       if [[ -n "$pid" ]] && cmd="$(ps -p "$pid" -o command= 2>/dev/null)"; then
         if [[ "$cmd" == *"$BROKER_ARGS_PATTERN"* ]]; then
           return 0   # a live primary running with exactly our arguments -- confirmed
@@ -208,7 +211,7 @@ restart_broker() {
       sleep 0.2
     done
   done
-  echo "WARNING: could not confirm a broker matching this script's arguments became primary within 3 attempts -- see $BROKER_LOG and $APP_DATA_DIR/broker.json" >&2
+  echo "WARNING: could not confirm a broker matching this script's arguments became primary within 3 attempts -- see $BROKER_LOG and $SHARED_ROOT/broker.json" >&2
   return 0   # don't abort: the registration wait downstream will surface the failure with context
 }
 
@@ -219,7 +222,7 @@ broker_is_healthy() {
   # only reached from an `elif`, where set -e is suspended, so it degrades to a wrong ANSWER rather
   # than a silent exit -- still worth closing, since "no broker.json" means "not healthy", not
   # "abandon the check".
-  pid="$(sed -n 's/.*"pid": *\([0-9][0-9]*\).*/\1/p' "$APP_DATA_DIR/broker.json" 2>/dev/null | head -1 || true)"
+  pid="$(sed -n 's/.*"pid": *\([0-9][0-9]*\).*/\1/p' "$SHARED_ROOT/broker.json" 2>/dev/null | head -1 || true)"
   [[ -n "$pid" ]] && cmd="$(ps -p "$pid" -o command= 2>/dev/null)" && [[ "$cmd" == *"$BROKER_ARGS_PATTERN"* ]]
 }
 
@@ -373,7 +376,7 @@ if prlctl exec "$VM_NAME" powershell -ExecutionPolicy Bypass -File "$UNC_ROOT\\r
   echo "  -broker-exe \"$BROKER_EXE\" \\"
   echo "  -broker-mode remote \\"
   echo "  -broker-bind \"$MAC_BIND\" \\"
-  echo "  -broker-app-data-dir \"$APP_DATA_DIR\""
+  echo "  -broker-app-data-dir \"$SHARED_ROOT\""
 else
   status=$?
   echo

@@ -29,7 +29,7 @@ var (
 	brokerExe        = flag.String("broker-exe", os.Getenv("MCP_SERVER_EXE"), "path to the built mcp-server binary under test")
 	brokerMode       = flag.String("broker-mode", envOr("MCP_SERVER_MODE", "local"), "topology to launch the broker in -- local or remote (PRD §05). MUST match whatever topology the real Revit instance is actually configured for: a mismatch doesn't error, it makes this process its own independent broker with zero connected instances, and every case below silently SKIPs rather than failing (the exact trap this flag exists to make loud instead of quiet)")
 	brokerBind       = flag.String("broker-bind", envOr("MCP_SERVER_BIND", ""), "remote mode only: non-loopback bind address (PRD §05) -- required when -broker-mode=remote")
-	brokerAppDataDir = flag.String("broker-app-data-dir", envOr("MCP_SERVER_APPDATA", ""), "remote mode: required, the shared-drive broker.json directory matching the real broker's own -app-data-dir. local mode: optional override")
+	brokerAppDataDir = flag.String("broker-app-data-dir", envOr("MCP_SERVER_APPDATA", ""), "remote mode: required, the shared-drive broker.json rendezvous directory, passed to the broker as -shared-root. local mode: optional app-data override, passed as -app-data-dir")
 )
 
 func envOr(key, fallback string) string {
@@ -55,7 +55,10 @@ func startClient(t *testing.T) (*mcpclient.Client, listInstancesOut) {
 		if *brokerBind == "" || *brokerAppDataDir == "" {
 			t.Fatalf("-broker-mode=remote requires -broker-bind and -broker-app-data-dir (or MCP_SERVER_BIND/MCP_SERVER_APPDATA) -- without them this would either fail to start or silently target the wrong broker.json location")
 		}
-		args = append(args, "-bind", *brokerBind, "-app-data-dir", *brokerAppDataDir)
+		// Remote mode: the harness's app-data-dir is the shared-drive rendezvous
+		// root, so pass it as -shared-root. The broker's own private root (models
+		// cache, how-to corpus) stays on this machine's platform app-data.
+		args = append(args, "-bind", *brokerBind, "-shared-root", *brokerAppDataDir)
 	case "local":
 		if *brokerAppDataDir != "" {
 			args = append(args, "-app-data-dir", *brokerAppDataDir)

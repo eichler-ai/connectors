@@ -60,8 +60,9 @@ Getting these values for your own setup: `-broker-bind` is the address the *othe
 (the one running Revit) can actually reach — in this project's own Mac+Parallels environment
 that's the Mac's IP on the Parallels shared network (`ifconfig` on the Mac; typically a
 `10.211.55.x`/`bridge100`-style address, not `127.0.0.1`). `-broker-app-data-dir` is whatever
-directory you pointed the real broker's own `-app-data-dir` flag at (PRD §05: must live on a
-drive both machines can reach, e.g. a Parallels shared folder). Neither value is committed
+directory you pointed the real broker's own `-shared-root` flag at (PRD §05: the rendezvous root,
+which must live on a drive both machines can reach, e.g. a Parallels shared folder — the harness
+passes this value to the broker it launches as `-shared-root`). Neither value is committed
 anywhere in this repo — see `.mcp.json`'s own gitignore entry for why: they're specific to one
 developer's machine and network, and would go stale the moment anyone else copied them.
 
@@ -80,7 +81,7 @@ a broker restart to force a fresh reconnect, start a genuinely long-lived STANDA
 (same "keep stdin open" trick this project uses elsewhere for exactly this reason):
 ```sh
 cd ../mcp-server
-nohup bash -c 'sleep 100000 | ./mcp-server-mac -mode remote -bind <bind-ip> -app-data-dir <dir>' &
+nohup bash -c 'sleep 100000 | ./mcp-server-mac -mode remote -bind <bind-ip> -shared-root <dir>' &
 disown
 ```
 then let the add-in reconnect to it (check its own `connection.log` for a fresh `connected:

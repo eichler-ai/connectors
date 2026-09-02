@@ -267,7 +267,8 @@ func main() {
 	mode := flag.String("mode", envOr("REVIT_MCP_MODE", "local"), "connection topology: \"local\" (127.0.0.1 only, default) or \"remote\" (bind a configured non-loopback interface) — PRD §05")
 	bindAddr := flag.String("bind", envOr("REVIT_MCP_BIND", ""), "non-loopback bind address, required when -mode=remote (e.g. the Parallels shared-network host adapter address)")
 	port := flag.Int("port", envIntOr("REVIT_MCP_PORT", 0), "TCP port for the add-in-facing listener; 0 picks an ephemeral port (discovered via broker.json)")
-	appDataDir := flag.String("app-data-dir", os.Getenv("REVIT_MCP_APPDATA"), "override the platform app-data directory (mainly for tests/dev); defaults to the PRD §09 convention")
+	appDataDir := flag.String("app-data-dir", os.Getenv("REVIT_MCP_APPDATA"), "override the broker-private app-data root (materialized models cache, local how-to corpus; mainly for tests/dev); defaults to the platform app-data directory, PRD §09")
+	sharedRoot := flag.String("shared-root", os.Getenv("REVIT_MCP_SHARED_ROOT"), "rendezvous root where broker.json is published for the add-in to discover — the shared drive's agreed root (PRD §05/§09); required with -mode=remote")
 	// -version exists so anything holding a broker binary -- a dev-loop
 	// script, CI, a person -- can ask it which source it was built from
 	// without launching a session or having a Go toolchain to hand
@@ -306,7 +307,7 @@ func main() {
 	// the one who can act on it.
 	logger.Printf("starting %s", versionLine())
 
-	if err := run(*mode, *bindAddr, *port, *appDataDir, logger); err != nil {
+	if err := run(*mode, *bindAddr, *port, *appDataDir, *sharedRoot, logger); err != nil {
 		logger.Fatalf("fatal: %v", err)
 	}
 }
@@ -327,7 +328,63 @@ func envIntOr(key string, def int) int {
 	return def
 }
 
-func run(mode, bindAddr string, port int, appDataDirOverride string, logger *log.Logger) error {
+// resolveRoots splits the broker's storage into two roots, by owner (PRD
+// §05/§09):
+//
+//	privateRoot    — the broker's own machine's platform app-data, ALWAYS.
+//	                 Holds regenerable per-user state: the materialized
+//	                 ranking-models cache and the local how-to corpus. In
+//	                 remote mode this stays on the broker's machine and never
+//	                 touches the shared drive — the ~24MB model cache has no
+//	                 business crossing a network mount, and nothing
+//	                 off-machine reads it.
+//
+//	rendezvousRoot — where broker.json (and broker.lock) is published for the
+//	                 add-in to discover. In local mode it is the same
+//	                 directory as privateRoot; in remote mode it is the shared
+//	                 drive's agreed root (§05), which the add-in on the other
+//	                 machine can reach and privateRoot cannot.
+//
+// -app-data-dir overrides privateRoot (tests/dev); -shared-root sets
+// rendezvousRoot in remote mode. deprecatedFallback is true when remote mode
+// had to fall back to -app-data-dir as the rendezvous root (no -shared-root
+// given), so the caller can warn.
+func resolveRoots(mode, appDataDirOverride, sharedRoot string) (privateRoot, rendezvousRoot string, deprecatedFallback bool, err error) {
+	privateRoot = appDataDirOverride
+	if privateRoot == "" {
+		d, aerr := singleton.AppDataDir()
+		if aerr != nil {
+			return "", "", false, fmt.Errorf("resolving app-data directory: %w", aerr)
+		}
+		privateRoot = d
+	}
+
+	rendezvousRoot = sharedRoot
+	if rendezvousRoot == "" {
+		switch {
+		case mode != "remote":
+			// Local mode: the add-in shares this machine, so the rendezvous
+			// root is simply the private root.
+			rendezvousRoot = privateRoot
+		case appDataDirOverride != "":
+			// Back-compat: -app-data-dir doubling as the remote-mode shared
+			// root, from before the split.
+			rendezvousRoot = appDataDirOverride
+			deprecatedFallback = true
+		default:
+			// PRD §05: in remote mode broker.json must be written to the
+			// shared drive's agreed root (the same location §09's
+			// file-exchange mechanism uses), NOT the local platform app-data
+			// directory — the remote add-in never looks there. Silently
+			// falling back would mean discovery just never finds broker.json,
+			// with nothing explaining why. Fail fast.
+			return "", "", false, fmt.Errorf("-shared-root is required in remote mode (PRD §05: broker.json must be published to the shared drive's agreed root, which the add-in on the other machine can reach)")
+		}
+	}
+	return privateRoot, rendezvousRoot, deprecatedFallback, nil
+}
+
+func run(mode, bindAddr string, port int, appDataDirOverride, sharedRoot string, logger *log.Logger) error {
 	if mode != "local" && mode != "remote" {
 		return fmt.Errorf("invalid -mode %q: must be \"local\" or \"remote\"", mode)
 	}
@@ -358,35 +415,28 @@ func run(mode, bindAddr string, port int, appDataDirOverride string, logger *log
 		bindAddr = "127.0.0.1"
 	}
 
-	dataDir := appDataDirOverride
-	if dataDir == "" {
-		if mode == "remote" {
-			// PRD §05: in remote mode, broker.json must be written to the
-			// shared drive's agreed root (the same location §09's
-			// file-exchange mechanism uses), NOT the local platform
-			// app-data directory singleton.AppDataDir() resolves — that
-			// directory is local-mode-only and the remote add-in side
-			// never looks there. Silently falling back to it here would
-			// mean the add-in's remote-mode discovery just never finds
-			// broker.json, with nothing anywhere explaining why. Fail
-			// fast instead: require the operator to pass the shared-drive
-			// root explicitly via -app-data-dir.
-			return fmt.Errorf("-app-data-dir is required in remote mode (PRD §05: broker.json must be written to the shared drive's agreed root, not the local app-data directory)")
-		}
-		d, err := singleton.AppDataDir()
-		if err != nil {
-			return fmt.Errorf("resolving app-data directory: %w", err)
-		}
-		dataDir = d
+	privateRoot, rendezvousRoot, deprecatedFallback, err := resolveRoots(mode, appDataDirOverride, sharedRoot)
+	if err != nil {
+		return err
 	}
-	if err := os.MkdirAll(dataDir, 0o755); err != nil {
-		return fmt.Errorf("creating app-data directory %q: %w", dataDir, err)
+	if deprecatedFallback {
+		// Back-compat: before the private/rendezvous split, -app-data-dir
+		// doubled as the remote-mode shared root. Honour it so existing wiring
+		// keeps working, but say so — the caller should pass -shared-root and
+		// let the model cache stay local.
+		logger.Printf("warning: using -app-data-dir %q as the remote-mode rendezvous root is deprecated; pass -shared-root instead so the model cache stays on this machine", appDataDirOverride)
+	}
+
+	for _, d := range []string{privateRoot, rendezvousRoot} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			return fmt.Errorf("creating app-data directory %q: %w", d, err)
+		}
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	lockPath := filepath.Join(dataDir, "broker.lock")
+	lockPath := filepath.Join(rendezvousRoot, "broker.lock")
 
 	// One stdin relay for the whole process lifetime (see its own doc
 	// comment) — both branches below read through it via a fresh
@@ -413,7 +463,7 @@ func run(mode, bindAddr string, port int, appDataDirOverride string, logger *log
 		reader := &turnReader{relay: relay, stop: stop}
 
 		if primary {
-			err := runPrimary(ctx, bindAddr, port, dataDir, logger, reader)
+			err := runPrimary(ctx, bindAddr, port, rendezvousRoot, privateRoot, logger, reader)
 			close(stop)
 			lock.Release()
 			return err // this process's own session ending is a real shutdown, not something to retry
@@ -432,7 +482,7 @@ func run(mode, bindAddr string, port int, appDataDirOverride string, logger *log
 		// exactly the "misrouted into an already-closed connection" bug
 		// this whole mechanism exists to prevent.
 		var wg sync.WaitGroup
-		err = runSecondary(ctx, dataDir, logger, reader, stop, &wg)
+		err = runSecondary(ctx, rendezvousRoot, logger, reader, stop, &wg)
 		wg.Wait()
 		if ctx.Err() != nil {
 			return nil // clean shutdown (signal), not a dropped-primary retry case
@@ -452,7 +502,7 @@ func run(mode, bindAddr string, port int, appDataDirOverride string, logger *log
 	}
 }
 
-func runPrimary(ctx context.Context, bindAddr string, port int, dataDir string, logger *log.Logger, stdin io.Reader) error {
+func runPrimary(ctx context.Context, bindAddr string, port int, rendezvousRoot, privateRoot string, logger *log.Logger, stdin io.Reader) error {
 	ln, err := net.Listen("tcp", net.JoinHostPort(bindAddr, strconv.Itoa(port)))
 	if err != nil {
 		return fmt.Errorf("binding TCP listener on %s:%d: %w", bindAddr, port, err)
@@ -477,10 +527,10 @@ func runPrimary(ctx context.Context, bindAddr string, port int, dataDir string, 
 		Token:     token,
 		Version:   version,
 	}
-	if err := singleton.WriteBrokerJSON(dataDir, info); err != nil {
+	if err := singleton.WriteBrokerJSON(rendezvousRoot, info); err != nil {
 		return fmt.Errorf("writing broker.json: %w", err)
 	}
-	logger.Printf("primary: listening on %s:%d, broker.json written to %s", bindAddr, tcpAddr.Port, dataDir)
+	logger.Printf("primary: listening on %s:%d, broker.json written to %s", bindAddr, tcpAddr.Port, rendezvousRoot)
 
 	mcpServer := mcp.NewServer(&mcp.Implementation{Name: serverName, Version: versionLine()}, nil)
 	execMgr := execution.NewManager()
@@ -488,18 +538,18 @@ func runPrimary(ctx context.Context, bindAddr string, port int, dataDir string, 
 	mcpserver.Register(mcpServer, execMgr)
 	reg := registry.New()
 	discoveryRouter := discovery.NewRouter(reg)
-	embedder, reranker := loadSearchModels(dataDir, logger)
+	embedder, reranker := loadSearchModels(privateRoot, logger)
 	searchIndex := manager.New(discoveryRouter, embedder, reranker, logger.Printf)
 	mcpserver.RegisterDiscovery(mcpServer, discoveryRouter, searchIndex)
 	mcpserver.RegisterInstances(mcpServer, reg, execMgr)
 	// The how-to index shares the models; it is built lazily on the first
 	// search_howtos/describe_howto call and rebuilt when the local
 	// directory changes.
-	howtoIndex := howtosearch.New(mcpserver.LocalCorpusDir(dataDir), embedder, reranker, logger.Printf)
+	howtoIndex := howtosearch.New(mcpserver.LocalCorpusDir(privateRoot), embedder, reranker, logger.Printf)
 	mcpserver.RegisterHowTo(mcpServer, mcpserver.HowToDeps{
 		Search:      howtoIndex,
-		LocalDir:    mcpserver.LocalCorpusDir(dataDir),
-		OutboxDir:   mcpserver.OutboxDir(dataDir),
+		LocalDir:    mcpserver.LocalCorpusDir(privateRoot),
+		OutboxDir:   mcpserver.OutboxDir(privateRoot),
 		GitHubToken: os.Getenv("REVIT_MCP_GITHUB_TOKEN"),
 		Registry:    reg,
 		Router:      discoveryRouter,
@@ -566,7 +616,7 @@ func runPrimary(ctx context.Context, bindAddr string, port int, dataDir string, 
 	// Injected client carries a real timeout; a zero-value http.Client has
 	// none, and a hung TCP connection to a broken proxy must never be able
 	// to block this goroutine (let alone startup) forever.
-	go updatecheck.Run(ctx, &http.Client{Timeout: 10 * time.Second}, dataDir, version, logger)
+	go updatecheck.Run(ctx, &http.Client{Timeout: 10 * time.Second}, rendezvousRoot, version, logger)
 
 	// The primary's own MCP session runs over its own stdio, exactly like
 	// every secondary's proxied session runs over TCP (PRD §05: "From the
@@ -584,7 +634,7 @@ func runPrimary(ctx context.Context, bindAddr string, port int, dataDir string, 
 	return nil
 }
 
-func runSecondary(ctx context.Context, dataDir string, logger *log.Logger, stdin io.Reader, stop chan struct{}, wg *sync.WaitGroup) error {
+func runSecondary(ctx context.Context, rendezvousRoot string, logger *log.Logger, stdin io.Reader, stop chan struct{}, wg *sync.WaitGroup) error {
 	var info singleton.BrokerInfo
 	var err error
 	// The primary listens before anything else (PRD §05), but there's still
@@ -592,12 +642,12 @@ func runSecondary(ctx context.Context, dataDir string, logger *log.Logger, stdin
 	// broker.json write; retry briefly rather than failing outright.
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		info, err = singleton.ReadBrokerJSON(dataDir)
+		info, err = singleton.ReadBrokerJSON(rendezvousRoot)
 		if err == nil {
 			break
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("reading broker.json from %q after waiting for the primary: %w", dataDir, err)
+			return fmt.Errorf("reading broker.json from %q after waiting for the primary: %w", rendezvousRoot, err)
 		}
 		time.Sleep(100 * time.Millisecond)
 	}

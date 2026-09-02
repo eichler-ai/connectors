@@ -310,16 +310,26 @@ if ($Uninstall) {
     }
     Unregister-ScheduledTask -TaskName (Get-PendingUpdateTaskName $Scope) -Confirm:$false -ErrorAction SilentlyContinue
     Remove-Item $appDir -Recurse -Force -ErrorAction SilentlyContinue
-    # The broker's search_functions ranker (issue #107) materializes its cross-encoder model files
-    # (~24MB) under the PRD §09 app-data root at first run, because the inference library needs real
-    # paths. That root is otherwise left alone here (broker.json/broker.lock are per-user runtime
-    # state the next broker launch recreates), but the model directory is a copy of bytes embedded in
-    # the exe being removed, so it goes with it. The path is what singleton.AppDataDir() resolves on
-    # Windows FOR THE ACCOUNT RUNNING THIS UNINSTALLER: the broker runs per user, so under -Scope
-    # AllUsers other users' copies (and, if UAC was answered with a different admin account, the
-    # invoking user's own) stay behind -- the same per-account scoping the claude-mcp deregistration
-    # below already has.
-    Remove-Item "$env:LocalAppData\Connectors\Revit\models" -Recurse -Force -ErrorAction SilentlyContinue
+    # The broker keeps its private app-data root at %LOCALAPPDATA%\Connectors\Revit -- what
+    # singleton.AppDataDir() resolves on Windows: the materialized search+how-to ranking models
+    # (~24MB, a copy of bytes embedded in the exe being removed), the local how-to corpus, the
+    # discovery cache, and -- in local mode -- the broker.json/broker.lock rendezvous pair. None of it
+    # is a record worth keeping: broker.json is a live rendezvous file whose every field (port, pid,
+    # token) is minted fresh on the next launch, and the models are re-materialized from the exe.
+    #
+    # $leftoverVersions is non-empty only when a version's add-in DLL survived removal (a running
+    # Revit had it locked), which means a broker may still be running and relying on this root -- so
+    # only clear the whole root when NO add-in remains for this account. Otherwise fall back to the
+    # old behaviour of dropping just the models directory (a locked, in-use model file simply fails to
+    # delete and stays). Path scope is per-account -- the %LOCALAPPDATA% of whoever runs this
+    # uninstaller -- so under -Scope AllUsers other users' copies (and, if UAC was answered with a
+    # different admin account, the invoking user's own) stay behind, the same per-account scoping the
+    # claude-mcp deregistration below already has.
+    if ($leftoverVersions.Count -eq 0) {
+        Remove-Item "$env:LocalAppData\Connectors\Revit" -Recurse -Force -ErrorAction SilentlyContinue
+    } else {
+        Remove-Item "$env:LocalAppData\Connectors\Revit\models" -Recurse -Force -ErrorAction SilentlyContinue
+    }
     Remove-Item $uninstallKeyPath -Recurse -Force -ErrorAction SilentlyContinue
     if (Get-Command claude -ErrorAction SilentlyContinue) {
         & claude mcp remove revit 2>$null | Out-Null
@@ -527,6 +537,13 @@ try {
     if (Test-Path $serverPayloadDir) {
         Copy-Item "$serverPayloadDir\*" $appDir -Force -Recurse
     }
+
+    # Create the broker's private app-data root now, so it exists before the first launch. The broker
+    # materializes its ranking-models cache and local how-to corpus here, and (in local mode) writes
+    # broker.json/broker.lock here -- what singleton.AppDataDir() resolves on Windows. The broker
+    # would create it lazily too, but setting it up here pairs with the uninstall cleanup above so the
+    # installer owns this directory's whole lifecycle.
+    New-Item -ItemType Directory -Force -Path "$env:LocalAppData\Connectors\Revit" | Out-Null
 
     if ($deployedVersions.Count -gt 0 -or $deferredVersions.Count -gt 0) {
         Copy-SelfIfNeeded $ScriptPath $selfCopyPath
