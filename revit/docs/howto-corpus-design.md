@@ -31,8 +31,8 @@ connector — a Revit API task, or the connector's own mechanics (transaction bl
 documents, routing, publishing, undo) — so long as it is a worked example. Not API reference (that
 is `describe_function`), not orientation or rules (that is `get_skills`). The unit of value is the **pitfall**: the harness comments are
 full of them ("`AreElementsJoined` and `IsWallJoinAllowedAtEnd` measure different things";
-"`LoadFamily` needs *both* documents to have no open transaction, so load first, then open for
-writing") and nothing today serves them to an agent at the moment it needs them.
+"`LoadFamily` needs its *target* document to have no open transaction — a modifiable source loads
+fine — so load between blocks, then place inside one") and nothing today serves them to an agent at the moment it needs them.
 
 A document carries:
 
