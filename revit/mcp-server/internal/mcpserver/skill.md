@@ -178,8 +178,8 @@ except the active document, activate the one you want to keep, then close the ot
 Some Revit APIs manage their own transaction and refuse to run while one is open on the document they
 act on: `UIDocument.RequestViewChange`/`ActiveView`, `Document.LoadFamily`,
 `UIApplication.OpenAndActivateDocument`, and every `EditScope`. **The document your call is routed at is
-modifiable for the whole run**, so against it they always fail ("must not be modifiable", "cannot change
-the active view of a modifiable document").
+modifiable for the whole run**, so against it they always fail — reported with `code`
+`script-target-must-not-be-modifiable`.
 
 Wrap them. The connector closes its transaction for the block and reopens one afterwards, so your
 changes still roll back if the script throws:
@@ -191,7 +191,8 @@ Connector.WithoutTransaction(Document, () => {
 ```
 
 Don't write inside that block — the document isn't modifiable there. To write, nest
-`Connector.WithTransaction`. That pair is what makes **stairs** work, and the closing edge is the point:
+`Connector.WithTransaction` (it also returns a value: `var id = Connector.WithTransaction(doc, () =>
+Level.Create(doc, 3.0).Id);`). That pair is what makes **stairs** work, and the closing edge is the point:
 an edit scope can't commit while a transaction is open.
 
 ```csharp
@@ -381,6 +382,7 @@ absent. For the why, a human can click **MCP Bridge → Status** on the Revit ri
 | Changing a placed sheet's title block does nothing useful | `ViewSheet.SheetTitleBlockId` holds the **placed instance's** id, while `ViewSheet.Create(doc, titleBlockTypeId)` takes a **type** id. Both are `ElementId`, so reusing the symbol id that worked in `Create` compiles, is accepted with no validation, and silently leaves the sheet pointing at a `FamilySymbol` instead of its title block. A fatal Revit crash followed this once; that link is unconfirmed, but the corruption is. | Don't assign a **type** id to it — and if you already have, assigning the placed instance's id back restores the sheet. To change the title block, retype the instance: `doc.GetElement(sheet.SheetTitleBlockId)` is it, or use a `FilteredElementCollector(doc, sheet.Id)` on `OST_TitleBlocks` with `WhereElementIsNotElementType()` when that id is already wrong. Then `instance.ChangeTypeId(symbolId)`, which works across families. `GetValidTypes()` enumerates candidates but gates nothing — it calls another family's symbol valid. `ChangeTypeId` returns `InvalidElementId` (`-1`) on success, so read the instance's `Symbol` back instead of testing it. |
 | Error `code` is `script-api-denied` | You used something flatly rejected — most often opening your own `Transaction` | See "What you may not do". Nothing ran and nothing changed; no argument lifts this, the script has to change. |
 | Error `code` is `script-lifecycle-confirmation-required` | A gated lifecycle/worksharing member without confirmation | Nothing ran. If genuinely intended, resend the **identical** call with `confirm_lifecycle_actions: true`. The `message` names every gated member used. |
+| Error `code` is `script-target-must-not-be-modifiable` | A self-transacting API (`LoadFamily`, `RequestViewChange`, an `EditScope`) hit the connector's open transaction | Wrap the call in `Connector.WithoutTransaction` — see "Calls that need their target *not* modifiable". |
 
 For a human debugging deeper: the add-in writes `connection.log` and `startup-errors.log` to
 `%LOCALAPPDATA%\Connectors\Revit\` on the machine running Revit. `broker.json` lives there too in

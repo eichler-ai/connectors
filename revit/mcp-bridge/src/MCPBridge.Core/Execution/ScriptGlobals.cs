@@ -154,6 +154,10 @@ public sealed class ScriptGlobals : IConnectorRuntime
         RequireDocumentTransactions(nameof(Connector.WithTransaction))
             .RunWithTransaction((Autodesk.Revit.DB.Document)document, body);
 
+    T IConnectorRuntime.WithTransaction<T>(object document, Func<T> body) =>
+        RequireDocumentTransactions(nameof(Connector.WithTransaction))
+            .RunWithTransaction((Autodesk.Revit.DB.Document)document, body);
+
     void IConnectorRuntime.Settle(object document, bool keep) =>
         RequireDocumentTransactions(nameof(Connector.Settle))
             .Settle((Autodesk.Revit.DB.Document)document, keep);

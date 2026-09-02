@@ -154,15 +154,48 @@ public class ConnectorApiSurfaceTests
 
         foreach (var member in ExpectedMembers)
         {
-            var entry = FindMemberEntry(docs, member);
-            Assert.True(
-                entry is not null && !string.IsNullOrWhiteSpace(entry.Summary),
-                $"'{member}' has no summary in the generated XML sidecar, so describe_function would " +
-                "return it as a bare signature. Add an XML doc comment, or check that " +
-                "GenerateDocumentationFile is still set in Eichler.Connectors.Revit.csproj.");
+            // EVERY overload, not the first one found (#146 Phase 0 added WithTransaction<T>): an
+            // undocumented overload would otherwise hide behind its documented sibling, and
+            // describe_function ships each overload's summary separately.
+            var entries = FindMemberEntries(docs, member);
+            Assert.True(entries.Count > 0, $"'{member}' has no entry at all in the generated XML sidecar.");
 
-            AssertWithinWordBudget(member, entry!.Summary!);
+            foreach (var entry in entries)
+            {
+                Assert.True(
+                    !string.IsNullOrWhiteSpace(entry.Summary),
+                    $"'{member}' has an overload with no summary in the generated XML sidecar, so " +
+                    "describe_function would return it as a bare signature. Add an XML doc comment, or " +
+                    "check that GenerateDocumentationFile is still set in Eichler.Connectors.Revit.csproj.");
+
+                AssertWithinWordBudget(member, entry.Summary!);
+            }
         }
+    }
+
+    /// <summary>
+    /// #146 Phase 0 (H4): the "create X, return its id" shape needs a value-returning form, or every such
+    /// script hoists a local out of the block. Reflected by NAME and generic-ness only -- touching
+    /// ReturnType or GetParameters() resolves the whole signature, Autodesk.Revit.DB.Document included,
+    /// which this host cannot load (found by doing exactly that: FileNotFoundException for RevitAPI). That
+    /// the generic overload actually RETURNS its type parameter is pinned by the sidecar's
+    /// <c>&lt;returns&gt;</c> entry and, for real, by the live harness.
+    /// </summary>
+    [Fact]
+    public void WithTransaction_HasAValueReturningGenericOverloadBesideTheActionForm()
+    {
+        var overloads = typeof(Connector)
+            .GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly)
+            .Where(m => m.Name == "WithTransaction")
+            .ToArray();
+
+        Assert.Equal(2, overloads.Length);
+        Assert.Single(overloads, m => m.IsGenericMethodDefinition && m.GetGenericArguments().Length == 1);
+        Assert.Single(overloads, m => !m.IsGenericMethodDefinition);
+
+        var generic = FindMemberEntries(LoadShippedDocs(), "WithTransaction")
+            .Single(e => e.Returns is not null);
+        Assert.Contains("returned", generic.Returns, StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>
@@ -325,14 +358,28 @@ public class ConnectorApiSurfaceTests
             "an agent by describe_function; move the rationale to <remarks>, which XmlDocIndex does not read.");
     }
 
-    private static XmlDocEntry? FindMemberEntry(IReadOnlyDictionary<string, XmlDocEntry> docs, string memberName)
-    {
-        // "M:Eichler.Connectors.Revit.Connector.Publish(System.String,System.String)" -> "Publish".
-        var prefix = "Eichler.Connectors.Revit.Connector." + memberName;
-        return docs
-            .Where(kv => kv.Key.Length > 2 && kv.Key[2..].StartsWith(prefix, StringComparison.Ordinal))
+    private static IReadOnlyList<XmlDocEntry> FindMemberEntries(IReadOnlyDictionary<string, XmlDocEntry> docs, string memberName) =>
+        docs
+            .Where(kv => IsEntryFor(kv.Key, memberName))
             .Select(kv => kv.Value)
-            .FirstOrDefault();
+            .ToList();
+
+    /// <summary>
+    /// Whether a doc id names <paramref name="memberName"/> (any overload). "M:Eichler.Connectors.Revit.
+    /// Connector.Publish(System.String,System.String)" and "M:...Connector.WithTransaction``1(...)" both
+    /// match their member; the character after the name is checked so "Publish" cannot claim a
+    /// hypothetical "PublishAll".
+    /// </summary>
+    private static bool IsEntryFor(string docId, string memberName)
+    {
+        var prefix = "Eichler.Connectors.Revit.Connector." + memberName;
+        if (docId.Length <= 2 || !docId[2..].StartsWith(prefix, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var rest = docId[(2 + prefix.Length)..];
+        return rest.Length == 0 || rest[0] is '(' or '`';
     }
 
     /// <summary>
@@ -412,8 +459,23 @@ public class ConnectorApiSurfaceTests
         // sidecar's shape. Asserting the count here means the Theory is protected by its own helper rather
         // than by a sibling test someone might later edit.
         //
-        // Seven members plus the type's own "T:" entry; the internal constructor is filtered out above.
-        Assert.Equal(ExpectedMembers.Length + 1, docs.Count);
+        // Every entry must belong to an expected member (or be the type's own "T:" entry), and every
+        // expected member must have at least one -- counted this way rather than as an exact total
+        // because a member may have several overloads (WithTransaction, since #146 Phase 0) and each
+        // overload is its own entry. The internal constructor is filtered out above.
+        foreach (var docId in docs.Keys)
+        {
+            Assert.True(
+                docId == ConnectorDocId || ExpectedMembers.Any(m => IsEntryFor(docId, m)),
+                $"the sidecar carries '{docId}', which names no member in ExpectedMembers.");
+        }
+
+        foreach (var member in ExpectedMembers)
+        {
+            Assert.True(docs.Keys.Any(k => IsEntryFor(k, member)), $"no sidecar entry for '{member}'.");
+        }
+
+        Assert.True(docs.ContainsKey(ConnectorDocId), "the sidecar has no entry for the Connector type itself.");
 
         return docs;
     }

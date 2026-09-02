@@ -1654,4 +1654,101 @@ public class ManagedDocumentTransactionsTests
         Assert.Equal(ManagedDocumentTransactions.DocumentOrigin.Ambient, set.OriginForTesting(ambient.DocumentId));
         Assert.Equal(ManagedDocumentTransactions.DocumentOrigin.AdoptedExisting, set.OriginForTesting("tmp-never-seen"));
     }
+
+    // ------------------------------------------------------------------------------------------
+    // #146 Phase 0: WithTransaction<T>, and the WithoutTransaction reopen restoring PRIOR state (H1)
+    // ------------------------------------------------------------------------------------------
+
+    [Fact]
+    public void WithTransactionOfT_ReturnsTheBodysValue_AndCommitsAtBlockEnd()
+    {
+        // The "create X, return its id" shape (#146 H4). With only an Action body the script has to
+        // hoist a local out of the block; the generic overload hands the value straight back and must
+        // run the SAME open/commit choreography as the Action form -- asserted on the journal so the
+        // two cannot drift apart.
+        var journal = new List<string>();
+        var set = NewSet();
+        var document = new JournalingDocumentAdapter("ambient", journal);
+        set.Open(document, isAmbient: true);
+
+        int result = 0;
+        set.RunWithoutTransactionCore(document, () =>
+        {
+            journal.Clear();
+            result = set.RunWithTransactionCore(document, () =>
+            {
+                journal.Add("BODY");
+                return 42;
+            });
+        });
+
+        Assert.Equal(42, result);
+        Assert.Equal(
+            new[] { "ambient:tx.Start", "BODY", "ambient:tx.Commit", "ambient:tx.Dispose", "ambient:tx.Start" },
+            journal);
+    }
+
+    [Fact]
+    public void WithTransactionOfT_RollsItsOwnBlockBackWhenTheBodyThrows_AndLeavesTheDocumentUsable()
+    {
+        // Same WEDGE/silent-commit guarantee as the Action form -- a generic overload that bypassed
+        // RunBody's unwind would reintroduce both for exactly the callers most likely to catch.
+        var journal = new List<string>();
+        var set = NewSet();
+        var document = new JournalingDocumentAdapter("ambient", journal);
+        set.Open(document, isAmbient: true);
+
+        set.RunWithoutTransactionCore(document, () =>
+        {
+            journal.Clear();
+            var thrown = Record.Exception(() =>
+                set.RunWithTransactionCore<int>(document, () => throw new InvalidOperationException("body failed")));
+            Assert.Equal("body failed", thrown?.Message);
+            Assert.Equal(new[] { "ambient:tx.Start", "ambient:tx.RollBack", "ambient:tx.Dispose" }, journal);
+
+            // Recovery: the next block on the same document is not refused.
+            var second = set.RunWithTransactionCore(document, () => "second");
+            Assert.Equal("second", second);
+        });
+    }
+
+    [Fact]
+    public void WithoutTransaction_DoesNotReopenATransactionTheDocumentDidNotHaveOnEntry()
+    {
+        // #146 H1. The scope's finally used to reopen a transaction UNCONDITIONALLY, so on a document
+        // that had NONE open when the scope began -- reachable today: settle, then WithTransaction
+        // (which closes its transaction at block end and leaves only the group) -- WithoutTransaction
+        // handed the document back MODIFIABLE for the rest of the run. That silently reinstated
+        // always-open on a document the docs say "is no longer open for writing", and it is the one
+        // path that would defeat a group-only default outright. The scope restores the state it found.
+        var journal = new List<string>();
+        var set = NewSet();
+        var document = new JournalingDocumentAdapter("ambient", journal);
+        set.Open(document, isAmbient: true);
+        set.SettleCore(document, keep: true);
+        set.RunWithTransactionCore(document, () => { });   // fresh group; transaction closed at block end
+        journal.Clear();
+
+        set.RunWithoutTransactionCore(document, () => journal.Add("BODY"));
+
+        Assert.Equal(new[] { "BODY" }, journal);          // no tx.Commit before, no tx.Start after
+        Assert.Equal(1, set.Count);                        // still managed: the group is the rollback boundary
+    }
+
+    [Fact]
+    public void WithoutTransaction_StillReopens_WhenTheDocumentHadATransactionOnEntry()
+    {
+        // The other half of H1's contract, pinned beside it so the fix cannot over-correct into "never
+        // reopen": under always-open every ambient document enters the scope WITH a transaction, and
+        // the script expects to write directly again once the block returns.
+        var journal = new List<string>();
+        var set = NewSet();
+        var document = new JournalingDocumentAdapter("ambient", journal);
+        set.Open(document, isAmbient: true);
+        journal.Clear();
+
+        set.RunWithoutTransactionCore(document, () => journal.Add("BODY"));
+
+        Assert.Equal(new[] { "ambient:tx.Commit", "ambient:tx.Dispose", "BODY", "ambient:tx.Start" }, journal);
+    }
 }

@@ -862,14 +862,48 @@ public sealed class RequestDispatcher
             ("script-write-outside-transaction", new[]
             {
                 "Wrap the write in Connector.WithTransaction(document, () => { ... }) -- the connector " +
-                "opens the transaction and commits it when the block ends.",
+                "opens the transaction and commits it when the block ends. It works on any open document, " +
+                "including one created or settled by an earlier call, and the value-returning form " +
+                "(var id = Connector.WithTransaction(doc, () => ...)) hands back what the block produced.",
                 "If this is inside Connector.WithoutTransaction, that block is deliberately not " +
                 "modifiable; nest Connector.WithTransaction inside it to write.",
-                "If the document was created or settled by an earlier call, open it first with " +
-                "Connector.OpenForWriting(document).",
+            }),
+        // #146 Phase 0 (H10's inverse). The mirror image of the case above: a Revit API that manages its
+        // OWN transaction -- Document.LoadFamily, UIDocument.RequestViewChange, every EditScope -- refuses
+        // because the target IS modifiable, and under always-open that is the CONNECTOR's transaction the
+        // script never asked for. Revit's message names the symptom and no way out; the fix is one wrap.
+        Exception modifiable when IsTargetMustNotBeModifiable(modifiable) =>
+            ("script-target-must-not-be-modifiable", new[]
+            {
+                "Wrap this call in Connector.WithoutTransaction(document, () => { ... }) -- the connector " +
+                "closes its transaction for the block and reopens it afterwards, so your other changes " +
+                "still roll back if the script throws. To write inside that block, nest " +
+                "Connector.WithTransaction.",
+                "Document.LoadFamily needs BOTH documents non-modifiable: nest one WithoutTransaction " +
+                "per document (source and target).",
+                "If you called Connector.OpenForWriting on this document earlier in the script, make " +
+                "this call before it instead.",
             }),
         _ => ("script-execution-failed", null),
     };
+
+    /// <summary>
+    /// Matched on the MESSAGE, and that is a weaker match than <see cref="IsModificationOutsideTransaction"/>'s
+    /// by necessity: Revit reports these as <c>Autodesk.Revit.Exceptions.InvalidOperationException</c>, a
+    /// type it also uses for hundreds of unrelated refusals, so the type alone says nothing. The phrases are
+    /// Revit's own wording for the three known shapes -- the modifiability precondition ("must not be
+    /// modifiable"), the active-view variant ("of a modifiable document"), and the EditScope commit edge,
+    /// which is the same collision at the other end of the block (caveats.md, issue #115). Fails OPEN if
+    /// Revit rewords them (the run simply reports script-execution-failed), which is why the live harness
+    /// pins each against real Revit rather than trusting these strings.
+    /// </summary>
+    private static bool IsTargetMustNotBeModifiable(Exception exception)
+    {
+        var message = exception.Message;
+        return message.Contains("must not be modifiable", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("of a modifiable document", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("EditScope cannot be closed, for there is a transaction", StringComparison.OrdinalIgnoreCase);
+    }
 
     /// <summary>
     /// Matched on the type's FULL NAME rather than by a type pattern, and that is load-bearing rather

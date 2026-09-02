@@ -148,17 +148,39 @@ func TestConnectorApiIsDiscoverable(t *testing.T) {
 				"member":      connectorNamespace + "." + connectorTypeName + "." + member,
 			}))
 
-			summary, _ := out.Result["summary"].(string)
-			if strings.TrimSpace(summary) == "" {
-				t.Errorf("%s has an empty summary live -- the XML doc sidecar is probably not deployed "+
-					"beside Eichler.Connectors.Revit.dll. result=%+v", member, out.Result)
-				continue
+			// An OVERLOADED member answers with its overload list instead of a summary, by
+			// describe_function's own contract -- re-call with each member_id (#146 Phase 0 made
+			// WithTransaction the first connector member with two overloads). Every overload must
+			// carry real text: an undocumented one would otherwise hide behind its sibling.
+			results := []map[string]any{out.Result}
+			if overloads, ok := out.Result["overloads"].([]any); ok && len(overloads) > 0 {
+				results = results[:0]
+				for _, o := range overloads {
+					memberID, _ := o.(map[string]any)["member_id"].(string)
+					if memberID == "" {
+						t.Errorf("%s: an overloads[] entry carries no member_id, so it cannot be described: %+v", member, o)
+						continue
+					}
+					results = append(results, describeFunctionSuccess(t, callDescribeFunction(t, c, map[string]any{
+						"instance_id": instanceID,
+						"member_id":   memberID,
+					})).Result)
+				}
 			}
 
-			// The summaries are agent-facing product; maintainer vocabulary in them is a defect (D5).
-			for _, forbidden := range []string{"ScriptGlobals", "PRD §", "IConnectorRuntime", "issue #"} {
-				if strings.Contains(summary, forbidden) {
-					t.Errorf("%s leaks maintainer vocabulary %q to an agent: %q", member, forbidden, summary)
+			for _, result := range results {
+				summary, _ := result["summary"].(string)
+				if strings.TrimSpace(summary) == "" {
+					t.Errorf("%s has an empty summary live -- the XML doc sidecar is probably not deployed "+
+						"beside Eichler.Connectors.Revit.dll. result=%+v", member, result)
+					continue
+				}
+
+				// The summaries are agent-facing product; maintainer vocabulary in them is a defect (D5).
+				for _, forbidden := range []string{"ScriptGlobals", "PRD §", "IConnectorRuntime", "issue #"} {
+					if strings.Contains(summary, forbidden) {
+						t.Errorf("%s leaks maintainer vocabulary %q to an agent: %q", member, forbidden, summary)
+					}
 				}
 			}
 		}

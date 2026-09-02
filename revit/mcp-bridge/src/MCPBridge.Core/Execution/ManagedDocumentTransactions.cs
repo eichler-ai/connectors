@@ -464,6 +464,14 @@ internal sealed class ManagedDocumentTransactions
                 "non-modifiable documents (Document.LoadFamily) is written.");
         }
 
+        // RESTORES THE STATE IT FOUND, not "a transaction" (#146 H1). This scope used to reopen a
+        // transaction unconditionally, so on a document that entered WITHOUT one -- reachable today via
+        // settle-then-WithTransaction, which leaves the group open and the transaction closed -- the
+        // block handed the document back MODIFIABLE for the rest of the run, silently reinstating
+        // always-open on a document the docs say is no longer open for writing. Under the group-only
+        // default this epic is heading for, that one path would have re-created the old model wholesale.
+        var hadTransactionOnEntry = entry.Transaction is not null;
+
         entry.InWithoutTransactionScope = true;
         try
         {
@@ -486,7 +494,10 @@ internal sealed class ManagedDocumentTransactions
             // write fails loudly with `script-write-outside-transaction`, which is a legible outcome; a
             // masked root cause is not. On the SUCCESS path a reopen failure still propagates normally,
             // because there is no exception to destroy.
-            SafeReopenAfterScope(entry);
+            if (hadTransactionOnEntry)
+            {
+                SafeReopenAfterScope(entry);
+            }
         }
     }
 
@@ -529,6 +540,20 @@ internal sealed class ManagedDocumentTransactions
 
         ReopenTransaction(entry);
         RunBody(entry, body, openedGroupHere: false);
+    }
+
+    /// <summary>
+    /// The value-returning form of <see cref="RunWithTransactionCore(IDocumentAdapter, Action)"/> (#146
+    /// Phase 0, H4) -- the "create X, return its id" shape, which with an Action body forces the script to
+    /// hoist a local out of the block. Deliberately a THIN WRAPPER over the Action form rather than a
+    /// second copy of its choreography: the open/commit/unwind rules live in exactly one place, so the two
+    /// overloads cannot drift apart, and every guarantee RunBody documents holds here by construction.
+    /// </summary>
+    internal T RunWithTransactionCore<T>(IDocumentAdapter document, Func<T> body)
+    {
+        T result = default!;
+        RunWithTransactionCore(document, () => { result = body(); });
+        return result;
     }
 
     /// <summary>
@@ -691,6 +716,21 @@ internal sealed class ManagedDocumentTransactions
     /// <summary>See <see cref="RunWithoutTransaction(Autodesk.Revit.DB.Document, Action)"/>.</summary>
     public void RunWithTransaction(Autodesk.Revit.DB.Document rawDocument, Action body) =>
         WithResolved(rawDocument, body, nameof(RunWithTransaction), RunWithTransactionCore);
+
+    /// <summary>
+    /// Raw-Document entry point for <see cref="RunWithTransactionCore{T}"/>. Same null-body and
+    /// null-document signposting as the Action form, spelled out rather than routed through
+    /// <see cref="WithResolved"/> because that helper is shaped around <c>Action</c>.
+    /// </summary>
+    public T RunWithTransaction<T>(Autodesk.Revit.DB.Document rawDocument, Func<T> body)
+    {
+        if (body is null)
+        {
+            throw new ArgumentNullException(nameof(body), $"`{nameof(RunWithTransaction)}` needs a body to run.");
+        }
+
+        return RunWithTransactionCore(ResolveAdapter(rawDocument, nameof(RunWithTransaction)), body);
+    }
 
     /// <summary>See <see cref="RunWithoutTransaction(Autodesk.Revit.DB.Document, Action)"/>.</summary>
     public void Settle(Autodesk.Revit.DB.Document rawDocument, bool keep)

@@ -168,6 +168,22 @@ public sealed class Connector
         _runtime.WithTransaction(document, body);
 
     /// <summary>
+    /// <see cref="WithTransaction(Autodesk.Revit.DB.Document, System.Action)"/> for a block that produces a
+    /// value: the connector opens a transaction, runs your code, commits when the block ends, and hands
+    /// back what the block returned — so <c>var id = Connector.WithTransaction(doc, () => Level.Create(doc, 3.0).Id);</c>
+    /// needs no local hoisted out of the block.
+    ///
+    /// <para>Same rules as the non-returning form: nesting on the same document is refused, and if the
+    /// block throws its changes are rolled back and nothing is returned.</para>
+    /// </summary>
+    /// <typeparam name="T">Whatever your block returns.</typeparam>
+    /// <param name="document">The document to write to.</param>
+    /// <param name="body">Your code. Runs once, immediately; its return value is the call's result.</param>
+    /// <returns>The value your block returned.</returns>
+    public T WithTransaction<T>(Autodesk.Revit.DB.Document document, System.Func<T> body) =>
+        _runtime.WithTransaction(document, body);
+
+    /// <summary>
     /// Finishes this document for the rest of the run, so Revit will allow <c>Close</c>, <c>Save</c>,
     /// <c>SaveAs</c> and <c>SynchronizeWithCentral</c> on it — all of which refuse while the connector
     /// holds anything open. Call it before those, in the same script.
