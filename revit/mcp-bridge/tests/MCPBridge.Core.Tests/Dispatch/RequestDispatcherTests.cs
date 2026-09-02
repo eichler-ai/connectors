@@ -405,7 +405,7 @@ public class RequestDispatcherTests
         Assert.Equal(new[] { "undo" }, uiApp.PostedCommands);
         Assert.Contains("\"status\":\"success\"", json);
         Assert.Contains("\"execution_id\":\"undo-1\"", json);
-        Assert.Contains("\"mutations\":{\"created\":0,\"modified\":0,\"deleted\":1", json);
+        Assert.Contains("\"mutations\":{\"net_created\":0,\"net_modified\":0,\"net_deleted\":1", json);
         Assert.Contains("\"code\":\"undo-reverted-connector-work\"", json);
         Assert.Contains("MCP: 1 Levels created", json);
         Assert.Contains("\"document_id\":\"doc-fake0000000000\"", json);
@@ -454,7 +454,7 @@ public class RequestDispatcherTests
         var json = await task;
 
         Assert.Equal(new[] { "redo" }, uiApp.PostedCommands);
-        Assert.Contains("\"mutations\":{\"created\":1,\"modified\":0,\"deleted\":0", json);
+        Assert.Contains("\"mutations\":{\"net_created\":1,\"net_modified\":0,\"net_deleted\":0", json);
         Assert.Contains("MCP: create L1", json);
     }
 

@@ -121,7 +121,7 @@ internal static class UndoLabel
     private static string? SoleCategory(MutationReport report, System.Func<CategoryTally, int> count, int total)
     {
         var sole = report.ByCategory.Where(kv => count(kv.Value) > 0).ToList();
-        return sole.Count == 1 && count(sole[0].Value) == total && sole[0].Key != "(none)" ? sole[0].Key : null;
+        return sole.Count == 1 && count(sole[0].Value) == total && sole[0].Key != "(uncategorized)" ? sole[0].Key : null;
     }
 
     private static string Cap(string s)

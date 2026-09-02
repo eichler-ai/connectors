@@ -25,16 +25,16 @@ public sealed class MutationReport
         Truncated = truncated;
     }
 
-    [JsonPropertyName("created")]
+    [JsonPropertyName("net_created")]
     public int Created { get; }
 
-    [JsonPropertyName("modified")]
+    [JsonPropertyName("net_modified")]
     public int Modified { get; }
 
-    [JsonPropertyName("deleted")]
+    [JsonPropertyName("net_deleted")]
     public int Deleted { get; }
 
-    /// <summary>Per-category created/modified tallies, keyed by Revit category name; elements with no category land under "(none)".</summary>
+    /// <summary>Per-category created/modified tallies, keyed by Revit category name; elements with no category land under "(uncategorized)".</summary>
     [JsonPropertyName("by_category")]
     public IReadOnlyDictionary<string, CategoryTally> ByCategory { get; }
 
@@ -51,9 +51,9 @@ public sealed class CategoryTally
         Modified = modified;
     }
 
-    [JsonPropertyName("created")]
+    [JsonPropertyName("net_created")]
     public int Created { get; }
 
-    [JsonPropertyName("modified")]
+    [JsonPropertyName("net_modified")]
     public int Modified { get; }
 }

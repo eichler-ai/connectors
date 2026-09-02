@@ -94,7 +94,7 @@ public class UndoLabelTests
     [Fact]
     public void FromReport_DoesNotNameTheUncategorisedBucketAsACategory()
     {
-        Assert.Equal("MCP: 3 elements created", UndoLabel.FromReport(Report(created: 3, categories: ("(none)", 3, 0))));
+        Assert.Equal("MCP: 3 elements created", UndoLabel.FromReport(Report(created: 3, categories: ("(uncategorized)", 3, 0))));
     }
 
     [Fact]

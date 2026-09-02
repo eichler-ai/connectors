@@ -161,12 +161,12 @@ type executeScriptOut struct {
 	// Mutations is the #146 Phase 2 net change report; nil when the run
 	// changed nothing (or failed), which the report's own tests assert on.
 	Mutations *struct {
-		Created    int `json:"created"`
-		Modified   int `json:"modified"`
-		Deleted    int `json:"deleted"`
+		Created    int `json:"net_created"`
+		Modified   int `json:"net_modified"`
+		Deleted    int `json:"net_deleted"`
 		ByCategory map[string]struct {
-			Created  int `json:"created"`
-			Modified int `json:"modified"`
+			Created  int `json:"net_created"`
+			Modified int `json:"net_modified"`
 		} `json:"by_category"`
 		Truncated bool `json:"truncated"`
 	} `json:"mutations"`

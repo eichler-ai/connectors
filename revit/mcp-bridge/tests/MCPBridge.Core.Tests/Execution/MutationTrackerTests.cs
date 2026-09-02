@@ -47,7 +47,7 @@ public class MutationTrackerTests
         Assert.Equal(2, report.ByCategory["Walls"].Created);
         Assert.Equal(1, report.ByCategory["Levels"].Created);
         Assert.Equal(1, report.ByCategory["Levels"].Modified);
-        Assert.Equal(1, report.ByCategory["(none)"].Modified);
+        Assert.Equal(1, report.ByCategory["(uncategorized)"].Modified);
         Assert.False(report.Truncated);
     }
 

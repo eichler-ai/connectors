@@ -81,8 +81,12 @@ with `document-not-found` and an `open_documents` list; omitted means the active
 `UIDocument` is null unless the routed document is the active one; use `Document` for a background
 one. `return` a value and it comes back as `return_value` — strings verbatim, collections and
 anonymous types as JSON, anything else as a self-explaining `<...>` marker. `output` is stdout,
-Revit's own writes too. A successful run that changed anything also carries **`mutations`** (net
-`created`/`modified`/`deleted` across every document it touched, plus `by_category`), so skip the
+Revit's own writes too. A successful run that changed anything also carries **`mutations`**:
+`net_created`/`net_modified`/`net_deleted` across every document it touched, plus `by_category`
+(elements with no Revit category tally under `(uncategorized)`). **Net, not activity**: it describes
+what is different in the model now, exactly what one Undo of this run would revert — an element
+created then deleted in the same run contributes nothing, created then edited counts once as created.
+Revit itself reports each committed block's net effect, so no gross count exists. Skip the
 read-after-write check. A short **`label`** ("create L1 walls") names the run's entry in Revit's Undo
 history, the person's backstop if you got it wrong; omitted, one is derived from what changed. The
 `undo`/`redo` tools (`confirm: true`) post Revit's own Undo/Redo and report what they reverted; the

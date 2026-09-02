@@ -199,7 +199,7 @@ func TestUndoRedoToolsForwardToTheAddIn(t *testing.T) {
 		seen = append(seen, p)
 		return map[string]any{
 			"status":    "success",
-			"mutations": map[string]any{"created": 0, "modified": 0, "deleted": 1, "by_category": map[string]any{}, "truncated": false},
+			"mutations": map[string]any{"net_created": 0, "net_modified": 0, "net_deleted": 1, "by_category": map[string]any{}, "truncated": false},
 			"notices":   []map[string]any{{"severity": "info", "code": "undo-reverted-connector-work", "source": "mcp-bridge.core.execution", "message": "undo reverted 'MCP: 1 Levels created'."}},
 		}, nil
 	})
@@ -330,8 +330,8 @@ func TestExecuteScriptToolMutationsRoundTrip(t *testing.T) {
 		res := map[string]any{"status": "success", "execution_id": p["execution_id"]}
 		if calls == 1 {
 			res["mutations"] = map[string]any{
-				"created": 2, "modified": 1, "deleted": 0,
-				"by_category": map[string]any{"Walls": map[string]any{"created": 2, "modified": 0}},
+				"net_created": 2, "net_modified": 1, "net_deleted": 0,
+				"by_category": map[string]any{"Walls": map[string]any{"net_created": 2, "net_modified": 0}},
 				"truncated":   false,
 			}
 		}
