@@ -104,7 +104,7 @@ example of a common task; L = covered by `get_skills` or by `describe_function` 
 | 20 | `sheet-titleblock-never-swap-on-instance` | interactive `SheetTitleBlockRecreateWorkaroundIsSafe` | pitfall | Changing a sheet's title block: create with the right type, never set `SheetTitleBlockId` on a live instance | **Revit crash** (issue #113) | H | accept; highest-value pitfall in the set |
 | 21 | `level-create-with-plan-view` | harness `TestCreateLevel` + #7's finding | howto | Create a level and a floor-plan view for it | the view does not come for free (from #7) | M | accept as the "datum + view" doc that #7, #9 and #12 reference |
 
-### 3b. Connector mechanics (worked examples `get_skills` states as rules but cannot show)
+### 3b. Connector mechanics (in scope — decided; worked examples `get_skills` states as rules but cannot show)
 
 | # | Proposed id | Source | Kind | Task (draft) | Recorded pitfalls | Value | Recommendation |
 |---|---|---|---|---|---|---|---|
@@ -256,9 +256,10 @@ validator and the fixture-run helper exist (§6 step 2); its text is this sectio
 1. **Granularity.** One document per subtest (≈33) versus merged task bundles (≈20). Recommendation:
    one per subtest, with `pitfall`/`negative` split out where marked; small documents rank and read
    better, and `members` cross-links do the grouping.
-2. **Do connector-mechanics documents (3b) belong in the corpus or in `get_skills`?** Recommendation:
-   corpus. `get_skills` is at its token budget and holds the *rules*; the corpus holds the *worked
-   examples*, which is the split the design note draws.
+2. **Scope — decided:** a how-to can cover *any* relevant usage topic, connector mechanics included.
+   The 3b rows are in. `get_skills` keeps the rules and the orientation; the corpus holds worked
+   examples of anything an agent does with the connector, whether the subject is a Revit API or the
+   connector's own transaction model, documents, files or tools.
 3. **Which 3a rows to merge** (#4 into #3; #12 into #21) — marked "decide" above.
 4. **Whether to include #31/#32** before #146 Phase 2c settles.
 5. **Versioning as in §1** (bundled release stream, per-component install skip, corpus version in
