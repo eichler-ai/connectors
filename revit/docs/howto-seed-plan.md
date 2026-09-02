@@ -475,8 +475,9 @@ Nothing is annotated or extracted until this table is settled.
    Issue Form template and the three labels, and the fixture-run helper; then
    `/triage-howto-submission` as a command file. The queue can start filling from real sessions while
    the seed is audited.
-3. Harness extractor + the audited seed (`revit/howto/corpus.jsonl`), the tier-2 sweep writing the
-   sidecar, and the corpus embedded in the broker with its version in `-version` / `get_skills`.
+3. The 23-document seed (`howto-seed-list.md`) authored under `internal/howto/corpus/`, the tier-2
+   sweep `TestHowToSweep` writing the sidecar, the corpus embedded in the broker with its version in
+   `-version` / `get_skills`. **Done:** every document verified on Revit 2025 and 2027 (2026-09-02).
 4. Generalised index + `search_howto` / `describe_howto`; local corpus indexed alongside.
 5. Release manifest + install.ps1 per-component skip + broker stage-and-swap and reconnect
    messaging (the full scope is in §1); release-notes diff of the corpus. Prerequisite for frequent
