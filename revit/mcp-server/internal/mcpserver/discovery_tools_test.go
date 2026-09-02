@@ -21,7 +21,7 @@ import (
 func connectDiscoveryClient(t *testing.T, r *discovery.Router) *mcp.ClientSession {
 	t.Helper()
 	server := mcp.NewServer(&mcp.Implementation{Name: "revit-mcp-server-test", Version: "0.0.0"}, nil)
-	RegisterDiscovery(server, r)
+	RegisterDiscovery(server, r, nil)
 
 	clientTransport, serverTransport := mcp.NewInMemoryTransports()
 

@@ -76,6 +76,24 @@ func TestIsJunkMasksEnumFloodsOnly(t *testing.T) {
 	}
 }
 
+func TestDocPathAcceptsQualifiedOrBareDeclaringType(t *testing.T) {
+	bare := Doc{Namespace: "Autodesk.Revit.DB", DeclaringType: "Wall", Name: "Create"}
+	qualified := Doc{Namespace: "Autodesk.Revit.DB", DeclaringType: "Autodesk.Revit.DB.Wall", Name: "Create"}
+	for _, d := range []Doc{bare, qualified} {
+		if d.Path() != "Autodesk.Revit.DB.Wall" || d.ShortType() != "Wall" || d.FullName() != "Autodesk.Revit.DB.Wall.Create" {
+			t.Errorf("%+v: Path=%q ShortType=%q FullName=%q", d, d.Path(), d.ShortType(), d.FullName())
+		}
+	}
+	// The wire shape (qualified declaring_type) must tokenize the name field
+	// without namespace noise, exactly like the bare shape.
+	if a, b := Tokenize(fieldText(bare, fieldName)), Tokenize(fieldText(qualified, fieldName)); !reflect.DeepEqual(a, b) {
+		t.Errorf("name-field tokens differ: %v vs %v", a, b)
+	}
+	if !strings.HasPrefix(RerankText(qualified), "Wall.Create") {
+		t.Errorf("RerankText = %q", RerankText(qualified))
+	}
+}
+
 // --- fixture corpus ----------------------------------------------------------
 
 func fixture() []Doc {

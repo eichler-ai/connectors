@@ -36,6 +36,12 @@ jobs:
         with:
           go-version-file: revit/mcp-server/go.mod
           cache-dependency-path: revit/mcp-server/go.sum
+      # search_functions' two ranking models are fetched (pinned by sha256) into
+      # internal/semsearch/models/assets for go:embed. Fetching here means the
+      # test run exercises the real bundled state, and the cross-compile below
+      # measures the real shipped binary size. See internal/semsearch/models.
+      - name: fetch search_functions models
+        run: ./internal/semsearch/models/fetch-models.sh
       - name: gofmt
         run: |
           unformatted="$(gofmt -l .)"

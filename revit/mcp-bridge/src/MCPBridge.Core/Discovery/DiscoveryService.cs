@@ -161,6 +161,37 @@ public sealed class DiscoveryService
         };
     }
 
+    /// <summary>
+    /// dump_members (issue #107): one page of the whole documented corpus for the broker's ranker.
+    /// Untruncated summaries -- see <see cref="DumpedMember"/>.
+    /// </summary>
+    public DumpMembersResult DumpMembers(int offset, int limit)
+    {
+        var rows = _cache.EnumerateMembers(offset, limit);
+        var total = _cache.CountMembers();
+        var next = offset + rows.Count;
+        return new DumpMembersResult
+        {
+            Members = rows.Select(r => new DumpedMember
+            {
+                Member = new MemberSignature
+                {
+                    MemberId = r.MemberId,
+                    Kind = r.Kind,
+                    Namespace = r.Namespace,
+                    DeclaringType = r.DeclaringType,
+                    Name = r.Name,
+                    Signature = r.Signature,
+                    Summary = r.Summary,
+                },
+                IsCore = r.IsCoreAssembly,
+            }).ToList(),
+            Total = total,
+            NextOffset = rows.Count > 0 && next < total ? next : null,
+            Fingerprint = _cache.CorpusFingerprint(),
+        };
+    }
+
     private static MemberSignature ToMemberSignature(DiscoveryMemberRow row) => new()
     {
         MemberId = row.MemberId,

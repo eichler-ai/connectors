@@ -592,6 +592,76 @@ public sealed class DiscoveryCache : IDisposable
         }
     }
 
+    // ---------------------------------------------------------------------------------------------
+    // Whole-corpus dump (issue #107) -- the broker builds its own search index from these pages.
+    // ---------------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// Number of members on documented types -- the same population <see cref="Search"/> ranks over, so the
+    /// broker's index and this cache agree on what "the corpus" is.
+    /// </summary>
+    public int CountMembers()
+    {
+        lock (_lock)
+        {
+            ThrowIfDisposed();
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = "SELECT COUNT(*) FROM members m JOIN types t ON m.type_id = t.id WHERE t.documented = 1";
+            return Convert.ToInt32(cmd.ExecuteScalar());
+        }
+    }
+
+    /// <summary>
+    /// One page of the corpus in stable <c>members.id</c> order, so consecutive (offset, limit) pages
+    /// partition it exactly once. Ordering by rowid rather than name is what makes paging safe against a
+    /// concurrent <see cref="Sync"/> only in the trivial sense (a sync mid-dump changes ids; the broker
+    /// detects that by re-reading <see cref="CorpusFingerprint"/> at the end of the dump).
+    /// </summary>
+    public IReadOnlyList<DiscoveryMemberRow> EnumerateMembers(int offset, int limit)
+    {
+        if (offset < 0) throw new ArgumentOutOfRangeException(nameof(offset));
+        if (limit <= 0) throw new ArgumentOutOfRangeException(nameof(limit));
+        lock (_lock)
+        {
+            ThrowIfDisposed();
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = """
+                SELECT m.kind, m.name, m.signature, m.summary, m.member_id, m.returns, m.params_json, t.namespace, t.full_name, a.kind
+                FROM members m JOIN types t ON m.type_id = t.id JOIN assemblies a ON t.assembly_id = a.id
+                WHERE t.documented = 1
+                ORDER BY m.id
+                LIMIT @limit OFFSET @offset
+                """;
+            cmd.Parameters.AddWithValue("@limit", limit);
+            cmd.Parameters.AddWithValue("@offset", offset);
+            using var reader = cmd.ExecuteReader();
+            return ReadMemberRows(reader).ToList();
+        }
+    }
+
+    /// <summary>
+    /// SHA-256 over the reflected assembly set (kind, name, content hash; ordered by path). Changes exactly
+    /// when the set of loaded assemblies or any assembly's bytes change -- the same signal <see cref="Sync"/>
+    /// keys its own reconcile on -- so it is the identity of the corpus, independent of Revit version.
+    /// </summary>
+    public string CorpusFingerprint()
+    {
+        lock (_lock)
+        {
+            ThrowIfDisposed();
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = "SELECT kind, name, file_hash FROM assemblies ORDER BY file_path";
+            var sb = new System.Text.StringBuilder();
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                sb.Append(reader.GetString(0)).Append('|').Append(reader.GetString(1)).Append('|').Append(reader.GetString(2)).Append('\n');
+            }
+            var digest = System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(sb.ToString()));
+            return Convert.ToHexString(digest).ToLowerInvariant();
+        }
+    }
+
     private readonly record struct TypeRow(long Id, string Namespace, string Name, string FullName, string? BaseFullName);
 
     /// <summary>

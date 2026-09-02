@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.Linq;
 using MCPBridge.Core.Discovery;
 using MCPBridge.Core.Protocol;
@@ -193,6 +194,49 @@ public class DiscoveryServiceTests
     // all, rather than an empty discovery surface) is covered by MCPBridge.Core.Tests' DiscoveryDispatchTests:
     // that project deliberately does not set GenerateDocumentationFile, so every one of its discovery tests
     // only passes if the escape hatch holds.
+
+    // ---------------------------------------------------------------------------------------------
+    // dump_members (issue #107)
+    // ---------------------------------------------------------------------------------------------
+
+    [Fact]
+    public void DumpMembers_PagesToTheEndWithNextOffsetThenNull()
+    {
+        var service = NewService();
+
+        var first = service.DumpMembers(offset: 0, limit: 2);
+
+        Assert.Equal(2, first.Members.Count);
+        Assert.True(first.Total > 2);
+        Assert.Equal(2, first.NextOffset);
+        Assert.Equal(64, first.Fingerprint.Length);
+        Assert.All(first.Members, m => Assert.True(m.IsCore));
+
+        var all = new List<string>();
+        int? offset = 0;
+        while (offset is not null)
+        {
+            var page = service.DumpMembers(offset.Value, limit: 7);
+            all.AddRange(page.Members.Select(m => m.Member.MemberId));
+            Assert.Equal(first.Fingerprint, page.Fingerprint);
+            offset = page.NextOffset;
+        }
+        Assert.Equal(first.Total, all.Count);
+        Assert.Equal(all.Count, all.Distinct().Count());
+    }
+
+    [Fact]
+    public void DumpMembers_PastTheEnd_IsEmptyWithNoNextOffset()
+    {
+        var service = NewService();
+        var total = service.DumpMembers(0, 1).Total;
+
+        var page = service.DumpMembers(offset: total, limit: 10);
+
+        Assert.Empty(page.Members);
+        Assert.Null(page.NextOffset);
+        Assert.Equal(total, page.Total);
+    }
 
     // ---------------------------------------------------------------------------------------------
     // search_functions

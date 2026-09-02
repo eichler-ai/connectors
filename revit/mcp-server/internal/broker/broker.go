@@ -72,10 +72,20 @@ type Broker struct {
 	Execution *execution.Manager
 	Discovery *discovery.Router
 	MCPServer *mcp.Server
+	// Search, when set, is told about every instance attach/detach so the
+	// broker-side search_functions index (issue #107) is built as soon as an
+	// instance registers and dropped when it goes.
+	Search SearchIndexer
 
 	// Logger receives best-effort diagnostic lines (connection lifecycle,
 	// rejected auth attempts). Defaults to the standard logger if nil.
 	Logger *log.Logger
+}
+
+// SearchIndexer is what Broker needs from internal/semsearch/manager.
+type SearchIndexer interface {
+	OnAttach(instanceID, revitVersion string)
+	OnDetach(instanceID string)
 }
 
 func (b *Broker) logf(format string, args ...any) {
@@ -271,6 +281,9 @@ func (b *Broker) serveAddIn(rwc io.ReadWriteCloser) {
 				b.logf("broker: connection re-registered from instance %s to %s; detaching the former", instanceID, rp.InstanceID)
 				b.Execution.DetachInstance(instanceID, conn)
 				b.Discovery.DetachInstance(instanceID, conn)
+				if b.Search != nil {
+					b.Search.OnDetach(instanceID)
+				}
 				b.Registry.RemoveIfEpoch(instanceID, registerEpoch)
 			}
 
@@ -294,6 +307,9 @@ func (b *Broker) serveAddIn(rwc io.ReadWriteCloser) {
 				displaced.Close()
 			}
 			b.Discovery.AttachInstance(rp.InstanceID, conn)
+			if b.Search != nil {
+				b.Search.OnAttach(rp.InstanceID, rp.RevitVersion)
+			}
 		case "ping":
 			// Heartbeat (PRD §05) — instanceID is only known once this
 			// connection's own register has arrived; a ping can't
@@ -334,8 +350,10 @@ func (b *Broker) serveAddIn(rwc io.ReadWriteCloser) {
 		// conn identity for the two conn maps, the register epoch for the
 		// registry — so no cross-store interleaving with a concurrent
 		// re-register can strand or clobber anything.
+		if b.Discovery.DetachInstance(instanceID, conn) && b.Search != nil {
+			b.Search.OnDetach(instanceID)
+		}
 		b.Execution.DetachInstance(instanceID, conn)
-		b.Discovery.DetachInstance(instanceID, conn)
 		b.Registry.RemoveIfEpoch(instanceID, registerEpoch)
 	}
 }

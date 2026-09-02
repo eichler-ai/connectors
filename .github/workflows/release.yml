@@ -106,12 +106,30 @@ jobs:
           go-version-file: revit/mcp-server/go.mod
           cache-dependency-path: revit/mcp-server/go.sum
 
+      # The broker embeds search_functions' two ranking models (go:embed of
+      # internal/semsearch/models/assets, fetched here and verified against
+      # sha256 pins). A release built without them would still compile and
+      # would silently ship keyword-only ranking, so the fetch is unconditional
+      # and the step after the build asserts the models really are inside.
+      - name: Fetch search_functions models
+        working-directory: revit/mcp-server
+        run: .\internal\semsearch\models\fetch-models.ps1
+
       - name: Build MCP Server broker (windows/amd64)
         working-directory: revit/mcp-server
         run: |
           $env:GOOS = "windows"
           $env:GOARCH = "amd64"
           go build -ldflags "-X main.version=$env:RELEASE_TAG" -o mcp-server.exe ./cmd/mcp-server
+
+      - name: Assert the release binary bundles the search models
+        working-directory: revit/mcp-server
+        run: |
+          $line = & .\mcp-server.exe -search-models
+          Write-Host $line
+          if ($line -notmatch '^search models: bundled') {
+            throw "the release broker does not bundle the search_functions models ('$line') -- the fetch step above did not populate internal/semsearch/models/assets."
+          }
 
       # A released broker must be able to say which source it was built from: skill.md, every tool
       # schema and every tool description are compiled into it, so "which revision is this?" is the

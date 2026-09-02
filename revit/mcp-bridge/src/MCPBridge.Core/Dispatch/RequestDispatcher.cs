@@ -145,6 +145,7 @@ public sealed class RequestDispatcher
         "list_functions" => Task.FromResult(HandleListFunctions(request)),
         "search_functions" => Task.FromResult(HandleSearchFunctions(request)),
         "describe_function" => Task.FromResult(HandleDescribeFunction(request)),
+        "dump_members" => Task.FromResult(HandleDumpMembers(request)),
         _ => Task.FromResult(UnknownMethod(request)),
     };
 
@@ -179,7 +180,7 @@ public sealed class RequestDispatcher
     private static readonly string[] SupportedMethods =
     {
         "execute_script", "poll_execution", "cancel_execution",
-        "list_functions", "search_functions", "describe_function",
+        "list_functions", "search_functions", "describe_function", "dump_members",
     };
 
     private async Task<string> HandleExecuteScriptAsync(JsonRpcRequest request)
@@ -1167,6 +1168,36 @@ public sealed class RequestDispatcher
         }
     }
 
+    /// <summary>
+    /// dump_members (issue #107): the broker pulls the whole documented corpus in pages to build its own
+    /// search index; same execution locus as the other discovery handlers (connection thread, no
+    /// ExternalEvent). Bounded by <see cref="MaxDumpMembersLimit"/> per page: at ~300 bytes a member that
+    /// is ~3MB, well under the wire's 64MiB line cap on both ends.
+    /// </summary>
+    private string HandleDumpMembers(JsonRpcRequest request)
+    {
+        if (_discoveryService is null)
+        {
+            return DiscoveryUnavailable(request.Id);
+        }
+
+        try
+        {
+            var offset = Math.Max(0, request.GetOptionalInt32("offset", 0));
+            var limit = Math.Clamp(request.GetOptionalInt32("limit", DefaultDumpMembersLimit), 1, MaxDumpMembersLimit);
+            var result = _discoveryService.DumpMembers(offset, limit);
+            return DiscoveryResultMessage.DumpMembers(request.Id, result);
+        }
+        catch (JsonRpcParamException ex)
+        {
+            return JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InvalidParams, ex.Message, ex.Diagnostic);
+        }
+        catch (Exception ex)
+        {
+            return DiscoveryUnexpectedError(request.Id, "dump_members", ex);
+        }
+    }
+
     private string HandleDescribeFunction(JsonRpcRequest request)
     {
         if (_discoveryService is null)
@@ -1259,6 +1290,8 @@ public sealed class RequestDispatcher
             remedy: null));
 
     private const int DefaultListFunctionsPageSize = 50;
+    private const int DefaultDumpMembersLimit = 5000;
+    private const int MaxDumpMembersLimit = 10000;
     private const int DefaultSearchFunctionsTopN = 20;
 
     /// <summary>

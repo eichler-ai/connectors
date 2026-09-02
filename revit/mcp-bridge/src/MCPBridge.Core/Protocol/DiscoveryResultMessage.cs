@@ -47,6 +47,28 @@ public static class DiscoveryResultMessage
         public double Score { get; set; }
     }
 
+    private sealed class DumpedMemberDto : MemberDto
+    {
+        [JsonPropertyName("core")]
+        public bool Core { get; set; }
+    }
+
+    private sealed class DumpMembersResultDto
+    {
+        [JsonPropertyName("members")]
+        public List<DumpedMemberDto> Members { get; set; } = new();
+
+        [JsonPropertyName("total")]
+        public int Total { get; set; }
+
+        [JsonPropertyName("next_offset")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public int? NextOffset { get; set; }
+
+        [JsonPropertyName("fingerprint")]
+        public string Fingerprint { get; set; } = "";
+    }
+
     private sealed class NamespaceEntryDto
     {
         [JsonPropertyName("namespace")]
@@ -240,6 +262,29 @@ public static class DiscoveryResultMessage
             TotalMatched = result.TotalMatched,
         };
 
+        return Serialize(id, dto);
+    }
+
+    /// <summary>dump_members (issue #107): {members:[member + core], total, next_offset?, fingerprint}.</summary>
+    public static string DumpMembers(JsonElement id, DumpMembersResult result)
+    {
+        var dto = new DumpMembersResultDto
+        {
+            Members = result.Members.Select(m => new DumpedMemberDto
+            {
+                MemberId = m.Member.MemberId,
+                Kind = m.Member.Kind,
+                Namespace = m.Member.Namespace,
+                DeclaringType = m.Member.DeclaringType,
+                Name = m.Member.Name,
+                Signature = m.Member.Signature,
+                Summary = m.Member.Summary,
+                Core = m.IsCore,
+            }).ToList(),
+            Total = result.Total,
+            NextOffset = result.NextOffset,
+            Fingerprint = result.Fingerprint,
+        };
         return Serialize(id, dto);
     }
 

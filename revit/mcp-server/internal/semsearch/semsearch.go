@@ -38,10 +38,25 @@ type Doc struct {
 	Core bool
 }
 
-// Path is the doc's location field: namespace plus declaring type.
-func (d Doc) Path() string { return d.Namespace + "." + d.DeclaringType }
+// Path is the declaring type's fully-qualified name. On the wire the add-in
+// sends declaring_type already qualified ("Autodesk.Revit.DB.Wall"), so it
+// is used as-is; a bare type name is qualified with Namespace.
+func (d Doc) Path() string {
+	if d.Namespace == "" || strings.HasPrefix(d.DeclaringType, d.Namespace+".") {
+		return d.DeclaringType
+	}
+	return d.Namespace + "." + d.DeclaringType
+}
 
-// FullName is Namespace.DeclaringType.Name, the shape describe_function accepts.
+// ShortType is the declaring type without its namespace ("Wall").
+func (d Doc) ShortType() string {
+	if i := strings.LastIndexByte(d.DeclaringType, '.'); i >= 0 {
+		return d.DeclaringType[i+1:]
+	}
+	return d.DeclaringType
+}
+
+// FullName is Path().Name, the shape describe_function accepts.
 func (d Doc) FullName() string { return d.Path() + "." + d.Name }
 
 // Embedder turns texts into unit vectors. Implementations must return one
@@ -117,7 +132,7 @@ const (
 func fieldText(d Doc, field int) string {
 	switch field {
 	case fieldName:
-		return d.DeclaringType + " " + d.Name
+		return d.ShortType() + " " + d.Name
 	case fieldPath:
 		return d.Namespace
 	default:
@@ -272,7 +287,7 @@ func (ix *Index) breakCoreTies(hits []Hit, ids []int, lexScores []float64) []Hit
 // RerankText is what the cross-encoder reads for a candidate: the
 // Type.Member identifier and its summary, matching the POC's pair format.
 func RerankText(d Doc) string {
-	s := d.DeclaringType + "." + d.Name
+	s := d.ShortType() + "." + d.Name
 	if d.Summary != "" {
 		s += " — " + d.Summary
 	}

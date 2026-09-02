@@ -105,6 +105,36 @@ public class DiscoveryDispatchTests
     }
 
     [Fact]
+    public async Task DumpMembers_PagesTheCorpusWithCoreFlagAndFingerprint()
+    {
+        var dispatcher = NewDispatcher();
+        var request = Parse(new { jsonrpc = "2.0", id = 7, method = "dump_members", @params = new { instance_id = "inst-1", offset = 0, limit = 1 } });
+
+        var json = await dispatcher.DispatchAsync(request);
+
+        Assert.Contains("\"members\":[", json);
+        Assert.Contains("\"core\":true", json);
+        Assert.Contains("\"total\":", json);
+        Assert.Contains("\"next_offset\":1", json);
+        Assert.Contains("\"fingerprint\":\"", json);
+    }
+
+    [Fact]
+    public async Task DumpMembers_DefaultsAndClampsPagingParams()
+    {
+        var dispatcher = NewDispatcher();
+        // No offset/limit: one page from 0 with the default limit -- the tiny Sample corpus fits, so no next_offset.
+        var json = await dispatcher.DispatchAsync(Parse(new { jsonrpc = "2.0", id = 8, method = "dump_members", @params = new { instance_id = "inst-1" } }));
+        Assert.Contains("\"members\":[", json);
+        Assert.DoesNotContain("\"next_offset\"", json);
+
+        // Negative offset clamps to 0 rather than erroring.
+        json = await dispatcher.DispatchAsync(Parse(new { jsonrpc = "2.0", id = 9, method = "dump_members", @params = new { instance_id = "inst-1", offset = -5, limit = 0 } }));
+        Assert.Contains("\"members\":[", json);
+        Assert.DoesNotContain("\"error\":", json);
+    }
+
+    [Fact]
     public async Task SearchFunctions_ReturnsScoredResults()
     {
         var dispatcher = NewDispatcher();
