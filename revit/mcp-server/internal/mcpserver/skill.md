@@ -22,8 +22,6 @@ orientation, not reference.
 >     Level.Create(Document, 42.0));
 > return new { walls, levelId = level.Id.Value };
 > ```
-> Only `System` is imported, so fully-qualify (`Autodesk.Revit.DB.Wall`) or add `using` directives —
-> see "What's in scope".
 
 ---
 
@@ -76,9 +74,10 @@ null unless the routed document is the active one; use `Document` for a backgrou
 
 **What comes back.** `return` a value and it arrives as `return_value` — strings verbatim, collections
 and anonymous types as JSON, anything else as a self-explaining `<...>` marker. `output` is stdout
-(Revit's own writes too). `notices[]` lists what was auto-resolved for you (see "Reading errors");
-`files[]` what you published (see "Exchanging files"). A successful run that changed anything carries
-**`mutations`**: `net_created`/`net_modified`/`net_deleted` across every document it touched, plus
+(Revit's own writes too). `notices[]` carries everything the run wants to tell you besides the return
+value — dialogs auto-answered, documents created, a partial commit, a `Settle` (see "Reading errors")
+— and appears on failed runs too. `files[]` is what you published (see "Exchanging files"). A
+successful run that changed anything carries **`mutations`**: `net_created`/`net_modified`/`net_deleted` across every document it touched, plus
 `by_category` (elements with no Revit category tally under `(uncategorized)`). **Net, not activity**
 — what is different in the model now, exactly what one Undo of this run would revert: an element
 created then deleted contributes nothing, created then edited counts once as created. Revit itself
@@ -146,8 +145,10 @@ scope.Commit(yourFailuresPreprocessor);
 **One run, one Undo entry.** A run that only reads leaves none; a run that wrote leaves exactly one,
 named by the call's `label` ("create L1 walls") or else by what changed — the person's backstop, one
 Ctrl+Z. The `undo`/`redo` tools (`confirm: true`) post Revit's own Undo/Redo and report what they
-reverted; the stack is **global**, so pass `document_id`, read the notice naming the reverted
-transaction, and never retry a timed-out undo blindly. Fix your own mistakes *inside* a script by
+reverted. The stack is **global** and may hold a person's action on top of yours: pass `document_id`
+as the document you expect to be active (a mismatch refuses the call rather than undoing the wrong
+stack), read the notice naming the reverted transaction (`MCP: …` is one of your runs; anything else
+is a person's), and never retry a timed-out undo blindly. Fix your own mistakes *inside* a script by
 throwing instead.
 
 **Flatly rejected: `new Transaction(...)`, `new TransactionGroup(...)`.** The connector owns every
@@ -174,7 +175,8 @@ Connector.WithTransaction(doc, () => { Autodesk.Revit.DB.Level.Create(doc, 10.0)
 
 - **It is headless**: in memory, no window, never the active document — writable by script, invisible
   to the person. Making it visible takes two calls: `Connector.Settle(doc, true)` then `SaveAs` in the
-  creating run (`OpenAndActivateDocument` needs a path), then activate in a later call. Activation is
+  creating run (both need `confirm_lifecycle_actions: true`; `OpenAndActivateDocument` needs a path),
+  then activate in a later call. Activation is
   refused only inside a block on the *active* document.
 - **Templates**: ask Revit rather than guessing. `Application.DefaultProjectTemplate` is a full `.rte`
   path; `Application.FamilyTemplatePath` is the **root** of the family-template tree — search it with
@@ -184,13 +186,14 @@ Connector.WithTransaction(doc, () => { Autodesk.Revit.DB.Level.Create(doc, 10.0)
   `UIApplication.Application.Documents` and matching `Title` — a `WithTransaction` block adopts it and
   its writes roll back with that run. The raw `Application.NewProjectDocument`/`NewFamilyDocument`
   still work and are adopted the same way, but nothing tracks them; prefer the `Connector` calls.
-- **Several documents commit in order** after your script returns — created ones first, the active one
-  last. If one commit fails the rest roll back, but a commit that already succeeded cannot be undone,
-  so you get a `script-partial-commit` notice naming which kept their changes; the ordering means the
-  active document is always the one rolled back.
+- **Several documents commit in order** after your script returns — ones this run created first,
+  then any pre-existing document a block adopted, the active one last. If one commit fails the rest
+  roll back, but a commit that already succeeded cannot be undone, so you get a `script-partial-commit`
+  notice (on a **failed** result) naming which kept their changes; an adopted document may be a real,
+  saved model, so don't assume what survived was scratch.
 
-**Finishing a document mid-run — `Connector.Settle(doc, keep:)`.** Revit refuses `Close`, `Save` and
-`SaveAs` while the connector holds a group open on the document, so settle it first (gated on
+**Finishing a document mid-run — `Connector.Settle(doc, keep:)`.** Revit refuses `Close`, `Save`, `SaveAs`
+and `SynchronizeWithCentral` while the connector holds a group open on the document, so settle it first (gated on
 `confirm_lifecycle_actions`, like the members it enables). `keep: true` makes everything written to it
 so far **permanent immediately** — a later failure no longer undoes it. `keep: false` discards it,
 which is what you want before closing a scratch document. Either way you get a notice. Writing again
@@ -217,8 +220,9 @@ you off anything on disk. Revit also refuses to `Close` the *active* document: f
 another document, activate the one you want to keep, then close the other on the next call.
 
 **If your script threw, whatever it created is still open** — writes roll back, documents don't
-disappear; `tmp-` ids in `list_instances` that were absent before your call are yours. Nothing tidies
-up for you, and a pile of scratch documents exhausts the memory of the Revit a person is working in
+disappear. Every run that created a document carries a `script-created-documents` notice naming it by
+title and `tmp-` id, so you have a handle even when the script threw before returning one. Nothing
+tidies up for you, and a pile of scratch documents exhausts the memory of the Revit a person is working in
 (a modal "Virtual Memory - High Usage" box, which the connector auto-dismisses and reports in `notices[]`).
 
 ## What needs your confirmation
@@ -261,7 +265,7 @@ confirm and proceed; if it crept into a script written for another purpose, remo
 Every failure uses one shape. Read `message` for what happened, `remedy` for what to do:
 
 ```json
-{"severity":"error","code":"script-execution-failed","source":"mcp-bridge.core.execution",
+{"severity":"error","code":"script-compilation-failed","source":"mcp-bridge.core.execution",
  "message":"(1,8): error CS0103: The name 'doc' does not exist in the current context",
  "detail":{"execution_id":"exec-33a9..."},
  "remedy":["..."]}
@@ -269,7 +273,8 @@ Every failure uses one shape. Read `message` for what happened, `remedy` for wha
 
 - **`message` names the real condition** — a compiler error, an API exception. Read it literally;
   compiler errors mean fix the script, not retry it.
-- **`code` is what you match on.** Most script failures are the generic `script-execution-failed`; a
+- **`code` is what you match on.** A compile error is `script-compilation-failed` (fix the script;
+  the remedy names the globals). Otherwise most failures are the generic `script-execution-failed`; a
   refusal carries its own — `script-api-denied` (change the script),
   `script-lifecycle-confirmation-required` (resend with the flag), `script-write-outside-transaction`
   (wrap the write in a block), `script-target-must-not-be-modifiable` (move the call between blocks).
@@ -375,7 +380,7 @@ local mode; in remote mode it moves to the shared drive — ask a human where th
 | `execute_script` | yes | run C# against a document; writes inside `Connector.WithTransaction` |
 | `poll_execution` | yes | finish a long-running script |
 | `cancel_execution` | yes | stop one cooperatively |
-| `undo` / `redo` | yes | revert / restore the last run's Undo entry (`confirm: true`) |
+| `undo` / `redo` | yes | revert / restore Revit's most recent action — global stack, may be a person's (`confirm: true`) |
 | `search_functions` | yes | find an API member by intent |
 | `list_functions` | yes | enumerate namespaces / types / members |
 | `describe_function` | yes | signature + docs for one member |
