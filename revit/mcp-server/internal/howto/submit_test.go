@@ -1,6 +1,11 @@
 package howto
 
 import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -177,7 +182,7 @@ func TestScrubReplacesPrivatePatternsAndReportsResidue(t *testing.T) {
 	env := testEnv(t)
 	d := &Document{
 		Title:    "Export Tower B Level 3 Coordination to DWG",
-		Task:     "Export from C:\\Projects\\Tower B\\model.rvt for nicholas on NICKS-MAC to \\\\fileserver\\share\\out; mail nick@example.com; host 10.211.55.2.",
+		Task:     "For nicholas on NICKS-MAC: export from C:\\Projects\\Tower B\\model.rvt to \\\\fileserver\\share\\out; mail nick@example.com; host 10.211.55.2.",
 		Script:   "// exported from /Users/nicholas/dev/eichler/connectors/model.rvt\nvar p = \"file:///C:/Projects/x\";\nvar q = \"%USERPROFILE%\\RevitMCPExchange\";\n",
 		Pitfalls: []Pitfall{{Symptom: "Project1 fails on D:\\data", Cause: "c", Fix: "f"}},
 		Queries:  &Queries{Miss: []Query{{Text: "export Tower B Level 3 Coordination", Surfaced: "nothing"}}},
@@ -187,7 +192,7 @@ func TestScrubReplacesPrivatePatternsAndReportsResidue(t *testing.T) {
 		t.Fatalf("unexpected residue: %+v", residue)
 	}
 	for field, text := range map[string]string{"title": out.Title, "task": out.Task, "script": out.Script, "pitfall": out.Pitfalls[0].Symptom, "query": out.Queries.Miss[0].Text} {
-		for _, leak := range []string{"Tower B", "nicholas", "NICKS-MAC", "C:\\", "\\\\fileserver", "@example.com", "10.211", "/Users/", "file://", "%USERPROFILE%", "D:\\", "Project1"} {
+		for _, leak := range []string{"Tower B", "nicholas", "NICKS-MAC", "C:\\", "\\\\fileserver", "@example.com", "10.211", "/Users/", "file://", "%USERPROFILE%", "D:\\", "Project1", "model.rvt", "share\\out"} {
 			if strings.Contains(text, leak) {
 				t.Errorf("%s still contains %q: %s", field, leak, text)
 			}
@@ -218,7 +223,10 @@ func TestPrepareWritesOutboxAndRefusesResidue(t *testing.T) {
 	if !strings.HasPrefix(prep.IssueURL, "https://github.com/eichler-ai/connectors/issues/new?") || !strings.Contains(prep.IssueURL, "template=howto-submission.yml") {
 		t.Fatalf("issue url = %s", prep.IssueURL)
 	}
-	if !strings.Contains(prep.GhCommand, "--template howto-submission.yml") || !strings.Contains(prep.GhCommand, prep.BodyPath) {
+	if filepath.Dir(prep.OutboxDoc) != filepath.Join(filepath.Dir(env.LocalDir), "outbox") {
+		t.Fatalf("outbox is not the sibling of local: %s", prep.OutboxDoc)
+	}
+	if strings.Contains(prep.GhCommand, "--template") || !strings.Contains(prep.GhCommand, "--label howto-submission") || !strings.Contains(prep.GhCommand, prep.BodyPath) {
 		t.Fatalf("gh command = %s", prep.GhCommand)
 	}
 	if len(prep.Labels) != 1 || prep.Labels[0] != "howto-submission" {
@@ -244,7 +252,7 @@ func TestPrepareWritesOutboxAndRefusesResidue(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(prep2.Labels) != 2 || prep2.Labels[1] != "howto-edit" || !strings.Contains(prep2.GhCommand, "(rev 2)") {
+	if len(prep2.Labels) != 2 || prep2.Labels[1] != "howto-edit" || !strings.Contains(prep2.GhCommand, "(rev 2)") || !strings.Contains(prep2.GhCommand, "--label howto-submission,howto-edit") {
 		t.Fatalf("edit prep = %+v", prep2)
 	}
 	body2, _ := os.ReadFile(prep2.BodyPath)
@@ -275,12 +283,156 @@ func TestSlug(t *testing.T) {
 	cases := map[string]string{
 		"Tag every door on a level":  "tag-every-door-on-a-level",
 		"  Wall.Create -- basics!  ": "wall-create-basics",
-		"ab":                         "ab-x",
+		"ab":                         "howto-" + ScriptSHA256("ab")[:8],
+		"墙体创建":                       "howto-" + ScriptSHA256("墙体创建")[:8],
 		strings.Repeat("long-", 30):  strings.TrimRight(strings.Repeat("long-", 30)[:80], "-"),
 	}
 	for in, want := range cases {
 		if got := Slug(in); got != want {
 			t.Errorf("Slug(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestScrubKeepsCSharpLiteralsWholeAndRespectsWordBoundaries(t *testing.T) {
+	env := testEnv(t)
+	env.Username = "max"                  // too short to scrub as a word: Math.Max must survive
+	env.DocumentTitles = []string{"Wall"} // too short as well
+	d := &Document{
+		Title:  "Wall.Create basics",
+		Task:   "Use Math.Max and Wall.Create.",
+		Script: "var p = \"C:\\\\Projects\\\\Tower B\\\\model.rvt\"; // opened from C:\\Projects\\Tower B\\model.rvt\nvar u = \"\\\\\\\\fileserver\\\\share\\\\x.rvt\";\n",
+	}
+	out, residue := Scrub(d, env)
+	if len(residue) != 0 {
+		t.Fatalf("residue: %+v", residue)
+	}
+	if out.Task != "Use Math.Max and Wall.Create." || out.Title != "Wall.Create basics" {
+		t.Fatalf("short names must not be scrubbed: %q / %q", out.Task, out.Title)
+	}
+	if strings.Contains(out.Script, "Projects") || strings.Contains(out.Script, "model.rvt") || strings.Contains(out.Script, "fileserver") {
+		t.Fatalf("path tails leaked: %s", out.Script)
+	}
+	// The literal's quotes survive so the scrubbed script is still a string.
+	if !strings.Contains(out.Script, "var p = \"<path>\";") || !strings.Contains(out.Script, "var u = \"<path>\";") {
+		t.Fatalf("literal structure broken: %s", out.Script)
+	}
+	env.Username = "nicholas"
+	d2 := &Document{Task: "nicholas and Nicholas but not nicholasson or anicholas."}
+	out2, _ := Scrub(d2, env)
+	if out2.Task != "<user> and <user> but not nicholasson or anicholas." {
+		t.Fatalf("boundary: %q", out2.Task)
+	}
+}
+
+func TestPrepareRefusesResidueTheScrubberCannotRemove(t *testing.T) {
+	env := testEnv(t)
+	sub := goodSubmission()
+	sub.Task = "Open the project file Tower-Model.rvt and tag every door on a level, then export it."
+	saved, err := Save(env, sub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = Prepare(env, saved, "")
+	var un *ErrUnscrubbed
+	if err == nil {
+		t.Fatal("a bare project file name must be refused as residue")
+	}
+	if !errorsAsUnscrubbed(err, &un) || un.Residue[0].Field != "task" || un.Residue[0].Kind != "project-file" {
+		t.Fatalf("err = %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(filepath.Dir(env.LocalDir), "outbox", saved.Doc.ID+".json")); statErr == nil {
+		t.Fatal("outbox must not be written on residue")
+	}
+}
+
+func errorsAsUnscrubbed(err error, target **ErrUnscrubbed) bool {
+	for err != nil {
+		if u, ok := err.(*ErrUnscrubbed); ok {
+			*target = u
+			return true
+		}
+		w, ok := err.(interface{ Unwrap() error })
+		if !ok {
+			return false
+		}
+		err = w.Unwrap()
+	}
+	return false
+}
+
+func TestSessionStampIsNotDuplicatedOnResave(t *testing.T) {
+	env := testEnv(t)
+	sub := goodSubmission()
+	ranSHA := ScriptSHA256(sub.Script)
+	env.SessionSucceeded = func(sha string) (time.Time, bool) { return env.Now(), sha == ranSHA }
+	for i := 0; i < 3; i++ {
+		if _, err := Save(env, sub); err != nil {
+			t.Fatal(err)
+		}
+		local, _ := LoadLocalDir(env.LocalDir)
+		env.Bases = []*Corpus{local}
+		sub.ID = "tag-every-door-on-a-level"
+		sub.ChangeNote = "resave"
+	}
+	f, _ := os.Open(filepath.Join(env.LocalDir, SessionSidecarName))
+	side, err := LoadSidecar(f)
+	f.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// rev 1, rev 2, rev 3 each get one stamp (same script, different rev); no duplicates within a rev.
+	if len(side.Stamps) != 3 {
+		t.Fatalf("stamps = %d: %+v", len(side.Stamps), side.Stamps)
+	}
+}
+
+func TestFileIssuePostsToTheIssuesAPIWithTheUsersToken(t *testing.T) {
+	env := testEnv(t)
+	saved, err := Save(env, goodSubmission())
+	if err != nil {
+		t.Fatal(err)
+	}
+	prep, err := Prepare(env, saved, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Title  string   `json:"title"`
+		Body   string   `json:"body"`
+		Labels []string `json:"labels"`
+	}
+	var auth, path string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth, path = r.Header.Get("Authorization"), r.URL.Path
+		json.NewDecoder(r.Body).Decode(&got)
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprint(w, `{"html_url":"https://github.com/eichler-ai/connectors/issues/171","number":171,"labels":[{"name":"howto-submission"}]}`)
+	}))
+	defer srv.Close()
+	filed, err := FileIssue(context.Background(), srv.Client(), srv.URL, "eichler-ai/connectors", "ghp_test", prep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filed.URL == "" || filed.Number != 171 || len(filed.LabelsApplied) != 1 {
+		t.Fatalf("filed = %+v", filed)
+	}
+	if auth != "Bearer ghp_test" || path != "/repos/eichler-ai/connectors/issues" {
+		t.Fatalf("request: auth=%q path=%q", auth, path)
+	}
+	if got.Title != prep.Title || got.Body != prep.Body || !strings.Contains(got.Body, "```json") || len(got.Labels) != 1 {
+		t.Fatalf("payload = %+v", got)
+	}
+	// Failure is reported with the status and GitHub's message, and no token means no call.
+	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		fmt.Fprint(w, `{"message":"Not Found"}`)
+	}))
+	defer bad.Close()
+	if _, err := FileIssue(context.Background(), bad.Client(), bad.URL, "eichler-ai/connectors", "ghp_test", prep); err == nil || !strings.Contains(err.Error(), "404") {
+		t.Fatalf("404 not surfaced: %v", err)
+	}
+	if _, err := FileIssue(context.Background(), nil, srv.URL, "eichler-ai/connectors", "", prep); err == nil {
+		t.Fatal("no token must not attempt a request")
 	}
 }

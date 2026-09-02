@@ -1,3 +1,7 @@
+---
+description: Triage how-to submissions from the review queue into the corpus, folding into existing how-tos by default
+---
+
 Takes issue numbers as its argument (`/triage-howto-submission 171 172`, or a range). If the argument
 is missing or unparseable, stop and ask — do not choose issues yourself. Only issues labelled
 `howto-submission` are in the queue; an unlabelled issue is not, even if it looks like one.
@@ -39,7 +43,9 @@ Per issue, in this order:
    For a `howto-edit` submission the target is already named; diff the submitted revision against
    the current line and judge the *change*, not the whole document.
 
-4. **Apply the `howto-reviewed` label, then run it, on a disposable fixture.** Only after the
+4. **Apply the `howto-reviewed` label, then run it, on a disposable fixture.** (The three labels
+   `howto-submission`, `howto-edit`, `howto-reviewed` exist in the repository; if one is missing,
+   `gh label create <name>` it before continuing.) Only after the
    read-through: create a blank fixture document on the connected Revit (the harness's
    `createBlankFixtureDocument` shape), route the script at it by `document_id`, run it with
    `execute_script`, and record status, diagnostic and return value in a comment. A failure is not a

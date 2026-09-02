@@ -3,6 +3,9 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -68,7 +71,8 @@ func howToDeps(t *testing.T) HowToDeps {
 	attachFakeDiscoveryInstance(t, r, "inst-1", func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
 		return map[string]any{}, nil
 	})
-	return HowToDeps{LocalDir: filepath.Join(t.TempDir(), "howto", "local"), Registry: reg, Router: r, Version: "dev", RepoSlug: "eichler-ai/connectors"}
+	root := filepath.Join(t.TempDir(), "howto")
+	return HowToDeps{LocalDir: filepath.Join(root, "local"), OutboxDir: filepath.Join(root, "outbox"), Registry: reg, Router: r, Version: "dev", RepoSlug: "eichler-ai/connectors"}
 }
 
 func TestSubmitHowToInvalidIsRefusedWithProblems(t *testing.T) {
@@ -140,8 +144,11 @@ func TestSubmitHowToWithConfirmationPreparesScrubbedIssue(t *testing.T) {
 			t.Fatalf("outbox file missing: %v", err)
 		}
 	}
-	if !strings.Contains(s.GhCommand, "gh issue create") || !strings.Contains(out.Guidance, s.GhCommand) || !strings.Contains(out.Guidance, "private") {
-		t.Fatalf("gh command / guidance: %q / %q", s.GhCommand, out.Guidance)
+	if s.FiledIssueURL != "" || s.Issue == nil || s.Issue.Repo != "eichler-ai/connectors" || s.Issue.Title == "" || !strings.Contains(s.Issue.Body, "```json") || len(s.Issue.Labels) != 1 || s.NewIssueURL == "" {
+		t.Fatalf("without a token the hand-off must be the issue fields: %+v", s)
+	}
+	if strings.Contains(s.Issue.Body, "Tower B") || !strings.Contains(out.Guidance, "GitHub connector") || !strings.Contains(out.Guidance, "new_issue_url") {
+		t.Fatalf("issue body / guidance: %q", out.Guidance)
 	}
 	// The unscrubbed local copy keeps the user's own text (it never leaves the machine).
 	raw, _ := os.ReadFile(out.LocalPath)
@@ -164,5 +171,53 @@ func TestSubmitHowToImprovesAnExistingLocalDocument(t *testing.T) {
 	}
 	if _, isErr := callSubmit(t, cs, map[string]any{"id": first.Document.ID}); !isErr {
 		t.Fatal("edit without change_note accepted")
+	}
+}
+
+func TestSubmitHowToWithNoInstanceSavesUnstamped(t *testing.T) {
+	deps := howToDeps(t)
+	deps.Registry = registry.New()
+	deps.Router = discovery.NewRouter(deps.Registry)
+	cs := connectHowToClient(t, deps)
+	out, isErr := callSubmit(t, cs, goodArgs())
+	if isErr || out.Document == nil || out.Verified != nil {
+		t.Fatalf("no-instance save: err=%v out=%+v", isErr, out)
+	}
+}
+
+func TestSubmitHowToFilesTheIssueWhenATokenIsConfigured(t *testing.T) {
+	deps := howToDeps(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprint(w, `{"html_url":"https://github.com/eichler-ai/connectors/issues/172","number":172,"labels":[]}`)
+	}))
+	defer srv.Close()
+	deps.GitHubToken, deps.HTTPClient, deps.GitHubAPI = "ghp_test", srv.Client(), srv.URL
+	cs := connectHowToClient(t, deps)
+	args := goodArgs()
+	args["confirm_submission"] = true
+	out, isErr := callSubmit(t, cs, args)
+	if isErr {
+		t.Fatalf("tool error: %+v", out.Error)
+	}
+	if out.Submission == nil || out.Submission.FiledIssueURL == "" || out.Submission.FiledIssueNum != 172 || out.Submission.Issue != nil {
+		t.Fatalf("not filed: %+v", out.Submission)
+	}
+	codes := map[string]bool{}
+	for _, n := range out.Notices {
+		codes[n.Code] = true
+	}
+	if !codes["howto-issue-unlabelled"] {
+		t.Fatalf("an unlabelled filing must be reported: %+v", out.Notices)
+	}
+	// Without confirmation nothing is posted even with a token.
+	deps2 := deps
+	hits := 0
+	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits++; w.WriteHeader(201); fmt.Fprint(w, `{}`) }))
+	defer srv2.Close()
+	deps2.HTTPClient, deps2.GitHubAPI = srv2.Client(), srv2.URL
+	cs2 := connectHowToClient(t, deps2)
+	if out, _ := callSubmit(t, cs2, goodArgs()); out.Submission != nil || hits != 0 {
+		t.Fatalf("gate bypassed: submission=%v hits=%d", out.Submission, hits)
 	}
 }

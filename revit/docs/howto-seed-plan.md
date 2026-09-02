@@ -315,18 +315,26 @@ Behaviour, in order:
 5. **Scrub** every text field, the script's string literals **and the script's comments** (the
    comments are the explanation, so they are exactly where a project name gets typed); refuse
    (`howto-submission-unscrubbed`, naming field and line) if any path or host survives.
-6. **Write the outbox file and return the prefilled issue URL.** The broker never files the issue: it
-   holds no token and spawns nothing (design note §6). **Filing is the agent's job**, using the
-   `gh` the agent session already has: the returned `guidance` says
-   `gh issue create --template howto-submission.yml --title "<title>" --body-file "<outbox_path>"`,
-   and the agent runs it under its own permission model, which is where the user sees and approves
-   the outward action. An agent without `gh` hands the user the prefilled URL and the outbox path.
+6. **File the issue, or hand it off.** The broker carries no maintainer credential and spawns nothing
+   (design note §6), and nothing assumes the `gh` CLI is installed. Three paths, in order:
+   (a) **the user's own opt-in token** — `REVIT_MCP_GITHUB_TOKEN` in the broker's environment — lets
+   the broker POST the issue to GitHub's REST API itself and return its URL (the response says which
+   labels GitHub kept; a non-collaborator's are dropped, so the issue is reported as not yet in the
+   queue); (b) otherwise the response carries the issue itself — `submission.issue` with `repo`,
+   `title`, `body`, `labels` — and **the agent files it with whatever GitHub tool it has**: most
+   users run Claude Desktop (Cowork) or Claude Code, where the GitHub connector or the `gh` CLI is
+   one install away, and the agent's own permission model is where the user sees and approves the
+   outward action (the response also spells out the equivalent
+   `gh issue create --repo <slug> --title … --body-file <outbox_path> --label howto-submission[,howto-edit]`;
+   `gh` refuses `--template` together with `--body-file`, so that command carries the labels);
+   (c) with neither, the **prefilled issue URL** (which carries the Issue Form template, so the
+   label applies for any author) plus the outbox body the person pastes.
    **The queue is defined by an Issue Form template, not by a label the submitter applies:** GitHub
    silently drops labels supplied by anyone without push access (both `labels=` in a URL and
    `gh --label`), so `.github/ISSUE_TEMPLATE/howto-submission.yml` carries `labels:
    [howto-submission]` — template-applied labels work for any author — and the three labels
    (`howto-submission`, `howto-edit`, `howto-reviewed`) are created in the repo as part of step 2.
-   Filing through the agent's own `gh` attaches the user's GitHub identity as the issue author; that
+   Filing through the agent's GitHub tool attaches the user's GitHub identity as the issue author; that
    is inherent to a public tracker and accepted here (the design note's earlier objection is
    superseded by this plan): the scrubber protects *model data*, not authorship, and credit in the
    document stays opt-in via `credit_as`.

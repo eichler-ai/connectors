@@ -163,16 +163,21 @@ The growth mechanism of the how-to corpus (design: [`howto-corpus-design.md`](ho
 plan: [`howto-seed-plan.md`](howto-seed-plan.md) §4). The agent hands in `title`, `task`, `script`,
 `members`, `pitfalls[]`, optional `queries`/`tags`, optional `credit_as`; to improve an existing
 how-to it passes that document's `id` with only the changed fields and a `change_note`, and the
-result is the next revision. The document is validated against the corpus schema first — a
+result is the next revision (until the embedded seed corpus lands in step 3, only the user's own
+local documents can be improved this way). The document is validated against the corpus schema first — a
 non-compliant submission is refused with `howto-invalid` naming every field to fix, and nothing is
 written — then saved to `<app-data>\howto\local\<id>.json`, with a `session` verification stamp if
 that exact script ran successfully in this session. Without `confirm_submission: true` that is all;
 with it, the document is scrubbed (paths, UNC, emails, addresses, the machine and user names, open
 document titles — every text field including the script's comments and literals; residue refuses
 the submission with `howto-submission-unscrubbed`) and an issue body is written to
-`<app-data>\howto\outbox\<id>.md` with a prefilled issue URL and the `gh issue create` command the
-agent runs itself. The broker never files the issue and holds no token; while the repository is
-private only collaborators can file, and the outbox file is the hand-off for anyone else.
+`<app-data>\howto\outbox\<id>.md`. If the user set `REVIT_MCP_GITHUB_TOKEN` (their own token, opt-in),
+the broker files the issue over GitHub's REST API and returns its URL; otherwise the response carries
+the issue fields (`repo`, `title`, `body`, `labels`) for the agent to create with its own GitHub tool
+(the GitHub connector, or the `gh` CLI — the equivalent command is included), plus a prefilled issue
+URL (which applies the queue label through the Issue Form template) for filing by hand. The broker
+never carries a maintainer credential; while the repository is private only collaborators can file,
+and the outbox file is the hand-off for anyone else.
 
 ## Script globals
 

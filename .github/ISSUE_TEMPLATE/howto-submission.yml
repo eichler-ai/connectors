@@ -1,6 +1,5 @@
 name: How-to submission
 description: A worked example for the Revit connector's how-to corpus, produced by submit_howto (or written by hand to the same schema).
-title: "[how-to] "
 labels: ["howto-submission"]
 body:
   - type: markdown

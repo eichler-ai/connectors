@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -28,8 +29,10 @@ const howtoSource = "mcp-server.internal.mcpserver.howto"
 
 // HowToDeps is what submit_howto needs from the rest of the broker.
 type HowToDeps struct {
-	// LocalDir is the local corpus directory (<app-data>/howto/local).
-	LocalDir string
+	// LocalDir is the local corpus directory (<app-data>/howto/local);
+	// OutboxDir the prepared-submission directory (<app-data>/howto/outbox).
+	LocalDir  string
+	OutboxDir string
 	// Registry supplies the connected instances' Revit versions and open
 	// document titles (scrubbed out of every submission).
 	Registry *registry.Registry
@@ -41,6 +44,13 @@ type HowToDeps struct {
 	Version string
 	// RepoSlug is the review-queue repository.
 	RepoSlug string
+	// GitHubToken is the USER's opt-in token (REVIT_MCP_GITHUB_TOKEN). When
+	// set, a confirmed submission is filed over the issues API by the broker;
+	// when empty, the prefilled URL and outbox body are the hand-off.
+	GitHubToken string
+	// HTTPClient and GitHubAPI let tests point filing at a fake server.
+	HTTPClient *http.Client
+	GitHubAPI  string
 	// Bases are corpora an edit's target may live in (the embedded seed,
 	// later the shared corpus); the local corpus is loaded per call.
 	Bases func() []*howto.Corpus
@@ -68,9 +78,27 @@ type SubmitHowToSubmission struct {
 	ScrubbedDocument *howto.Document `json:"scrubbed_document"`
 	OutboxDocument   string          `json:"outbox_document"`
 	IssueBodyPath    string          `json:"issue_body_path"`
-	IssueURL         string          `json:"issue_url"`
-	GhCommand        string          `json:"gh_command"`
-	Labels           []string        `json:"labels"`
+	// FiledIssueURL is set when the broker filed the issue itself (a GitHub
+	// token is configured); then the agent has nothing more to do.
+	FiledIssueURL string `json:"filed_issue_url,omitempty"`
+	FiledIssueNum int    `json:"filed_issue_number,omitempty"`
+	// LabelsApplied is what GitHub kept; empty for a non-collaborator, whose
+	// issue is not in the queue until a maintainer labels it.
+	LabelsApplied []string `json:"labels_applied,omitempty"`
+	// Issue is what to file when the broker did not: the agent creates it
+	// with whatever GitHub tool it has (the GitHub connector, the gh CLI),
+	// or the user opens NewIssueURL and pastes the body from IssueBodyPath.
+	Issue       *IssueToFile `json:"issue,omitempty"`
+	NewIssueURL string       `json:"new_issue_url,omitempty"`
+	GhCommand   string       `json:"gh_command,omitempty"`
+}
+
+// IssueToFile is the review-queue issue, ready for any GitHub tool.
+type IssueToFile struct {
+	Repo   string   `json:"repo"`
+	Title  string   `json:"title"`
+	Body   string   `json:"body"`
+	Labels []string `json:"labels"`
 }
 
 // SubmitHowToOut is the output schema for submit_howto.
@@ -88,7 +116,7 @@ type SubmitHowToOut struct {
 func RegisterHowTo(s *mcp.Server, deps HowToDeps) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "submit_howto",
-		Description: "Hand in a how-to you just learned (or improve an existing one by id): saved to the user's local how-to corpus immediately, validated against the corpus schema with every problem named, and -- with confirm_submission -- scrubbed of paths/names and prepared as a review-queue issue you then file with the returned gh command. Submit after the script ran successfully, never speculatively.",
+		Description: "Hand in a how-to you just learned (or improve an existing one by id): saved to the user's local how-to corpus immediately, validated against the corpus schema with every problem named, and -- with confirm_submission -- scrubbed of paths/names and prepared as a review-queue issue: filed by the connector when the user configured a GitHub token, otherwise handed to you as a prefilled issue URL plus the body file. Submit after the script ran successfully, never speculatively.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in SubmitHowToIn) (*mcp.CallToolResult, SubmitHowToOut, error) {
 		out := submitHowTo(deps, in)
 		if out.Error != nil {
@@ -101,6 +129,7 @@ func RegisterHowTo(s *mcp.Server, deps HowToDeps) {
 func submitHowTo(deps HowToDeps, in SubmitHowToIn) SubmitHowToOut {
 	env := howto.Env{
 		LocalDir:         deps.LocalDir,
+		OutboxDir:        deps.OutboxDir,
 		ConnectorVersion: deps.Version,
 		RepoSlug:         deps.RepoSlug,
 		Now:              time.Now,
@@ -118,9 +147,15 @@ func submitHowTo(deps HowToDeps, in SubmitHowToIn) SubmitHowToOut {
 	// connected -- a submission can still be saved locally.
 	instanceID := ""
 	if deps.Router != nil {
-		if id, ver, drec := deps.Router.ResolveInstance(in.InstanceID); drec == nil {
+		id, ver, drec := deps.Router.ResolveInstance(in.InstanceID)
+		switch {
+		case drec == nil:
 			instanceID, env.RevitVersion = id, ver
-		} else if in.InstanceID != "" {
+		case drec.Code == "no-instance-connected":
+			// Nothing connected: the local save still works, just unstamped.
+		default:
+			// ambiguous-instance-version, instance-not-found: the caller
+			// asked for (or needs) a specific instance; say so, do not guess.
 			return SubmitHowToOut{Error: drec}
 		}
 	}
@@ -163,9 +198,12 @@ func submitHowTo(deps HowToDeps, in SubmitHowToIn) SubmitHowToOut {
 			fmt.Sprintf("local how-to %s already existed and was replaced", saved.Doc.ID)))
 	}
 	if saved.Stamp == nil && saved.Doc.Script != "" {
-		out.Notices = append(out.Notices, diag.New(diag.SeverityInfo, "howto-script-not-run-this-session", howtoSource,
-			"this exact script text has not run successfully in this session, so the document carries no verification stamp").
-			WithRemedy("run the script with execute_script first, then submit the identical text"))
+		code, msg := "howto-script-not-run-this-session", "no successful execute_script run of this exact script text is on record for this instance (the broker keeps the last 200 runs for 10 minutes), so the document carries no verification stamp"
+		if saved.ScriptChanged {
+			code, msg = "unverified-script-change", "this revision changes the script and that new text has not run successfully here; the revision is saved locally, and the review queue will see it as unverified"
+		}
+		out.Notices = append(out.Notices, diag.New(diag.SeverityInfo, code, howtoSource, msg).
+			WithRemedy("run the script with execute_script on this instance, then submit the identical text within 10 minutes"))
 	}
 	if !in.ConfirmSubmission {
 		out.Notices = append(out.Notices, diag.New(diag.SeverityInfo, "howto-submission-confirmation-required", howtoSource,
@@ -191,10 +229,28 @@ func submitHowTo(deps HowToDeps, in SubmitHowToIn) SubmitHowToOut {
 		out.Error = diag.New(diag.SeverityError, "howto-submission-failed", howtoSource, err.Error())
 		return out
 	}
-	out.Submission = &SubmitHowToSubmission{ScrubbedDocument: prep.Scrubbed, OutboxDocument: prep.OutboxDoc, IssueBodyPath: prep.BodyPath,
-		IssueURL: prep.IssueURL, GhCommand: prep.GhCommand, Labels: prep.Labels}
-	out.Guidance = "The scrubbed document is what will leave this machine -- read it. To file it, run the gh command (it asks the user's permission and uses their GitHub identity as the issue author): " + prep.GhCommand +
-		" -- if gh is unavailable or the repository is not accessible to this account (it is private during development), open " + prep.IssueURL + " and paste the body from " + prep.BodyPath + ", or hand that file to a maintainer."
+	out.Submission = &SubmitHowToSubmission{ScrubbedDocument: prep.Scrubbed, OutboxDocument: prep.OutboxDoc, IssueBodyPath: prep.BodyPath}
+	if deps.GitHubToken != "" {
+		filed, err := howto.FileIssue(context.Background(), deps.HTTPClient, deps.GitHubAPI, env.RepoSlug, deps.GitHubToken, prep)
+		if err != nil {
+			out.Notices = append(out.Notices, diag.New(diag.SeverityWarning, "howto-issue-not-filed", howtoSource, err.Error()).
+				WithRemedy("the prepared submission is intact in the outbox; file it by hand at the new_issue_url, or fix the token (REVIT_MCP_GITHUB_TOKEN) and resubmit"))
+		} else {
+			out.Submission.FiledIssueURL, out.Submission.FiledIssueNum, out.Submission.LabelsApplied = filed.URL, filed.Number, filed.LabelsApplied
+			if len(filed.LabelsApplied) == 0 {
+				out.Notices = append(out.Notices, diag.New(diag.SeverityInfo, "howto-issue-unlabelled", howtoSource,
+					"GitHub filed the issue but applied no label (the token's account is not a collaborator), so it is not yet in the review queue").
+					WithRemedy("a maintainer will label it; nothing more to do"))
+			}
+			out.Guidance = "Filed as " + filed.URL + " under the token owner's GitHub identity. The scrubbed document is what left this machine; the local copy at " + saved.LocalPath + " is unchanged."
+			return out
+		}
+	}
+	out.Submission.Issue = &IssueToFile{Repo: env.RepoSlug, Title: prep.Title, Body: prep.Body, Labels: prep.Labels}
+	out.Submission.NewIssueURL, out.Submission.GhCommand = prep.IssueURL, prep.GhCommand
+	out.Guidance = "The scrubbed document is what will leave this machine -- read it with the user. The connector did not file the issue (no REVIT_MCP_GITHUB_TOKEN is set), so file it yourself with the GitHub tool you have: " +
+		"create an issue in " + env.RepoSlug + " from submission.issue (title, body, labels verbatim) using the GitHub connector if it is installed, or the gh CLI (gh_command). Without either, the user opens new_issue_url and pastes the body from " + prep.BodyPath +
+		". The repository is private during development, so only collaborators can file; anyone else hands the outbox file to a maintainer."
 	return out
 }
 
@@ -211,3 +267,6 @@ func firstNonEmpty(vals ...string) string {
 // directory. The broker indexes it (step 4), so it lives with the broker,
 // not with Revit's exchange root, which in remote mode is another machine.
 func LocalCorpusDir(dataDir string) string { return filepath.Join(dataDir, "howto", "local") }
+
+// OutboxDir is where prepared submissions (scrubbed document + issue body) go.
+func OutboxDir(dataDir string) string { return filepath.Join(dataDir, "howto", "outbox") }
