@@ -47,12 +47,11 @@ Verification is deliberately **not** a field of the document (§3): it lives in 
 document's id and script hash, so a submitter cannot write it and an append-only corpus file never
 needs editing.
 
-**The script dialect is itself versioned by the connector, not only by Revit.** #146 (in progress as
-this is written) replaces the ambient-transaction model with group-always / transaction-on-write:
-after it lands, a top-level `Level.Create(Document, …)` is refused with
-`script-write-outside-transaction`. The Phase 3 dialect, as described by its author (branch
-`feat/tx-redesign-phase3`, `skill.md` section "Writing: one block per batch, nothing open in between";
-not merged as this is written): reads at top level; writes inside
+**The script dialect is itself versioned by the connector, not only by Revit.** #146 Phase 3 (merged
+as #160) replaced the ambient-transaction model with group-always / transaction-on-write: a top-level
+`Level.Create(Document, …)` is now refused with `script-write-outside-transaction`. The shipped
+dialect (`skill.md` section "Writing: one block per batch, nothing open in between"): reads at top
+level; writes inside
 `Connector.WithTransaction(doc, () => { … })`, which returns the body's value, one block per batch;
 self-transacting calls (`LoadFamily`, `RequestViewChange`, EditScope start/commit, `Export`) go
 *between* blocks; `Connector.Settle` unchanged; `OpenForWriting` and `WithoutTransaction` gone. The
