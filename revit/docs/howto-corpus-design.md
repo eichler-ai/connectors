@@ -39,13 +39,25 @@ A document carries:
 | `id`, `title`, `task` | identity and the task in agent language — `task` is the primary embedding text |
 | `queries` | phrasings that found it and phrasings that *missed*; the misses are the corpus's most valuable rows, they are where API search fails and the how-to earns its keep |
 | `members` | fully-qualified members used, so an API hit and a how-to hit can be cross-linked |
-| `script` | the working C# body, in the connector's script dialect (ambient transaction, `Connector` global) |
+| `script` | the working C# body, in the connector's script dialect **as of the version it was verified on** — see the dialect note below |
 | `pitfalls` | one entry per mistake avoided, each with the symptom the agent would otherwise see |
 | `provenance` | where it came from and how it was reviewed |
 
 Verification is deliberately **not** a field of the document (§3): it lives in a sidecar keyed by the
 document's id and script hash, so a submitter cannot write it and an append-only corpus file never
 needs editing.
+
+**The script dialect is itself versioned by the connector, not only by Revit.** #146 (in progress as
+this is written) replaces the ambient-transaction model with group-always / transaction-on-write:
+after it lands, a top-level `Level.Create(Document, …)` is refused with
+`script-write-outside-transaction` and must be wrapped in `Connector.WithTransaction(doc, () => …)`.
+Every script in the seed — including the example beside this note — is written in the pre-#146
+dialect and will fail the sweep the day #146 deploys. That is the mechanism working as intended (§3):
+the stamps go `failed` with the diagnostic naming the fix, the seed is re-extracted from the harness
+tests once they are updated, and the sidecar's `connector_version` records which broker verified
+what. It also means the sweep must key stamps by connector version as well as Revit version, and
+`search_howto` should prefer documents verified on the *running* connector's version — added to §9
+as D6.
 
 The full schema is `howto-schema.json`; the example document shows every field populated from a
 real case.
@@ -270,6 +282,10 @@ entry for 8.5 points here.
   enough, or should local scripts be shown but never auto-run?
 - **D5 — prose drift.** A `fix` or `symptom` can go stale while the script still passes the sweep;
   nothing detects that except re-review. Consider a `reviewed_at` age shown on the hit.
+- **D6 — connector-version dialect.** The sidecar already records `connector_version`; should a
+  stamp be keyed by it (so a script verified under the pre-#146 dialect is not offered as verified
+  on a post-#146 broker), and should the sweep run on every connector release, not only on Revit
+  version changes? #146's transaction-model change is the first concrete case.
 
 ## 10. Implementation order [proposed]
 
