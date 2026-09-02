@@ -9,10 +9,9 @@ task; it is orientation, not reference.
 1. **The globals are the real Revit types.** `Document` **is** `Autodesk.Revit.DB.Document`, not a
    wrapper; `UIApplication` and `UIDocument` are the real `Autodesk.Revit.UI` types (`UIDocument` may
    be null). Pass them straight into any Revit API.
-2. **You never open a Revit transaction — you open a block.** Every document is readable but **not
-   modifiable** until you write inside `Connector.WithTransaction(doc, () => { ... })`. The connector
-   opens that transaction (with warning/error capture) and commits it when the block ends. What a run
-   commits is kept if the script returns normally and **undone as one unit if it throws**.
+2. **Writes go inside `Connector.WithTransaction(doc, () => { ... })`; never open a Revit transaction
+   yourself.** Documents are read-only outside a block. The connector commits each block when it ends,
+   and **undoes the whole run as one unit if the script throws**.
 
 ```csharp
 var walls = new FilteredElementCollector(Document)
@@ -151,79 +150,58 @@ stack), read the notice naming the reverted transaction (`MCP: …` is one of yo
 is a person's), and never retry a timed-out undo blindly. Fix your own mistakes *inside* a script by
 throwing instead.
 
-**Flatly rejected: `new Transaction(...)`, `new TransactionGroup(...)`.** The connector owns every
-transaction — the one behind your block carries the warning/error capture `notices[]` comes from, and
-yours would bypass it and the run's rollback. Caught before the script runs by a semantic check over
-the compiled code, so nothing changes; `code` is `script-api-denied`; no flag lifts it. A native
-`SubTransaction` **is** allowed as a savepoint inside a block, **but only held in a `using`** —
-`using (var st = new Autodesk.Revit.DB.SubTransaction(doc)) { st.Start(); … st.Commit(); }` (or
-`RollBack()`). Disposal is the safety net: one still active when the enclosing transaction closed
-crashed Revit later. Outside a block, `SubTransaction.Start()` fails with
+**`new Transaction(...)` and `new TransactionGroup(...)` are rejected** before the script runs
+(`code` `script-api-denied`, no flag lifts it): the connector's own transaction is what captures
+warnings into `notices[]` and rolls the run back, and yours would bypass both. A `SubTransaction` is
+allowed as a savepoint inside a block, but only as `using (var st = new
+Autodesk.Revit.DB.SubTransaction(doc)) { st.Start(); … st.Commit(); }` — one left open when the block
+ended has crashed Revit. Outside a block, `SubTransaction.Start()` fails with
 `script-subtransaction-needs-transaction`.
 
 ## Documents
 
 **Creating documents — use `Connector.CreateProjectDocument` / `Connector.CreateFamilyDocument`.**
-They create the document *and* track it for the run, so its writes are undone with everything else if
-the script throws. Write to it exactly like the active document; nothing persists until you save,
-which is gated separately.
+The document is tracked for the run (its writes roll back with everything else) and written to like any
+other. It is **headless** — no window, never the active document — and gets a session-only `tmp-<guid>`
+`document_id` that appears in `list_instances`, so a later call can route straight at it; a
+`WithTransaction` block on any other open document adopts it the same way. Template paths:
+`Application.DefaultProjectTemplate` (a full `.rte` path) and `Application.FamilyTemplatePath` (a tree —
+search it recursively). Raw `Application.NewProjectDocument` works too, but nothing tracks it.
 
 ```csharp
-var doc = Connector.CreateProjectDocument();     // blank, from Revit's default template
+var doc = Connector.CreateProjectDocument();
 Connector.WithTransaction(doc, () => { Autodesk.Revit.DB.Level.Create(doc, 10.0); });
+return doc.Title;   // a follow-up call finds it by this
 ```
 
-- **It is headless**: in memory, no window, never the active document — writable by script, invisible
-  to the person. Making it visible takes two calls: `Connector.Settle(doc, true)` then `SaveAs` in the
-  creating run (both need `confirm_lifecycle_actions: true`; `OpenAndActivateDocument` needs a path),
-  then activate in a later call. Activation is refused only inside a block on the *active* document.
-- **Templates**: ask Revit rather than guessing. `Application.DefaultProjectTemplate` is a full `.rte`
-  path; `Application.FamilyTemplatePath` is the **root** of the family-template tree — search it with
-  `SearchOption.AllDirectories`.
-- **It has a session-only `tmp-<guid>` `document_id`** and appears in `list_instances` like any open
-  document, so a later call can be routed straight at it. Reached the other way — by walking
-  `UIApplication.Application.Documents` and matching `Title` — a `WithTransaction` block adopts it and
-  its writes roll back with that run. The raw `Application.NewProjectDocument`/`NewFamilyDocument`
-  still work and are adopted the same way, but nothing tracks them; prefer the `Connector` calls.
-- **Several documents commit in order** after your script returns — ones this run created first,
-  then any pre-existing document a block adopted, the active one last. If one commit fails the rest
-  roll back, but a commit that already succeeded cannot be undone, so you get a `script-partial-commit`
-  notice (on a **failed** result) naming which kept their changes; an adopted document may be a real,
-  saved model, so don't assume what survived was scratch.
+**`Connector.Settle(doc, keep:)` ends the run's hold on a document early** — required before `Close`,
+`Save`, `SaveAs` or `SynchronizeWithCentral` in the same run, all gated on
+`confirm_lifecycle_actions: true`. `keep: true` makes its writes permanent now (a later throw no longer
+undoes them); `keep: false` discards them. To make a created document visible: `Settle(doc, true)`,
+`SaveAs`, then `OpenAndActivateDocument` from a later call.
 
-**Finishing a document mid-run — `Connector.Settle(doc, keep:)`.** Revit refuses `Close`, `Save`,
-`SaveAs` and `SynchronizeWithCentral` while the connector holds a group open on the document, so settle
-it first (gated on `confirm_lifecycle_actions`, like the members it enables). `keep: true` makes everything written to it
-so far **permanent immediately** — a later failure no longer undoes it. `keep: false` discards it,
-which is what you want before closing a scratch document. Either way you get a notice. Writing again
-afterwards (a new block) is fine and rolls back as usual; nothing settled comes back.
-
-**Close your scratch documents — nothing else will.** In the creating run: `Settle(doc, false)` then
-`Close(false)` with `confirm_lifecycle_actions: true`. From a *later* call the document is unmanaged
-and closes directly — have the creating run `return doc.Title;` so the follow-up matches a title it
-actually saw:
+**Close your scratch documents — nothing else will**, and a pile of them exhausts the memory of the
+Revit a person is working in. Same run: `Settle(doc, false)` then `doc.Close(false)`. Later run, by the
+title the creating run returned:
 
 ```csharp
-var wanted = "Project7";         // whatever Title the creating call returned — don't guess one
+var wanted = "Project7";
 Autodesk.Revit.DB.Document scratch = null;
 foreach (Autodesk.Revit.DB.Document d in UIApplication.Application.Documents)
     if (d.PathName == "" && d.Title == wanted) { scratch = d; break; }
 if (scratch == null) return "already gone";
-scratch.Close(false);            // false = discard; never prompts
+scratch.Close(false);            // discard; never prompts
 ```
 
-**Test `PathName == ""` as well as `Title`.** `Close(false)` discards unsaved work without asking, and
-Revit auto-names unsaved documents `Project1`, `Project2`, … — a person's own looks exactly like yours,
-and a *saved* model at `…\Project1.rvt` has `Title == "Project1"` too. The empty-`PathName` test keeps
-you off anything on disk. Revit also refuses to `Close` the *active* document: from a call routed at
-another document, activate the one you want to keep, then close the other on the next call.
+`PathName == ""` matters: Revit names unsaved documents `Project1`, `Project2`, …, so a title alone
+can match a person's own unsaved work or a saved `Project1.rvt`. The active document cannot be closed;
+activate another first.
 
-**If your script threw, whatever it created is still open** — writes roll back, documents don't
-disappear. Every run that created a document carries a `script-created-documents` notice naming it by
-title and `tmp-` id, so you have a handle even when the script threw before returning one. Nothing
-tidies up for you, and a pile of scratch documents exhausts the memory of the Revit a person is
-working in (a modal "Virtual Memory - High Usage" box, which the connector auto-dismisses and reports
-in `notices[]`).
+**A thrown script leaves created documents open** (writes roll back, documents don't disappear); the
+`script-created-documents` notice on every run names them by title and `tmp-` id. With several
+documents, commits land in order — created, adopted, active last — and a `script-partial-commit`
+notice reports any that kept their changes after a failure; an adopted document may be a real, saved
+model.
 
 ## What needs your confirmation
 
