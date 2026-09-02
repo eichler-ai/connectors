@@ -383,7 +383,27 @@ Two cases the review walked, decided here:
   `shared_rev` beside the local `rev` when the shared corpus has moved past the local copy, and
   `describe_howto` says so; the user decides whether to drop the override.
 
-### 4e. Queue hygiene
+### 4e. While the repository is private
+
+The repository is private during development, and a private repository's issues are visible and
+writable only to collaborators. Consequences for the growth loop, decided:
+
+- **Collaborators** (the team) can use the full path: their `gh` is authenticated against the repo,
+  the issue is created, and — because collaborators have push access — the label applies whether it
+  comes from the template or from `--label`. The template is still the queue definition, so nothing
+  changes when the repo goes public.
+- **Anyone else** cannot reach the queue at all: `gh issue create` fails with a not-found, and the
+  prefilled URL lands on a 404. `submit_howto` still does its local half unchanged (the document is
+  written to the local corpus and usable at once), and its `guidance` for this case names the
+  **outbox file as the hand-off**: send it to a maintainer, who files or triages it directly. The
+  broker detects the private-repo case only after the fact (the agent's `gh` call fails), so the
+  guidance is written for both outcomes rather than the broker probing GitHub.
+- **Scrubbing is not relaxed while private.** Issues filed now become public the day the repository
+  does, so every submission is scrubbed as if the tracker were already public.
+- **Going public** needs no change to the design: the template path starts working for everyone, and
+  the labels already exist.
+
+### 4f. Queue hygiene
 
 - Label `howto-submission` is applied by the Issue Form template (the only way a non-collaborator's
   issue gets a label); an issue without the label is not in the queue.
