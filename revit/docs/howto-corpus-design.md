@@ -43,6 +43,8 @@ A document carries:
 | `members` | fully-qualified members used, so an API hit and a how-to hit can be cross-linked |
 | `script` | the working C# body in the connector's dialect **as of the version it was verified on** (dialect note below); its comments are the explanation — there is no prose summary |
 | `pitfalls` | one entry per mistake avoided, each with the symptom the agent would otherwise see |
+| `tags` | facets; indexed at low weight, returned on hits |
+| `contributors` | opt-in credit per revision (`author` / `contributor` / `reviewer`), cumulative across a lineage; agent-visible |
 | `provenance` | where it came from and how it was reviewed — maintainer-facing, never returned to an agent |
 
 Verification is deliberately **not** a field of the document (§3): it lives in a sidecar keyed by the

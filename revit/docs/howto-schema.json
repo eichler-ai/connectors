@@ -143,7 +143,7 @@
         "type": "string",
         "pattern": "^[a-z0-9][a-z0-9-]{1,31}$"
       },
-      "description": "Free-form facets (walls, views, sheets, worksharing, transactions). Not indexed for ranking; for browsing and de-duplication."
+      "description": "Facets (walls, views, sheets, worksharing, transactions, groups). Indexed at low weight for search and returned on every hit; also used for browsing and de-duplication."
     },
     "api_since": {
       "type": "string",
@@ -187,11 +187,6 @@
           "type": "string",
           "format": "date-time",
           "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$"
-        },
-        "submitter": {
-          "type": "string",
-          "maxLength": 120,
-          "description": "Optional public handle the submitter chose to attach. Never an email or machine name; the scrubber removes those."
         }
       },
       "allOf": [
@@ -226,7 +221,7 @@
           }
         }
       ],
-      "description": "Maintainer-facing only: never returned by search_howto or describe_howto, and never indexed."
+      "description": "Maintainer-facing only: never returned by search_howto or describe_howto, and never indexed. Credit lives in `contributors`, which is agent-visible."
     },
     "supersedes": {
       "type": "string",
@@ -247,6 +242,46 @@
       "type": "integer",
       "minimum": 1,
       "description": "Revision of this lineage, from 1. The corpus may hold several revisions of one id; readers serve the highest. An improvement is the same id with rev+1 (submit_howto handles this)."
+    },
+    "contributors": {
+      "type": "array",
+      "maxItems": 50,
+      "description": "Credit, agent-visible: who authored and improved this lineage, accumulated across revisions (a new revision appends, never rewrites). Opt-in: submit_howto only records a handle the submitter passed as credit_as; nothing is inferred from git, gh or the machine. Returned by describe_howto.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "handle",
+          "role",
+          "rev"
+        ],
+        "properties": {
+          "handle": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$",
+            "description": "A GitHub login (the same identity the review queue sees), or a display name the submitter chose. Never an email or machine name."
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "author",
+              "contributor",
+              "reviewer"
+            ],
+            "description": "author: created rev 1. contributor: submitted a later revision. reviewer: triaged it into the shared corpus (optional; maintainers may decline credit)."
+          },
+          "rev": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "The revision this credit applies to."
+          },
+          "at": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$"
+          }
+        }
+      }
     }
   },
   "allOf": [

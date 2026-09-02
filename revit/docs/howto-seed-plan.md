@@ -183,9 +183,17 @@ should either help the ranker find the document or help the agent do the task.
    the record look complete.
 7. **`provenance` is maintainer-facing**: never returned to an agent, never indexed. It names the
    source test and, for a document derived from a comment rather than executed code, says so.
-8. **Indexed fields**: `title`, `task`, `pitfalls` text, `members`, and the script's comment lines
-   (code stripped). What `search_howto` returns per hit: `id`, `rev`, `title`, `task`, `members`,
-   `verified_on`, `source`. What `describe_howto` returns: those plus `script` and `pitfalls`.
+8. **Indexed fields**: `title`, `task`, `pitfalls` text, `members`, `tags` (low weight), and the
+   script's comment lines (code stripped). What `search_howto` returns per hit: `id`, `rev`, `title`,
+   `task`, `members`, `tags`, `verified_on`, `source`. What `describe_howto` returns: those plus
+   `script`, `pitfalls` and `contributors`.
+9. **Credit is opt-in and cumulative.** `contributors[]` records `{handle, role, rev}` per revision:
+   `author` for rev 1, `contributor` for each later revision, `reviewer` optionally for the maintainer
+   who triaged it. A new revision appends to the list it inherits, so a lineage improved by several
+   people over time credits all of them. The handle is whatever the submitter passed as `credit_as`
+   (a GitHub login or a chosen name); nothing is inferred from git, `gh` or the machine, and the
+   scrubber rejects an email or host name in it. Harness-derived seed documents carry no
+   contributors unless the maintainer adds one.
 
 ## 4. Growth: `submit_howto` → tagged issue → `/triage-howto-submission` → corpus
 
@@ -202,7 +210,8 @@ One bullet, under the discovery tools, within the token budget (something of equ
 >   you hit and got past, hand it in: the task in one sentence, the working script, the members, the
 >   queries that missed and the one that hit, the pitfall as symptom → cause → fix. To improve an
 >   existing how-to (a missing pitfall, a better script, a version note), pass its `id` with only the
->   fields you changed; the tool submits it as the next revision. It saves to your own how-to corpus at once and, with
+>   fields you changed; the tool submits it as the next revision. Pass `credit_as` with the user's
+>   GitHub login or chosen name if they want credit; otherwise none is recorded. It saves to your own how-to corpus at once and, with
 >   `confirm_submission: true`, prepares a scrubbed GitHub issue for the maintainers to review.
 >   Submit **after** the script ran successfully, never speculatively.
 
@@ -219,6 +228,7 @@ submit_howto(
   pitfalls[]?, queries?, tags?, summary?,   # schema fields, optional
   id?,                                      # to IMPROVE an existing how-to: its id (see below)
   change_note?,                             # one sentence: what changed and why (required with id)
+  credit_as?,                               # handle to record in contributors[] (opt-in; omitted = no credit)
   instance_id?,                             # which Revit verified it (defaults as for discovery)
   confirm_submission: bool                  # outward half; default false
 ) -> {
@@ -300,7 +310,8 @@ choose issues itself, and loads `revit-connector-development` for the harness ru
    verbatim: it is evidence, not prose.
 6. **Append and stamp.** Append the final document to `revit/howto/corpus.jsonl` with
    `provenance.kind: "submission"`, `ref` = the issue URL, `reviewed_by` = the maintainer's login
-   (for an edit, the same `id` at `rev + 1`; readers serve the highest rev);
+   (for an edit, the same `id` at `rev + 1`; readers serve the highest rev); keep the submitter's
+   `contributors` entry as submitted and optionally append the maintainer as `reviewer`;
    append the harness stamp from step 3 to `revit/howto/verified.jsonl`; open one PR per triage run
    listing the issues it closes (`Closes #171`), CI validates both files.
 7. **Report.** Issues closed, documents added, documents superseded, and — the same net-count
