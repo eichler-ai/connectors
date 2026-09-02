@@ -8,8 +8,8 @@ to hold them — it sits at its token budget covering basic usage, and the Revit
 too large for a skill file or even tens of them. The corpus is searched on demand, exactly like the
 API, and the two are ranked by the same pipeline.
 
-Companion files: [`howto-schema.json`](howto-schema.json) (the document schema, JSON Schema 2020-12),
-[`howto-verification-schema.json`](howto-verification-schema.json) (the harness-owned verification
+Companion files: [`howto-schema.json`](../mcp-server/internal/howto/schema/howto-schema.json) (in `revit/mcp-server/internal/howto/schema/`, embedded in the broker) (the document schema, JSON Schema 2020-12),
+[`howto-verification-schema.json`](../mcp-server/internal/howto/schema/howto-verification-schema.json) (the harness-owned verification
 sidecar, §3) and [`howto-example-join-walls.json`](howto-example-join-walls.json) (one real document,
 extracted by hand from `test-harness/validation_corpus_test.go` case #2 and validated against the
 schema). The example carries **no verification**: its `script` replaces the test's fixture preamble
@@ -31,8 +31,8 @@ connector — a Revit API task, or the connector's own mechanics (transaction bl
 documents, routing, publishing, undo) — so long as it is a worked example. Not API reference (that
 is `describe_function`), not orientation or rules (that is `get_skills`). The unit of value is the **pitfall**: the harness comments are
 full of them ("`AreElementsJoined` and `IsWallJoinAllowedAtEnd` measure different things";
-"`LoadFamily` needs *both* documents to have no open transaction, so load first, then open for
-writing") and nothing today serves them to an agent at the moment it needs them.
+"`LoadFamily` needs its *target* document to have no open transaction — a modifiable source loads
+fine — so load between blocks, then place inside one") and nothing today serves them to an agent at the moment it needs them.
 
 A document carries:
 
@@ -181,9 +181,9 @@ installer work that makes it cheap, is in `howto-seed-plan.md` §1.
 a newer corpus, validates the fields it knows, and reports `howto-corpus-newer-than-broker` in
 `guidance` and `notices[]` rather than skipping the whole corpus.
 
-**Local corpus:** PRD §09 keeps human-browsed files under the exchange root, never app-data, so the
-local corpus lives at `<exchange-root>/howto/` (beside `imports/` and `exports/`), one document per
-`.json` file. It is indexed alongside, marked `source: "local"` on every hit so the agent knows it is
+**Local corpus:** lives with the broker, at `<broker app-data>/howto/local/`, one document per
+`.json` file (the seed plan §4b records why it is not Revit's exchange root: the broker indexes it,
+and in remote mode the two are different machines; every tool response names the path). It is indexed alongside, marked `source: "local"` on every hit so the agent knows it is
 unreviewed, and re-scanned when a file changes (mtime check on search; no watcher). An `id` collision
 between local and seed/shared resolves to local with `supersedes_shared: true` on the hit — the
 intended way to override a shared how-to for one environment; two local files with one `id` is a

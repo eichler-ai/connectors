@@ -234,6 +234,10 @@ That path is as important as the seed and moves **ahead of** search in the imple
 (§6): both the extractor and the submit tool emit schema documents, and a review queue can start
 filling before `search_howto` exists to serve it.
 
+**Rejection is immediate and instructive [decided, implemented in step 2]:** a non-compliant
+submission is refused before anything is written, with `howto-invalid` listing every field and rule
+that failed and a remedy naming the field rules, so the agent fixes and resubmits in one round.
+
 ### 4a. What the agent is told (`skill.md`)
 
 One bullet, under the discovery tools, within the token budget (something of equal size comes out):
@@ -265,7 +269,7 @@ submit_howto(
   confirm_submission: bool                  # outward half; default false
 ) -> {
   document,        # the schema-valid document as written locally (id assigned: slug of title)
-  local_path,      # <local-corpus>/<id>.json  (the local corpus directory, design note §5)
+  local_path,      # <local-corpus>/<id>.json  -- <broker app-data>/howto/local, see the note below
   verified,        # the session stamp, if the exact script ran successfully this session, else null
   submission?: {   # only with confirm_submission: true
     scrubbed_document,   # what leaves the machine, shown in full
@@ -275,6 +279,13 @@ submit_howto(
   notices[], guidance
 }
 ```
+
+**Where the local corpus lives [decided at step 2].** `<broker app-data>/howto/local/` (on Windows
+`%LOCALAPPDATA%\Connectors\Revit\howto\local`), not Revit's exchange root as §4d of the design note
+first said: the broker is what indexes and serves it, and in remote mode the exchange root is on the
+Revit machine while the broker runs on another. The tool returns the path on every call so a person
+can find and edit the files; the design note's §5 is corrected to match. The outbox is
+`<broker app-data>/howto/outbox/`, the session sidecar `<broker app-data>/howto/local/verified.jsonl`.
 
 **Improving an existing how-to.** With `id: <existing id>`, the tool loads that document (local
 first, then the embedded/shared corpus), overlays only the fields the call supplied, and produces
@@ -290,7 +301,7 @@ two lineages turn out to be one.
 
 Behaviour, in order:
 
-1. **Validate** against `howto-schema.json`; a failing field is a `howto-invalid` error naming it.
+1. **Validate** against `howto-schema.json` (in `revit/mcp-server/internal/howto/schema/`, embedded in the broker); a failing field is a `howto-invalid` error naming it.
    With `id`, also check the target exists and is the lineage's latest revision (else base the edit
    on the latest and say so).
 2. **Write locally first** (`provenance.kind: "local"`), so the submitter's own `search_howto` serves
@@ -304,18 +315,26 @@ Behaviour, in order:
 5. **Scrub** every text field, the script's string literals **and the script's comments** (the
    comments are the explanation, so they are exactly where a project name gets typed); refuse
    (`howto-submission-unscrubbed`, naming field and line) if any path or host survives.
-6. **Write the outbox file and return the prefilled issue URL.** The broker never files the issue: it
-   holds no token and spawns nothing (design note §6). **Filing is the agent's job**, using the
-   `gh` the agent session already has: the returned `guidance` says
-   `gh issue create --template howto-submission.yml --title "<title>" --body-file "<outbox_path>"`,
-   and the agent runs it under its own permission model, which is where the user sees and approves
-   the outward action. An agent without `gh` hands the user the prefilled URL and the outbox path.
+6. **File the issue, or hand it off.** The broker carries no maintainer credential and spawns nothing
+   (design note §6), and nothing assumes the `gh` CLI is installed. Three paths, in order:
+   (a) **the user's own opt-in token** — `REVIT_MCP_GITHUB_TOKEN` in the broker's environment — lets
+   the broker POST the issue to GitHub's REST API itself and return its URL (the response says which
+   labels GitHub kept; a non-collaborator's are dropped, so the issue is reported as not yet in the
+   queue); (b) otherwise the response carries the issue itself — `submission.issue` with `repo`,
+   `title`, `body`, `labels` — and **the agent files it with whatever GitHub tool it has**: most
+   users run Claude Desktop (Cowork) or Claude Code, where the GitHub connector or the `gh` CLI is
+   one install away, and the agent's own permission model is where the user sees and approves the
+   outward action (the response also spells out the equivalent
+   `gh issue create --repo <slug> --title … --body-file <outbox_path> --label howto-submission[,howto-edit]`;
+   `gh` refuses `--template` together with `--body-file`, so that command carries the labels);
+   (c) with neither, the **prefilled issue URL** (which carries the Issue Form template, so the
+   label applies for any author) plus the outbox body the person pastes.
    **The queue is defined by an Issue Form template, not by a label the submitter applies:** GitHub
    silently drops labels supplied by anyone without push access (both `labels=` in a URL and
    `gh --label`), so `.github/ISSUE_TEMPLATE/howto-submission.yml` carries `labels:
    [howto-submission]` — template-applied labels work for any author — and the three labels
    (`howto-submission`, `howto-edit`, `howto-reviewed`) are created in the repo as part of step 2.
-   Filing through the agent's own `gh` attaches the user's GitHub identity as the issue author; that
+   Filing through the agent's GitHub tool attaches the user's GitHub identity as the issue author; that
    is inherent to a public tracker and accepted here (the design note's earlier objection is
    superseded by this plan): the scrubber protects *model data*, not authorship, and credit in the
    document stays opt-in via `credit_as`.
@@ -416,9 +435,14 @@ writable only to collaborators. Consequences for the growth loop, decided:
 
 ## 5. Decisions the audit needs
 
-1. **Granularity.** One document per subtest (≈33) versus merged task bundles (≈20). Recommendation:
-   one per subtest, with `pitfall`/`negative` split out where marked; small documents rank and read
-   better, and `members` cross-links do the grouping.
+1. **Granularity — decided:** one document per Revit feature or connector mechanism, at moderate
+   depth: a broader usage concept with numbered steps (roughly 3–8 KB of script), not a one-line
+   example, and not a bundle of unrelated tasks. Count is unbounded — every niche feature gets its
+   own how-to, and the corpus is expected to reach hundreds. For the seed this regroups the 3a/3b rows
+   into feature-level documents (e.g. one "groups" document carrying create, edit-propagation and the
+   member-move trap; one "levels, grids and the views they need"); the regrouped list is confirmed at
+   seed time. Triage folds a submission into the document that already teaches its feature and starts
+   a new lineage only for a feature no document covers (§4c step 3).
 2. **Scope — decided:** a how-to can cover *any* relevant usage topic, connector mechanics included.
    The 3b rows are in. `get_skills` keeps the rules and the orientation; the corpus holds worked
    examples of anything an agent does with the connector, whether the subject is a Revit API or the

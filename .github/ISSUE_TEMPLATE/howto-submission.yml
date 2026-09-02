@@ -1,0 +1,37 @@
+name: How-to submission
+description: A worked example for the Revit connector's how-to corpus, produced by submit_howto (or written by hand to the same schema).
+labels: ["howto-submission"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks. Paste the issue body that `submit_howto` wrote to your outbox (`<app-data>/howto/outbox/<id>.md`)
+        into the field below, unedited — it carries the scrubbed document in a ```json block and the reviewer
+        checklist. Do not include project paths, document titles, user or machine names anywhere.
+        Improvements to an existing how-to carry the same `id` at the next `rev` and a change note.
+  - type: textarea
+    id: body
+    attributes:
+      label: Submission
+      description: The outbox body, verbatim.
+      placeholder: "**How-to:** `walls-closed-footprint-confirm-joins` rev 1 — …\n\n```json\n{ ... }\n```"
+    validations:
+      required: true
+  - type: input
+    id: revit
+    attributes:
+      label: Revit version the script ran on
+      placeholder: "2025"
+    validations:
+      required: true
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Submitter checks
+      options:
+        - label: The script ran successfully with the connector on the version above, as pasted.
+          required: true
+        - label: I read the scrubbed document and it contains no project data, paths, titles or names.
+          required: true
+        - label: I understand this issue is public once the repository is, and that acceptance credits the `contributors` handle in the document (if any) and nothing else.
+          required: true
