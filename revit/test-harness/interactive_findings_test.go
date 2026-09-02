@@ -175,7 +175,7 @@ try {
 // "no script-reachable path satisfies both no-ambient-transaction-to-start and a
 // transaction-to-write". That was wrong, and proving it took two tests -- one for
 // the START edge (a managed transaction on the target blocks StairsEditScope.Start)
-// and one for the COMMIT edge (with the transaction supplied via OpenForWriting
+// and one for the COMMIT edge (with the transaction supplied by a WithTransaction block
 // INSIDE the scope, Start and CreateStraightRun both succeed and scope.Commit()
 // then refuses: "EditScope cannot be closed, for there is a transaction or
 // transaction group still open in the document"). The real blocker was a third
@@ -183,11 +183,12 @@ try {
 // -- and closing a connector-owned transaction mid-run is the one thing no script
 // could do.
 //
-// settle-on-request (#132, PRD §06) supplies exactly that, and this test is the
-// whole feature in one script: WithoutTransaction closes the connector's
-// transaction so Start() is legal, WithTransaction opens one INSIDE the scope so
-// the run can be built, and its closing edge -- not tidiness, the load-bearing
-// part -- is what makes scope.Commit() legal a line later.
+// Under group-always (#146 Phase 3) the shape is the natural one: nothing is
+// open between blocks, so Start() is legal at top level; WithTransaction opens
+// a transaction INSIDE the scope so the run can be built, and its closing edge
+// -- not tidiness, the load-bearing part -- is what makes scope.Commit() legal
+// a line later. (Before Phase 3 this needed a WithoutTransaction escape hatch
+// around the whole thing; that member is gone.)
 //
 // Note the mutation evidence behind the causal claim, recorded when the negative
 // test was retired: removing the transaction entirely flipped commitOutcome to
@@ -197,30 +198,31 @@ func TestStairsAreCreatableWithSettleOnRequest(t *testing.T) {
 	fixtureTitle := createBlankFixtureDocument(t, c, instanceID, documentID)
 
 	out := runScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+`
-var l1 = Autodesk.Revit.DB.Level.Create(doc, 0.0);
-var l2 = Autodesk.Revit.DB.Level.Create(doc, 12.0);
-doc.Regenerate();
+Autodesk.Revit.DB.Level l1 = null, l2 = null;
+Connector.WithTransaction(doc, () => {
+  l1 = Autodesk.Revit.DB.Level.Create(doc, 0.0);
+  l2 = Autodesk.Revit.DB.Level.Create(doc, 12.0);
+  doc.Regenerate();
+});
 
-long stairsId = -1;
 int runCount = -1;
 int risers = -1;
 
-Connector.WithoutTransaction(doc, () => {
-  var scope = new Autodesk.Revit.DB.StairsEditScope(doc, "harness settle-on-request stairs");
-  var newStairsId = scope.Start(l1.Id, l2.Id);
-  stairsId = newStairsId.Value;
+// No block open here: the document is not modifiable, which is what Start() needs.
+var scope = new Autodesk.Revit.DB.StairsEditScope(doc, "harness group-always stairs");
+var newStairsId = scope.Start(l1.Id, l2.Id);
+long stairsId = newStairsId.Value;
 
-  Connector.WithTransaction(doc, () => {
-    var line = Autodesk.Revit.DB.Line.CreateBound(
-      new Autodesk.Revit.DB.XYZ(0, 0, 0), new Autodesk.Revit.DB.XYZ(20, 0, 0));
-    Autodesk.Revit.DB.Architecture.StairsRun.CreateStraightRun(
-      doc, newStairsId, line, Autodesk.Revit.DB.Architecture.StairsRunJustification.Center);
-  });
-
-  scope.Commit(new Preproc());
+Connector.WithTransaction(doc, () => {
+  var line = Autodesk.Revit.DB.Line.CreateBound(
+    new Autodesk.Revit.DB.XYZ(0, 0, 0), new Autodesk.Revit.DB.XYZ(20, 0, 0));
+  Autodesk.Revit.DB.Architecture.StairsRun.CreateStraightRun(
+    doc, newStairsId, line, Autodesk.Revit.DB.Architecture.StairsRunJustification.Center);
 });
 
-// Back inside a transaction here -- WithoutTransaction reopens one in the same group.
+// The block closed its transaction, so the scope can commit.
+scope.Commit(new Preproc());
+
 var stairs = doc.GetElement(new Autodesk.Revit.DB.ElementId(stairsId)) as Autodesk.Revit.DB.Architecture.Stairs;
 if (stairs != null) { runCount = stairs.GetStairsRuns().Count; risers = stairs.ActualRisersNumber; }
 var stairsInModel = new Autodesk.Revit.DB.FilteredElementCollector(doc)
@@ -236,7 +238,7 @@ class Preproc : Autodesk.Revit.DB.IFailuresPreprocessor {
 }
 `)
 	if out.Status != "success" {
-		t.Fatalf("stairs creation was expected to SUCCEED via settle-on-request (#132) -- this is the assertion that proves the feature works end to end; status=%q (%s)", out.Status, out.diag())
+		t.Fatalf("stairs creation was expected to SUCCEED under group-always (#146 Phase 3) -- this is the assertion that proves the feature works end to end; status=%q (%s)", out.Status, out.diag())
 	}
 	for _, want := range []string{`"runCount":1`, `"stairsInModel":1`, `"inEditMode":false`} {
 		if !strings.Contains(out.ReturnValue, want) {
@@ -287,11 +289,8 @@ class Preproc : Autodesk.Revit.DB.IFailuresPreprocessor {
 // run so the wedge and the rollback are proven against the SAME live state, not
 // two documents that happened to behave.
 //
-// WithTransaction is nested inside WithoutTransaction because that is the only
-// state a script can call it from: after OpenForWriting the ambient transaction
-// is open, and WithTransaction on an already-transacted document refuses by
-// design (its own "cannot be nested" guard). Same shape as
-// TestStairsAreCreatableWithSettleOnRequest above.
+// Since #146 Phase 3 the blocks sit at top level: nothing is open between them,
+// which is the resting state every document is in.
 func TestWithTransactionRecoversWhenItsBodyThrowsAndTheScriptCatches(t *testing.T) {
 	c, instanceID, documentID := targetDocument(t)
 	fixtureTitle := createBlankFixtureDocument(t, c, instanceID, documentID)
@@ -300,32 +299,29 @@ func TestWithTransactionRecoversWhenItsBodyThrowsAndTheScriptCatches(t *testing.
 bool caught = false;
 bool secondBlockThrew = false;
 
-Connector.WithoutTransaction(doc, () => {
-  // Block 1: write, then throw. The SCRIPT catches it -- this is the ordinary
-  // "try an API, fall back on failure" shape, not an exotic case.
-  try {
-    Connector.WithTransaction(doc, () => {
-      Autodesk.Revit.DB.Level.Create(doc, 77.7);
-      throw new System.InvalidOperationException("harness: deliberate throw inside WithTransaction");
-    });
-  } catch (System.InvalidOperationException) {
-    caught = true;
-  }
+// Block 1: write, then throw. The SCRIPT catches it -- this is the ordinary
+// "try an API, fall back on failure" shape, not an exotic case.
+try {
+  Connector.WithTransaction(doc, () => {
+    Autodesk.Revit.DB.Level.Create(doc, 77.7);
+    throw new System.InvalidOperationException("harness: deliberate throw inside WithTransaction");
+  });
+} catch (System.InvalidOperationException) {
+  caught = true;
+}
 
-  // Block 2: the WEDGE probe. If block 1's transaction was left open, this
-  // throws "a transaction is already open" and secondBlockThrew goes true.
-  try {
-    Connector.WithTransaction(doc, () => {
-      Autodesk.Revit.DB.Level.Create(doc, 88.8);
-    });
-  } catch (System.Exception) {
-    secondBlockThrew = true;
-  }
-});
+// Block 2: the WEDGE probe. If block 1's transaction was left open, this
+// throws "a transaction is already open" and secondBlockThrew goes true.
+try {
+  Connector.WithTransaction(doc, () => {
+    Autodesk.Revit.DB.Level.Create(doc, 88.8);
+  });
+} catch (System.Exception) {
+  secondBlockThrew = true;
+}
 
-// Back under a transaction here -- WithoutTransaction reopened one in the same
-// group. Count each level by its distinctive elevation: the thrown block's must
-// be GONE (rolled back), the survivor's PRESENT (committed).
+// Reads need no block. Count each level by its distinctive elevation: the
+// thrown block's must be GONE (rolled back), the survivor's PRESENT (committed).
 int atThrown = 0, atSurvivor = 0;
 foreach (var e in new Autodesk.Revit.DB.FilteredElementCollector(doc)
     .OfClass(typeof(Autodesk.Revit.DB.Level))) {
@@ -386,7 +382,7 @@ func TestSettleMakesLifecycleActionsReachableInTheSameRun(t *testing.T) {
 
 		out := decodeToolResult[executeScriptOut](t, callExecuteScriptWith(t, c, instanceID, documentID,
 			fixtureWritePreamble(title)+`
-Autodesk.Revit.DB.Level.Create(doc, 30.0);
+Connector.WithTransaction(doc, () => { Autodesk.Revit.DB.Level.Create(doc, 30.0); });
 Connector.Settle(doc, false);
 doc.Close(false);
 return "closed";
@@ -416,7 +412,7 @@ return "closed";
 		out := decodeToolResult[executeScriptOut](t, callExecuteScriptWith(t, c, instanceID, documentID,
 			fixtureWritePreamble(title)+`
 try { System.IO.File.Delete(@"C:\dev\fixtures\settle-saveas-probe.rvt"); } catch {}
-Autodesk.Revit.DB.Level.Create(doc, 40.0);
+Connector.WithTransaction(doc, () => { Autodesk.Revit.DB.Level.Create(doc, 40.0); });
 Connector.Settle(doc, true);
 doc.SaveAs(@"C:\dev\fixtures\settle-saveas-probe.rvt");
 return new {
@@ -557,7 +553,7 @@ return "area = " + room.Area + "; loops = " + loops + ";";
 
 	t.Run("DefaultComputationHeightProbe", func(t *testing.T) {
 		out := runScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+
-			fmt.Sprintf(buildRoom, "10.0", ""))
+			withTx(fmt.Sprintf(buildRoom, "10.0", "")))
 		if out.Status != "success" {
 			t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
 		}
@@ -571,7 +567,7 @@ return "area = " + room.Area + "; loops = " + loops + ";";
 	t.Run("SettingComputationHeightInsideTheWallBodyWorks", func(t *testing.T) {
 		setHeight := `level.get_Parameter(Autodesk.Revit.DB.BuiltInParameter.LEVEL_ROOM_COMPUTATION_HEIGHT).Set(4.0);`
 		out := runScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+
-			fmt.Sprintf(buildRoom, "6200.0", setHeight))
+			withTx(fmt.Sprintf(buildRoom, "6200.0", setHeight)))
 		if out.Status != "success" {
 			t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
 		}
@@ -665,7 +661,7 @@ func TestSheetTitleBlockRecreateWorkaroundIsSafe(t *testing.T) {
 	c, instanceID, documentID := targetDocument(t)
 	fixtureTitle := createBlankFixtureDocument(t, c, instanceID, documentID)
 
-	out := runScript(t, c, instanceID, documentID, "using System.Linq;\n"+fixtureWritePreamble(fixtureTitle)+`
+	out := runScript(t, c, instanceID, documentID, "using System.Linq;\n"+fixtureWritePreamble(fixtureTitle)+withTx(`
 // FloorPlan is a built-in ViewFamily every valid Revit install ships a
 // ViewFamilyType for, unlike a title block symbol (which depends on what the
 // project template happened to load) -- First() is fine here for exactly
@@ -679,7 +675,7 @@ var plan = Autodesk.Revit.DB.ViewPlan.Create(doc, vft.Id, level.Id);
 var tbType = new Autodesk.Revit.DB.FilteredElementCollector(doc)
     .OfClass(typeof(Autodesk.Revit.DB.FamilySymbol)).OfCategory(Autodesk.Revit.DB.BuiltInCategory.OST_TitleBlocks)
     .Cast<Autodesk.Revit.DB.FamilySymbol>().FirstOrDefault();
-if (tbType == null) { return "no-titleblock-loaded"; }
+if (tbType == null) { return (object)"no-titleblock-loaded"; }
 if (!tbType.IsActive) { tbType.Activate(); }
 
 var sheet = Autodesk.Revit.DB.ViewSheet.Create(doc, tbType.Id);
@@ -695,7 +691,7 @@ var placedTitleBlock = new Autodesk.Revit.DB.FilteredElementCollector(doc, sheet
 var placedTypeMatches = placedTitleBlock != null && placedTitleBlock.GetTypeId() == tbType.Id;
 
 return new { sheetCreated = sheet != null, viewportCreated = viewport != null, placedTypeMatches = placedTypeMatches };
-`)
+`))
 	if out.Status != "success" {
 		t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
 	}
@@ -741,15 +737,22 @@ func TestRoutingAwayFromATargetMakesItNonModifiable(t *testing.T) {
 	fixtureTitle, fixtureDocID := createAndAwaitDocumentID(t, c, instanceID, documentID)
 	t.Cleanup(func() { closeDocumentByTitle(t, c, instanceID, documentID, fixtureTitle, "") })
 
-	t.Run("TheRoutedDocumentIsModifiable", func(t *testing.T) {
-		out := runScript(t, c, instanceID, fixtureDocID,
-			`return Document.IsModifiable ? "modifiable" : "not-modifiable";`)
+	t.Run("TheRoutedDocumentIsModifiableOnlyInsideABlock", func(t *testing.T) {
+		// #146 Phase 3: the routed document has the run's GROUP open and no transaction -- readable,
+		// not modifiable -- until a WithTransaction block opens one, and not again after it closes.
+		out := runScript(t, c, instanceID, fixtureDocID, `
+bool before = Document.IsModifiable;
+bool inside = Connector.WithTransaction(Document, () => Document.IsModifiable);
+bool after = Document.IsModifiable;
+return new { before, inside, after };
+`)
 		if out.Status != "success" {
 			t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
 		}
-		// "not-modifiable" contains "modifiable", so match on the negative spelling.
-		if strings.Contains(out.ReturnValue, "not-modifiable") {
-			t.Fatalf("the routed document must be modifiable for the whole run -- if it is not, the ambient managed transaction is no longer being opened and most of this suite's write cases are meaningless; (%s)", out.diag())
+		for _, want := range []string{`"before":false`, `"inside":true`, `"after":false`} {
+			if !strings.Contains(out.ReturnValue, want) {
+				t.Fatalf("wanted %s -- group-always means not modifiable outside a WithTransaction block and modifiable inside it; (%s)", want, out.diag())
+			}
 		}
 	})
 
@@ -760,36 +763,51 @@ func TestRoutingAwayFromATargetMakesItNonModifiable(t *testing.T) {
 			t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
 		}
 		if !strings.Contains(out.ReturnValue, "not-modifiable") {
-			t.Fatalf("a document reached by Title from a run routed ELSEWHERE must not be modifiable -- that is the whole routing recipe; (%s)", out.diag())
+			t.Fatalf("a document reached by Title from a run routed ELSEWHERE must not be modifiable (nothing manages it); (%s)", out.diag())
 		}
 	})
 
-	t.Run("RequestViewChangeRefusedAtTheActiveDocumentAndSucceedsRoutedAway", func(t *testing.T) {
-		// Routed AT the active document: UIDocument is non-null and its own
-		// document is modifiable, so Revit refuses. Nothing changes on screen,
-		// so this half needs no cleanup.
-		refused := runScript(t, c, instanceID, documentID, `
+	t.Run("RequestViewChangeIsRefusedOnlyInsideABlock", func(t *testing.T) {
+		// #146 Phase 3 inverted the old #131 recipe: at the active document, with no block open, the
+		// document is not modifiable and RequestViewChange is ACCEPTED; inside a WithTransaction block
+		// it is refused with Revit's "modifiable document" message. Both directions asserted, so the
+		// rule is pinned rather than either half passing for an unrelated reason. Nothing changes on
+		// screen from the refused half; the accepted half's view change is undone by the sibling
+		// subtest's own restore logic pattern -- here we request the CURRENT active view, a no-op.
+		out := runScript(t, c, instanceID, documentID, `
 Autodesk.Revit.DB.View target = null;
 foreach (Autodesk.Revit.DB.Element e in new Autodesk.Revit.DB.FilteredElementCollector(Document).OfClass(typeof(Autodesk.Revit.DB.ViewPlan))) {
   var v = (Autodesk.Revit.DB.View)e;
   if (!v.IsTemplate && v.Id != UIDocument.ActiveView.Id) { target = v; break; }
 }
 if (target == null) { return "no-other-view"; }
+string insideBlock;
 try {
-  UIDocument.RequestViewChange(target);
-  return "accepted";
+  Connector.WithTransaction(Document, () => { UIDocument.RequestViewChange(target); });
+  insideBlock = "accepted";
 } catch (Autodesk.Revit.Exceptions.InvalidOperationException ex) {
-  return "refused: " + ex.Message;
+  insideBlock = "refused: " + ex.Message;
 }
+string outsideBlock;
+try {
+  UIDocument.RequestViewChange(UIDocument.ActiveView);   // the active view itself: accepted means no visible change
+  outsideBlock = "accepted";
+} catch (Autodesk.Revit.Exceptions.InvalidOperationException ex) {
+  outsideBlock = "refused: " + ex.Message;
+}
+return insideBlock + " | " + outsideBlock;
 `)
-		if refused.Status != "success" {
-			t.Fatalf("expected status=success, got %q (%s)", refused.Status, refused.diag())
+		if out.Status != "success" {
+			t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
 		}
-		if strings.Contains(refused.ReturnValue, "no-other-view") {
+		if strings.Contains(out.ReturnValue, "no-other-view") {
 			t.Skip("active document has fewer than two non-template plan views; nothing to switch between")
 		}
-		if !strings.Contains(refused.ReturnValue, "refused:") {
-			t.Fatalf("RequestViewChange was expected to be REFUSED from a call routed at the active document, whose managed transaction makes it modifiable -- if this now succeeds, the recipe #131 documents is no longer needed and both skill.md and caveats.md should be corrected; (%s)", refused.diag())
+		if !strings.HasPrefix(strings.Trim(out.ReturnValue, `"`), "refused:") {
+			t.Fatalf("RequestViewChange INSIDE a WithTransaction block was expected to be REFUSED (the document is modifiable there); (%s)", out.diag())
+		}
+		if !strings.HasSuffix(strings.Trim(out.ReturnValue, `"`), "| accepted") {
+			t.Fatalf("RequestViewChange OUTSIDE a block at the active document was expected to be ACCEPTED under group-always -- if it is refused, a transaction is open when none should be; (%s)", out.diag())
 		}
 	})
 
@@ -897,10 +915,9 @@ return "requested " + target.Id.Value;
 // #115 states the dead end as "no script-reachable code path satisfies both 'no
 // ambient transaction to start the edit scope' and 'a transaction open to write
 // to it'." That is not the blocker: both ARE satisfiable today, and the first
-// three steps below prove it, using only shipped members. Routing the call away
-// from the fixture leaves it unmanaged so Start() succeeds, and
-// Connector.OpenForWriting -- called INSIDE the scope -- supplies the
-// transaction the runs need.
+// three steps below prove it, using only shipped members. Nothing is open on the
+// fixture so Start() succeeds, and a Connector.WithTransaction block -- opened
+// INSIDE the scope -- supplies the transaction the runs need.
 //
 // The blocker is a THIRD condition nobody named: no transaction may be open
 // when the edit scope COMMITS. Cancel() refuses identically, so the scope
@@ -914,9 +931,8 @@ return "requested " + target.Id.Value;
 // yet). That distinction is what makes #115's fix a callback whose transaction
 // CLOSES before the scope commits, rather than merely a way to start the scope.
 //
-// It pins the COMMIT edge specifically: a managed transaction opened AFTER Start(),
-// via OpenForWriting from inside the scope. The START edge had its own test until
-// the primitive shipped and made that test's claim false.
+// It pins the COMMIT edge specifically: the scope's Commit attempted from INSIDE
+// the block whose transaction is still open.
 func TestStairsEditScopeCannotCommitWhileAConnectorTransactionIsOpen(t *testing.T) {
 	c, instanceID, documentID := targetDocument(t)
 	fixtureTitle := createBlankFixtureDocument(t, c, instanceID, documentID)
@@ -929,26 +945,26 @@ foreach (Autodesk.Revit.DB.Element e in new Autodesk.Revit.DB.FilteredElementCol
 }
 if (l1 == null || l2 == null) { throw new System.Exception("blank fixture document does not have the two template levels this probe needs"); }
 
-// 1. no managed transaction on this document, because the call is routed elsewhere
+// 1. no transaction on this document (the resting state), so Start() is legal
 var scope = new Autodesk.Revit.DB.StairsEditScope(doc, "harness #115 commit-edge probe");
 var stairsId = scope.Start(l1.Id, l2.Id);
 
-// 2. the only shipped way to get a transaction -- asked for INSIDE the scope
-Connector.OpenForWriting(doc);
+// 2.-4. inside a block: the run can be written, and the commit hits the wall while the block's
+// transaction is still open. (Committing AFTER the block is the working shape, pinned by
+// TestStairsAreCreatableWithSettleOnRequest.)
+return Connector.WithTransaction(doc, () => {
+  var line = Autodesk.Revit.DB.Line.CreateBound(new Autodesk.Revit.DB.XYZ(0, 0, 0), new Autodesk.Revit.DB.XYZ(20, 0, 0));
+  var run = Autodesk.Revit.DB.Architecture.StairsRun.CreateStraightRun(doc, stairsId, line, Autodesk.Revit.DB.Architecture.StairsRunJustification.Center);
 
-// 3. and it really does let the run be written
-var line = Autodesk.Revit.DB.Line.CreateBound(new Autodesk.Revit.DB.XYZ(0, 0, 0), new Autodesk.Revit.DB.XYZ(20, 0, 0));
-var run = Autodesk.Revit.DB.Architecture.StairsRun.CreateStraightRun(doc, stairsId, line, Autodesk.Revit.DB.Architecture.StairsRunJustification.Center);
-
-// 4. and here is the wall
-string commitOutcome;
-try {
-  scope.Commit(new Preproc());
-  commitOutcome = "committed";
-} catch (Autodesk.Revit.Exceptions.InvalidOperationException ex) {
-  commitOutcome = "refused: " + ex.Message;
-}
-return new { started = stairsId.Value > 0, wroteRun = run != null, commitOutcome };
+  string commitOutcome;
+  try {
+    scope.Commit(new Preproc());
+    commitOutcome = "committed";
+  } catch (Autodesk.Revit.Exceptions.InvalidOperationException ex) {
+    commitOutcome = "refused: " + ex.Message;
+  }
+  return new { started = stairsId.Value > 0, wroteRun = run != null, commitOutcome };
+});
 
 class Preproc : Autodesk.Revit.DB.IFailuresPreprocessor {
   public Autodesk.Revit.DB.FailureProcessingResult PreprocessFailures(Autodesk.Revit.DB.FailuresAccessor a) {
@@ -1014,23 +1030,20 @@ func TestWithTransactionReturnsTheBodysValue(t *testing.T) {
 	fixtureTitle := createBlankFixtureDocument(t, c, instanceID, documentID)
 
 	out := runScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+`
-Autodesk.Revit.DB.ElementId created = null;
-bool caught = false;
-Connector.WithoutTransaction(doc, () => {
-  // Expression-bodied, non-void: must bind to the Func<T> overload.
-  created = Connector.WithTransaction(doc, () => Autodesk.Revit.DB.Level.Create(doc, 66.6).Id);
+// Expression-bodied, non-void: must bind to the Func<T> overload.
+var created = Connector.WithTransaction(doc, () => Autodesk.Revit.DB.Level.Create(doc, 66.6).Id);
 
-  // The throwing shape, caught by the script: the generic form must unwind its
-  // own block exactly as the Action form does.
-  try {
-    Connector.WithTransaction<int>(doc, () => {
-      Autodesk.Revit.DB.Level.Create(doc, 67.6);
-      throw new System.InvalidOperationException("harness: deliberate throw inside WithTransaction<T>");
-    });
-  } catch (System.InvalidOperationException) {
-    caught = true;
-  }
-});
+// The throwing shape, caught by the script: the generic form must unwind its
+// own block exactly as the Action form does.
+bool caught = false;
+try {
+  Connector.WithTransaction<int>(doc, () => {
+    Autodesk.Revit.DB.Level.Create(doc, 67.6);
+    throw new System.InvalidOperationException("harness: deliberate throw inside WithTransaction<T>");
+  });
+} catch (System.InvalidOperationException) {
+  caught = true;
+}
 
 int atReturned = 0, atThrown = 0;
 foreach (var e in new Autodesk.Revit.DB.FilteredElementCollector(doc).OfClass(typeof(Autodesk.Revit.DB.Level))) {
@@ -1072,12 +1085,12 @@ func TestTargetMustNotBeModifiableIsMappedToItsOwnCode(t *testing.T) {
 		if rej.Error.Code != "script-target-must-not-be-modifiable" {
 			t.Fatalf("%s against a modifiable target must map to `script-target-must-not-be-modifiable`, got %q -- if this is `script-execution-failed`, Revit's message no longer contains a phrase RequestDispatcher.IsTargetMustNotBeModifiable matches and the mapping is failing open; message: %s", api, rej.Error.Code, rej.Error.Message)
 		}
-		if joined := strings.Join(rej.Error.Remedy, " "); !strings.Contains(joined, "Connector.WithoutTransaction") {
-			t.Errorf("the remedy must name the one wrap that fixes this (Connector.WithoutTransaction); got: %q", joined)
+		if joined := strings.Join(rej.Error.Remedy, " "); !strings.Contains(joined, "OUTSIDE your Connector.WithTransaction block") {
+			t.Errorf("the remedy must say to move the call outside the WithTransaction block (documents are not modifiable by default since #146 Phase 3); got: %q", joined)
 		}
 	}
 
-	t.Run("LoadFamilyFromAModifiableSourceDocument", func(t *testing.T) {
+	t.Run("LoadFamilyIntoAModifiableTargetDocument", func(t *testing.T) {
 		probe := runScript(t, c, instanceID, documentID, `
 var app = UIApplication.Application;
 foreach (var f in System.IO.Directory.EnumerateFiles(app.FamilyTemplatePath, "Generic Model.rft", System.IO.SearchOption.AllDirectories)) { return f; }
@@ -1088,14 +1101,17 @@ return "";
 			t.Skip("no Generic Model.rft under Application.FamilyTemplatePath; cannot build a family to load")
 		}
 
-		// The family document is created WRITABLE (its managed transaction stays
-		// open for the run), so LoadFamily from it into the active document fails
-		// on the SOURCE side with Revit's "must not be modifiable". The created
-		// document outlives the rejected run; the marker lets us close it.
+		// Since #146 Phase 3 no document is modifiable by default (a group, no transaction), so
+		// LoadFamily works at top level; to hit Revit's "must not be modifiable" the call is made
+		// INSIDE a WithTransaction block on the TARGET. (A block on the SOURCE does not trigger it:
+		// live on Revit 2025 under Phase 3, LoadFamily from a modifiable family document into a
+		// non-modifiable target succeeded -- the pre-Phase-3 "source must not be modifiable" finding
+		// was the always-open target being blamed on the source.) The created document outlives the
+		// rejected run; the marker lets us close it.
 		rej := runRejectedScript(t, c, instanceID, documentID, fmt.Sprintf(`
 var fam = Connector.CreateFamilyDocument(%s);
 System.Console.WriteLine("cleanup-title=" + fam.Title + ";");
-var loaded = fam.LoadFamily(Document);
+var loaded = Connector.WithTransaction(Document, () => fam.LoadFamily(Document));
 return loaded == null ? "not-loaded" : "loaded";
 `, strconv.Quote(template)))
 		for _, title := range cleanupTitles(rej.Output) {
@@ -1122,44 +1138,40 @@ foreach (Autodesk.Revit.DB.Element e in new Autodesk.Revit.DB.FilteredElementCol
   var v = (Autodesk.Revit.DB.View)e;
   if (!v.IsTemplate && v.Id != UIDocument.ActiveView.Id) { target = v; break; }
 }
-UIDocument.RequestViewChange(target);
+Connector.WithTransaction(Document, () => { UIDocument.RequestViewChange(target); });
 return "accepted";
 `)
 		assertMapped(t, rej, "UIDocument.RequestViewChange")
 	})
 }
 
-// TestWithoutTransactionRestoresTheStateItFound pins #146 H1 live. The scope
-// used to reopen a transaction UNCONDITIONALLY when it ended, so on a document
-// that entered it with NO transaction -- settled, then written through
-// WithTransaction, which closes at block end -- WithoutTransaction handed the
-// document back MODIFIABLE for the rest of the run. That silently reinstated
-// always-open on a document skill.md says "is unmanaged after a settle", and it
-// is the one path that would have defeated a group-only default outright. Now
-// the block restores what it found: not modifiable in, not modifiable out.
-func TestWithoutTransactionRestoresTheStateItFound(t *testing.T) {
+// TestDocumentsAreNotModifiableUntilABlockOpens pins the #146 Phase 3 default
+// live: the connector opens a GROUP for the routed document and no transaction,
+// so it is readable but not modifiable until a Connector.WithTransaction block
+// opens one, and not again after the block closes. This is the resting state
+// every other test in this file now writes from; a regression here (a
+// transaction open by default) would make every LoadFamily / EditScope /
+// RequestViewChange call fail again with "must not be modifiable".
+func TestDocumentsAreNotModifiableUntilABlockOpens(t *testing.T) {
 	c, instanceID, documentID := targetDocument(t)
 	fixtureTitle := createBlankFixtureDocument(t, c, instanceID, documentID)
 
-	// Settle is confirmation-gated, hence the flag -- the fixture is a throwaway
-	// document and keep:false discards nothing of value.
-	out := decodeToolResult[executeScriptOut](t, callExecuteScriptWith(t, c, instanceID, documentID,
-		fixtureWritePreamble(fixtureTitle)+`
-Connector.Settle(doc, false);
-Connector.WithTransaction(doc, () => { });      // fresh group; transaction closed at block end
-bool before = doc.IsModifiable;
-Connector.WithoutTransaction(doc, () => { });
-bool after = doc.IsModifiable;
-return new { before, after };
-`, map[string]any{"confirm_lifecycle_actions": true}))
+	out := runScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+`
+bool activeBefore = Document.IsModifiable;
+bool fixtureBefore = doc.IsModifiable;
+bool insideActive = Connector.WithTransaction(Document, () => Document.IsModifiable);
+bool insideFixture = Connector.WithTransaction(doc, () => doc.IsModifiable);
+bool activeAfter = Document.IsModifiable;
+bool fixtureAfter = doc.IsModifiable;
+return new { activeBefore, fixtureBefore, insideActive, insideFixture, activeAfter, fixtureAfter };
+`)
 	if out.Status != "success" {
 		t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
 	}
-	if !strings.Contains(out.ReturnValue, `"before":false`) {
-		t.Fatalf("precondition: after Settle + a closed WithTransaction block the document must NOT be modifiable, or this test is not exercising the no-transaction entry state; (%s)", out.diag())
-	}
-	if !strings.Contains(out.ReturnValue, `"after":false`) {
-		t.Errorf("WithoutTransaction reopened a transaction the document did not have when the block began -- the H1 regression: the scope must restore the state it found, not always-open; (%s)", out.diag())
+	for _, want := range []string{`"activeBefore":false`, `"fixtureBefore":false`, `"insideActive":true`, `"insideFixture":true`, `"activeAfter":false`, `"fixtureAfter":false`} {
+		if !strings.Contains(out.ReturnValue, want) {
+			t.Errorf("wanted %s -- group-always, transaction-on-write: modifiable only inside a WithTransaction block; (%s)", want, out.diag())
+		}
 	}
 }
 
@@ -1173,10 +1185,10 @@ func TestSubTransactionIsASavepointInsideTheConnectorsTransaction(t *testing.T) 
 	fixtureTitle := createBlankFixtureDocument(t, c, instanceID, documentID)
 
 	t.Run("RollBackDiscardsOnlyTheSubTransactionsSlice", func(t *testing.T) {
-		// Inside the connector's ambient transaction (fixtureWritePreamble opened it):
-		// a level created before the savepoint and one created after it both
-		// survive; the one created INSIDE the rolled-back sub-transaction is gone.
-		out := runScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+`
+		// Inside a WithTransaction block: a level created before the savepoint and
+		// one created after it both survive; the one created INSIDE the rolled-back
+		// sub-transaction is gone.
+		out := runScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+withTx(`
 Autodesk.Revit.DB.Level.Create(doc, 71.1);
 using (var st = new Autodesk.Revit.DB.SubTransaction(doc)) {
   st.Start();
@@ -1199,7 +1211,7 @@ foreach (var e in new Autodesk.Revit.DB.FilteredElementCollector(doc).OfClass(ty
   if (System.Math.Abs(lvl.Elevation - 74.4) < 0.01) after++;
 }
 return new { before, rolledBack, committed, after };
-`)
+`))
 		if out.Status != "success" {
 			t.Fatalf("expected status=success -- if the code is script-api-denied, SubTransaction is back in ScriptApiDenylist's constructed-types table; got %q (%s)", out.Status, out.diag())
 		}
@@ -1211,17 +1223,15 @@ return new { before, rolledBack, committed, after };
 	})
 
 	t.Run("StartOutsideAnyTransactionIsMappedToItsOwnCode", func(t *testing.T) {
-		// Inside WithoutTransaction the document has no open transaction, which is
-		// the one state a SubTransaction cannot start in. Revit's own message names
-		// neither the connector nor the fix; the mapping does. Lets the exception
+		// Outside any WithTransaction block -- the RESTING state since #146 Phase 3 -- the document has
+		// no open transaction, which is the one state a SubTransaction cannot start in. Revit's own
+		// message names neither the connector nor the fix; the mapping does. Lets the exception
 		// PROPAGATE so the code on the wire is what is asserted.
 		rej := runRejectedScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+`
-Connector.WithoutTransaction(doc, () => {
-  using (var st = new Autodesk.Revit.DB.SubTransaction(doc)) {
-    st.Start();
-    st.RollBack();
-  }
-});
+using (var st = new Autodesk.Revit.DB.SubTransaction(doc)) {
+  st.Start();
+  st.RollBack();
+}
 return "started";
 `)
 		if rej.Error.Code != "script-subtransaction-needs-transaction" {
@@ -1253,7 +1263,7 @@ return "started";
 		// SubTransaction that is Started and then only DISPOSED (no Commit, no RollBack) must roll its
 		// slice back, leave the enclosing block committable, and leave the document closable -- the
 		// fixture's cleanup Close is the same call that crashed Revit in the bare-construction probe.
-		out := runScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+`
+		out := runScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+withTx(`
 using (var st = new Autodesk.Revit.DB.SubTransaction(doc)) {
   st.Start();
   Autodesk.Revit.DB.Level.Create(doc, 76.6);
@@ -1268,7 +1278,7 @@ foreach (var e in new Autodesk.Revit.DB.FilteredElementCollector(doc).OfClass(ty
   if (System.Math.Abs(lvl.Elevation - 77.7) < 0.01) after++;
 }
 return new { disposedOnly, after };
-`)
+`))
 		if out.Status != "success" {
 			t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
 		}
@@ -1303,7 +1313,7 @@ func TestMutationReportDescribesWhatTheRunChanged(t *testing.T) {
 		// deleted (nets to nothing); one PRE-EXISTING level edited (modified). Expected: created 2,
 		// deleted 0, modified >= 1 (Revit may mark dependents modified on regeneration, so >=), and
 		// by_category.Levels.created == 2.
-		out := runScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+`
+		out := runScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+withTx(`
 var a = Autodesk.Revit.DB.Level.Create(doc, 80.1);
 var b = Autodesk.Revit.DB.Level.Create(doc, 81.1);
 b.Elevation = 81.2;
@@ -1317,7 +1327,7 @@ foreach (var e in new Autodesk.Revit.DB.FilteredElementCollector(doc).OfClass(ty
 if (existing == null) { return "no-preexisting-level"; }
 existing.Name = existing.Name + " (renamed)";
 return "wrote";
-`)
+`))
 		if out.Status != "success" {
 			t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
 		}
@@ -1349,15 +1359,13 @@ return "wrote";
 		// The rolled-back block's level must not appear: either Revit raises no event for a
 		// transaction that never committed, or it raises the reverse -- both net to zero.
 		out := runScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+`
-Connector.WithoutTransaction(doc, () => {
-  try {
-    Connector.WithTransaction(doc, () => {
-      Autodesk.Revit.DB.Level.Create(doc, 83.1);
-      throw new System.InvalidOperationException("harness: deliberate");
-    });
-  } catch (System.InvalidOperationException) { }
-  Connector.WithTransaction(doc, () => { Autodesk.Revit.DB.Level.Create(doc, 84.1); });
-});
+try {
+  Connector.WithTransaction(doc, () => {
+    Autodesk.Revit.DB.Level.Create(doc, 83.1);
+    throw new System.InvalidOperationException("harness: deliberate");
+  });
+} catch (System.InvalidOperationException) { }
+Connector.WithTransaction(doc, () => { Autodesk.Revit.DB.Level.Create(doc, 84.1); });
 return "done";
 `)
 		if out.Status != "success" {
@@ -1373,12 +1381,12 @@ return "done";
 		// document settled with keep:false must contribute nothing. Its writes are gone.
 		scratchTitle := createBlankFixtureDocument(t, c, instanceID, documentID)
 		out := decodeToolResult[executeScriptOut](t, callExecuteScriptWith(t, c, instanceID, documentID,
-			fixtureWritePreamble(scratchTitle)+`
+			fixtureWritePreamble(scratchTitle)+withTx(`
 Autodesk.Revit.DB.Level.Create(doc, 85.1);
 Autodesk.Revit.DB.Level.Create(doc, 86.1);
 Connector.Settle(doc, false);
 return "discarded";
-`, map[string]any{"confirm_lifecycle_actions": true}))
+`), map[string]any{"confirm_lifecycle_actions": true}))
 		if out.Status != "success" {
 			t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
 		}
@@ -1404,10 +1412,10 @@ func TestUndoLabelIsAcceptedByRevit(t *testing.T) {
 
 	t.Run("AgentLabel", func(t *testing.T) {
 		out := decodeToolResult[executeScriptOut](t, callExecuteScriptWith(t, c, instanceID, documentID,
-			fixtureWritePreamble(fixtureTitle)+`
+			fixtureWritePreamble(fixtureTitle)+withTx(`
 Autodesk.Revit.DB.Level.Create(doc, 90.1);
 return "labelled";
-`, map[string]any{"label": "harness: label\nwith newline and a very long tail " + strings.Repeat("x", 200)}))
+`), map[string]any{"label": "harness: label\nwith newline and a very long tail " + strings.Repeat("x", 200)}))
 		if out.Status != "success" {
 			t.Fatalf("a labelled run must succeed -- if Revit rejected the sanitised name as a transaction name, this is where it shows; got %q (%s)", out.Status, out.diag())
 		}
@@ -1417,11 +1425,11 @@ return "labelled";
 	})
 
 	t.Run("DerivedLabel", func(t *testing.T) {
-		out := runScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+`
+		out := runScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+withTx(`
 Autodesk.Revit.DB.Level.Create(doc, 91.1);
 Autodesk.Revit.DB.Level.Create(doc, 92.1);
 return "derived";
-`)
+`))
 		if out.Status != "success" {
 			t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
 		}
@@ -1479,7 +1487,7 @@ return n;
 
 	// The labelled write the tools will act on. Routed at the ACTIVE document.
 	created := decodeToolResult[executeScriptOut](t, callExecuteScriptWith(t, c, instanceID, documentID,
-		`Autodesk.Revit.DB.Level.Create(Document, 93.3); return "created";`,
+		`Connector.WithTransaction(Document, () => { Autodesk.Revit.DB.Level.Create(Document, 93.3); }); return "created";`,
 		map[string]any{"label": "harness undo probe"}))
 	if created.Status != "success" || created.Mutations == nil || created.Mutations.Created != 1 {
 		t.Fatalf("the probe write must succeed with created:1; status=%q mutations=%+v (%s)", created.Status, created.Mutations, created.diag())
@@ -1488,10 +1496,12 @@ return n;
 	t.Cleanup(func() {
 		if levelCount(t) != "0" {
 			runScript(t, c, instanceID, documentID, `
-foreach (var e in new Autodesk.Revit.DB.FilteredElementCollector(Document).OfClass(typeof(Autodesk.Revit.DB.Level)).ToElements()) {
-  var lvl = e as Autodesk.Revit.DB.Level;
-  if (lvl != null && System.Math.Abs(lvl.Elevation - 93.3) < 0.01) Document.Delete(lvl.Id);
-}
+Connector.WithTransaction(Document, () => {
+  foreach (var e in new Autodesk.Revit.DB.FilteredElementCollector(Document).OfClass(typeof(Autodesk.Revit.DB.Level)).ToElements()) {
+    var lvl = e as Autodesk.Revit.DB.Level;
+    if (lvl != null && System.Math.Abs(lvl.Elevation - 93.3) < 0.01) Document.Delete(lvl.Id);
+  }
+});
 return "cleaned";`)
 		}
 	})

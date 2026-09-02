@@ -17,6 +17,8 @@ internal sealed class FakeTransactionAdapter : ITransactionAdapter
 
     public bool ThrowOnCommit { get; set; }
 
+    public bool ThrowOnStart { get; set; }
+
     /// <summary>
     /// Makes the best-effort unwind after a failed commit itself fail -- the "state unknown" case that
     /// makes TransactionScriptExecutor emit its partial-commit notice even when nothing committed.
@@ -33,7 +35,14 @@ internal sealed class FakeTransactionAdapter : ITransactionAdapter
     /// </summary>
     public Action? OnCommit { get; set; }
 
-    public void Start() => Calls.Add("Start");
+    public void Start()
+    {
+        Calls.Add("Start");
+        if (ThrowOnStart)
+        {
+            throw new InvalidOperationException("simulated Start failure");
+        }
+    }
 
     public TransactionCommitResult Commit()
     {

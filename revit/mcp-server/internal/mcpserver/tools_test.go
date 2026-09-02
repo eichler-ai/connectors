@@ -642,10 +642,10 @@ func TestExecuteScriptDescription_NamesTheScriptGlobalsAndRoutesOnward(t *testin
 
 	// Connector members are documented by describe_function now, not here. If one of these reappears,
 	// the Go copy is back and so is the drift.
-	// All six of the connector members that must NOT reappear. `Publish` is deliberately absent from this
+	// Every connector member that must NOT reappear. `Publish` is deliberately absent from this
 	// list: it legitimately appears as part of the `Connector.Publish(path)` calling form asserted above.
 	for _, name := range []string{
-		"CreateProjectDocument", "CreateFamilyDocument", "OpenForWriting",
+		"CreateProjectDocument", "CreateFamilyDocument", "WithTransaction", "Settle",
 		"ExportsDirectory", "ImportsDirectory", "DialogResultOverrides",
 	} {
 		if strings.Contains(desc, name) {

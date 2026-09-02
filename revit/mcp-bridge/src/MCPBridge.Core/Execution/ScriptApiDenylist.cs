@@ -13,14 +13,12 @@ namespace MCPBridge.Core.Execution;
 /// TWO CHECKS, and they differ in KIND, not just in importance -- one is an unconditional rejection,
 /// the other is a confirmation gate:
 ///
-/// 1. TRANSACTION OWNERSHIP -- the load-bearing one. TransactionScriptExecutor opens an ambient
-///    TransactionGroup + Transaction around every script run, before compilation even happens, and
-///    Revit permits only one open Transaction per Document. A script constructing its own Transaction or
-///    TransactionGroup against that same document therefore always fails, and worse, could leave the
-///    executor's own transaction state ambiguous. This check is what makes
-///    exposing the real Document safe at all; everything else a script does with the real API (reads,
-///    writes, element queries, geometry) rides the ambient transaction correctly with no new
-///    transaction-ownership scheme -- confirmed live before Phase 3 shipped.
+/// 1. TRANSACTION OWNERSHIP -- the load-bearing one. TransactionScriptExecutor opens a TransactionGroup
+///    around every script run, before compilation even happens, and every write goes through a
+///    transaction the connector opens inside that group (Connector.WithTransaction) with the §07 failure
+///    preprocessor on its commit. A script constructing its own Transaction or TransactionGroup would
+///    bypass that capture and collide with the run's own group state. This check is what makes exposing
+///    the real Document safe at all; reads need nothing, and writes ride the connector's transaction.
 ///
 ///    THE OVER-BREADTH THIS CHECK ONCE HAD IS RESOLVED, and the resolution left the check itself
 ///    byte-for-byte unchanged -- worth recording, because it is the reason the fix was chosen. The check
@@ -120,7 +118,7 @@ internal static class ScriptApiDenylist
     /// PERMITTED WITH ONE SYNTACTIC CONDITION, enforced by <see cref="RequireSubTransactionHeldInUsing"/>:
     /// the construction must be the resource of a `using`. Live-verified hazard (Revit 2025): a
     /// SubTransaction still active when the enclosing transaction closes -- the WithTransaction block
-    /// ending, Connector.WithoutTransaction committing, Connector.Settle, or an exception unwinding
+    /// ending, Connector.Settle, or an exception unwinding
     /// through RunBody's rollback -- is accepted silently (slice kept, no exception) and Revit then
     /// crashed on the next Document.Close. Nothing at runtime can guard it: the connector never sees the
     /// script's SubTransaction object, and Document exposes no open-sub-transaction observable. Dispose
@@ -539,13 +537,12 @@ internal static class ScriptApiDenylist
 
         throw ScriptApiDenylistViolationException.Denied(
             typeName,
-            "Every script already runs inside a Transaction and TransactionGroup this connector opens " +
-            "for you, and Revit allows only one open Transaction per document at a time, so opening " +
-            "your own always fails.",
-            "Just make your changes directly -- they are committed automatically if the script succeeds " +
-            "and rolled back if it throws. For a savepoint inside the run, a native " +
-            "Autodesk.Revit.DB.SubTransaction held in a `using` is permitted: Start it, then Commit or " +
-            "RollBack it before the enclosing transaction closes.");
+            "The connector owns every transaction: it opens one for you, with warning/error capture, and " +
+            "commits it when your block ends -- a transaction you construct yourself would bypass that capture " +
+            "and cannot coexist with the run's own group.",
+            "Write inside Connector.WithTransaction(doc, () => { ... }) instead; reads need no block. For a " +
+            "savepoint inside the block, a native Autodesk.Revit.DB.SubTransaction held in a `using` is " +
+            "permitted: Start it, then Commit or RollBack it before the block ends.");
     }
 
     /// <summary>

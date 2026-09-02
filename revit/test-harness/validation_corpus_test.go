@@ -31,13 +31,18 @@ func TestValidationCorpus_ExportViewToDwg(t *testing.T) {
 	fixtureTitle := createBlankFixtureDocument(t, c, instanceID, documentID)
 
 	out := runScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+`
-var level = Autodesk.Revit.DB.Level.Create(doc, 0.0);
-Autodesk.Revit.DB.ElementId vftId = null;
-foreach (Autodesk.Revit.DB.ViewFamilyType vft in new Autodesk.Revit.DB.FilteredElementCollector(doc).OfClass(typeof(Autodesk.Revit.DB.ViewFamilyType))) {
-  if (vft.ViewFamily == Autodesk.Revit.DB.ViewFamily.FloorPlan) { vftId = vft.Id; break; }
-}
-var view = Autodesk.Revit.DB.ViewPlan.Create(doc, vftId, level.Id);
-doc.Regenerate();
+// The view is built inside a block; the export runs OUTSIDE it (an export wants a document nothing is
+// writing to -- #146 Phase 3 makes that the resting state).
+var view = Connector.WithTransaction(doc, () => {
+  var level = Autodesk.Revit.DB.Level.Create(doc, 0.0);
+  Autodesk.Revit.DB.ElementId vftId = null;
+  foreach (Autodesk.Revit.DB.ViewFamilyType vft in new Autodesk.Revit.DB.FilteredElementCollector(doc).OfClass(typeof(Autodesk.Revit.DB.ViewFamilyType))) {
+    if (vft.ViewFamily == Autodesk.Revit.DB.ViewFamily.FloorPlan) { vftId = vft.Id; break; }
+  }
+  var created = Autodesk.Revit.DB.ViewPlan.Create(doc, vftId, level.Id);
+  doc.Regenerate();
+  return created;
+});
 
 var options = new Autodesk.Revit.DB.DWGExportOptions();
 var views = new System.Collections.Generic.List<Autodesk.Revit.DB.ElementId> { view.Id };
@@ -95,7 +100,7 @@ func TestValidationCorpus_ClosedRectangularFootprint(t *testing.T) {
 	c, instanceID, documentID := targetDocument(t)
 	fixtureTitle := createBlankFixtureDocument(t, c, instanceID, documentID)
 
-	out := runScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+`
+	out := runScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+withTx(`
 var level = Autodesk.Revit.DB.Level.Create(doc, 0.0);
 Autodesk.Revit.DB.WallType wallType = null;
 foreach (Autodesk.Revit.DB.WallType wt in new Autodesk.Revit.DB.FilteredElementCollector(doc).OfClass(typeof(Autodesk.Revit.DB.WallType))) {
@@ -128,7 +133,7 @@ var loopCloses =
   ((Autodesk.Revit.DB.LocationCurve)w4.Location).Curve.GetEndPoint(1).IsAlmostEqualTo(((Autodesk.Revit.DB.LocationCurve)w1.Location).Curve.GetEndPoint(0));
 
 return new { wallTypeFound = wallType != null, wallCount = walls.Length, loopCloses, allEndsAllowJoin };
-`)
+`))
 	if out.Status != "success" {
 		t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
 	}
@@ -152,19 +157,17 @@ return new { wallTypeFound = wallType != null, wallCount = walls.Length, loopClo
 // TWO REAL FINDINGS from live research, both about this connector's ambient-transaction model
 // interacting with Document.LoadFamily specifically, not generic Revit API behavior:
 //
-//  1. Document.LoadFamily(Document) requires its SOURCE document to have NO open transaction. A family
-//     document created via CreateFamilyDocument in the SAME script call as its own geometry edits still
-//     has its managed transaction open for the rest of that call -- LoadFamily on it in the same call
-//     throws "The document must not be modifiable before calling LoadFamily." The fix is the same
-//     two-call split OpenForWriting itself exists for (see fixtureWritePreamble's own doc comment): build
-//     the family in one execute_script call, let that call return so the transaction commits and closes,
-//     then LoadFamily it from a SEPARATE call.
-//  2. Less obvious, and NOT fixed by the two-call split alone: LoadFamily ALSO requires its TARGET
-//     document to have no open transaction at the moment of the call. Calling OpenForWriting(doc) before
-//     famDoc.LoadFamily(doc) throws the identical error, just naming the target instead of the source.
-//     The correct order within the second call is LoadFamily first, THEN OpenForWriting(doc) -- the
-//     family instance placement that follows needs the transaction, but the load itself must happen
-//     before it opens.
+//  1. Under the pre-#146 always-open model, LoadFamily from a family document created in the SAME call
+//     threw "The document must not be modifiable before calling LoadFamily." That was read as a rule
+//     about the SOURCE and forced a two-call split: build the family in one call, LoadFamily it from a
+//     SEPARATE call. Re-tested under Phase 3 (TestTargetMustNotBeModifiableIsMappedToItsOwnCode), a
+//     modifiable source loads fine -- the target, always modifiable back then, was the real cause. The
+//     split is kept because it is a realistic agent shape, not because it is required.
+//  2. The real rule: LoadFamily requires its TARGET document to have no open transaction at the
+//     moment of the call. So within the second call, LoadFamily runs OUTSIDE the WithTransaction block and
+//     the family-instance placement that follows runs INSIDE one -- the load must happen before the block
+//     opens. Under always-open this needed OpenForWriting to be ordered after the load; now it is just
+//     where the block starts.
 func TestValidationCorpus_LoadFamilyAndPlaceInstance(t *testing.T) {
 	c, instanceID, documentID := targetDocument(t)
 	fixtureTitle := createBlankFixtureDocument(t, c, instanceID, documentID)
@@ -178,6 +181,7 @@ foreach (var f in System.IO.Directory.EnumerateFiles(app.FamilyTemplatePath, "Ge
 if (template.Length == 0) return "no-template";
 
 var famDoc = Connector.CreateFamilyDocument(template);
+var extrusion = Connector.WithTransaction(famDoc, () => {
 var plane = Autodesk.Revit.DB.Plane.CreateByNormalAndOrigin(Autodesk.Revit.DB.XYZ.BasisZ, Autodesk.Revit.DB.XYZ.Zero);
 var sketchPlane = Autodesk.Revit.DB.SketchPlane.Create(famDoc, plane);
 
@@ -193,8 +197,10 @@ profile.Append(Autodesk.Revit.DB.Line.CreateBound(p4, p1));
 var profileArr = new Autodesk.Revit.DB.CurveArrArray();
 profileArr.Append(profile);
 
-var extrusion = famDoc.FamilyCreate.NewExtrusion(true, profileArr, sketchPlane, 2.0);
+var created = famDoc.FamilyCreate.NewExtrusion(true, profileArr, sketchPlane, 2.0);
 famDoc.Regenerate();
+return created;
+});
 
 return $"famTitle={famDoc.Title} extrusionCreated={extrusion != null}";
 `)
@@ -227,8 +233,9 @@ if (famDoc == null) { throw new System.Exception("family document not found by t
 var family = famDoc.LoadFamily(doc);
 famDoc.Close(false);
 
-Connector.OpenForWriting(doc);
-
+// #146 Phase 3: the load happened with no block open (neither document modifiable, which LoadFamily
+// requires); the placement writes go inside a block.
+return Connector.WithTransaction(doc, () => {
 Autodesk.Revit.DB.FamilySymbol symbol = null;
 foreach (Autodesk.Revit.DB.ElementId symId in family.GetFamilySymbolIds()) {
   symbol = doc.GetElement(symId) as Autodesk.Revit.DB.FamilySymbol;
@@ -252,6 +259,7 @@ return new {
   instanceCreated = instance != null,
   placedCount
 };
+});
 `
 	// Close(false) is confirm_lifecycle_actions-gated (PRD §14) -- it acts outside the ambient
 	// transaction boundary, same as every other Document.Close call in this suite.

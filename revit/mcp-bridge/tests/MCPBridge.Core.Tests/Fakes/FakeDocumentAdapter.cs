@@ -29,14 +29,28 @@ internal sealed class FakeDocumentAdapter : IDocumentAdapter
 
     public ITransactionAdapter CreateTransaction(string name)
     {
-        var tx = new FakeTransactionAdapter(name) { OnCommit = OnTransactionCommit };
+        var tx = new FakeTransactionAdapter(name) { OnCommit = OnTransactionCommit, ThrowOnStart = TransactionThrowOnStart };
         LastTransaction = tx;
         return tx;
     }
 
+    /// <summary>Applied to every group this document creates -- the end-of-run failure shapes since #146 Phase 3 (assimilate or rollback throwing).</summary>
+    /// <summary>Every transaction this document creates throws from Start().</summary>
+    public bool TransactionThrowOnStart { get; set; }
+
+    public bool GroupThrowOnRollBack { get; set; }
+
+    public bool GroupThrowOnAssimilate { get; set; }
+
+    /// <summary>Every group this document creates refuses SetName (Revit rejecting the undo label).</summary>
+    public bool GroupThrowOnSetName { get; set; }
+
+    /// <summary>Attached to every group this document creates; see FakeTransactionGroupAdapter.OnTerminal.</summary>
+    public Action? OnGroupTerminal { get; set; }
+
     public ITransactionGroupAdapter CreateTransactionGroup(string name)
     {
-        var group = new FakeTransactionGroupAdapter(name);
+        var group = new FakeTransactionGroupAdapter(name) { ThrowOnRollBack = GroupThrowOnRollBack, ThrowOnAssimilate = GroupThrowOnAssimilate, OnTerminal = OnGroupTerminal, ThrowOnSetName = GroupThrowOnSetName };
         LastTransactionGroup = group;
         return group;
     }

@@ -177,30 +177,34 @@ if (matchCount > 1) { throw new System.Exception("fixture document title is ambi
 `, strconv.Quote(title), strconv.Quote(title), strconv.Quote(title))
 }
 
-// fixtureWritePreamble is fixtureLookupPreamble plus an unsaved-document assertion plus
-// OpenForWriting(doc) -- use this instead of fixtureLookupPreamble in any subtest that WRITES to
-// the fixture document. Without OpenForWriting, `doc` is fully readable but every write throws
-// "Attempt to modify the model outside of transaction": createBlankFixtureDocument's own
-// CreateProjectDocument call opened a managed transaction that already committed and closed the
-// moment THAT script returned, so a later, separate execute_script call finds an ordinary,
-// un-transacted document -- confirmed live, the bug that motivated adding the OpenForWriting
-// script global in the first place. Kept as a distinct helper from fixtureLookupPreamble, not
-// folded into it unconditionally, so a read-only subtest's own script signals its intent and
-// never pays for (or risks) a write transaction it doesn't need.
+// fixtureWritePreamble is fixtureLookupPreamble plus an unsaved-document assertion -- use it in any
+// subtest that WRITES to the fixture document, and wrap the writes themselves in withTx (or an
+// explicit Connector.WithTransaction block): since #146 Phase 3 a document is readable but NOT
+// modifiable until a script opens a WithTransaction block, and there is no longer an OpenForWriting
+// to make it writable for the run. Kept as a distinct helper from fixtureLookupPreamble so a
+// read-only subtest's own script signals its intent.
 //
 // Independent PR review finding: the PathName assertion below is what actually keeps this helper
 // scoped to what it's meant for -- a throwaway document createBlankFixtureDocument itself made
 // this session. Without it, a Title collision with a real, saved, on-disk document (unlikely, but
 // exactly the kind of unlikely a fixture helper should not depend on excluding by luck) would
-// pass fixtureLookupPreamble's now-uniqueness-checked match and then OpenForWriting would happily
-// adopt and this subtest would write into it. PathName is empty for a document that has never
-// been saved, so asserting it here is a direct, load-bearing check that this is that
-// document, not a defensive nicety.
+// pass fixtureLookupPreamble's now-uniqueness-checked match and this subtest would write into it.
+// PathName is empty for a document that has never been saved, so asserting it here is a direct,
+// load-bearing check that this is that document, not a defensive nicety.
 func fixtureWritePreamble(title string) string {
 	return fixtureLookupPreamble(title) + fmt.Sprintf(`
 if (!string.IsNullOrEmpty(doc.PathName)) { throw new System.Exception("fixture document " + %s + " is unexpectedly saved to disk (PathName=" + doc.PathName + "); refusing to write to what may not be the throwaway fixture document"); }
-Connector.OpenForWriting(doc);
 `, strconv.Quote(title))
+}
+
+// withTx wraps a script body that writes to `doc` and ends in a `return` in the connector's
+// value-returning WithTransaction block (#146 Phase 3: documents are not modifiable outside one).
+// The body's own `return X;` becomes the block's result, and the block's result is the script's.
+// Every return in the body must have one type (C# infers the lambda's T from them), and a call that
+// needs a NON-modifiable target -- LoadFamily, RequestViewChange, an EditScope's Start/Commit --
+// belongs outside the block, not in it.
+func withTx(body string) string {
+	return "return Connector.WithTransaction(doc, () => {\n" + body + "\n});\n"
 }
 
 // cleanupTitles extracts every "cleanup-title=<Title>;" marker a script

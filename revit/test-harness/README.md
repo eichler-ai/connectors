@@ -160,14 +160,14 @@ the way to target one bundle/subtest during focused iteration, same as always; `
   cleanup every document-creating case registers), `cleanupTitles`/`registerCreatedDocumentCleanup`
   (extract the `cleanup-title=` stdout markers scripts print when their return value is spoken
   for), `fixtureLookupPreamble` (the by-Title re-find every subtest needs), and
-  `fixtureWritePreamble` (that plus `Connector.OpenForWriting(doc)` -- use this one instead whenever a subtest
-  WRITES to the fixture document; without it every write throws "Attempt to modify the model outside
-  of transaction", since a created document's managed transaction commits and closes the moment the
-  call that created it returns). Call `createBlankFixtureDocument` ONCE per bundle, not once per
-  subtest.
-- `open_for_writing_test.go` — `TestOpenForWritingSafety`: `Connector.OpenForWriting`'s
-  headline rollback-on-throw guarantee plus its two negative paths ("adopt the ambient
-  document", "adopt the same document twice"), added after an independent review round found
+  `fixtureWritePreamble` (the same lookup, kept as a separate name so a WRITING subtest reads as one)
+  and `withTx(body)` (wraps a script body in `Connector.WithTransaction(doc, () => { ... })` -- since
+  #146 Phase 3 no document is modifiable outside such a block, so every subtest that writes uses it).
+  Call `createBlankFixtureDocument` ONCE per bundle, not once per subtest.
+- `open_for_writing_test.go` — `TestWithTransactionAdoptsAnExistingDocument`: a `WithTransaction`
+  block on a document the run did not create adopts it with a group, so its
+  headline rollback-on-throw guarantee holds, plus the negative path ("nest a block on the same
+  document") and the multi-document rollback, added after an independent review round found
   the adopted-document origin had zero coverage at any tier.
 - `phase_a_test.go` — the first coverage-plan corpus bundle, `TestPhaseACoreCRUDAndQuery` (core
   CRUD + query): `CreateWall`, `QueryElementsByCategory`, `GetSetParameter`, `DeleteElement`,
@@ -193,7 +193,7 @@ the way to target one bundle/subtest during focused iteration, same as always; `
   trailing `\r` appended to whatever text was passed, undocumented in Autodesk's own shipped XML
   doc; and a `Level` created via `Level.Create` gets no associated floor plan view for free.
 - `memcheck_test.go` — throwaway diagnostics, not part of the coverage corpus:
-  `TestOpenForWritingMemoryCycles` (N true cross-call create/write/close cycles, for the memory
+  `TestAdoptedDocumentMemoryCycles` (N true cross-call create/write/close cycles, for the memory
   investigation logged in [issue #31](https://github.com/eichler-ai/connectors/issues/31)) and
   `TestOpenDocumentCount` (reports `Application.Documents`' current count/titles). Kept around as
   ready-made tools for revisiting that issue, not run as part of a normal test pass.
@@ -230,7 +230,7 @@ room, etc.) was blocked on there being no *sanctioned* way for scripts to reach 
 elements; that is resolved (PRD §14, "Real Revit API access from scripts"), so the corpus is now
 buildable, just not built. What the suite actually covers today — registration, error shapes,
 the sanctioned script globals, the denylist/lifecycle-gate rejections, core CRUD + query, and
-the `Connector.OpenForWriting` safety cases — is a genuine regression suite in its own right and doesn't
+the `Connector.WithTransaction` adoption safety cases — is a genuine regression suite in its own right and doesn't
 need that structure; a data-driven corpus format is worth introducing once there are enough
 cases for one to earn its keep, not before. `poll_execution`/`cancel_execution` and the
 `Publish`/`files[]` path are covered end to end (`execution_lifecycle_test.go`,

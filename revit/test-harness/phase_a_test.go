@@ -11,10 +11,10 @@ import (
 // plan, "Rollout order" step 4) -- one blank document created ONCE via
 // createBlankFixtureDocument, then each check below as its own INDEPENDENT
 // t.Run subtest, each its own execute_script call, against that same
-// document -- found again by Title per subtest (fixtureLookupPreamble) and
-// opened for writing per subtest (fixtureWritePreamble, ScriptGlobals.
-// OpenForWriting) since a document's managed transaction from the call that
-// created it commits and closes the moment that call returns. Subtests are
+// document -- found again by Title per subtest (fixtureLookupPreamble /
+// fixtureWritePreamble) and written to inside a Connector.WithTransaction
+// block (withTx), since #146 Phase 3 makes no document modifiable outside
+// one. Subtests are
 // independent, not chained: each creates whatever elements it needs at its
 // own elevation AND X-offset (elevation alone isn't enough -- two walls
 // sharing the same X/Y footprint at different levels still overlap in 3D
@@ -29,8 +29,8 @@ import (
 // project's standing "no fake integration tier" rule extends to test
 // AUTHORING, not just to what ships) -- see PRD §13's corpus plan for the
 // live-research sessions that shaped the CreateSharedParameter and
-// EditGroupPropagatesToAllInstances cases, and the OpenForWriting feature
-// this bundle now depends on.
+// EditGroupPropagatesToAllInstances cases, and the cross-call document
+// adoption this bundle depends on.
 func TestPhaseACoreCRUDAndQuery(t *testing.T) {
 	c, instanceID, documentID := targetDocument(t)
 	fixtureTitle := createBlankFixtureDocument(t, c, instanceID, documentID)
@@ -41,7 +41,7 @@ func TestPhaseACoreCRUDAndQuery(t *testing.T) {
 	// wall), create the element under test, and read a property back to
 	// confirm it landed.
 	t.Run("CreateWall", func(t *testing.T) {
-		out := runScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+`
+		out := runScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+withTx(`
 var level = Autodesk.Revit.DB.Level.Create(doc, 10.0);
 var line = Autodesk.Revit.DB.Line.CreateBound(
     new Autodesk.Revit.DB.XYZ(0, 0, 0), new Autodesk.Revit.DB.XYZ(20, 0, 0));
@@ -50,7 +50,7 @@ return new {
   created = wall != null && wall.Id.Value != 0,
   category = wall.Category == null ? "null" : wall.Category.Name
 };
-`)
+`))
 		if out.Status != "success" {
 			t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
 		}
@@ -64,7 +64,7 @@ return new {
 	// QueryElementsByCategory proves the FilteredElementCollector + category
 	// filter pattern every later query-shaped case in this corpus will reuse.
 	t.Run("QueryElementsByCategory", func(t *testing.T) {
-		out := runScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+`
+		out := runScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+withTx(`
 var level = Autodesk.Revit.DB.Level.Create(doc, 20.0);
 var line = Autodesk.Revit.DB.Line.CreateBound(
     new Autodesk.Revit.DB.XYZ(100, 0, 0), new Autodesk.Revit.DB.XYZ(115, 0, 0));
@@ -74,7 +74,7 @@ var count = new Autodesk.Revit.DB.FilteredElementCollector(doc)
     .WhereElementIsNotElementType()
     .GetElementCount();
 return new { foundAtLeastOne = count >= 1, count };
-`)
+`))
 		if out.Status != "success" {
 			t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
 		}
@@ -87,9 +87,9 @@ return new { foundAtLeastOne = count >= 1, count };
 	// SAME script (the round-trip a single execute_script call can prove --
 	// whether the value survives to a LATER script is TransactionScriptExecutor's
 	// job, already covered end-to-end by TestCreatedDocumentIsWritable and,
-	// now, by this whole bundle's own use of OpenForWriting across calls).
+	// now, by this whole bundle's own cross-call adoption of the fixture).
 	t.Run("GetSetParameter", func(t *testing.T) {
-		out := runScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+`
+		out := runScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+withTx(`
 var level = Autodesk.Revit.DB.Level.Create(doc, 30.0);
 var line = Autodesk.Revit.DB.Line.CreateBound(
     new Autodesk.Revit.DB.XYZ(200, 0, 0), new Autodesk.Revit.DB.XYZ(210, 0, 0));
@@ -98,7 +98,7 @@ var p = wall.get_Parameter(Autodesk.Revit.DB.BuiltInParameter.ALL_MODEL_INSTANCE
 p.Set("mcp-harness-phase-a");
 var readBack = wall.get_Parameter(Autodesk.Revit.DB.BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS).AsString();
 return new { roundTripped = readBack == "mcp-harness-phase-a", readBack };
-`)
+`))
 		if out.Status != "success" {
 			t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
 		}
@@ -110,7 +110,7 @@ return new { roundTripped = readBack == "mcp-harness-phase-a", readBack };
 	// DeleteElement: create, delete, and confirm doc.GetElement can no longer
 	// find it -- the negative-space counterpart to every creation check above.
 	t.Run("DeleteElement", func(t *testing.T) {
-		out := runScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+`
+		out := runScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+withTx(`
 var level = Autodesk.Revit.DB.Level.Create(doc, 40.0);
 var line = Autodesk.Revit.DB.Line.CreateBound(
     new Autodesk.Revit.DB.XYZ(300, 0, 0), new Autodesk.Revit.DB.XYZ(308, 0, 0));
@@ -119,7 +119,7 @@ var id = wall.Id;
 doc.Delete(id);
 var stillThere = doc.GetElement(id) != null;
 return new { deleted = !stillThere };
-`)
+`))
 		if out.Status != "success" {
 			t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
 		}
@@ -156,7 +156,7 @@ return new { deleted = !stillThere };
 	// value up front and restores it, and deletes the temp file, in a try/finally so both happen
 	// even if OpenSharedParameterFile or the binding calls below throw.
 	t.Run("CreateSharedParameter", func(t *testing.T) {
-		out := runScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+`
+		out := runScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+withTx(`
 var app = UIApplication.Application;
 var sharedParamPath = System.IO.Path.Combine(
     System.IO.Path.GetTempPath(), "mcp-harness-shared-params-" + System.Guid.NewGuid().ToString("N") + ".txt");
@@ -190,7 +190,7 @@ try {
 }
 
 return new { bound, definitionName };
-`)
+`))
 		if out.Status != "success" {
 			t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
 		}
@@ -254,7 +254,7 @@ return new { bound, definitionName };
 	//    argument alone -- compare two instances of the SAME type against
 	//    each other, never against an assumed absolute coordinate).
 	t.Run("EditGroupPropagatesToAllInstances", func(t *testing.T) {
-		out := runScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+`
+		out := runScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+withTx(`
 var level = Autodesk.Revit.DB.Level.Create(doc, 50.0);
 var line = Autodesk.Revit.DB.Line.CreateBound(
     new Autodesk.Revit.DB.XYZ(400, 0, 0), new Autodesk.Revit.DB.XYZ(410, 0, 0));
@@ -319,7 +319,7 @@ return new {
   group3WallX,
   propagated = deltaX.HasValue && deltaX.Value < 0.0001
 };
-`)
+`))
 		if out.Status != "success" {
 			t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
 		}

@@ -11,18 +11,20 @@ Read this once at the start of a Revit task. It is orientation, not reference.
 > into any Revit API that wants a document:
 > ```csharp
 > var walls = new FilteredElementCollector(Document)
->     .OfClass(typeof(Wall)).GetElementCount();
-> var level = Level.Create(Document, 42.0);   // writes work too
+>     .OfClass(typeof(Wall)).GetElementCount();          // reads need nothing
+> var level = Connector.WithTransaction(Document, () =>  // writes go in a block
+>     Level.Create(Document, 42.0));
 > return new { walls, levelId = level.Id.Value };
 > ```
 > `UIApplication` and `UIDocument` are likewise the real `Autodesk.Revit.UI` types (`UIDocument`
 > may be null). Only `System` is imported, so either fully-qualify (`Autodesk.Revit.DB.Wall`) or
 > nothing will resolve — see "Running a script" below.
 >
-> **You never open a transaction.** Every script already runs inside a `Transaction` and
-> `TransactionGroup` this connector opens for you: your changes commit automatically if the script
-> succeeds and roll back if it throws. Revit allows only one open transaction per document, so
-> constructing your own is **rejected before your script runs** — see "What you may not do" below.
+> **You never open a Revit transaction yourself — you open a block.** A document is readable but
+> **not modifiable** until you write inside `Connector.WithTransaction(doc, () => { ... })`; the
+> connector opens that transaction (with warning/error capture) and commits it when the block ends.
+> Everything a run commits is kept if the script returns normally and **undone as one unit if it
+> throws**. Constructing `new Transaction(...)` yourself is rejected before the script runs.
 
 ---
 
@@ -111,25 +113,24 @@ Only `System` is imported by default, so use fully-qualified names (`Autodesk.Re
 your script if you'd rather: `using Autodesk.Revit.DB;`.
 
 **Creating documents — use `Connector.CreateProjectDocument` / `Connector.CreateFamilyDocument`.**
-These create the document *and* open a transaction the connector manages for it, so you can write to it
-immediately; it commits when your script returns and rolls back if it throws, exactly like the active
-document. No confirmation needed — nothing persists until you save, which is gated separately.
+These create the document *and* track it for the run, so its writes are undone with everything else
+if the script throws. Write to it exactly like the active document. No confirmation needed — nothing
+persists until you save, which is gated separately.
 
 ```csharp
-var doc = Connector.CreateProjectDocument();     // blank, writable, from Revit's default template
-Autodesk.Revit.DB.Level.Create(doc, 10.0);       // just write to it — no transaction of your own
+var doc = Connector.CreateProjectDocument();     // blank, from Revit's default template
+Connector.WithTransaction(doc, () => { Autodesk.Revit.DB.Level.Create(doc, 10.0); });
 ```
 
 **What you get is headless**: in memory, no window, never the active document — writable by *script*,
 invisible to the person. Making it visible takes **two calls**:
 `UIApplication.OpenAndActivateDocument` needs a path, so `Connector.Settle(doc, true)` then `SaveAs` in
-the creating run, then activate from a second call routed at any document **other than the active one**
-(activation is refused only while the *active* document is modifiable, and your call's target always is).
+the creating run, then activate in a second call. Activation is refused only inside a block on the
+*active* document; between blocks it works.
 
-**The raw `UIApplication.Application.NewProjectDocument`/`NewFamilyDocument` still work but return a
-document nothing has opened for writing** — writing to it throws
-`ModificationOutsideTransactionException`. Pass it to `Connector.OpenForWriting` first, or just use the
-`Connector` calls above, which do both in one step.
+**The raw `UIApplication.Application.NewProjectDocument`/`NewFamilyDocument` still work** — a
+`WithTransaction` block adopts any open document — but nothing tracks them, so prefer the `Connector`
+calls above, whose documents roll back with the run.
 
 Ask Revit for template paths rather than guessing: `Application.DefaultProjectTemplate` is a full `.rte`
 path; `Application.FamilyTemplatePath` is the **root of the family-template tree** — search it
@@ -137,9 +138,9 @@ recursively (`SearchOption.AllDirectories`).
 
 However you made it, a created document is unsaved, so it gets a session-only **`tmp-<guid>`
 `document_id`**: it appears in `list_instances` like any other open document and a later call can be
-routed straight at it, in which case it is that call's own `Document`, writable, nothing more to do.
-Reached the other way — by walking `UIApplication.Application.Documents` and matching `Title` — it comes
-back not modifiable; `Connector.OpenForWriting(doc)` makes it writable for that script.
+routed straight at it, in which case it is that call's own `Document`. Reached the other way — by walking
+`UIApplication.Application.Documents` and matching `Title` — a `WithTransaction` block adopts it, and its
+writes roll back with the run like any other.
 
 **With several documents in play**, all of them commit after your script returns — created ones first,
 the active one last. If one commit fails the rest are rolled back, but a commit that already succeeded
@@ -175,68 +176,55 @@ is working in — which surfaces as a modal "Virtual Memory - High Usage" box; t
 auto-dismisses that specific one and reports it in `notices[]`. (Revit also refuses to `Close` the *active* document: from a call routed at anything
 except the active document, activate the one you want to keep, then close the other on the next call.)
 
-### Calls that need their target *not* modifiable
+### Writing: one block per batch, nothing open in between
 
-Some Revit APIs manage their own transaction and refuse a target with one open:
-`UIDocument.RequestViewChange`/`ActiveView`, `Document.LoadFamily`,
-`UIApplication.OpenAndActivateDocument`, every `EditScope`. **Your routed document is modifiable for
-the whole run**, so against it they fail ("must not be modifiable"; `code`
-`script-target-must-not-be-modifiable`).
+`Connector.WithTransaction(doc, () => { ... })` is **the** way to write. Outside a block every document
+is readable and not modifiable; inside it write directly. Use one block per batch of changes, not one per
+element (each block is a Revit commit and a regeneration). It also returns a value:
+`var id = Connector.WithTransaction(doc, () => Level.Create(doc, 3.0).Id);`. A block that throws rolls
+back only its own slice and the document stays usable, so `try { WithTransaction } catch` is
+catch-and-continue. Nesting on the *same* document is refused; blocks on different documents nest freely.
 
-Wrap them. The connector closes its transaction for the block and restores it afterwards (one that had
-none stays non-modifiable), so your changes still roll back if the script throws:
-
-```csharp
-Connector.WithoutTransaction(Document, () => {
-    UIApplication.ActiveUIDocument.RequestViewChange(someView);   // applies once your script returns
-});
-```
-
-Don't write inside that block — the document isn't modifiable there. To write, nest
-`Connector.WithTransaction` (it also returns a value: `var id = Connector.WithTransaction(doc, () =>
-Level.Create(doc, 3.0).Id);`). That pair is what makes **stairs** work, and the closing edge is the point:
-an edit scope can't commit while a transaction is open.
+**Calls that need their target *not* modifiable go between blocks**, where they now simply work:
+`Document.LoadFamily` (its *target* must be between blocks), `UIDocument.RequestViewChange`/`ActiveView`,
+`UIApplication.OpenAndActivateDocument`, `Document.Export`, and every `EditScope`. Inside a block they
+fail with `code` `script-target-must-not-be-modifiable` ("must not be modifiable"). Stairs are the
+canonical shape — the scope starts and commits *between* blocks, the run is built *inside* one:
 
 ```csharp
-Connector.WithoutTransaction(doc, () => {
-    var scope = new Autodesk.Revit.DB.StairsEditScope(doc, "stairs");
-    var id = scope.Start(baseLevel.Id, topLevel.Id);
-    Connector.WithTransaction(doc, () => {
-        Autodesk.Revit.DB.Architecture.StairsRun.CreateStraightRun(
-            doc, id, line, Autodesk.Revit.DB.Architecture.StairsRunJustification.Center);
-    });
-    scope.Commit(yourFailuresPreprocessor);
+var scope = new Autodesk.Revit.DB.StairsEditScope(doc, "stairs");
+var id = scope.Start(baseLevel.Id, topLevel.Id);
+Connector.WithTransaction(doc, () => {
+    Autodesk.Revit.DB.Architecture.StairsRun.CreateStraightRun(
+        doc, id, line, Autodesk.Revit.DB.Architecture.StairsRunJustification.Center);
 });
+scope.Commit(yourFailuresPreprocessor);
 ```
 
-`LoadFamily` needs **both** documents non-modifiable — nest one block per document (nesting the same
-scope on the *same* document is refused).
+A run that only reads leaves **no** undo entry; a run that wrote leaves exactly one (named by your
+`label`, else by what changed), so a person can revert the whole run with one Ctrl+Z.
 
 **To `Close`, `Save` or `SaveAs` a document in the run that touched it**, finish it first with
-`Connector.Settle(doc, keep:)` (itself gated on `confirm_lifecycle_actions`, like the members it enables) — Revit refuses those while the connector holds anything open.
+`Connector.Settle(doc, keep:)` (itself gated on `confirm_lifecycle_actions`, like the members it enables) — Revit refuses those while the connector holds a group open on it.
 `keep: true` makes everything written to that document so far **permanent immediately**: a later failure
 will no longer undo it. `keep: false` discards it, which is what you want before closing a scratch
-document. Either way you get a notice saying so. Writing again afterwards is fine and rolls back as
-usual — but the document is unmanaged after a settle, so write through
-`Connector.WithTransaction(doc, () => { ... })` rather than directly, or you get
-`script-write-outside-transaction`. Nothing settled comes back.
+document. Either way you get a notice saying so. Writing again afterwards (a new block) is fine and
+rolls back as usual. Nothing settled comes back.
 
 ### What you may not do without saying so
 
 Two different things here, and the difference matters. Both are caught **before your script runs**, by a
-semantic check over the compiled code — so a refused script changes nothing and the transaction it would
-have run in is rolled back cleanly.
+semantic check over the compiled code — so a refused script changes nothing.
 
 **1. Flatly rejected — `new Transaction(...)`, `new TransactionGroup(...)`.**
-Your script is already inside one, and Revit allows only one open transaction per document, so your own
-can never work. There is no flag for this. Just make your changes directly; they commit on success and
-roll back on failure. The error record's `code` is `script-api-denied`. It applies to every document,
-including one you just created — use `Connector.CreateProjectDocument`/`CreateFamilyDocument` above,
-which own that document's transaction. A native `SubTransaction` **is** allowed as a savepoint inside
-the open transaction, **but only held in a `using`** — `using (var st = new
+The connector owns every transaction: the one it opens for your `WithTransaction` block carries the
+warning/error capture your result's `notices[]` comes from, and yours would bypass it and the run's
+rollback. There is no flag for this; write inside a block instead. The error record's `code` is
+`script-api-denied`, for every document including one you just created. A native `SubTransaction`
+**is** allowed as a savepoint inside a block, **but only held in a `using`** — `using (var st = new
 Autodesk.Revit.DB.SubTransaction(doc)) { st.Start(); … st.Commit(); }` (or `RollBack()`); any other
 construction is rejected. Disposal is the safety net: one still active when the enclosing transaction
-closed (block end, `WithoutTransaction`, `Settle`, an exception) crashed Revit later.
+closed (block end, `Settle`, an exception) crashed Revit later.
 
 **2. Allowed, but only if you confirm — the document-lifecycle and worksharing calls.**
 
@@ -248,12 +236,12 @@ closed (block end, `WithoutTransaction`, `Settle`, an exception) crashed Revit l
 | `Document.SaveAsCloudModel` | a cloud project other people can open |
 | `Document.Print`, `.PrintToFile`, `PrintManager.SubmitPrint` | a physical device |
 | `UIDocument.SaveAndClose` | the filesystem, then that person's session |
-| `UIApplication.PostCommand` | anything, after your script's transaction has already closed |
+| `UIApplication.PostCommand` | anything, after your script's run has already ended |
 | `WorksharingUtils.RelinquishOwnership` | another user's ability to edit |
 | `Connector.Settle` | this run's own rollback guarantee for that document — see above |
 
-**Why these and nothing else:** everything else you change is covered by the transaction wrapped around
-your script, so if the script throws, your changes are undone automatically. These are not — they act
+**Why these and nothing else:** everything else you change is covered by the group wrapped around your
+run, so if the script throws, your changes are undone automatically. These are not — they act
 outside this document's own content, and no exception takes them back. That one question ("would a thrown
 exception actually undo this?") is the whole rule.
 
@@ -392,7 +380,7 @@ absent. For the why, a human can click **MCP Bridge → Status** on the Revit ri
 | Changing a placed sheet's title block does nothing useful | `ViewSheet.SheetTitleBlockId` holds the **placed instance's** id, while `ViewSheet.Create(doc, titleBlockTypeId)` takes a **type** id. Both are `ElementId`, so reusing the symbol id that worked in `Create` compiles, is accepted with no validation, and silently leaves the sheet pointing at a `FamilySymbol` instead of its title block. A fatal Revit crash followed this once; that link is unconfirmed, but the corruption is. | Don't assign a **type** id to it — and if you already have, assigning the placed instance's id back restores the sheet. To change the title block, retype the instance: `doc.GetElement(sheet.SheetTitleBlockId)` is it, or use a `FilteredElementCollector(doc, sheet.Id)` on `OST_TitleBlocks` with `WhereElementIsNotElementType()` when that id is already wrong. Then `instance.ChangeTypeId(symbolId)`, which works across families. `GetValidTypes()` enumerates candidates but gates nothing — it calls another family's symbol valid. `ChangeTypeId` returns `InvalidElementId` (`-1`) on success, so read the instance's `Symbol` back instead of testing it. |
 | Error `code` is `script-api-denied` | You used something flatly rejected — most often opening your own `Transaction` | See "What you may not do". Nothing ran and nothing changed; no argument lifts this, the script has to change. |
 | Error `code` is `script-lifecycle-confirmation-required` | A gated lifecycle/worksharing member without confirmation | Nothing ran. If genuinely intended, resend the **identical** call with `confirm_lifecycle_actions: true`. The `message` names every gated member used. |
-| Error `code` is `script-target-must-not-be-modifiable` | A self-transacting API (`LoadFamily`, `RequestViewChange`, an `EditScope`) hit the connector's open transaction | Wrap the call in `Connector.WithoutTransaction` — see "Calls that need their target *not* modifiable". |
+| Error `code` is `script-target-must-not-be-modifiable` | A self-transacting API (`LoadFamily`, `RequestViewChange`, an `EditScope`) was called inside a `WithTransaction` block | Move it between blocks — see "Writing: one block per batch". |
 | Error `code` is `script-subtransaction-needs-transaction` | `SubTransaction.Start()` with no transaction open | Nest the code in `Connector.WithTransaction(doc, () => { … })`. |
 
 For a human debugging deeper: the add-in writes `connection.log` and `startup-errors.log` to

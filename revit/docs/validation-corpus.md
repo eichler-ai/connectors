@@ -106,10 +106,12 @@ mostly localized placeholder/redirect content, no real furniture families) -- di
 `Directory.GetFiles`, not assumed. Rather than depend on an optional content-library install a corpus
 case shouldn't be fragile against, this case builds and loads its own minimal Generic Model family
 instead -- still a genuine, complete exercise of `Document.LoadFamily` + `FamilySymbol` activation +
-`NewFamilyInstance`. Two real findings about this connector's ambient-transaction model colliding with
-`Document.LoadFamily` specifically (not generic Revit API behavior), both now documented in
-`caveats.md`'s new "must not be modifiable" section: the call's source document needs its managed
-transaction already closed (a second `execute_script` call, same shape as `OpenForWriting`'s own
-two-call precedent), and separately, the TARGET document must also have no open transaction at the
-moment of the call -- `Connector.OpenForWriting(doc)` has to come AFTER `LoadFamily`, not before. Regression
-replay: `TestValidationCorpus_LoadFamilyAndPlaceInstance`.
+`NewFamilyInstance`. Two real findings about transactions colliding with `Document.LoadFamily`
+specifically (not generic Revit API behavior), both documented in `caveats.md`'s "must not be
+modifiable" section: the call needs its target document to have no open transaction (the source
+turned out not to matter once re-tested under Phase 3 -- the original finding blamed both). Under the
+original always-open model that forced a two-call split plus a careful ordering
+of `Connector.OpenForWriting`; since #146 Phase 3 (group-always, transaction-on-write) it only means
+the call goes between `Connector.WithTransaction` blocks -- the case now builds the family in one call
+and loads and places it in the next, with `LoadFamily` outside the placement block. Regression replay:
+`TestValidationCorpus_LoadFamilyAndPlaceInstance`.

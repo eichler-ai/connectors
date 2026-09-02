@@ -9,9 +9,12 @@ using MCPBridge.RevitAdapter;
 namespace MCPBridge.Core.Execution;
 
 /// <summary>
-/// Wraps one script run in a Transaction/TransactionGroup (PRD §06 step 4): commit + assimilate on
-/// success, roll back both on any failure (thrown exception, compile error, or cooperative
-/// cancellation) so a failed script never leaves partial document changes behind.
+/// Wraps one script run in a TransactionGroup (PRD §06 step 4; #146 Phase 3): the group is opened before
+/// the script runs and no transaction is -- a document is readable and not modifiable until the script
+/// opens a Connector.WithTransaction block, whose transaction the connector commits into the group at
+/// block end. On success the group is assimilated (one undo entry) when anything committed into it and
+/// rolled back when nothing did; on any failure (thrown exception, compile error, or cooperative
+/// cancellation) the group is rolled back, so a failed script never leaves partial document changes.
 ///
 /// ISSUE #24: that is now true of EVERY document the run touches, not just the active one. The pair
 /// above is opened for the ambient document before the script runs; a document the script creates via
@@ -103,7 +106,13 @@ internal sealed class TransactionScriptExecutor
         // the commits CommitAll performs after the script finishes are still observed, and nothing keeps
         // listening once the run is over.
         var mutations = new MutationTracker();
-        var changeSubscription = (uiApplication as IDocumentChangeSource)?.Subscribe(mutations.Record);
+        var changeSubscription = (uiApplication as IDocumentChangeSource)?.Subscribe(change =>
+        {
+            mutations.Record(change);
+            // #146 Phase 3: a self-transacting API between blocks commits into the group without the
+            // connector seeing a CloseTransaction; this is how CommitAll learns the group is not empty.
+            transactions.NoteDocumentChanged(change.DocumentId);
+        });
 
         try
         {
@@ -234,8 +243,8 @@ internal sealed class TransactionScriptExecutor
     /// <summary>
     /// One notice per Connector.Settle (issue #132, decision 2). Settle is the ONLY scope that notices,
     /// and the reason is signal rather than literalism: it is the irreversible one -- it makes this
-    /// document's changes permanent or discards them, immediately -- while WithTransaction and
-    /// WithoutTransaction leave the group's rollback boundary intact and have nothing to confess. A
+    /// document's changes permanent or discards them, immediately -- while WithTransaction leaves the
+    /// group's rollback boundary intact and has nothing to confess. A
     /// notice per scope would bury these under any script that writes in a loop.
     ///
     /// Severity is Warning rather than Info deliberately: settling the AMBIENT document gives up the
@@ -313,7 +322,7 @@ internal sealed class TransactionScriptExecutor
                 "(not this one) and reach it through UIApplication.Application.Documents, matching its Title AND " +
                 "PathName == \"\" (so a saved file of the same name is never closed), then call Document.Close(false) " +
                 "-- or SaveAs to keep it -- with confirm_lifecycle_actions: true. Routing the call AT this document " +
-                "instead makes the connector open a transaction on it, which Revit refuses to Close; see get_skills " +
+                "instead makes the connector open a transaction group on it, which Revit refuses to Close; see get_skills " +
                 "for the full scratch-document recipe. Leaving it open is fine too.",
             });
     }
@@ -365,23 +374,23 @@ internal sealed class TransactionScriptExecutor
         {
             // Independent PR review finding (PR #28 #1): this used to unconditionally claim every
             // committed document is "unsaved and in-memory." That was true when CreateProjectDocument/
-            // CreateFamilyDocument were the only two members of this tier, but ScriptGlobals.OpenForWriting
+            // CreateFamilyDocument were the only two members of this tier, but adoption via ScriptGlobals.WithTransaction
             // adds a genuine adopt-by-title WRITE path (a script can now open a managed transaction on a
             // document it did not itself create this run, including one that is saved on disk), so the
             // claim is a straightforward lie whenever ManagedDocumentCommitResult.AnyCommittedDocumentMayBeReal
             // is true. Report honestly instead of guessing which committed document was which.
             remedy.Add(
                 commit.AnyCommittedDocumentMayBeReal
-                    ? "At least one committed document may be a real, saved document -- one adopted via " +
-                      "OpenForWriting, or the ambient document itself -- not necessarily an unsaved, " +
+                    ? "At least one committed document may be a real, saved document -- one adopted by a " +
+                      "WithTransaction block, or the ambient document itself -- not necessarily an unsaved, " +
                       "in-memory one created this run. Do not assume the committed changes are throwaway."
                     : "Documents a script creates are unsaved and in-memory, so nothing was written to disk -- " +
                       "the committed changes exist only in this Revit session.");
             // NOT "or undo": the connector has no way to un-commit an already-committed Transaction (Revit
             // itself offers none), and this run's own script can never open a fresh transaction on a
             // document from a later, separate execute_script call (ScriptApiDenylist check 1) -- so even
-            // with OpenForWriting's adopt-by-title path, a follow-up script can inspect a committed
-            // document and open ITS OWN new managed transaction on it (via OpenForWriting again) to make
+            // with the adopt-by-title path, a follow-up script can inspect a committed
+            // document and open ITS OWN new managed transaction on it (via another WithTransaction block) to make
             // further changes, but it can never undo what already committed.
             remedy.Add(
                 "Find a committed document by Title in UIApplication.Application.Documents from a follow-up " +

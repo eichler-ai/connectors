@@ -12,6 +12,7 @@ using Xunit;
 
 namespace MCPBridge.Core.Tests.Execution;
 
+[Collection(ActiveDialogContextCollection.Name)]
 public class TransactionScriptExecutorTests
 {
     // RevitAPI/RevitAPIUI are supplied as METADATA references, not loaded assemblies -- ScriptGlobals'
@@ -28,8 +29,10 @@ public class TransactionScriptExecutorTests
     }
 
     [Fact]
-    public async Task SuccessfulScript_CommitsTransaction_AndAssimilatesGroup()
+    public async Task ReadOnlyScript_OpensNoTransaction_AndRollsBackTheEmptyGroup()
     {
+        // #146 Phase 3: the run opens a GROUP only; a script that never opens a WithTransaction block
+        // leaves it empty, and an empty group is rolled back -- no undo entry for a read.
         var executor = NewExecutor();
         var document = new FakeDocumentAdapter();
         var uiApp = new FakeUiApplicationAdapter();
@@ -37,8 +40,57 @@ public class TransactionScriptExecutorTests
         var outcome = await executor.ExecuteAsync(document, uiApp, null, "1 + 1", CancellationToken.None);
 
         Assert.True(outcome.Success);
-        Assert.Equal(new[] { "Start", "Commit", "Dispose" }, document.LastTransaction!.Calls);
-        Assert.Equal(new[] { "Start", "Assimilate", "Dispose" }, document.LastTransactionGroup!.Calls);
+        Assert.Null(document.LastTransaction);
+        Assert.Equal(new[] { "Start", "RollBack", "Dispose" }, document.LastTransactionGroup!.Calls);
+    }
+
+    [Fact]
+    public async Task AnObservedChangeWithNoBlock_MakesTheRunAssimilateTheGroup()
+    {
+        // Independent review of #160: a self-transacting Revit API called between blocks (LoadFamily,
+        // EditScope.Commit, Export) commits into the group and raises DocumentChanged, but no connector
+        // transaction closes. The run must keep that work, not roll it back as "empty".
+        var executor = NewExecutor();
+        var document = new FakeDocumentAdapter();
+        var uiApp = new FakeUiApplicationAdapter
+        {
+            OnSubscribed = self => self.EmitChange(new DocumentChange(
+                document.DocumentId, DocumentChangeOperation.Committed, "TransactionCommitted", new[] { "Load Family" },
+                new[] { new ChangedElement(1, "Generic Models") },
+                Array.Empty<ChangedElement>(),
+                Array.Empty<long>(),
+                categoriesTruncated: false)),
+        };
+
+        var outcome = await executor.ExecuteAsync(document, uiApp, null, "1 + 1", CancellationToken.None);
+
+        Assert.True(outcome.Success);
+        Assert.Null(document.LastTransaction);
+        Assert.Contains("Assimilate", document.LastTransactionGroup!.Calls);
+        Assert.DoesNotContain("RollBack", document.LastTransactionGroup!.Calls);
+        Assert.Equal(1, Assert.IsType<MutationReport>(outcome.Mutations).Created);
+    }
+
+    [Fact]
+    public async Task ARefusedUndoLabel_IsReportedAsAnInfoNotice_AndTheRunStillSucceeds()
+    {
+        // Independent review of #160 (finding 14): ManagedDocumentTransactions records the refusal; this
+        // pins the executor turning that record into the undo-label-not-applied notice.
+        var executor = NewExecutor();
+        var document = new FakeDocumentAdapter { GroupThrowOnSetName = true };
+        var uiApp = new FakeUiApplicationAdapter
+        {
+            OnSubscribed = self => self.EmitChange(new DocumentChange(
+                document.DocumentId, DocumentChangeOperation.Committed, "TransactionCommitted", new[] { "x" },
+                new[] { new ChangedElement(1, "Walls") }, Array.Empty<ChangedElement>(), Array.Empty<long>(), categoriesTruncated: false)),
+        };
+
+        var outcome = await executor.ExecuteAsync(document, uiApp, null, "1 + 1", CancellationToken.None);
+
+        Assert.True(outcome.Success);
+        var notice = Assert.Single(outcome.Notices, n => n.Code == "undo-label-not-applied");
+        Assert.Equal(DiagnosticSeverity.Info, notice.Severity);
+        Assert.Contains("Assimilate", document.LastTransactionGroup!.Calls);
     }
 
     // ------------------------------------------------------------------------------------------
@@ -51,13 +103,19 @@ public class TransactionScriptExecutorTests
         var executor = NewExecutor();
         var document = new FakeDocumentAdapter();
         var uiApp = new FakeUiApplicationAdapter { ActiveUiDocument = new FakeUiDocumentAdapter { Document = document } };
-        // The fake raises the change INSIDE the commit, exactly where Revit raises DocumentChanged.
-        document.OnTransactionCommit = () => uiApp.EmitChange(new DocumentChange(
-            document.DocumentId, DocumentChangeOperation.Committed, "TransactionCommitted", new[] { "MCP Bridge Script" },
-            new[] { new ChangedElement(1, "Walls"), new ChangedElement(2, "Walls") },
-            new[] { new ChangedElement(9, "Levels") },
-            Array.Empty<long>(),
-            categoriesTruncated: false));
+        // A tier-1 script cannot open a WithTransaction block (touching Document loads RevitAPI), so the
+        // change is raised through the subscription hook -- the executor's job here is to have subscribed
+        // before the run and to build the report from what arrived.
+        uiApp = new FakeUiApplicationAdapter
+        {
+            ActiveUiDocument = uiApp.ActiveUiDocument,
+            OnSubscribed = self => self.EmitChange(new DocumentChange(
+                document.DocumentId, DocumentChangeOperation.Committed, "TransactionCommitted", new[] { "MCP Bridge Script" },
+                new[] { new ChangedElement(1, "Walls"), new ChangedElement(2, "Walls") },
+                new[] { new ChangedElement(9, "Levels") },
+                Array.Empty<long>(),
+                categoriesTruncated: false)),
+        };
 
         var outcome = await executor.ExecuteAsync(document, uiApp, null, "1 + 1", CancellationToken.None);
 
@@ -85,50 +143,15 @@ public class TransactionScriptExecutorTests
 
         Assert.True(outcome.Success);
         Assert.Equal("MCP: create L1 walls", document.LastTransactionGroup!.Name);
-        Assert.Equal("MCP: create L1 walls", document.LastTransaction!.Name);
         // Given a label, the derived name is NOT applied over it.
         Assert.DoesNotContain("SetName", document.LastTransactionGroup.Calls);
     }
 
-    [Fact]
-    public async Task WithoutALabel_TheGroupIsRenamedFromTheMutationReport_BeforeAssimilate()
-    {
-        var executor = NewExecutor();
-        var document = new FakeDocumentAdapter();
-        var uiApp = new FakeUiApplicationAdapter { ActiveUiDocument = new FakeUiDocumentAdapter { Document = document } };
-        document.OnTransactionCommit = () => uiApp.EmitChange(new DocumentChange(
-            document.DocumentId, DocumentChangeOperation.Committed, "TransactionCommitted", Array.Empty<string>(),
-            new[] { new ChangedElement(1, "Walls"), new ChangedElement(2, "Walls") },
-            Array.Empty<ChangedElement>(), Array.Empty<long>(), categoriesTruncated: false));
 
-        var outcome = await executor.ExecuteAsync(document, uiApp, null, "1 + 1", CancellationToken.None);
 
-        Assert.True(outcome.Success);
-        Assert.Equal("MCP Bridge Script", document.LastTransactionGroup!.Name);   // created with the default...
-        Assert.Equal("MCP: 2 Walls created", document.LastTransactionGroup.LastName);   // ...renamed from the net effect
-        Assert.Equal(new[] { "Start", "SetName", "Assimilate", "Dispose" }, document.LastTransactionGroup.Calls);
-    }
-
-    [Fact]
-    public async Task ARefusedRename_IsReportedAsANotice_AndTheRunStillSucceeds()
-    {
-        var executor = NewExecutor();
-        var document = new FakeDocumentAdapter();
-        var uiApp = new FakeUiApplicationAdapter { ActiveUiDocument = new FakeUiDocumentAdapter { Document = document } };
-        document.OnTransactionCommit = () =>
-        {
-            document.LastTransactionGroup!.ThrowOnSetName = true;
-            uiApp.EmitChange(new DocumentChange(document.DocumentId, DocumentChangeOperation.Committed, "TransactionCommitted", Array.Empty<string>(),
-                new[] { new ChangedElement(1, "Walls") }, Array.Empty<ChangedElement>(), Array.Empty<long>(), categoriesTruncated: false));
-        };
-
-        var outcome = await executor.ExecuteAsync(document, uiApp, null, "1 + 1", CancellationToken.None);
-
-        Assert.True(outcome.Success);
-        var notice = Assert.Single(outcome.Notices, n => n.Code == "undo-label-not-applied");
-        Assert.Contains("simulated SetName refusal", notice.Message);
-        Assert.NotNull(outcome.Mutations);   // the writes themselves are unaffected
-    }
+    // The derived-label and refused-rename paths need a COMMITTED block, which a tier-1 script cannot open
+    // (touching Document loads RevitAPI); they are pinned at the ManagedDocumentTransactions level
+    // (CommitAll_SetsEachDocumentsOwnUndoLabel_..., CommitAll_ARefusedSetName_...) and live.
 
     [Fact]
     public async Task WithoutALabelAndWithoutChanges_TheGroupKeepsItsDefaultName()
@@ -238,7 +261,7 @@ public class TransactionScriptExecutorTests
             document, uiApp, null, "throw new System.InvalidOperationException(\"boom\");", CancellationToken.None);
 
         Assert.False(outcome.Success);
-        Assert.Equal(new[] { "Start", "RollBack", "Dispose" }, document.LastTransaction!.Calls);
+        Assert.Null(document.LastTransaction);   // group only (#146 Phase 3); nothing to roll back but the group
         Assert.Equal(new[] { "Start", "RollBack", "Dispose" }, document.LastTransactionGroup!.Calls);
     }
 
@@ -260,7 +283,7 @@ public class TransactionScriptExecutorTests
         Assert.False(outcome.Success);
         Assert.False(outcome.WasCancelled);
         Assert.IsType<ScriptApiDenylistViolationException>(outcome.Exception);
-        Assert.Equal(new[] { "Start", "RollBack", "Dispose" }, document.LastTransaction!.Calls);
+        Assert.Null(document.LastTransaction);   // group only (#146 Phase 3); nothing to roll back but the group
         Assert.Equal(new[] { "Start", "RollBack", "Dispose" }, document.LastTransactionGroup!.Calls);
     }
 
@@ -284,7 +307,7 @@ public class TransactionScriptExecutorTests
         Assert.False(outcome.WasCancelled);
         var ex = Assert.IsType<ScriptApiDenylistViolationException>(outcome.Exception);
         Assert.Equal(ScriptApiDenylistViolationException.ConfirmationRequiredCode, ex.Code);
-        Assert.Equal(new[] { "Start", "RollBack", "Dispose" }, document.LastTransaction!.Calls);
+        Assert.Null(document.LastTransaction);   // group only (#146 Phase 3); nothing to roll back but the group
         Assert.Equal(new[] { "Start", "RollBack", "Dispose" }, document.LastTransactionGroup!.Calls);
     }
 
@@ -307,24 +330,26 @@ public class TransactionScriptExecutorTests
     }
 
     [Fact]
-    public async Task CommitFailure_RollsBackTransactionAndGroup_ReportsFailure()
+    public async Task EndOfRunGroupFailure_ReportsFailure_NotSuccess()
     {
+        // #146 Phase 3: a script's writes commit at each block's end (and a commit failure throws INTO the
+        // script there), so what can still fail after a successful script is the GROUP's terminal step.
+        // Here the empty group's rollback throws: the run must be reported failed, never "success".
         var executor = NewExecutor();
-        var document = new FakeDocumentAdapter();
+        var document = new FakeDocumentAdapter { GroupThrowOnRollBack = true };
         var uiApp = new FakeUiApplicationAdapter();
-        // Force the commit itself to fail after a successful script run.
-        var transaction = (FakeTransactionAdapter)document.CreateTransaction("pre-created");
-        transaction.ThrowOnCommit = true;
 
-        // Re-point the document's next CreateTransaction call to return our rigged fake.
-        var riggedDocument = new RiggedDocumentAdapter(document, transaction);
-
-        var outcome = await executor.ExecuteAsync(riggedDocument, uiApp, null, "1 + 1", CancellationToken.None);
+        var outcome = await executor.ExecuteAsync(document, uiApp, null, "1 + 1", CancellationToken.None);
 
         Assert.False(outcome.Success);
-        Assert.Equal(new[] { "Start", "Commit", "RollBack", "Dispose" }, transaction.Calls);
-        Assert.Equal(new[] { "Start", "RollBack", "Dispose" }, riggedDocument.LastTransactionGroup!.Calls);
+        Assert.Null(document.LastTransaction);
+        Assert.Equal(new[] { "Start", "RollBack", "Dispose" }, document.LastTransactionGroup!.Calls);
     }
+
+    // Failures-API outcomes (warnings auto-dismissed, an error forcing a rollback) surface at a block's
+    // COMMIT since #146 Phase 3, which a tier-1 script cannot reach (Document loads RevitAPI). They are
+    // pinned at the ManagedDocumentTransactions level (WithTransaction_AccumulatesFailures...,
+    // WithTransaction_DoesNotRollBackTheTransactionItself...) and live.
 
     [Fact]
     public async Task PartialCommitNotice_DoesNotClaimSurvivingChanges_WhenNothingCommitted()
@@ -336,14 +361,12 @@ public class TransactionScriptExecutorTests
         // already committed ... so those changes remain" -- claiming surviving changes that do not
         // exist, in the one notice whose whole purpose is being honest about partial state.
         var executor = NewExecutor();
-        var document = new FakeDocumentAdapter();
+        // The empty group's own rollback throws: nothing committed, and the document is left in an
+        // unknown state -- the shape this notice exists for.
+        var document = new FakeDocumentAdapter { GroupThrowOnRollBack = true };
         var uiApp = new FakeUiApplicationAdapter();
-        var transaction = (FakeTransactionAdapter)document.CreateTransaction("pre-created");
-        transaction.ThrowOnCommit = true;
-        transaction.ThrowOnRollBack = true;
-        var riggedDocument = new RiggedDocumentAdapter(document, transaction);
 
-        var outcome = await executor.ExecuteAsync(riggedDocument, uiApp, null, "1 + 1", CancellationToken.None);
+        var outcome = await executor.ExecuteAsync(document, uiApp, null, "1 + 1", CancellationToken.None);
 
         Assert.False(outcome.Success);
         var notice = Assert.Single(outcome.Notices, n => n.Code == "script-partial-commit");
@@ -368,47 +391,11 @@ public class TransactionScriptExecutorTests
 
         Assert.False(outcome.Success);
         Assert.True(outcome.WasCancelled);
-        Assert.Equal(new[] { "Start", "RollBack", "Dispose" }, document.LastTransaction!.Calls);
+        Assert.Null(document.LastTransaction);   // group only (#146 Phase 3); nothing to roll back but the group
         Assert.Equal(new[] { "Start", "RollBack", "Dispose" }, document.LastTransactionGroup!.Calls);
     }
 
-    [Fact]
-    public async Task WarningOnlyFailure_CommitsAndReportsNotice()
-    {
-        var executor = NewExecutor();
-        var document = new FakeDocumentAdapter();
-        var uiApp = new FakeUiApplicationAdapter();
-        var transaction = (FakeTransactionAdapter)document.CreateTransaction("pre-created");
-        transaction.FailuresToReport = new[] { new FailureSummary(false, "wall is slightly off axis", "warn-def-1", System.Array.Empty<string>()) };
-        var riggedDocument = new RiggedDocumentAdapter(document, transaction);
 
-        var outcome = await executor.ExecuteAsync(riggedDocument, uiApp, null, "1 + 1", CancellationToken.None);
-
-        Assert.True(outcome.Success);
-        Assert.Equal(new[] { "Start", "Commit", "Dispose" }, transaction.Calls);
-        Assert.Equal(new[] { "Start", "Assimilate", "Dispose" }, riggedDocument.LastTransactionGroup!.Calls);
-        Assert.Contains(outcome.Notices, n => n.Message.Contains("off axis"));
-    }
-
-    [Fact]
-    public async Task ErrorFailure_RollsBackGroupOnly_NotTransactionAgain_ReturnsFailedWithNotices()
-    {
-        var executor = NewExecutor();
-        var document = new FakeDocumentAdapter();
-        var uiApp = new FakeUiApplicationAdapter();
-        var transaction = (FakeTransactionAdapter)document.CreateTransaction("pre-created");
-        transaction.FailuresToReport = new[] { new FailureSummary(true, "elements would be deleted", "err-def-1", System.Array.Empty<string>()) };
-        var riggedDocument = new RiggedDocumentAdapter(document, transaction);
-
-        var outcome = await executor.ExecuteAsync(riggedDocument, uiApp, null, "1 + 1", CancellationToken.None);
-
-        Assert.False(outcome.Success);
-        // Commit() already rolled the Transaction back internally (ProceedWithRollBack) -- only one
-        // "Commit" call, no separate "RollBack" on the transaction itself.
-        Assert.Equal(new[] { "Start", "Commit", "Dispose" }, transaction.Calls);
-        Assert.Equal(new[] { "Start", "RollBack", "Dispose" }, riggedDocument.LastTransactionGroup!.Calls);
-        Assert.Contains(outcome.Notices, n => n.Message.Contains("deleted"));
-    }
 
     // --- PRD §09: Publish / files[] ---
 
@@ -846,7 +833,7 @@ throw new System.TimeoutException(""cancellation was never observed"");";
     /// Forwarding is exactly the kind of thing that is boring to test and silently wrong when it breaks --
     /// a transposed pair of one-line properties compiles, ships, and reads correctly.
     ///
-    /// <para><c>OpenForWriting</c> stays tier-2 by construction (it needs a real second Revit document);
+    /// <para>Adoption by a <c>WithTransaction</c> block stays tier-2 by construction (it needs a real second Revit document);
     /// this covers the other two, plus the seam's cast, against the real script surface.</para>
     /// </summary>
     [Fact]
@@ -904,7 +891,11 @@ throw new System.TimeoutException(""cancellation was never observed"");";
 
         int? seenByTheDialogHandler = null;
         var document = new FakeDocumentAdapter();
-        document.OnTransactionCommit = () =>
+        // Observed at the group's terminal step -- after the script ran, before the finally clears the
+        // context. (Was the transaction-commit hook; a read-only script opens no transaction since #146
+        // Phase 3. Its intermittent full-suite failures (#151) were parallel test classes clobbering the
+        // static -- see ActiveDialogContextCollection.)
+        document.OnGroupTerminal = () =>
             seenByTheDialogHandler = ActiveDialogContext.TryGetOverride("TaskDialog_Probe");
 
         var outcome = await executor.ExecuteAsync(
@@ -1049,7 +1040,7 @@ throw new System.TimeoutException(""cancellation was never observed"");";
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
             executor.ExecuteAsync(document, uiApp, null, "1 + 1", CancellationToken.None));
 
-        Assert.Equal(new[] { "Start", "RollBack", "Dispose" }, document.LastTransaction!.Calls);
+        Assert.Null(document.LastTransaction);   // group only (#146 Phase 3); nothing to roll back but the group
         Assert.Equal(new[] { "Start", "RollBack", "Dispose" }, document.LastTransactionGroup!.Calls);
     }
 
@@ -1072,35 +1063,6 @@ throw new System.TimeoutException(""cancellation was never observed"");";
 
         Assert.False(outcome.Success);
         Assert.IsType<ScriptApiDenylistViolationException>(outcome.Exception);
-    }
-
-    /// <summary>Test-only helper: a document adapter that hands out a pre-built (rigged) transaction instead of a fresh one.</summary>
-    private sealed class RiggedDocumentAdapter : MCPBridge.RevitAdapter.IDocumentAdapter
-    {
-        private readonly FakeDocumentAdapter _inner;
-        private readonly FakeTransactionAdapter _riggedTransaction;
-
-        public RiggedDocumentAdapter(FakeDocumentAdapter inner, FakeTransactionAdapter riggedTransaction)
-        {
-            _inner = inner;
-            _riggedTransaction = riggedTransaction;
-        }
-
-        public string Title => _inner.Title;
-        public string? PathName => _inner.PathName;
-        public bool IsWorkshared => _inner.IsWorkshared;
-        public string? CentralModelPath => _inner.CentralModelPath;
-        public string DocumentId => _inner.DocumentId;
-
-        public MCPBridge.RevitAdapter.ITransactionAdapter CreateTransaction(string name) => _riggedTransaction;
-
-        public FakeTransactionGroupAdapter? LastTransactionGroup { get; private set; }
-
-        public MCPBridge.RevitAdapter.ITransactionGroupAdapter CreateTransactionGroup(string name)
-        {
-            LastTransactionGroup = new FakeTransactionGroupAdapter(name);
-            return LastTransactionGroup;
-        }
     }
 
     // ---------------------------------------------------------------------------------------------
