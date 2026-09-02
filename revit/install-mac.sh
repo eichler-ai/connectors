@@ -23,7 +23,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 BROKER_SRC_DIR="$REPO_ROOT/revit/mcp-server"
 BROKER_BIN="$BROKER_SRC_DIR/mcp-server-mac"
-APP_DATA_DIR="$REPO_ROOT/Connectors/Revit"
+SHARED_ROOT="$REPO_ROOT/Connectors/Revit"
 
 UNINSTALL=0
 BIND_OVERRIDE=""
@@ -141,7 +141,7 @@ echo "Building mcp-server for macOS..."
 ( cd "$BROKER_SRC_DIR" && go build "${BROKER_LDFLAGS[@]}" -o "$BROKER_BIN" ./cmd/mcp-server )
 echo "Built: $BROKER_BIN -- $("$BROKER_BIN" -version)"
 
-mkdir -p "$APP_DATA_DIR"
+mkdir -p "$SHARED_ROOT"
 
 # --- Register with Claude Code ------------------------------------------------------------------
 # --scope local (the default, but explicit here since this must never accidentally end up in a
@@ -149,7 +149,7 @@ mkdir -p "$APP_DATA_DIR"
 # values (this IP, these absolute paths) have no business in a file other developers pull. See
 # this project's own PR history for exactly this mistake caught and reverted.
 claude mcp remove revit --scope local >/dev/null 2>&1 || true
-claude mcp add revit --scope local -- "$BROKER_BIN" -mode remote -bind "$BIND_IP" -port "$PORT" -app-data-dir "$APP_DATA_DIR"
+claude mcp add revit --scope local -- "$BROKER_BIN" -mode remote -bind "$BIND_IP" -port "$PORT" -shared-root "$SHARED_ROOT"
 
 # `claude mcp add` on an already-registered name is a silent, exit-0 no-op rather than an
 # overwrite -- so if the `remove` above failed for a real reason (swallowed by `|| true`, since
@@ -164,7 +164,8 @@ if ! claude mcp get revit 2>/dev/null | grep -qF -- "$BIND_IP"; then
 fi
 
 echo "Registered 'revit' with Claude Code (scope: local)."
-echo "Remote-mode config: -bind $BIND_IP -port $PORT -app-data-dir $APP_DATA_DIR"
+echo "Remote-mode config: -bind $BIND_IP -port $PORT -shared-root $SHARED_ROOT"
+echo "  (the broker's own models cache + how-to corpus stay on this Mac's app-data, not the shared folder)"
 echo "Next: inside the VM, run revit/install.ps1 (if not already), launch Revit with"
 echo "  MCPBRIDGE_BROKER_MODE=remote and MCPBRIDGE_SHARED_ROOT=<UNC path to this repo's shared folder>"
 echo "set for the process, then run 'claude' here and it will spawn this broker automatically."

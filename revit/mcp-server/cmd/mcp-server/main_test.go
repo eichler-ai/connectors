@@ -505,6 +505,26 @@ func TestResolveRootsSplitsByOwner(t *testing.T) {
 			t.Errorf("err = %v, want the -shared-root-required error", err)
 		}
 	})
+
+	// Remote mode, no override, shared root given: THE production path. The
+	// private root falls back to the broker's own platform app-data
+	// (singleton.AppDataDir()), distinct from the shared rendezvous root --
+	// this is exactly what keeps the model cache off the shared drive.
+	t.Run("remote default private is the broker's own app-data", func(t *testing.T) {
+		priv, rdv, dep, err := resolveRoots("remote", "", "/mnt/shared/Connectors/Revit")
+		if err != nil {
+			t.Fatalf("resolveRoots: %v", err)
+		}
+		if rdv != "/mnt/shared/Connectors/Revit" {
+			t.Errorf("rendezvous=%q, want the shared root", rdv)
+		}
+		if priv == "" || priv == rdv {
+			t.Errorf("private=%q, want a non-empty platform app-data path distinct from the shared root %q", priv, rdv)
+		}
+		if dep {
+			t.Error("deprecatedFallback = true, want false")
+		}
+	})
 }
 
 // TestRunRejectsUnspecifiedBindAddr confirms the pre-existing

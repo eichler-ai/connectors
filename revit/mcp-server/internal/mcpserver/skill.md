@@ -266,8 +266,9 @@ Every failure uses one shape. Read `message` for what happened, `remedy` for wha
 ## Exchanging files
 
 Each document gets a workspace with `exports/` and `imports/`. Both directions go through the
-filesystem, not MCP, so size is not a constraint. **Never hard-code the paths** — read them from the
-globals; the workspace root has changed before. Beside them, per-run audit files: `scripts/` (verbatim
+filesystem, not MCP, so size is not a constraint. **The location is not fixed and is not restated
+here — never hard-code it.** To find it, read `Connector.ExportsDirectory` / `Connector.ImportsDirectory`
+(or `return` one to see the absolute path); the workspace root has changed before. Beside them, per-run audit files: `scripts/` (verbatim
 script) and `logs/` (NDJSON diagnostics), swept after 14 days.
 
 **Revit → you.** Write the file, then `Connector.Publish` it. Published files come back in `files[]`,
