@@ -110,10 +110,18 @@ internal static class UpdateTrigger
             Process.Start(startInfo); // fire-and-forget: never waited on.
 
             // Independent review finding: install.ps1's -Silent flag SKIPS Revit's automatic relaunch
-            // (install.ps1 ~line 564: `if (-not $Silent -and ...)`) -- under -Silent, Revit closes and
-            // does NOT reopen on its own, so the previous "may close and reopen shortly" wording was
-            // simply wrong about what happens next.
-            onStarted("Update started. Revit will close shortly to apply it; reopen it manually once the update finishes.");
+            // (`if (-not $Silent -and ...)`) -- under -Silent, Revit closes and does NOT reopen on its
+            // own. Since the release manifest (seed plan §1, step 5) the installer also skips every
+            // component whose hash is unchanged, so Revit closes ONLY when this version's add-in
+            // payload actually changed; a broker-only release (a how-to corpus update, say) is staged
+            // beside the running broker and takes effect when the MCP client next starts it. This
+            // button cannot know which case applies before the installer has compared the manifest,
+            // so the text states both outcomes rather than promising one.
+            onStarted(
+                "Update started. If the add-in changed, Revit will close to apply it; reopen it afterwards. " +
+                "If only the broker changed, Revit stays open and the update takes effect when your MCP client " +
+                "next starts the broker (reconnect the revit MCP server, e.g. /mcp in Claude Code); " +
+                "this window shows the update as available until then.");
         }
         catch (Exception ex)
         {

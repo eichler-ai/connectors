@@ -61,6 +61,11 @@ Copy-Item revit\mcp-bridge\src\MCPBridge.AddIn\MCPBridge.addin $payload
 # Broker payload
 $server = New-Item -ItemType Directory -Force "$($stage.FullName)\server"
 Copy-Item revit\mcp-server\mcp-server.exe $server
+# Optional: a manifest lets a re-run skip components that did not change (and leave a running
+# Revit open). Without it every run redeploys everything.
+. .\revit\install.ps1 -LoadFunctionsOnly
+$info = (& revit\mcp-server\mcp-server.exe -build-info) | ConvertFrom-Json
+New-PackageManifest $stage.FullName 'local-dev' $info.howto_corpus | ConvertTo-Json -Depth 5 | Out-File "$($stage.FullName)\manifest.json" -Encoding utf8
 Compress-Archive "$($stage.FullName)\*" "$env:TEMP\mcpbridge-release.zip" -Force
 ```
 
@@ -75,8 +80,9 @@ broker in `%LOCALAPPDATA%\Programs\MCPBridge\`, registers `revit` with Claude Co
 (`claude mcp add revit -- ...\mcp-server.exe --mode local`), and writes a Programs & Features
 uninstall entry. Re-running it is safe — though note the installer's "already up to date"
 no-op short-circuit applies to the release-download path only; with `-LocalPackagePath` every
-run redeploys, by design (there is no version to compare a local zip against). `-Uninstall`
-removes it.
+run re-enters the deploy loop, by design (there is no release to compare a local zip against) —
+though with a `manifest.json` in the zip, components whose hash the last run recorded are skipped.
+`-Uninstall` removes it.
 
 ## 5. Run a first script
 
