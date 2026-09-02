@@ -220,6 +220,10 @@ internal sealed class BridgeHost
                 period: Timeout.InfiniteTimeSpan);
         }
 
+        // #146 Phase 2: dropped DocumentChanged events are traced to the connection log (the adapter's
+        // handler swallows by contract; this is what keeps a missed event diagnosable).
+        RevitUiApplicationAdapter.DiagnosticTrace = LogConnectionDiagnostic;
+
         var dispatcher = new RequestDispatcher(
             _executionManager,
             scriptBridge,
@@ -379,6 +383,7 @@ internal sealed class BridgeHost
     public void Stop()
     {
         _stopCts?.Cancel();
+        RevitUiApplicationAdapter.DiagnosticTrace = null;
 
         try
         {

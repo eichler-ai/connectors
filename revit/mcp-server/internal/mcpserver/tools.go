@@ -146,6 +146,8 @@ func Register(s *mcp.Server, mgr *execution.Manager) {
 		return toolResult(res, drec)
 	})
 
+	registerUndoRedo(s, mgr)
+
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "cancel_execution",
 		Description: "Request cooperative cancellation of an in-flight execution. The script must observe its CancellationToken to actually stop; a script that doesn't cooperate (or never responds) resolves to \"unrecoverable\" once the broker's own cancellation grace period lapses.",
@@ -153,6 +155,40 @@ func Register(s *mcp.Server, mgr *execution.Manager) {
 		res, drec := mgr.CancelExecution(ctx, in.ExecutionID)
 		return toolResult(res, drec)
 	})
+}
+
+// UndoRedoIn is the input schema shared by the undo and redo tools (#146 Phase 2c).
+type UndoRedoIn struct {
+	InstanceID string `json:"instance_id" jsonschema:"instance_id of the target Revit instance, from list_instances"`
+	DocumentID string `json:"document_id,omitempty" jsonschema:"the document you expect to be ACTIVE; Revit's undo acts on the active document's stack, so if a different document has become active the call is refused (undo-wrong-active-document) before anything is posted. Omit to act on whichever document is active"`
+	Confirm    bool   `json:"confirm,omitempty" jsonschema:"must be true: this acts on Revit's GLOBAL undo stack and reverts the most recent action in the session, which is a person's if they acted after your last script; without it the call is refused (undo-confirmation-required), naming how long ago the connector last ran here"`
+	TimeoutMs  int    `json:"timeout_ms,omitempty" jsonschema:"how long to wait for the posted command to take effect; default 10000, min 1000, max 30000"`
+}
+
+func registerUndoRedo(s *mcp.Server, mgr *execution.Manager) {
+	for _, direction := range []string{"undo", "redo"} {
+		direction := direction
+		mcp.AddTool(s, &mcp.Tool{
+			Name: direction,
+			Description: "Post Revit's " + direction + " command on an instance and report what it reverted: `mutations` carries the net " +
+				"change the " + direction + " made to the model and notices[] names the reverted transaction(s) -- `MCP: ...` entries are " +
+				"the connector's own runs (undo-reverted-connector-work); anything else means a person's action was reverted " +
+				"(undo-reverted-other-work, a warning: call the opposite tool at once if unintended). Revit's undo stack is global " +
+				"and not inspectable, so this cannot promise to revert only agent work; that is why confirm is required, and why " +
+				"document_id lets you refuse if another document became active. For a mistake INSIDE a script, roll back there " +
+				"instead (throw, or a SubTransaction). Busy while a script is running, and scripts are busy while this runs.",
+		}, func(ctx context.Context, req *mcp.CallToolRequest, in UndoRedoIn) (*mcp.CallToolResult, ExecutionOut, error) {
+			timeoutMs := in.TimeoutMs
+			if timeoutMs <= 0 {
+				timeoutMs = 10_000
+			}
+			if timeoutMs > 30_000 {
+				timeoutMs = 30_000
+			}
+			res, drec := mgr.UndoRedo(ctx, in.InstanceID, direction, in.Confirm, timeoutMs, in.DocumentID)
+			return toolResult(res, drec)
+		})
+	}
 }
 
 // isErrorStatus reports whether status is one the agent must see flagged as

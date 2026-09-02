@@ -16,6 +16,7 @@ Design rationale for all of it: [`PRD.md`](PRD.md) §06 (execution), §07 (dialo
 | `execute_script` | yes | compile & run C# in a Revit instance |
 | `poll_execution` | yes | wait on / re-check a long-running execution |
 | `cancel_execution` | yes | cooperative cancellation of a running script |
+| `undo` / `redo` | yes | post Revit's own Undo/Redo and report what it reverted (gated: the stack is global) |
 | `list_functions` | yes | browse the reflected API: namespaces → types → members |
 | `search_functions` | yes | ranked search over member names + XML docs |
 | `describe_function` | yes | full signature/params/docs for one member |
@@ -95,6 +96,27 @@ running some other script (one at a time per instance, it's Revit's UI thread); 
 > `<max depth 6 reached: ...>`, `<circular reference to ...>` — so a bounded result never reads as a
 > complete one. For a large result, return a projection of the fields you need, or write it to a
 > file with `Connector.Publish`.
+
+### `undo` / `redo`
+
+Post Revit's own Undo or Redo on an instance and report what it reverted. `instance_id` and
+`confirm: true` (required — see below); optional `document_id` (the document you expect to be active —
+Revit's undo acts on the *active* document's stack, so a mismatch is refused before anything is posted,
+`undo-wrong-active-document`); optional `timeout_ms` (default 10000, min 1000, max 30000) bounds how long
+the add-in waits for the posted command to take effect. An undo **is an execution** for the busy gate: it
+gets an `execution_id`, scripts answer `busy` while it runs and it answers `busy` while a script runs (an
+undo posted mid-script would revert that script). The result shares execute_script's shape: `status`,
+`mutations` (the net change the undo/redo made to the model) and `notices[]` naming the reverted
+transaction(s) and document — `undo-reverted-connector-work` (info) when every name is one of the
+connector's `MCP: …` entries, `undo-reverted-other-work` (warning) otherwise, because **Revit's undo
+stack is global and not inspectable**: the tool reverts the most recent action in the session, which is a
+person's if they acted after the agent's last script. That is why `confirm` is required (the refusal
+names how long ago the connector last ran on that instance) and why the notice exists — if it reverted
+the wrong thing, call the opposite tool at once. `undo-not-posted` when Revit refused the command (a modal
+state). `undo-no-change-observed` when nothing followed the post within `timeout_ms`: the command **was
+posted** and may still take effect, so inspect the model rather than retrying — a second post would revert
+the next action too. For a mistake inside a script, roll back there instead: throw, or use a
+`SubTransaction`.
 
 ### Discovery tools
 

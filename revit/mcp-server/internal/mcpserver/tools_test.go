@@ -182,6 +182,107 @@ func TestExecuteScriptToolAddInReportedErrorIsToolError(t *testing.T) {
 	}
 }
 
+// TestUndoRedoToolsForwardToTheAddIn pins the #146 Phase 2c tools: each
+// forwards its direction, confirm and timeout on the `undo_redo` wire method,
+// and the add-in's terminal answer (status, mutations, notices) comes back
+// as the tool result. Busy when a script is in flight is the manager's
+// existing rule and is pinned separately below.
+func TestUndoRedoToolsForwardToTheAddIn(t *testing.T) {
+	mgr := execution.NewManager()
+	var seen []map[string]any
+	attachFakeInstance(t, mgr, "inst-1", func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
+		if method != "undo_redo" {
+			return nil, &transport.RPCError{Code: -32601, Message: "unexpected method " + method}
+		}
+		var p map[string]any
+		json.Unmarshal(params, &p)
+		seen = append(seen, p)
+		return map[string]any{
+			"status":    "success",
+			"mutations": map[string]any{"created": 0, "modified": 0, "deleted": 1, "by_category": map[string]any{}, "truncated": false},
+			"notices":   []map[string]any{{"severity": "info", "code": "undo-reverted-connector-work", "source": "mcp-bridge.core.execution", "message": "undo reverted 'MCP: 1 Levels created'."}},
+		}, nil
+	})
+	cs := connectClient(t, mgr)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "undo", Arguments: map[string]any{"instance_id": "inst-1", "confirm": true, "timeout_ms": 99_000, "document_id": "doc-1"}})
+	if err != nil {
+		t.Fatalf("CallTool undo: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected tool error: %+v", res.Content)
+	}
+	var out ExecutionOut
+	sc, _ := json.Marshal(res.StructuredContent)
+	if err := json.Unmarshal(sc, &out); err != nil {
+		t.Fatalf("decoding structured content: %v", err)
+	}
+	if out.Mutations == nil || out.Mutations.Deleted != 1 || len(out.Notices) != 1 || out.Notices[0].Code != "undo-reverted-connector-work" {
+		t.Errorf("undo result did not carry the add-in's answer: %+v", out)
+	}
+	if got := seen[0]; got["direction"] != "undo" || got["confirm"] != true || got["timeout_ms"].(float64) != 30_000 || got["document_id"] != "doc-1" {
+		t.Errorf("wire params = %v (want direction undo, confirm true, timeout clamped to 30000, document_id doc-1)", got)
+	}
+	if id, _ := seen[0]["execution_id"].(string); id == "" {
+		t.Errorf("an undo is an execution: the broker must mint and send an execution_id, got %v", seen[0]["execution_id"])
+	}
+	if out.ExecutionID == "" {
+		t.Errorf("the tool result must carry the undo's execution_id (it is pollable), got %+v", out)
+	}
+	// Settled: the instance is free again for the next call.
+	if st := mgr.StatusForInstance("inst-1"); st != execution.StatusIdle {
+		t.Errorf("instance should be idle after a terminal undo answer, got %q", st)
+	}
+
+	if _, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "redo", Arguments: map[string]any{"instance_id": "inst-1"}}); err != nil {
+		t.Fatalf("CallTool redo: %v", err)
+	}
+	if got := seen[1]; got["direction"] != "redo" || got["confirm"] != false || got["timeout_ms"].(float64) != 10_000 {
+		t.Errorf("redo wire params = %v (want direction redo, confirm false, default timeout 10000)", got)
+	}
+	if _, present := seen[1]["document_id"]; present {
+		t.Errorf("an omitted document_id must not be sent, got %v", seen[1]["document_id"])
+	}
+}
+
+// TestUndoIsBusyWhileAScriptIsInFlight pins the broker half of the gate: the
+// add-in never sees an undo_redo while an execution it owns is non-terminal.
+func TestUndoIsBusyWhileAScriptIsInFlight(t *testing.T) {
+	mgr := execution.NewManager()
+	var methods []string
+	attachFakeInstance(t, mgr, "inst-1", func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
+		var p map[string]any
+		json.Unmarshal(params, &p)
+		methods = append(methods, method)
+		// The script never finishes: answer pending so the instance stays busy.
+		return map[string]any{"status": "pending", "execution_id": p["execution_id"]}, nil
+	})
+	cs := connectClient(t, mgr)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if _, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "execute_script", Arguments: map[string]any{"instance_id": "inst-1", "document_id": "doc-1", "script": "1", "timeout_ms": 100}}); err != nil {
+		t.Fatalf("execute_script: %v", err)
+	}
+	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "undo", Arguments: map[string]any{"instance_id": "inst-1", "confirm": true}})
+	if err != nil {
+		t.Fatalf("undo: %v", err)
+	}
+	var out ExecutionOut
+	sc, _ := json.Marshal(res.StructuredContent)
+	json.Unmarshal(sc, &out)
+	if out.Status != "busy" || out.ExecutionID == "" {
+		t.Errorf("undo during a pending script must answer busy pointing at it, got %+v", out)
+	}
+	for _, m := range methods {
+		if m == "undo_redo" {
+			t.Errorf("undo_redo reached the add-in while a script was in flight")
+		}
+	}
+}
+
 // TestExecuteScriptToolLabelReachesTheWire pins the #146 Phase 2b `label`
 // argument: sent to the add-in verbatim when given, and absent from the
 // params -- not sent as "" -- when not, so an older add-in sees exactly the

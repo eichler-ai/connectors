@@ -64,9 +64,8 @@ Every script call targets `{instance_id, document_id}`. Get both from `list_inst
   `tmp-<guid>` for an unsaved one (session-only; don't persist it).
 - `status` is `idle` / `pending` / `busy` / `unresponsive` / `unrecoverable`. Only `idle` starts work
   immediately. `unrecoverable` means that instance needs Revit restarted — nothing you send will run.
-- `memory` (MB, updated each heartbeat) is the Revit process's own use; watch `private_mb`. It climbs
-  across create/write/close cycles (mostly Revit's document memory, never released until exit), so on a
-  long session restart Revit once it reaches multiple GB.
+- `memory` (MB, per heartbeat) is the Revit process's own use; watch `private_mb` — it only climbs
+  (Revit's document memory is never released until exit), so restart Revit once it reaches multiple GB.
 
 **Several Revit versions can be connected at once**, and 2025 and 2027 have genuinely different API
 surfaces. Scripts are always explicitly targeted, so they're unaffected. Discovery is not — see below.
@@ -83,7 +82,10 @@ anonymous types as JSON, anything else as a self-explaining `<...>` marker. `out
 Revit's own writes too. A successful run that changed anything also carries **`mutations`** (net
 `created`/`modified`/`deleted` across every document it touched, plus `by_category`), so skip the
 read-after-write check. A short **`label`** ("create L1 walls") names the run's entry in Revit's Undo
-history, the person's backstop if you got it wrong; omitted, one is derived from what changed.
+history, the person's backstop if you got it wrong; omitted, one is derived from what changed. The
+`undo`/`redo` tools (`confirm: true`) post Revit's own Undo/Redo and report what they reverted; the
+stack is **global**, so pass `document_id`, read the notice naming the reverted transaction, and never
+retry a timed-out undo blindly. Fix mistakes *inside* a script by throwing instead.
 
 ```csharp
 return Document.Title;
@@ -175,10 +177,11 @@ except the active document, activate the one you want to keep, then close the ot
 
 ### Calls that need their target *not* modifiable
 
-Some Revit APIs manage their own transaction and refuse a target with one open: `UIDocument.RequestViewChange`/`ActiveView`, `Document.LoadFamily`,
-`UIApplication.OpenAndActivateDocument`, and every `EditScope`. **The document your call is routed at is
-modifiable for the whole run**, so against it they always fail ("must not be modifiable") — reported with
-`code` `script-target-must-not-be-modifiable`.
+Some Revit APIs manage their own transaction and refuse a target with one open:
+`UIDocument.RequestViewChange`/`ActiveView`, `Document.LoadFamily`,
+`UIApplication.OpenAndActivateDocument`, every `EditScope`. **Your routed document is modifiable for
+the whole run**, so against it they fail ("must not be modifiable"; `code`
+`script-target-must-not-be-modifiable`).
 
 Wrap them. The connector closes its transaction for the block and restores it afterwards (one that had
 none stays non-modifiable), so your changes still roll back if the script throws:
@@ -191,8 +194,7 @@ Connector.WithoutTransaction(Document, () => {
 
 Don't write inside that block — the document isn't modifiable there. To write, nest
 `Connector.WithTransaction` (it also returns a value: `var id = Connector.WithTransaction(doc, () =>
-Level.Create(doc, 3.0).Id);`; `describe_function` lists its overloads — pass a `member_id`). That pair
-is what makes **stairs** work, and the closing edge is the point:
+Level.Create(doc, 3.0).Id);`). That pair is what makes **stairs** work, and the closing edge is the point:
 an edit scope can't commit while a transaction is open.
 
 ```csharp
@@ -207,8 +209,8 @@ Connector.WithoutTransaction(doc, () => {
 });
 ```
 
-`LoadFamily` needs **both** documents non-modifiable — nest a block per document. Nesting the same
-scope on the *same* document is refused, so nest by document, not by helper method.
+`LoadFamily` needs **both** documents non-modifiable — nest one block per document (nesting the same
+scope on the *same* document is refused).
 
 **To `Close`, `Save` or `SaveAs` a document in the run that touched it**, finish it first with
 `Connector.Settle(doc, keep:)` (itself gated on `confirm_lifecycle_actions`, like the members it enables) — Revit refuses those while the connector holds anything open.

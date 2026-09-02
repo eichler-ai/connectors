@@ -148,12 +148,16 @@ var registeredToolNames = []string{
 	"search_functions",
 	"describe_function",
 	"get_skills",
+	"undo",
+	"redo",
 }
 
 func TestSkillFileDocumentsEveryRegisteredTool(t *testing.T) {
 	for _, name := range registeredToolNames {
-		if !strings.Contains(skillFile, name) {
-			t.Errorf("skill file never mentions %q: add it, or an agent reading this file will not know the tool exists", name)
+		// As a code span: the bare words "undo"/"redo" appear in ordinary prose about Revit's Undo
+		// history, so a substring match would pass without the TOOLS being documented (review of #156).
+		if !strings.Contains(skillFile, "`"+name+"`") {
+			t.Errorf("skill file never mentions `%s` as a tool: add it, or an agent reading this file will not know the tool exists", name)
 		}
 	}
 }
