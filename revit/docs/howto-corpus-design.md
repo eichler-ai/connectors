@@ -57,7 +57,7 @@ self-transacting calls (`LoadFamily`, `RequestViewChange`, EditScope start/commi
 *between* blocks; `Connector.Settle` unchanged; `OpenForWriting` and `WithoutTransaction` gone. The
 validation-corpus case #3 pitfalls about `LoadFamily` and open transactions are therefore about to
 change shape too — a second concrete instance of D6. Every script in the seed — including the example beside this note — is written in the pre-#146
-dialect and will fail the sweep the day #146 deploys. That is the mechanism working as intended (§3):
+dialect and fails the sweep against a #160 broker (the example's source test predates #160). That is the mechanism working as intended (§3):
 the stamps go `failed` with the diagnostic naming the fix, the seed is re-extracted from the harness
 tests once they are updated, and the sidecar's `connector_version` records which broker verified
 what. It also means the sweep must key stamps by connector version as well as Revit version, and
