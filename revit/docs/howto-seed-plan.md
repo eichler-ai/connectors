@@ -153,9 +153,11 @@ One bullet, under the discovery tools, within the token budget (something of equ
 
 > - **`submit_howto`** — when a task needed more than one search, a reformulated query, or a pitfall
 >   you hit and got past, hand it in: the task in one sentence, the working script, the members, the
->   queries that missed and the one that hit, the pitfall as symptom → cause → fix. It saves to your
->   own how-to corpus at once and, with `confirm_submission: true`, prepares a scrubbed GitHub issue
->   for the maintainers to review. Submit **after** the script ran successfully, never speculatively.
+>   queries that missed and the one that hit, the pitfall as symptom → cause → fix. To improve an
+>   existing how-to (a missing pitfall, a better script, a version note), pass its `id` as `supersedes`
+>   with only the fields you changed. It saves to your own how-to corpus at once and, with
+>   `confirm_submission: true`, prepares a scrubbed GitHub issue for the maintainers to review.
+>   Submit **after** the script ran successfully, never speculatively.
 
 The trigger is the important part: the moment of value is when the agent has *just* recovered from a
 miss, which is exactly the recorded episode the corpus wants. `get_skills` also tells the agent what
@@ -166,8 +168,10 @@ than the first line.
 
 ```
 submit_howto(
-  title, task, script, members[],           # required
+  title, task, script, members[],           # required for a NEW document
   pitfalls[]?, queries?, tags?, summary?,   # schema fields, optional
+  supersedes?,                              # id of an existing how-to this one improves (see below)
+  change_note?,                             # one sentence: what changed and why (required with supersedes)
   instance_id?,                             # which Revit verified it (defaults as for discovery)
   confirm_submission: bool                  # outward half; default false
 ) -> {
@@ -183,9 +187,22 @@ submit_howto(
 }
 ```
 
+**Improving an existing how-to.** With `supersedes: <id>`, the tool loads that document (local first,
+then the embedded/shared corpus), overlays only the fields the call supplied, and produces a
+complete new document whose `supersedes` points at the old one — the corpus's append-only edit
+shape (design note §6). So an agent that found one missing pitfall submits just `pitfalls` and
+`change_note`; `title`, `task`, `script` and the rest carry over. Rules: the new document gets a
+fresh id derived from the old one (`<old-id>-2`, then `-3` …) unless the caller names one; a
+`script` change without a successful run in this session is accepted locally but flagged
+`unverified-script-change` in the issue; `queries` and `pitfalls` are *merged* (appended, de-duplicated
+by text) rather than replaced, since they are evidence; `change_note` becomes the first line of the
+issue body and the label gains `howto-edit` beside `howto-submission`.
+
 Behaviour, in order:
 
 1. **Validate** against `howto-schema.json`; a failing field is a `howto-invalid` error naming it.
+   With `supersedes`, also check the target exists and is not itself superseded (point at the head
+   of the chain instead, and say so).
 2. **Write locally first** (`provenance.kind: "local"`), so the submitter's own `search_howto` serves
    it immediately. Re-submitting the same `id` overwrites the local file and says so.
 3. **Session stamp**: if this session executed exactly this `script` text and it succeeded, append
@@ -224,14 +241,20 @@ choose issues itself, and loads `revit-connector-development` for the harness ru
    value, and record the outcome as a comment. A failure is not a rejection by itself — the fix may be
    a one-line edit — but nothing enters the corpus without a passing run on at least one version.
    This is the `howto-reviewed` gate made concrete: the human reads before the script runs.
-4. **De-duplicate.** Search the existing corpus (`search_howto` once it exists; a `members`-set
-   match until then). A near-duplicate becomes a `supersedes` of the older document if it is better,
-   or a comment pointing at the existing one if not.
+4. **De-duplicate, or apply the edit.** For a new document, search the existing corpus (`search_howto`
+   once it exists; a `members`-set match until then): a near-duplicate becomes a `supersedes` of the
+   older document if it is better, or a comment pointing at the existing one if not. For a
+   `howto-edit` submission, diff the new document against the one it supersedes (the command prints
+   the field-level diff), and judge the *change*, not the whole document: a good pitfall added to an
+   otherwise unchanged how-to is accepted on the strength of the pitfall; a rewritten script is
+   re-run before it replaces the old one (step 3 applies to the new script text).
 5. **Edit.** The maintainer edits `task`, `title`, `pitfalls` wording and `tags` in place — this is
    where prose quality is enforced, and it is a human edit, not the agent's. `queries.miss` is kept
    verbatim: it is evidence, not prose.
 6. **Append and stamp.** Append the final document to `revit/howto/corpus.jsonl` with
-   `provenance.kind: "submission"`, `ref` = the issue URL, `reviewed_by` = the maintainer's login;
+   `provenance.kind: "submission"`, `ref` = the issue URL, `reviewed_by` = the maintainer's login
+   (for an edit, `supersedes` set, so search hides the old document from then on and
+   `describe_howto` on the old id points forward);
    append the harness stamp from step 3 to `revit/howto/verified.jsonl`; open one PR per triage run
    listing the issues it closes (`Closes #171`), CI validates both files.
 7. **Report.** Issues closed, documents added, documents superseded, and — the same net-count
