@@ -98,13 +98,55 @@ type ListFunctionsOut struct {
 	Error        *diag.Record `json:"error,omitempty"`
 }
 
+// searchManyResults is the total_matched count above which the guidance nudges
+// the agent to narrow rather than to widen. A heuristic, not a tuned boundary:
+// well past a single default page (top_n 20) so it only fires when the match set
+// is genuinely broad enough that the wanted member is plausibly buried. Ranker-
+// agnostic -- "too many, narrow it" is sound advice under keyword or embedding
+// ranking alike.
+const searchManyResults = 50
+
+// searchGuidance returns the hint attached to every search_functions response.
+// Ranking is fuzzy and recall is imperfect, so the hint steers the agent by the
+// shape of the result set toward the correction most likely to help:
+//
+//   - nothing matched -> the target is almost never actually absent; reword.
+//     This is the moment the wrong "the API isn't there" conclusion is cheapest.
+//   - too many matched -> the wanted member is likely buried; narrow, don't widen.
+//   - a workable set -> the top hit may still be wrong; the target can rank below
+//     what was returned, so a reworded retry is still on the table.
+//
+// returned is this page's result count; total is total_matched across all pages.
+func searchGuidance(returned, total int) string {
+	if returned == 0 {
+		return "No members matched. This does not mean the API is absent -- ranking is keyword-based, " +
+			"so retry with different wording: a synonym, the operation verb, or the domain noun " +
+			"(e.g. \"get all walls\" -> try \"collector\" or \"filter elements\"). Or browse the tree " +
+			"with list_functions."
+	}
+	if total > searchManyResults {
+		return "Many members matched, so the one you want may be ranked below what was returned. " +
+			"Narrow rather than widen: add more context to your query (the specific operation and the " +
+			"element type you mean), use a more precise term, or pass namespace to scope the search. " +
+			"You can also page with the cursor."
+	}
+	return "If none of these is the member you want, the target may exist under different wording -- " +
+		"retry with a synonym or the operation verb, or browse with list_functions. Ranking is fuzzy; " +
+		"a low score or a short list does not mean the API is absent."
+}
+
 // SearchFunctionsOut is the output schema for the search_functions tool.
 type SearchFunctionsOut struct {
-	Results      []Member     `json:"results,omitempty"`
-	NextCursor   string       `json:"next_cursor,omitempty"`
-	TotalMatched int          `json:"total_matched,omitempty"`
-	RevitVersion string       `json:"revit_version,omitempty"`
-	Error        *diag.Record `json:"error,omitempty"`
+	Results      []Member `json:"results,omitempty"`
+	NextCursor   string   `json:"next_cursor,omitempty"`
+	TotalMatched int      `json:"total_matched,omitempty"`
+	RevitVersion string   `json:"revit_version,omitempty"`
+	// Guidance is a broker-added retry hint (searchGuidance), not part of the
+	// add-in's response; it tells the agent that fuzzy ranking can miss a member
+	// that exists under different wording, so a weak result set warrants a
+	// reworded retry rather than "the API isn't there".
+	Guidance string       `json:"guidance,omitempty"`
+	Error    *diag.Record `json:"error,omitempty"`
 }
 
 // DescribeFunctionOut is the output schema for the describe_function tool.
@@ -177,6 +219,7 @@ func RegisterDiscovery(s *mcp.Server, r *discovery.Router) {
 			return errorCallToolResultFor(out), out, nil
 		}
 		out.RevitVersion = revitVersion
+		out.Guidance = searchGuidance(len(out.Results), out.TotalMatched)
 		return nil, out, nil
 	})
 
