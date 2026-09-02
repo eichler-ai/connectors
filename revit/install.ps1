@@ -310,6 +310,16 @@ if ($Uninstall) {
     }
     Unregister-ScheduledTask -TaskName (Get-PendingUpdateTaskName $Scope) -Confirm:$false -ErrorAction SilentlyContinue
     Remove-Item $appDir -Recurse -Force -ErrorAction SilentlyContinue
+    # The broker's search_functions ranker (issue #107) materializes its cross-encoder model files
+    # (~24MB) under the PRD §09 app-data root at first run, because the inference library needs real
+    # paths. That root is otherwise left alone here (broker.json/broker.lock are per-user runtime
+    # state the next broker launch recreates), but the model directory is a copy of bytes embedded in
+    # the exe being removed, so it goes with it. The path is what singleton.AppDataDir() resolves on
+    # Windows FOR THE ACCOUNT RUNNING THIS UNINSTALLER: the broker runs per user, so under -Scope
+    # AllUsers other users' copies (and, if UAC was answered with a different admin account, the
+    # invoking user's own) stay behind -- the same per-account scoping the claude-mcp deregistration
+    # below already has.
+    Remove-Item "$env:LocalAppData\Connectors\Revit\models" -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item $uninstallKeyPath -Recurse -Force -ErrorAction SilentlyContinue
     if (Get-Command claude -ErrorAction SilentlyContinue) {
         & claude mcp remove revit 2>$null | Out-Null
