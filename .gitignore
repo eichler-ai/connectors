@@ -24,3 +24,7 @@ Connectors/
 bin/
 obj/
 revit/test-harness/.buildtmp/
+
+# The Go broker built in place (`go build ./cmd/mcp-server` from revit/mcp-server) -- ~80MB with the
+# search models embedded; an 83MB blob reached a PR branch this way once (#154).
+revit/mcp-server/mcp-server

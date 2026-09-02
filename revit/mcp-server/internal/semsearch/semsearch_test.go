@@ -284,12 +284,42 @@ func TestDenseRespectsNamespaceMaskAndJunk(t *testing.T) {
 	}
 }
 
+// TestDenseOnlyRankingIsNotReorderedByCoreFlag pins the independent review
+// finding on PR #154: an earlier post-fusion "core wins lexical ties" pass
+// treated every dense-only hit (lexical score 0) as a tie and pushed core
+// members above add-in members regardless of cosine. The tie-break must act
+// only on genuinely equal retriever scores.
+func TestDenseOnlyRankingIsNotReorderedByCoreFlag(t *testing.T) {
+	ctx := context.Background()
+	emb := newKeywordEmbedder()
+	docs := []Doc{
+		// Core doc: one of its three concepts (move) is the query's; cosine ~0.58.
+		{MemberID: "M:Autodesk.Revit.DB.Document.Export", Namespace: "Autodesk.Revit.DB", DeclaringType: "Autodesk.Revit.DB.Document", Name: "Export", Summary: "Filter the walls, then move them.", Core: true},
+		// Add-in doc: entirely the query's concept; cosine 1.0.
+		{MemberID: "M:Acme.Tools.Mover.Shift", Namespace: "Acme.Tools", DeclaringType: "Acme.Tools.Mover", Name: "Shift", Summary: "Translate the location of an item.", Core: false},
+	}
+	ix := Build(docs)
+	if err := ix.Embed(ctx, emb); err != nil {
+		t.Fatal(err)
+	}
+	// "relocate" is a token of neither doc (no lexical hit anywhere), but the
+	// embedder maps it to the same concept as "translate"/"location"/"move".
+	hits, err := ix.Search(ctx, Query{Text: "relocate", Embedder: emb})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 2 || hits[0].Doc.MemberID != "M:Acme.Tools.Mover.Shift" {
+		t.Fatalf("add-in doc with the higher cosine must rank first; got %v", ids(hits))
+	}
+}
+
 func TestRRF(t *testing.T) {
 	// Two lists, weights 1.5 (lexical) : 1.0 (dense), k=60.
 	// doc 7: lex rank 1, dense rank 2 -> 1.5/61 + 1.0/62
 	// doc 3: lex rank 2, dense rank 1 -> 1.5/62 + 1.0/61
 	// doc 9: dense rank 3 only        -> 1.0/63
-	got := rrf([][]int{{7, 3}, {3, 7, 9}}, []float64{1.5, 1.0}, 60)
+	ix := &Index{docs: make([]Doc, 10)}
+	got := ix.rrf([][]int{{7, 3}, {3, 7, 9}}, []float64{1.5, 1.0}, 60)
 	want := []int{7, 3, 9}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("rrf order = %v, want %v", got, want)

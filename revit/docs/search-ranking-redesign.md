@@ -300,7 +300,7 @@ third-party dependency, pinned to the Python implementation by `TestParityWithPy
 |---|---|
 | 8.1 Lexical in Go or C# FTS5 | **Go.** `internal/semsearch` implements BM25F over name / path / summary with the POC's field weights, the identifier splitter mirroring the add-in's `IdentifierRelevance.SplitWords`, RRF (1.5 : 1, k = 60), the `BuiltIn*`/`PostableCommand` junk mask, the namespace pre-mask, and core-wins-exact-ties. The C# ranker is untouched and still answers as the fallback. |
 | 8.2 Index build timing | **On attach, in the background, never blocking a call.** `internal/semsearch/manager` pages the corpus over a new add-in wire method `dump_members` (5,000 members a page, ~16 pages for 2027), builds lexical (0.3 s) then dense (1.4 s), and caches by corpus fingerprint (SHA-256 of the loaded assembly set, computed by `DiscoveryCache.CorpusFingerprint`) so a reconnect or a sibling instance reuses the index after one page. Until ready, `search_functions` forwards to the add-in's keyword ranker and the response says `ranker: keyword-fallback`. |
-| 8.3 Latency budget | Query path: static embed < 1 ms, brute-force cosine over 3 × 76k × 256 ≈ 90 ms, cross-encoder pool 20 ≈ 1.0–1.3 s. No ANN index needed at this corpus size. Cursor pages are slices of a small bounded cache of ranked lists (16 entries), so a second page costs nothing; the cursor's scope includes the corpus fingerprint and ranker so it cannot replay across ranked sets. |
+| 8.3 Latency budget | Query path: static embed < 1 ms, brute-force cosine over 3 × 68k × 256 ≈ 80 ms, int8 cross-encoder pool 20 ≈ 1.2–1.5 s on the M1 Max (fp32 was 0.95 s; the guest measured fp32 only). No ANN index needed at this corpus size. Cursor pages are slices of a small bounded cache of ranked lists (16 entries), so a second page costs nothing; the cursor's scope includes the corpus fingerprint and ranker so it cannot replay across ranked sets. |
 | 8.4 Corpus freshness | The fingerprint. A fingerprint change between pages fails the build (the add-in re-synced mid-dump) and the next attach rebuilds; a failed build never blocks search (fallback). |
 | 8.5 How-to-docs corpus | **Not shipped**; the merge point in §4 remains open. |
 
@@ -311,12 +311,37 @@ without them compiles and ranks lexical-only (`ranker: lexical`, said in every `
 Measured binary: **79.5 MB** with models (from 11.6 MB) — the cross-encoder ships int8 (23 MB) and
 the static model fp32 (30 MB); hugot/GoMLX add ~15 MB of code.
 
-**Go port reproduces the POC** (`TestRealCorpusRecall`, real 2027 corpus, 43 queries, no rerank):
-lexical 15 / 21 / 27 and hybrid 17 / 23 / 33 at recall@1 / 3 / 10, against Python's 14 / 20 / 26 and
-16 / 22 / 32.
+**Go pipeline measured on the 43 labelled queries** (`TestRealCorpusRecall` with all three model
+env vars set; real 2027 corpus, 68,410 non-junk members indexed; Apple M1 Max) — recall@1 / 3 / 10:
+
+| Stage (Go, shipped code) | recall@1 | @3 | @10 | per query |
+|---|---|---|---|---|
+| lexical (BM25F) | 14 / 43 | 21 | 28 | 2 ms |
+| hybrid RRF (potion-base-8M) | 17 / 43 | 23 | 33 | 77 ms |
+| **hybrid + cross-encoder, pool 20 (what ships)** | **24 / 43** | **29** | **34** | 1.54 s |
+
+Against the Python POC's 14 / 20 / 26, 16 / 22 / 32 and 23 / 29 / 33 for the same three stages: the
+port reproduces the POC within one query at every rank. Lexical build 0.25 s, dense build 1.14 s.
 
 **Cross-encoder parity** (`crossenc.TestScoresMatchPythonCrossEncoder`, int8): 0.9960 / 0.9978 /
 0.0000 against Python fp32 sigmoid 0.9971 / 0.9987 / 0.0000 on the reference pairs; same ordering.
+
+**Live, Revit 2025 (dev VM, remote mode, broker on the Mac)** — `TestSemanticSearchAnswersTaskSentences`
+and the broker log: the corpus the add-in ships is **46,877 documented members** (2025 has fewer than
+2027's 76,601), paged in 10 `dump_members` calls; the index was **ready 21 s after registration**
+(wire transfer through the Parallels guest dominates — the same corpus indexes in ~1.5 s from a local
+file); model load at broker start 139–157 ms; a semantic query round trip including the reranker
+~1.5 s; `move an element to a new location` → `ElementTransformUtils.MoveElement`, `delete an element
+from the document` → `Document.Delete`, `get the parameter of an element by its name` →
+`Element.LookupParameter` all within the top 3; namespace pre-mask, cursor paging and the junk mask
+hold live. The known miss reproduced too: `find every element of a given class in the document`
+ranks `ElementClassFilter`'s constructor first and leaves `FilteredElementCollector.OfClass` outside
+the top 5 — the idiom shape §3.3 predicted.
+
+**Race detector.** hugot's Go backend uses unsafe pointer arithmetic that `-race`'s checkptr rejects
+(fatal `pointer arithmetic result points to invalid allocation` in gomlx's matmul). Tests that run a
+model carry a `!race` constraint; CI's `go test -race ./...` still covers everything except model
+inference, and the plain gated runs cover that.
 
 ### 10.4 Still open after this implementation
 
@@ -338,3 +363,14 @@ lexical 15 / 21 / 27 and hybrid 17 / 23 / 33 at recall@1 / 3 / 10, against Pytho
   the wire and a member-count threshold.
 - **Attach/detach plumbing**: the manager is told about instances through a third broker hook
   (`Broker.Search`); an observer on `discovery.Router` would fence once for every consumer.
+- **Corpus freshness after the deferred sync** (independent review of #154): the add-in re-checks its
+  assembly set ~8 s after startup; if that sync changes the corpus after the index is ready, nothing
+  today tells the broker (`register` carries no fingerprint). Ship the fingerprint on `register`
+  and rebuild on change. Related: `DiscoveryService.DumpMembers` takes its three cache locks
+  separately, so a page's rows and fingerprint can straddle a sync; the mid-dump fingerprint check
+  catches the cross-page case, not the intra-page one.
+- **Result semantics worth documenting for agents**: `total_matched` is now the size of the fused
+  candidate set (≤ 400), not a corpus match count; `score` is the cross-encoder's sigmoid for the
+  reranked head and 1/rank beyond it.
+- **Build-time network**: CI and the release runner fetch the two models from Hugging Face on every
+  run (sha256-pinned, revision-pinned); a mirror or cache would remove the egress dependency.

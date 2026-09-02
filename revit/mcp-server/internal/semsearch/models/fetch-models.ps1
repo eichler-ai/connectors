@@ -1,9 +1,10 @@
 # Fetches the pinned search_functions models into assets/ for go:embed (Windows PowerShell 5.1).
 # Pins (revision + sha256) must match models.go; the build verifies them again at load.
 $ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"  # Invoke-WebRequest is very slow with the progress bar on under Windows PowerShell 5.1
 Set-Location (Join-Path $PSScriptRoot "assets")
 $PotionRev = "bf8b056651a2c21b8d2565580b8569da283cab23"
-$MsMarcoRev = "main"
+$MsMarcoRev = "a09144355adeed5f58c8ed011d209bf8ee5a1fec"
 function Fetch($url, $dest, $sha) {
   if ((Test-Path $dest) -and ((Get-FileHash $dest -Algorithm SHA256).Hash.ToLower() -eq $sha)) { Write-Host "ok      $dest"; return }
   New-Item -ItemType Directory -Force -Path (Split-Path $dest) | Out-Null

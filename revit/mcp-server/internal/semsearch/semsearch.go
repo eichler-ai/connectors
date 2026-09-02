@@ -107,9 +107,11 @@ const (
 	// matches the dense retriever drops.
 	rrfLexicalWeight = 1.5
 	rrfDenseWeight   = 1.0
-	// DefaultRerankPool: pool 20 delivered the full reranker gain
-	// (recall@1 23/43, MRR 0.629 == pool 50) at ~1s in pure Go; pool 50
-	// costs 2.1-2.4s for no rank-1 gain.
+	// DefaultRerankPool: in the POC eval pool 20 delivered the full reranker
+	// gain (recall@1 23/43, MRR 0.629, identical to pool 50). Measured pure-Go
+	// cost of the shipped int8 cross-encoder on Apple M1 Max: ~1.2-1.3s at
+	// pool 20, ~3.3s at pool 50 -- so the larger pool buys nothing at rank 1
+	// and costs 2s (crossenc_test.go logs the pool-20 figure on every run).
 	DefaultRerankPool = 20
 )
 
@@ -206,7 +208,7 @@ func (ix *Index) Search(ctx context.Context, q Query) ([]Hit, error) {
 	mask := ix.mask(q.Namespace)
 
 	lexScores := ix.lex.score(tokens, lexicalFieldWeights)
-	lexOrder := topIdx(lexScores, mask, candidateDepth)
+	lexOrder := ix.topIdx(lexScores, mask, candidateDepth)
 
 	fused := lexOrder
 	ix.denseMu.RLock()
@@ -218,8 +220,8 @@ func (ix *Index) Search(ctx context.Context, q Query) ([]Hit, error) {
 			return nil, err
 		}
 		denseScores := dense.score(qv[0], denseFieldWeights)
-		denseOrder := topIdx(denseScores, mask, candidateDepth)
-		fused = rrf([][]int{lexOrder, denseOrder}, []float64{rrfLexicalWeight, rrfDenseWeight}, rrfK)
+		denseOrder := ix.topIdx(denseScores, mask, candidateDepth)
+		fused = ix.rrf([][]int{lexOrder, denseOrder}, []float64{rrfLexicalWeight, rrfDenseWeight}, rrfK)
 	}
 	if len(fused) == 0 {
 		return nil, nil
@@ -231,7 +233,6 @@ func (ix *Index) Search(ctx context.Context, q Query) ([]Hit, error) {
 		// RRF scores are not meaningful to a caller, order is.
 		hits[i] = Hit{Doc: ix.docs[id], Score: 1.0 / float64(i+1)}
 	}
-	hits = ix.breakCoreTies(hits, fused, lexScores)
 
 	if q.Reranker != nil {
 		pool := q.RerankPool
@@ -272,20 +273,6 @@ func (ix *Index) mask(namespace string) []bool {
 		m[i] = namespace == "" || d.Namespace == namespace
 	}
 	return m
-}
-
-// breakCoreTies reorders adjacent hits whose lexical scores are equal so a
-// core member precedes an add-in one. Only exact lexical ties are touched,
-// so this cannot override a real relevance difference.
-func (ix *Index) breakCoreTies(hits []Hit, ids []int, lexScores []float64) []Hit {
-	sort.SliceStable(hits, func(a, b int) bool {
-		sa, sb := lexScores[ids[a]], lexScores[ids[b]]
-		if sa != sb {
-			return false // keep fused order
-		}
-		return hits[a].Doc.Core && !hits[b].Doc.Core
-	})
-	return hits
 }
 
 // RerankText is what the cross-encoder reads for a candidate: the
@@ -536,16 +523,31 @@ func (d *denseIndex) score(qv []float32, weights [numFields]float64) []float64 {
 
 // --- fusion ------------------------------------------------------------------
 
+// less orders two docs by score, best first; on an exact score tie a core
+// member precedes an add-in one (PRD §08: boost core, never exclude add-ins),
+// and the original index breaks the remaining ties so the order is total.
+// The tie-break lives here, inside each retriever, so it can only ever act on
+// genuinely equal scores -- never across a real relevance difference.
+func (ix *Index) less(a, b int, sa, sb float64) bool {
+	if sa != sb {
+		return sa > sb
+	}
+	if ca, cb := ix.docs[a].Core, ix.docs[b].Core; ca != cb {
+		return ca
+	}
+	return a < b
+}
+
 // topIdx returns the indices of the k highest-scoring eligible docs with a
 // strictly positive score, best first.
-func topIdx(scores []float64, mask []bool, k int) []int {
+func (ix *Index) topIdx(scores []float64, mask []bool, k int) []int {
 	var ids []int
 	for i, s := range scores {
 		if mask[i] && s > 0 {
 			ids = append(ids, i)
 		}
 	}
-	sort.SliceStable(ids, func(a, b int) bool { return scores[ids[a]] > scores[ids[b]] })
+	sort.Slice(ids, func(a, b int) bool { return ix.less(ids[a], ids[b], scores[ids[a]], scores[ids[b]]) })
 	if len(ids) > k {
 		ids = ids[:k]
 	}
@@ -553,7 +555,7 @@ func topIdx(scores []float64, mask []bool, k int) []int {
 }
 
 // rrf fuses ranked lists by reciprocal rank: score(doc) = Σ w_l / (k + rank_l).
-func rrf(lists [][]int, weights []float64, k int) []int {
+func (ix *Index) rrf(lists [][]int, weights []float64, k int) []int {
 	score := make(map[int]float64)
 	var order []int
 	for l, list := range lists {
@@ -564,6 +566,6 @@ func rrf(lists [][]int, weights []float64, k int) []int {
 			score[id] += weights[l] / float64(k+r+1)
 		}
 	}
-	sort.SliceStable(order, func(a, b int) bool { return score[order[a]] > score[order[b]] })
+	sort.Slice(order, func(a, b int) bool { return ix.less(order[a], order[b], score[order[a]], score[order[b]]) })
 	return order
 }

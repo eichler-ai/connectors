@@ -30,7 +30,7 @@ type ListFunctionsIn struct {
 // SearchFunctionsIn is the input schema for the search_functions tool.
 type SearchFunctionsIn struct {
 	InstanceID string `json:"instance_id,omitempty" jsonschema:"instance_id of the target Revit instance; if omitted, any connected instance is used as long as all connected instances share one Revit version -- otherwise this errors and lists the candidates, since results would silently be version-specific"`
-	Query      string `json:"query" jsonschema:"REQUIRED. One plain sentence describing the task, naming the Revit element type and the operation, e.g. \"move an element to a new location\" or \"get every wall in the document\". Matched by sentence embedding plus keyword fusion and reranked by a cross-encoder, so intent and synonyms match without the exact API name; a suspected identifier dropped into the sentence gets an exact-match boost. Avoid bare single keywords."`
+	Query      string `json:"query" jsonschema:"REQUIRED. One plain sentence describing the task, naming the Revit element type and the operation, e.g. \"move an element to a new location\" or \"get every wall in the document\". Matched by sentence embedding plus keyword fusion and reranked by a cross-encoder, so intent and synonyms match without the exact API name; a suspected type or member name dropped into the sentence also scores through the keyword pass. Avoid bare single keywords."`
 	Namespace  string `json:"namespace,omitempty" jsonschema:"scope the search to one namespace, e.g. Autodesk.Revit.DB"`
 	Cursor     string `json:"cursor,omitempty" jsonschema:"opaque pagination cursor echoed back from a prior response's next_cursor"`
 	TopN       int    `json:"top_n,omitempty" jsonschema:"ranked results per page; default 20"`
@@ -149,9 +149,11 @@ type SearchFunctionsOut struct {
 	// reworded retry rather than "the API isn't there".
 	Guidance string `json:"guidance,omitempty"`
 	// Ranker says which ranker produced Results: "semantic" (the broker's
-	// embedding + keyword + cross-encoder index), "lexical" (broker index,
-	// models not bundled), or "keyword-fallback" (the add-in's own ranker,
-	// while the broker index is still building). Guidance explains.
+	// embedding + keyword + cross-encoder index), "semantic-no-rerank" (the
+	// same without the cross-encoder, when its model failed to load),
+	// "lexical" (broker index, models not bundled), or "keyword-fallback"
+	// (the add-in's own ranker, while the broker index is still building).
+	// Guidance explains.
 	Ranker string `json:"ranker,omitempty"`
 	// Notices carries §01 records about how this response was produced --
 	// today, why the broker index did not answer (search-index-building /
@@ -321,10 +323,7 @@ func searchViaIndex(ctx context.Context, r *discovery.Router, search *manager.Ma
 			"search_functions could not rank against the broker index: "+err.Error()).
 			WithRemedy("retry; if it persists, restart the broker and report with its log")}, true
 	}
-	ranker := rankerLexical
-	if res.Dense {
-		ranker = rankerSemantic
-	}
+	ranker := rankerName(res.Dense, res.Reranked)
 	scope := searchScope(in.Query, in.Namespace, res.Fingerprint, ranker)
 	offset, cdrec := parseSearchCursor(in.Cursor, scope)
 	if cdrec != nil {
@@ -336,7 +335,7 @@ func searchViaIndex(ctx context.Context, r *discovery.Router, search *manager.Ma
 		TotalMatched: len(res.Hits),
 		RevitVersion: revitVersion,
 		Ranker:       ranker,
-		Guidance:     semanticGuidance(len(page), len(res.Hits), res.Dense),
+		Guidance:     semanticGuidance(len(page), len(res.Hits), res.Dense, res.Reranked),
 	}
 	if next < len(res.Hits) {
 		out.NextCursor = buildSearchCursor(next, scope)

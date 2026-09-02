@@ -1,3 +1,8 @@
+//go:build !race
+
+// See crossenc.go: hugot/GoMLX trips the race detector's checkptr, so model
+// inference is not exercised under -race.
+
 package crossenc
 
 import (

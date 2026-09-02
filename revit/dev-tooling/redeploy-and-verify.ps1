@@ -370,9 +370,14 @@ if (-not $SkipRelaunch) {
         $lines = @($RevitExe, $DocDest)
         Say "launching $which with document: '$DocDest'"
     } elseif ($RevitExe) {
-        # A bare exe still needs the line, so the signal cannot be mistaken for "no payload".
-        $lines = @($RevitExe)
-        Say "launching $which with no document"
+        # A one-line *.launch signal is, by the launcher agent's contract, "the document to open" --
+        # so an exe-only launch cannot be expressed as one line: it would launch the DEFAULT Revit
+        # (2027) with the exe path as its document, register that instance as if the deploy had
+        # worked, and the marker check (which reads the DLL on disk, not the one loaded) would pass.
+        # Measured once (issue #107's live run): a 2025 deploy without -DocDest came back as a 2027
+        # instance running an old add-in, presenting as `unknown-method` for a method the deployed
+        # DLL demonstrably contained. Refuse rather than guess.
+        throw "-RevitExe without -DocDest cannot be expressed to the launcher agent (a one-line signal means 'document'); pass -DocDest (e.g. the version's fixture .rvt) alongside -RevitExe."
     } else {
         Say "launching $which with no document"
     }

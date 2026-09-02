@@ -1,3 +1,7 @@
+//go:build !race
+
+// !race: the optional cross-encoder stage runs hugot, which trips checkptr.
+
 package semsearch_test
 
 import (
@@ -10,6 +14,7 @@ import (
 	"time"
 
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/semsearch"
+	"github.com/eichler-ai/connectors/revit/mcp-server/internal/semsearch/crossenc"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/semsearch/staticembed"
 )
 
@@ -24,7 +29,9 @@ import (
 //
 // Set SEMSEARCH_POC_DIR to the POC scratch dir (members.json,
 // labels_big.json) and SEMSEARCH_POTION_DIR to the model dir; skipped
-// otherwise. Floors are a little below the Python numbers: tokenizer and
+// otherwise. With SEMSEARCH_MSMARCO_DIR also set, the full pipeline
+// (hybrid + cross-encoder rerank, pool 20) is measured too -- the number the
+// PRD and design note cite for the shipped ranker. Floors are a little below the Python numbers: tokenizer and
 // BM25 details differ slightly, and the point is to catch a broken port,
 // not to pin a single query.
 func TestRealCorpusRecall(t *testing.T) {
@@ -112,6 +119,17 @@ func TestRealCorpusRecall(t *testing.T) {
 	}
 	lex := eval("lexical (BM25F)", func(s string) semsearch.Query { return semsearch.Query{Text: s} })
 	hyb := eval("hybrid RRF (potion)", func(s string) semsearch.Query { return semsearch.Query{Text: s, Embedder: emb} })
+	if msmarco := os.Getenv("SEMSEARCH_MSMARCO_DIR"); msmarco != "" {
+		rr, err := crossenc.Load(context.Background(), msmarco)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rr.Close()
+		full := eval("hybrid + rerank pool 20", func(s string) semsearch.Query { return semsearch.Query{Text: s, Embedder: emb, Reranker: rr} })
+		if full.r1 < hyb.r1 {
+			t.Errorf("reranking lowered recall@1: %d -> %d", hyb.r1, full.r1)
+		}
+	}
 
 	if lex.r10 < 23 {
 		t.Errorf("lexical recall@10 = %d, below the POC-derived floor 23 (Python: 26)", lex.r10)

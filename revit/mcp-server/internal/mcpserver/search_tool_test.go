@@ -70,17 +70,24 @@ func TestPageHitsAndTruncation(t *testing.T) {
 }
 
 func TestSemanticGuidanceBranches(t *testing.T) {
-	empty := semanticGuidance(0, 0, true)
+	empty := semanticGuidance(0, 0, true, true)
 	if !strings.Contains(empty, "does not mean the API is absent") || !strings.Contains(empty, "list_functions") {
 		t.Errorf("empty guidance = %q", empty)
 	}
-	dense := semanticGuidance(20, 120, true)
+	dense := semanticGuidance(20, 120, true, true)
 	if !strings.Contains(dense, "cross-encoder") || !strings.Contains(dense, "next_cursor") || !strings.Contains(dense, "namespace") {
 		t.Errorf("dense guidance = %q", dense)
 	}
-	lex := semanticGuidance(5, 5, false)
+	lex := semanticGuidance(5, 5, false, false)
 	if !strings.Contains(lex, "keyword-only") || strings.Contains(lex, "next_cursor") {
 		t.Errorf("lexical guidance = %q", lex)
+	}
+	noRerank := semanticGuidance(5, 5, true, false)
+	if !strings.Contains(noRerank, "reranker is unavailable") || strings.Contains(noRerank, "cross-encoder re-read") {
+		t.Errorf("no-rerank guidance = %q", noRerank)
+	}
+	if rankerName(true, true) != rankerSemantic || rankerName(true, false) != rankerSemanticNoRerank || rankerName(false, false) != rankerLexical {
+		t.Error("rankerName mapping")
 	}
 	if g := fallbackGuidance(manager.Status{State: manager.StateBuilding}); !strings.Contains(g, "still building") {
 		t.Errorf("building fallback = %q", g)

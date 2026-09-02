@@ -4,9 +4,19 @@
 // binary. It re-reads the query against each of the fused top-N candidates
 // and is the single largest quality lever in the pipeline (design note §3.2).
 //
-// Measured on Apple M1 Max and on the Windows arm64 guest (4 cores), int8
-// ONNX: ~1.0-1.3s for a pool of 20, scaling linearly (~2.4s at 50, ~4.8s at
-// 100) -- which is why semsearch.DefaultRerankPool is 20.
+// Measured (scratchpad spike, then crossenc_test.go which logs the pool-20
+// figure on every gated run): the shipped int8 model on Apple M1 Max costs
+// ~1.2-1.4s at pool 20 and ~3.3s at pool 50; the fp32 model measured 0.95s /
+// 2.1s / 4.3s at pools 20 / 50 / 100 on the M1 Max and 1.0s / 2.4s / 4.8s
+// natively in the Windows arm64 guest (4 cores). int8 was not run in the
+// guest. Cost scales linearly with the pool, which is why
+// semsearch.DefaultRerankPool is 20.
+//
+// hugot's Go backend uses unsafe pointer arithmetic that the race detector's
+// checkptr instrumentation rejects (fatal "pointer arithmetic result points to
+// invalid allocation" inside gomlx matmul), so tests that run a model are
+// excluded from -race builds with a `!race` constraint; the production
+// binary is unaffected.
 package crossenc
 
 import (
@@ -28,8 +38,9 @@ type Reranker struct {
 	mu       sync.Mutex
 }
 
-// batchSize is hugot's inner batch for the pair forward passes. 16 measured
-// no worse than 32 at pool 20 and keeps the padded batch shape small.
+// batchSize is hugot's inner batch for the pair forward passes; 16 keeps the
+// padded batch small for a pool of 20. Not tuned -- no batch-size sweep was
+// run.
 const batchSize = 16
 
 // Load opens the model directory (model.onnx + tokenizer.json, and the

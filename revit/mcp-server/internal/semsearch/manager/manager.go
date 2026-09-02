@@ -67,6 +67,10 @@ const (
 	maxMembers = 400_000
 	// buildTimeout bounds the whole page-and-index run.
 	buildTimeout = 5 * time.Minute
+	// maxBuildAttempts bounds how many times a failed build is retried on
+	// re-register (the add-in re-registers on every document event); after
+	// that the instance stays failed until it disconnects and reconnects.
+	maxBuildAttempts = 3
 	// maxCachedIndexes bounds the fingerprint cache: each index is ~235MB for
 	// the 2027 corpus with dense vectors (76k × 3 fields × 256 × 4B), so this
 	// is up to ~700MB resident. Keep only a few.
@@ -97,8 +101,9 @@ type built struct {
 
 type entry struct {
 	built
-	err  *diag.Record
-	done chan struct{} // closed when the build finished (ready or failed)
+	err      *diag.Record
+	attempts int           // builds started for this instance, including this one
+	done     chan struct{} // closed when the build finished (ready or failed)
 }
 
 // cachedSearch is one ranked list, kept so cursor pages are slices.
@@ -137,20 +142,21 @@ func New(src Source, embedder semsearch.Embedder, reranker semsearch.Reranker, l
 // build is running or an index is ready are no-ops.
 func (m *Manager) OnAttach(instanceID string) {
 	m.mu.Lock()
+	attempts := 0
 	if e, ok := m.byInstance[instanceID]; ok {
 		select {
 		case <-e.done:
-			if e.err == nil {
+			if e.err == nil || e.attempts >= maxBuildAttempts {
 				m.mu.Unlock()
-				return // ready
+				return // ready, or failed for good until the instance reconnects
 			}
-			// failed earlier: allow a rebuild on the next attach
+			attempts = e.attempts // failed earlier: retry, bounded
 		default:
 			m.mu.Unlock()
 			return // building
 		}
 	}
-	e := &entry{done: make(chan struct{})}
+	e := &entry{done: make(chan struct{}), attempts: attempts + 1}
 	m.byInstance[instanceID] = e
 	m.mu.Unlock()
 	go m.build(instanceID, e)
@@ -206,9 +212,11 @@ var ErrNotReady = errors.New("search index not ready")
 // Result is one ranked search over a ready index.
 type Result struct {
 	Hits []semsearch.Hit
-	// Dense reports whether the dense retriever (and so the semantic ranker)
-	// took part; false means lexical-only.
-	Dense bool
+	// Dense reports whether the dense retriever took part; false means
+	// lexical-only. Reranked reports whether the cross-encoder re-scored the
+	// pool -- false when no reranker is wired (e.g. its model failed to load).
+	Dense    bool
+	Reranked bool
 	// Fingerprint identifies the corpus the ranking came from, so a paging
 	// cursor can be tied to exactly this ranked set.
 	Fingerprint string
@@ -234,7 +242,7 @@ func (m *Manager) Search(ctx context.Context, instanceID, query, namespace strin
 	if e.err != nil {
 		return Result{}, ErrNotReady
 	}
-	res := Result{Dense: e.dense, Fingerprint: e.fingerprint}
+	res := Result{Dense: e.dense, Reranked: m.reranker != nil, Fingerprint: e.fingerprint}
 	key := e.fingerprint + "\x00" + namespace + "\x00" + strings.ToLower(strings.TrimSpace(query))
 	if hits, ok := m.cachedSearch(key); ok {
 		res.Hits = hits
@@ -292,7 +300,7 @@ func buildFailed(instanceID string, cause *diag.Record, err error) *diag.Record 
 		msg += ": " + err.Error()
 	}
 	rec := diag.New(diag.SeverityWarning, "search-index-build-failed", source, msg).
-		WithRemedy("search_functions keeps answering from the add-in's keyword ranker; the index is rebuilt when the instance next reconnects")
+		WithRemedy("search_functions keeps answering from the add-in's keyword ranker; the build is retried on the instance's next register event (up to 3 attempts), then when it reconnects")
 	detail := map[string]any{"instance_id": instanceID}
 	if cause != nil {
 		detail["cause"] = cause
@@ -307,7 +315,11 @@ func (m *Manager) build(instanceID string, e *entry) {
 	res, err := m.buildCorpus(ctx, instanceID)
 	if err != nil {
 		e.err = err
-		m.logf("semsearch: index build for instance %s failed after %v: %s", instanceID, time.Since(start).Round(time.Millisecond), err.Message)
+		cause := ""
+		if c, ok := err.Detail["cause"].(*diag.Record); ok && c != nil {
+			cause = " (cause: " + c.Code + ": " + c.Message + ")"
+		}
+		m.logf("semsearch: index build for instance %s failed after %v: %s%s", instanceID, time.Since(start).Round(time.Millisecond), err.Message, cause)
 	} else {
 		e.built = res
 		m.logf("semsearch: index for instance %s ready in %v (%d members, fingerprint %.12s, dense=%v)",

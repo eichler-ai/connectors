@@ -28,10 +28,23 @@ const (
 
 // Ranker values reported on SearchFunctionsOut.Ranker.
 const (
-	rankerSemantic        = "semantic"         // broker index, dense + lexical + cross-encoder
-	rankerLexical         = "lexical"          // broker index, models not bundled in this build
-	rankerKeywordFallback = "keyword-fallback" // add-in's own ranker; index not ready
+	rankerSemantic         = "semantic"           // broker index, dense + lexical + cross-encoder
+	rankerSemanticNoRerank = "semantic-no-rerank" // broker index, dense + lexical; cross-encoder unavailable
+	rankerLexical          = "lexical"            // broker index, models not bundled in this build
+	rankerKeywordFallback  = "keyword-fallback"   // add-in's own ranker; index not ready
 )
+
+// rankerName maps a manager result to the wire value.
+func rankerName(dense, reranked bool) string {
+	switch {
+	case dense && reranked:
+		return rankerSemantic
+	case dense:
+		return rankerSemanticNoRerank
+	default:
+		return rankerLexical
+	}
+}
 
 // pageHits turns the ranked hits into one page of wire results.
 func pageHits(hits []semsearch.Hit, offset, topN int) ([]Member, int) {
@@ -121,10 +134,13 @@ func clampTopN(n int) int {
 // semanticGuidance is the agent-facing note for results served from the
 // broker index. It names the mechanism so the agent can shape its next
 // query (design note §6/§7).
-func semanticGuidance(returned, total int, dense bool) string {
+func semanticGuidance(returned, total int, dense, reranked bool) string {
 	how := "Ranking fused a keyword pass with a sentence-embedding pass over member names, namespaces and summaries, then a cross-encoder re-read your query against the top candidates."
-	if !dense {
+	switch {
+	case !dense:
 		how = "Ranking is keyword-only in this build (the embedding models were not bundled), fused over member names, namespaces and summaries."
+	case !reranked:
+		how = "Ranking fused a keyword pass with a sentence-embedding pass over member names, namespaces and summaries (the cross-encoder reranker is unavailable in this broker, so the top of the list is the fused order)."
 	}
 	if total == 0 {
 		return "No members matched -- the query had no words the index recognises. This does not mean the API is absent. " +

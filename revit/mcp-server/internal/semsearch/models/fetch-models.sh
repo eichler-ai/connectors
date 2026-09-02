@@ -4,7 +4,7 @@
 set -eu
 cd "$(dirname "$0")/assets"
 POTION_REV=bf8b056651a2c21b8d2565580b8569da283cab23
-MSMARCO_REV=main
+MSMARCO_REV=a09144355adeed5f58c8ed011d209bf8ee5a1fec
 fetch() { # url dest sha256
   if [ -f "$2" ] && [ "$(shasum -a 256 "$2" | cut -d' ' -f1)" = "$3" ]; then echo "ok      $2"; return; fi
   mkdir -p "$(dirname "$2")"

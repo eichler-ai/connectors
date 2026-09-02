@@ -349,7 +349,7 @@ Anything under `Eichler.Connectors.Revit` is reached through the `Connector` glo
 - **`search_functions`** — start here when you know *what* you want, not the name. Ranking fuses a
   sentence-embedding pass with a keyword pass, then a cross-encoder reranks — so write `query` as
   **one plain sentence naming the element type and the operation** (`"move an element to a new
-  location"`, not `"move"`); a suspected identifier in it gets an exact-match boost; `namespace`
+  location"`, not `"move"`); a suspected type or member name in it also scores through the keyword pass; `namespace`
   filters before ranking. A weak or empty result does **not** mean the API is absent — rephrase, or
   browse with `list_functions`. Each response says which `ranker` answered (`keyword-fallback` while
   a just-connected instance's index builds) and repeats this as `guidance`.

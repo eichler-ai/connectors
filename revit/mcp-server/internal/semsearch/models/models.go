@@ -12,8 +12,8 @@
 // Models (both permissively licensed):
 //   - minishlab/potion-base-8M (MIT), revision bf8b056 -- static embedder
 //     read by internal/semsearch/staticembed.
-//   - Xenova/ms-marco-MiniLM-L-6-v2 (Apache-2.0) int8 ONNX export of
-//     cross-encoder/ms-marco-MiniLM-L-6-v2 -- reranker read by
+//   - Xenova/ms-marco-MiniLM-L-6-v2 (Apache-2.0), revision a091443, int8
+//     ONNX export of cross-encoder/ms-marco-MiniLM-L-6-v2 -- reranker read by
 //     internal/semsearch/crossenc through hugot, which needs the files on
 //     disk (Materialize).
 package models
