@@ -234,6 +234,10 @@ That path is as important as the seed and moves **ahead of** search in the imple
 (§6): both the extractor and the submit tool emit schema documents, and a review queue can start
 filling before `search_howto` exists to serve it.
 
+**Rejection is immediate and instructive [decided, implemented in step 2]:** a non-compliant
+submission is refused before anything is written, with `howto-invalid` listing every field and rule
+that failed and a remedy naming the field rules, so the agent fixes and resubmits in one round.
+
 ### 4a. What the agent is told (`skill.md`)
 
 One bullet, under the discovery tools, within the token budget (something of equal size comes out):
@@ -423,9 +427,14 @@ writable only to collaborators. Consequences for the growth loop, decided:
 
 ## 5. Decisions the audit needs
 
-1. **Granularity.** One document per subtest (≈33) versus merged task bundles (≈20). Recommendation:
-   one per subtest, with `pitfall`/`negative` split out where marked; small documents rank and read
-   better, and `members` cross-links do the grouping.
+1. **Granularity — decided:** one document per Revit feature or connector mechanism, at moderate
+   depth: a broader usage concept with numbered steps (roughly 3–8 KB of script), not a one-line
+   example, and not a bundle of unrelated tasks. Count is unbounded — every niche feature gets its
+   own how-to, and the corpus is expected to reach hundreds. For the seed this regroups the 3a/3b rows
+   into feature-level documents (e.g. one "groups" document carrying create, edit-propagation and the
+   member-move trap; one "levels, grids and the views they need"); the regrouped list is confirmed at
+   seed time. Triage folds a submission into the document that already teaches its feature and starts
+   a new lineage only for a feature no document covers (§4c step 3).
 2. **Scope — decided:** a how-to can cover *any* relevant usage topic, connector mechanics included.
    The 3b rows are in. `get_skills` keeps the rules and the orientation; the corpus holds worked
    examples of anything an agent does with the connector, whether the subject is a Revit API or the
