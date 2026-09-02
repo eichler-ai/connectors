@@ -225,18 +225,24 @@ throw new System.TimeoutException("failsafe: cancellation never arrived within 6
 		t.Fatalf("non-terminal status carried no execution_id, so nothing can ever poll it: %+v", started)
 	}
 
-	// The §07 v1 fallback rides this exact answer: a timed-out execute with the
-	// run still live must carry the window-inventory notice -- the tier-2 pin of
-	// the inventory's whole reachability story (its unbounded form deadlocked
-	// THIS answer; see Win32WindowInventory). Asserted on the code, per §01.
-	foundInventoryNotice := false
+	// The §07 fallback rides this exact answer: a timed-out execute with the run
+	// still live must say something about Revit's windows -- either the v1
+	// inventory itself (window-inventory-timeout-fallback), or, since #138 caps
+	// the inventory to its wire-budget slice and this long-runner is precisely a
+	// script holding the UI thread, the #149 statement that it was dropped and
+	// why (window-inventory-skipped). Either is the tier-2 pin of the
+	// inventory's reachability story (its unbounded form deadlocked THIS answer;
+	// see Win32WindowInventory); silence is the one outcome §01 forbids.
+	var inventoryCode string
 	for _, n := range started.Notices {
-		if n.Code == "window-inventory-timeout-fallback" {
-			foundInventoryNotice = true
+		if n.Code == "window-inventory-timeout-fallback" || n.Code == "window-inventory-skipped" {
+			inventoryCode = n.Code
 		}
 	}
-	if !foundInventoryNotice {
-		t.Errorf("a timed-out execute with the run still pending/running should carry the window-inventory-timeout-fallback notice (PRD §07 v1); notices: %+v", started.Notices)
+	if inventoryCode == "" {
+		t.Errorf("a timed-out execute with the run still pending/running must carry window-inventory-timeout-fallback or window-inventory-skipped (PRD §07, #149); notices: %+v", started.Notices)
+	} else {
+		t.Logf("window inventory outcome on the timed-out answer: %s", inventoryCode)
 	}
 
 	// Instance busy state (PRD §06): a second execute_script against the same
