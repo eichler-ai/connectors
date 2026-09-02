@@ -381,7 +381,7 @@ public sealed class RequestDispatcher
             _auditTrailTrace?.Invoke(
                 $"[#136] window inventory skipped: only {budgetMs}ms of wire budget left for it " +
                 $"(timeout_ms={timeoutMs}, handler_elapsed_ms={handlerSw.ElapsedMilliseconds})");
-            return null;
+            return new[] { InventorySkippedNotice("wire-budget-too-small", budgetMs, timeoutMs) };
         }
 
         // §07 v2 dismissals flow out through this side channel, not the (abandonable) return value: a
@@ -404,7 +404,11 @@ public sealed class RequestDispatcher
         }
         else
         {
-            inventoryNotices = null;
+            // #149: the drop is stated ON THE WIRE, not only in the log. A pending answer with no inventory
+            // used to be indistinguishable from "nothing owned a window"; this one-string notice costs no
+            // window call (so it cannot blow the budget the drop protects) and tells the agent the one thing
+            // it can act on -- look at Revit's screen. It is also what lets the live harness pin this branch.
+            inventoryNotices = new[] { InventorySkippedNotice("ui-thread-busy", budgetMs, timeoutMs) };
 
             // Budget won: send the pending status without the diagnostic rather than hold the wire call.
             // Report the drop now (§01 observability-over-silence) so a missing window inventory on a timeout
@@ -451,6 +455,36 @@ public sealed class RequestDispatcher
 
         return merged;
     }
+
+    /// <summary>
+    /// #149 (PRD §01, observability over silence): the notice a timed-out pending answer carries when the
+    /// §07 window inventory was NOT taken -- either because #138's wire-budget slice for it was too small
+    /// to start, or because it elapsed with a script holding the UI thread (window-text reads block). Pure
+    /// string, no Win32 call, so it is always affordable. <paramref name="reason"/> is machine-readable in
+    /// detail so a caller (and the harness) can tell the two apart.
+    /// </summary>
+    internal static DiagnosticRecord InventorySkippedNotice(string reason, long budgetMs, long timeoutMs) =>
+        DiagnosticRecord.Create(
+            DiagnosticSeverity.Info,
+            "window-inventory-skipped",
+            DiagnosticSource.Dialogs,
+            reason == "ui-thread-busy"
+                ? $"poll/execute timed out while the execution was still pending/running, and the window inventory " +
+                  $"was dropped after its {budgetMs}ms wire-budget slice elapsed -- a script is holding Revit's UI " +
+                  "thread, so windows could not be read in time. Nothing is known about open dialogs."
+                : $"poll/execute timed out while the execution was still pending/running, and the window inventory " +
+                  $"was not attempted: only {budgetMs}ms of the wire budget remained (timeout_ms={timeoutMs}).",
+            detail: new Dictionary<string, object?>
+            {
+                ["reason"] = reason,
+                ["budget_ms"] = budgetMs,
+                ["timeout_ms"] = timeoutMs,
+            },
+            remedy: new[]
+            {
+                "Check Revit's screen for a modal dialog and dismiss it manually; if none, the script is simply still running.",
+                "A longer timeout_ms leaves more budget for the inventory on the next poll.",
+            });
 
     /// <summary>
     /// PRD §07 v1: enumerates top-level windows owned by this Revit process and wraps them into a

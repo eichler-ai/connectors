@@ -822,6 +822,62 @@ public class RequestDispatcherTests
         Assert.False(windowInventory.LastShouldDismiss!("#32770", "Something Else"));
     }
 
+    /// <summary>
+    /// #149: when #138's wire-budget cap drops the inventory, the pending answer says so on the wire with
+    /// `window-inventory-skipped` (reason ui-thread-busy) instead of carrying nothing -- the silent drop made
+    /// "no windows" and "could not look" indistinguishable, and left the live lifecycle test asserting a
+    /// notice the design no longer guarantees. Deterministic via the same gate the dismissal test uses.
+    /// </summary>
+    [Fact]
+    public async Task PollExecution_InventoryAbandonedByWireBudget_ReportsWindowInventorySkipped()
+    {
+        var executionManager = NewExecutionManager();
+        var bridge = new ExternalEventBridge<ScriptExecutionOutcome>(new FakeExternalEventRaiser());
+        var now = DateTimeOffset.UtcNow;
+        using var gate = new System.Threading.ManualResetEventSlim(false);
+        var windowInventory = new FakeWindowInventory { Gate = gate };
+        var dispatcher = new RequestDispatcher(
+            executionManager,
+            bridge,
+            NewScriptExecutor(),
+            now: () => now,
+            delay: _ => { now = now.AddMilliseconds(200); return Task.CompletedTask; },
+            windowInventory: windowInventory);
+        executionManager.Start("exec-1", "1 + 1", 600_000, now);
+
+        string json;
+        try
+        {
+            json = await dispatcher.DispatchAsync(PollRequest(1, "exec-1", timeoutMs: 500));
+        }
+        finally
+        {
+            gate.Set();
+        }
+
+        Assert.Contains("\"status\":\"pending\"", json);
+        Assert.Contains("\"code\":\"window-inventory-skipped\"", json);
+        Assert.Contains("\"reason\":\"ui-thread-busy\"", json);
+        Assert.DoesNotContain("window-inventory-timeout-fallback", json);
+    }
+
+    [Fact]
+    public void InventorySkippedNotice_NotAttemptedForLackOfBudget_SaysSoWithTheMachineReadableReason()
+    {
+        // The "too little wire budget left to even start" branch depends on the handler's REAL elapsed
+        // stopwatch, which no injected clock reaches, so the branch's decision is pinned through the pure
+        // budget function and its notice through the builder both branches share.
+        Assert.True(RequestDispatcher.ComputeInventoryBudgetMs(handlerElapsedMs: 30_000, timeoutMs: 1_000) < 250);
+
+        var notice = RequestDispatcher.InventorySkippedNotice("wire-budget-too-small", budgetMs: -24_000, timeoutMs: 1_000);
+
+        Assert.Equal("window-inventory-skipped", notice.Code);
+        Assert.Equal(DiagnosticSeverity.Info, notice.Severity);
+        Assert.Contains("was not attempted", notice.Message);
+        Assert.Equal("wire-budget-too-small", notice.Detail!["reason"]);
+        Assert.Contains(notice.Remedy!, r => r.Contains("Check Revit's screen"));
+    }
+
     [Fact]
     public async Task PollExecution_AllowlistedDialogDismissed_ReportedEvenWhenInventoryAbandonedByWireBudget()
     {
