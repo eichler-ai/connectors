@@ -38,12 +38,12 @@ A document carries:
 
 | Field group | Purpose |
 |---|---|
-| `id`, `title`, `task` | identity and the task in agent language — `task` is the primary embedding text |
+| `id`, `rev`, `title`, `task` | lineage id (never renamed) and revision; `task` is the primary search text |
 | `queries` | phrasings that found it and phrasings that *missed*; the misses are the corpus's most valuable rows, they are where API search fails and the how-to earns its keep |
 | `members` | fully-qualified members used, so an API hit and a how-to hit can be cross-linked |
-| `script` | the working C# body, in the connector's script dialect **as of the version it was verified on** — see the dialect note below |
+| `script` | the working C# body in the connector's dialect **as of the version it was verified on** (dialect note below); its comments are the explanation — there is no prose summary |
 | `pitfalls` | one entry per mistake avoided, each with the symptom the agent would otherwise see |
-| `provenance` | where it came from and how it was reviewed |
+| `provenance` | where it came from and how it was reviewed — maintainer-facing, never returned to an agent |
 
 Verification is deliberately **not** a field of the document (§3): it lives in a sidecar keyed by the
 document's id and script hash, so a submitter cannot write it and an append-only corpus file never

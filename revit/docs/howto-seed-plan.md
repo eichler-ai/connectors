@@ -86,8 +86,8 @@ example of a common task; L = covered by `get_skills` or by `describe_function` 
 | 2 | `collect-elements-by-category` | phase A `QueryElementsByCategory` | howto | Find every element of a category in the document | the `FilteredElementCollector` idiom `search_functions` cannot return as a member (design note §3.3; live miss on 2025) | H | accept; add a sibling `collect-elements-by-class` (OfClass) — the recorded miss "get all walls" |
 | 3 | `parameter-get-set-by-name` | phase A `GetSetParameter` | howto | Read and set an element parameter by name | — | M | accept |
 | 4 | `element-delete` | phase A `DeleteElement` | howto | Delete an element and confirm it is gone | — | L | accept as short doc, or fold into #3 as "CRUD basics" — decide |
-| 5 | `shared-parameter-create-and-bind` | phase A `CreateSharedParameter` | howto + negative | Define a shared parameter in a fresh shared-parameter file and bind it to a category | (1) there is **no** `Application.CreateSharedParameterFile`: write the tab-delimited file with `System.IO`, then `OpenSharedParameterFile`; (2) `BuiltInParameterGroup` is gone → `GroupTypeId` (2025+) | H | accept; **split**: the negative is its own `negative` document so "create shared parameter file" resolves to a "stop looking" answer |
-| 6 | `group-edit-propagates` | phase A `EditGroupPropagatesToAllInstances` | howto + negative + pitfall | Edit a group so every placed instance changes | no group-edit-scope API (no `Document.EditGroup`); editing a member directly is allowed with one placed instance (warning) and **refused** with two or more (rolled back as `status=error`); `ElementTransformUtils.MoveElement` on a member's own id silently does nothing — move the group's id instead | H | accept; the no-scope result is a `negative` document, the MoveElement trap a `pitfall` |
+| 5 | `shared-parameter-create-and-bind` | phase A `CreateSharedParameter` | howto | Define a shared parameter in a fresh shared-parameter file and bind it to a category | (1) there is **no** `Application.CreateSharedParameterFile`: write the tab-delimited file with `System.IO`, then `OpenSharedParameterFile`; (2) `BuiltInParameterGroup` is gone → `GroupTypeId` (2025+) | H | accept; the missing-API fact goes in the `task` sentence and the step comment (guideline 5), not a separate document |
+| 6 | `group-edit-propagates` | phase A `EditGroupPropagatesToAllInstances` | howto + pitfall | Edit a group so every placed instance changes | no group-edit-scope API (no `Document.EditGroup`); editing a member directly is allowed with one placed instance (warning) and **refused** with two or more (rolled back as `status=error`); `ElementTransformUtils.MoveElement` on a member's own id silently does nothing — move the group's id instead | H | accept (fleshed out, §3e); the MoveElement trap is its own `pitfall` document |
 | 7 | `room-create-and-tag` | phase B `CreateRoomAndTagIt` | howto | Create a room on a level and tag it | `Level.Create` does **not** create a floor-plan view; without a level-scoped `ViewPlan`, `NewRoomTag`/`NewDimension` fail with a deep `ArgumentNullException`; `NewRoomTag` overload note | H | accept; the view pitfall also stands alone (see #21) |
 | 8 | `door-place-in-wall` | phase B `PlaceDoorInWall` | howto | Place a door family instance hosted in a wall | `FamilySymbol.Activate()` before `NewFamilyInstance` or it throws | H | accept |
 | 9 | `dimension-between-walls` | phase B `DimensionBetweenWalls` | howto | Dimension between two walls in a plan view | needs a view scoped to the level (shares #7's pitfall) | M | accept |
@@ -130,55 +130,62 @@ example of a common task; L = covered by `get_skills` or by `describe_function` 
 | `connector_api_discovery_test.go`, `semantic_search_test.go`, `discovery_test.go` | tests of the discovery tools themselves |
 | `TestDialogsAreStillAutoSuppressed` | behaviour the connector handles without the agent's involvement; a `notices[]` matter, not a task |
 
-### 3d. Negative documents to add explicitly
+### 3d. Recorded "this does not exist" results
 
-Recorded "this does not exist" results deserve their own `negative` documents, because the semantic
-ranker always returns something:
+Each of these is stated in the `task` sentence and the step comment of the how-to that carries the
+route (guideline 5), so the query that would look for the missing API finds the route:
 
-- no `Application.CreateSharedParameterFile` (from #5)
-- no group-edit-scope API (from #6)
-- no floor-plan view is created with a level (from #7)
-- `BuiltInParameterGroup` / `ParameterType` gone in 2025+ (`GroupTypeId` / `SpecTypeId`; from #5 and the skill's own rule)
+- no `Application.CreateSharedParameterFile` → #5
+- no group-edit-scope API → #6
+- no floor-plan view is created with a level → #21
+- `BuiltInParameterGroup` / `ParameterType` gone in 2025+ (`GroupTypeId` / `SpecTypeId`) → #5
+
+No standalone `negative` document is in the seed; the kind stays available for a genuinely
+route-less case.
 
 ### 3e. Worked example: `group-edit-propagates`, fleshed out
 
-Audit row #6 is written out in full as the level-of-detail reference, split as the audit proposed:
+Audit row #6 is written out in full as the level-of-detail reference, as two documents (a third,
+the standalone negative, was dropped after review — see guideline 5):
 
 - [`howto-example-group-edit-propagates.json`](howto-example-group-edit-propagates.json) — the how-to
-  (kind `howto`, ~2 KB script, three pitfalls; no `queries` — the test records the research outcome,
-  not the query strings, and none were invented).
-- [`howto-example-group-edit-mode-api-does-not-exist.json`](howto-example-group-edit-mode-api-does-not-exist.json)
-  — the negative (kind `negative`, no members, the "stop looking" answer with the route to take).
+  (kind `howto`, ~2 KB script whose comments carry the explanation, three one-line pitfalls; no
+  `queries` — the test records the research outcome, not the query strings, and none were invented).
 - [`howto-example-group-member-move-silently-does-nothing.json`](howto-example-group-member-move-silently-does-nothing.json)
-  — the pitfall (kind `pitfall`, no script, one symptom → cause → fix).
+  — the pitfall (kind `pitfall`, no script, one symptom → cause → fix), a separate document because
+  "move an element in a group" is a different task from "edit a group".
 
-All three validate against the schema. None carries a verification stamp: the how-to's script is the
-test's script minus the test-only proof scaffolding (a third instance placed for comparison), so no
-harness run has executed this exact text — the sweep will.
+Both validate. Neither carries a verification stamp: the how-to's script is the test's minus its
+proof scaffolding, so no harness run has executed this exact text — the sweep will.
 
-**Level-of-detail guidelines the example sets** (these are what `/triage-howto-submission` enforces
-at its edit step, §4c):
+**Level-of-detail guidelines the example sets** (what `/triage-howto-submission` enforces at its
+edit step, §4c). The text is optimised for retrieval and for tokens: every field an agent reads
+should either help the ranker find the document or help the agent do the task.
 
-1. `task` is two sentences: the task as an agent would phrase it, then the one-line shape of the
-   answer. It is the embedding text, so it names the element type, the operation and the key member
-   nouns (`GroupType`, `ungroup`) in plain words.
-2. `summary` is the recipe in prose, four to six lines, naming members in order. It is what
-   `describe_howto` shows first; the script is what the agent copies.
-3. `script` is complete and runnable against a blank document: any setup a real task would already
-   have is included but labelled as setup, and numbered comments mark the steps that *are* the
-   how-to. Test-only assertions and comparison scaffolding are removed. Target: under 3 KB; the
-   16 KB bound is for exceptional cases.
-4. One `pitfalls[]` entry per distinct mistake, each with the symptom the agent actually sees
-   (error text quoted where the test recorded it), the cause, and the fix as an instruction. A
-   pitfall that is a task in its own right (the silent `MoveElement`) becomes its own `pitfall`
-   document instead of a fourth entry.
-5. A "this does not exist" result is its own `negative` document, with the member it names as free
-   text in `pitfalls[].members` (since it is not a real member) and the route to take in `summary`.
-6. `queries` records only what a session actually typed and saw, in the words used; nothing is
-   invented to make the record look complete. Where the source is a test comment rather than a
-   transcript, the entry is kept minimal.
-7. `provenance.ref` names the test function, and — for a document derived from a *comment* rather
-   than from executed code (the pitfall here) — says so.
+1. **`id` is a lineage, `rev` is the version.** The id is a kebab slug chosen once and never renamed;
+   an improvement is the same id with `rev + 1`. References (`describe_howto`, local overrides, links
+   between documents) therefore survive edits. Uniqueness is a triage check against the shared corpus
+   (submit_howto suffixes `-2`, `-3` … on a local/embedded clash).
+2. **`task` is the search text**: one or two plain sentences naming the element type, the operation,
+   and the key member nouns of the answer (`GroupType`, `ungroup`). No preamble, no rationale.
+3. **The script's comments are the explanation.** There is no `summary` field. Setup a real task
+   would already have is included but labelled as setup; numbered comments mark the recipe's steps
+   and say *why* at the step where it matters ("no group edit mode in the API; in-place edits are
+   refused once two instances exist"). Test-only assertions and comparison scaffolding are removed.
+   Target well under 3 KB.
+4. **Pitfalls are one line each**: the symptom the agent sees (error text as recorded), the cause,
+   the fix as an instruction. A pitfall that is a task in its own right becomes its own `pitfall`
+   document.
+5. **No standalone negative when a how-to exists.** "There is no X API" belongs in that how-to's
+   `task` sentence and step comment, where the query that would have found the negative finds the
+   route instead. `kind: negative` is reserved for "the API cannot do this and there is no route".
+6. **`queries` records only what a session actually typed and saw.** Nothing is invented to make
+   the record look complete.
+7. **`provenance` is maintainer-facing**: never returned to an agent, never indexed. It names the
+   source test and, for a document derived from a comment rather than executed code, says so.
+8. **Indexed fields**: `title`, `task`, `pitfalls` text, `members`, and the script's comment lines
+   (code stripped). What `search_howto` returns per hit: `id`, `rev`, `title`, `task`, `members`,
+   `verified_on`, `source`. What `describe_howto` returns: those plus `script` and `pitfalls`.
 
 ## 4. Growth: `submit_howto` → tagged issue → `/triage-howto-submission` → corpus
 
@@ -194,8 +201,8 @@ One bullet, under the discovery tools, within the token budget (something of equ
 > - **`submit_howto`** — when a task needed more than one search, a reformulated query, or a pitfall
 >   you hit and got past, hand it in: the task in one sentence, the working script, the members, the
 >   queries that missed and the one that hit, the pitfall as symptom → cause → fix. To improve an
->   existing how-to (a missing pitfall, a better script, a version note), pass its `id` as `supersedes`
->   with only the fields you changed. It saves to your own how-to corpus at once and, with
+>   existing how-to (a missing pitfall, a better script, a version note), pass its `id` with only the
+>   fields you changed; the tool submits it as the next revision. It saves to your own how-to corpus at once and, with
 >   `confirm_submission: true`, prepares a scrubbed GitHub issue for the maintainers to review.
 >   Submit **after** the script ran successfully, never speculatively.
 
@@ -210,8 +217,8 @@ than the first line.
 submit_howto(
   title, task, script, members[],           # required for a NEW document
   pitfalls[]?, queries?, tags?, summary?,   # schema fields, optional
-  supersedes?,                              # id of an existing how-to this one improves (see below)
-  change_note?,                             # one sentence: what changed and why (required with supersedes)
+  id?,                                      # to IMPROVE an existing how-to: its id (see below)
+  change_note?,                             # one sentence: what changed and why (required with id)
   instance_id?,                             # which Revit verified it (defaults as for discovery)
   confirm_submission: bool                  # outward half; default false
 ) -> {
@@ -227,22 +234,22 @@ submit_howto(
 }
 ```
 
-**Improving an existing how-to.** With `supersedes: <id>`, the tool loads that document (local first,
-then the embedded/shared corpus), overlays only the fields the call supplied, and produces a
-complete new document whose `supersedes` points at the old one — the corpus's append-only edit
-shape (design note §6). So an agent that found one missing pitfall submits just `pitfalls` and
-`change_note`; `title`, `task`, `script` and the rest carry over. Rules: the new document gets a
-fresh id derived from the old one (`<old-id>-2`, then `-3` …) unless the caller names one; a
-`script` change without a successful run in this session is accepted locally but flagged
-`unverified-script-change` in the issue; `queries` and `pitfalls` are *merged* (appended, de-duplicated
-by text) rather than replaced, since they are evidence; `change_note` becomes the first line of the
-issue body and the label gains `howto-edit` beside `howto-submission`.
+**Improving an existing how-to.** With `id: <existing id>`, the tool loads that document (local
+first, then the embedded/shared corpus), overlays only the fields the call supplied, and produces
+the **next revision**: same `id`, `rev + 1` — the corpus's append-only edit shape (design note §6).
+So an agent that found one missing pitfall submits just `id`, `pitfalls` and `change_note`; `title`,
+`task`, `script` and the rest carry over. Rules: a `script` change without a successful run in this
+session is accepted locally but flagged `unverified-script-change` in the issue; `queries` and
+`pitfalls` are *merged* (appended, de-duplicated by text) rather than replaced, since they are
+evidence; `change_note` becomes the first line of the issue body and the label gains `howto-edit`
+beside `howto-submission`. `supersedes` is not an agent-facing field: it is set only at triage when
+two lineages turn out to be one.
 
 Behaviour, in order:
 
 1. **Validate** against `howto-schema.json`; a failing field is a `howto-invalid` error naming it.
-   With `supersedes`, also check the target exists and is not itself superseded (point at the head
-   of the chain instead, and say so).
+   With `id`, also check the target exists and is the lineage's latest revision (else base the edit
+   on the latest and say so).
 2. **Write locally first** (`provenance.kind: "local"`), so the submitter's own `search_howto` serves
    it immediately. Re-submitting the same `id` overwrites the local file and says so.
 3. **Session stamp**: if this session executed exactly this `script` text and it succeeded, append
@@ -282,19 +289,18 @@ choose issues itself, and loads `revit-connector-development` for the harness ru
    a one-line edit — but nothing enters the corpus without a passing run on at least one version.
    This is the `howto-reviewed` gate made concrete: the human reads before the script runs.
 4. **De-duplicate, or apply the edit.** For a new document, search the existing corpus (`search_howto`
-   once it exists; a `members`-set match until then): a near-duplicate becomes a `supersedes` of the
-   older document if it is better, or a comment pointing at the existing one if not. For a
-   `howto-edit` submission, diff the new document against the one it supersedes (the command prints
-   the field-level diff), and judge the *change*, not the whole document: a good pitfall added to an
-   otherwise unchanged how-to is accepted on the strength of the pitfall; a rewritten script is
-   re-run before it replaces the old one (step 3 applies to the new script text).
+   once it exists; a `members`-set match until then): a near-duplicate is either folded into the
+   existing lineage as its next revision (with `supersedes` on the merged-away id if it had one) or
+   answered with a comment pointing at the existing document. For a `howto-edit` submission, diff the
+   new revision against the previous one (the command prints the field-level diff) and judge the
+   *change*, not the whole document: a good pitfall added to an otherwise unchanged how-to is accepted
+   on the strength of the pitfall; a rewritten script is re-run before it replaces the old one.
 5. **Edit.** The maintainer edits `task`, `title`, `pitfalls` wording and `tags` in place — this is
    where prose quality is enforced, and it is a human edit, not the agent's. `queries.miss` is kept
    verbatim: it is evidence, not prose.
 6. **Append and stamp.** Append the final document to `revit/howto/corpus.jsonl` with
    `provenance.kind: "submission"`, `ref` = the issue URL, `reviewed_by` = the maintainer's login
-   (for an edit, `supersedes` set, so search hides the old document from then on and
-   `describe_howto` on the old id points forward);
+   (for an edit, the same `id` at `rev + 1`; readers serve the highest rev);
    append the harness stamp from step 3 to `revit/howto/verified.jsonl`; open one PR per triage run
    listing the issues it closes (`Closes #171`), CI validates both files.
 7. **Report.** Issues closed, documents added, documents superseded, and — the same net-count

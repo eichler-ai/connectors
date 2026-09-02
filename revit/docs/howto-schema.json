@@ -8,6 +8,7 @@
   "required": [
     "schema_version",
     "id",
+    "rev",
     "kind",
     "title",
     "task",
@@ -25,7 +26,7 @@
     "id": {
       "type": "string",
       "pattern": "^[a-z0-9][a-z0-9-]{2,79}$",
-      "description": "Stable kebab-case slug, unique across the shared corpus. A local document with the same id overrides the shared one for that user (supersedes_shared on the hit)."
+      "description": "Lineage id: a kebab-case slug chosen when the document is first created and never renamed. Edits keep the id and bump `rev`, so a reference (describe_howto, a local override, a link in another document) stays valid across revisions. Uniqueness is checked against the shared corpus at triage and against local + embedded corpora by submit_howto, which appends -2, -3 … on a clash."
     },
     "kind": {
       "type": "string",
@@ -34,7 +35,7 @@
         "negative",
         "pitfall"
       ],
-      "description": "howto: a working path to a task. negative: the API does NOT offer this; here is what to do instead (the ranker always returns something, so 'stop looking' must be a document). pitfall: a single mistake and its fix, without a full task script."
+      "description": "howto: a working path to a task (the normal kind). pitfall: a single mistake and its fix, without a full task script, for a mistake that is a task in its own right. negative: reserved for 'the API cannot do this and there is no route' -- when a how-to exists, its task sentence states the missing API and no separate negative document is written."
     },
     "title": {
       "type": "string",
@@ -46,12 +47,7 @@
       "type": "string",
       "minLength": 20,
       "maxLength": 600,
-      "description": "The task in agent language, one to three plain sentences naming the element types and the operation. Primary embedding text for search."
-    },
-    "summary": {
-      "type": "string",
-      "maxLength": 1200,
-      "description": "Optional: the approach in prose, for describe_howto. Not indexed."
+      "description": "The task in agent language: one or two plain sentences naming the element type, the operation, and the key member nouns of the answer. This is the primary search text, so every word should earn its place; no preamble, no rationale."
     },
     "queries": {
       "type": "object",
@@ -90,7 +86,7 @@
     "script": {
       "type": "string",
       "maxLength": 16384,
-      "description": "The C# script body in the connector's dialect: ambient transaction (never open your own), `Document`/`UIApplication`/`Connector` globals, `return` a value. Required for kind=howto; optional otherwise. 16 KB bound.",
+      "description": "The complete, runnable C# script body in the connector's current dialect (reads at top level; writes inside Connector.WithTransaction; return a value). Comments in the script ARE the explanation: label setup as setup, number the steps of the recipe, and say why at the step where it matters. There is no separate prose summary. Required for kind=howto. 16 KB bound; aim well under 3 KB.",
       "minLength": 1
     },
     "script_language": {
@@ -229,12 +225,13 @@
             }
           }
         }
-      ]
+      ],
+      "description": "Maintainer-facing only: never returned by search_howto or describe_howto, and never indexed."
     },
     "supersedes": {
       "type": "string",
       "pattern": "^[a-z0-9][a-z0-9-]{2,79}$",
-      "description": "id of the document this one replaces. The shared corpus is append-only; an edit is a new document pointing at the old one, and search hides superseded documents."
+      "description": "Lineage MERGE only: the id of another lineage this one replaces (a duplicate found at triage). Ordinary edits do not use this; they bump rev."
     },
     "created_at": {
       "type": "string",
@@ -245,6 +242,11 @@
       "type": "string",
       "format": "date-time",
       "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$"
+    },
+    "rev": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Revision of this lineage, from 1. The corpus may hold several revisions of one id; readers serve the highest. An improvement is the same id with rev+1 (submit_howto handles this)."
     }
   },
   "allOf": [

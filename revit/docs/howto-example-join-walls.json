@@ -1,10 +1,10 @@
 {
   "schema_version": 1,
   "id": "walls-closed-footprint-confirm-joins",
+  "rev": 1,
   "kind": "howto",
   "title": "Model a closed rectangular wall footprint and confirm its corners are allowed to join",
   "task": "Create four walls forming a closed rectangular loop on a level, then confirm that each wall's ends are allowed to join at the corners. Use WallUtils to check joins, not JoinGeometryUtils.",
-  "summary": "Pick a Basic wall type from the document, create four walls from bound lines whose endpoints chain p1->p2->p3->p4->p1, regenerate, then ask WallUtils.IsWallJoinAllowedAtEnd for both ends (0 and 1) of every wall. Loop closure is checked geometrically from each wall's LocationCurve endpoints.",
   "queries": {
     "miss": [
       {
