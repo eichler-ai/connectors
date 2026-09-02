@@ -8,13 +8,16 @@ to hold them — it sits at its token budget covering basic usage, and the Revit
 too large for a skill file or even tens of them. The corpus is searched on demand, exactly like the
 API, and the two are ranked by the same pipeline.
 
-Companion files: [`howto-schema.json`](howto-schema.json) (the document schema, JSON Schema 2020-12)
-and [`howto-example-join-walls.json`](howto-example-join-walls.json) (one real document, extracted by
-hand from `test-harness/validation_corpus_test.go` case #2 — validated against the schema). Two
-honesty notes on the example: its `verified.2027` stamp is dated to the test file's last commit
-rather than to a recorded harness run, because no run timestamp exists to cite yet (§3 is what would
-create one); and its `script` replaces the test's fixture preamble with `var doc = Document;`, so the
-hash is of the how-to's script, not the test's literal.
+Companion files: [`howto-schema.json`](howto-schema.json) (the document schema, JSON Schema 2020-12),
+[`howto-verification-schema.json`](howto-verification-schema.json) (the harness-owned verification
+sidecar, §3) and [`howto-example-join-walls.json`](howto-example-join-walls.json) (one real document,
+extracted by hand from `test-harness/validation_corpus_test.go` case #2 and validated against the
+schema). The example carries **no verification**: its `script` replaces the test's fixture preamble
+with `var doc = Document;`, so no harness run has executed that exact text, and a stamp for it would be
+declared rather than earned — which §3 forbids. The first sweep (§3) will write the stamp.
+
+This note was revised after an independent review (PR #159); the review's design questions are
+carried in §9 rather than answered by assertion.
 
 Throughout: **[decided]** is settled by this note, **[open]** needs a decision before implementation.
 
@@ -38,8 +41,11 @@ A document carries:
 | `members` | fully-qualified members used, so an API hit and a how-to hit can be cross-linked |
 | `script` | the working C# body, in the connector's script dialect (ambient transaction, `Connector` global) |
 | `pitfalls` | one entry per mistake avoided, each with the symptom the agent would otherwise see |
-| `verified` | per Revit version: when, how, against which script hash — see §3 |
 | `provenance` | where it came from and how it was reviewed |
+
+Verification is deliberately **not** a field of the document (§3): it lives in a sidecar keyed by the
+document's id and script hash, so a submitter cannot write it and an append-only corpus file never
+needs editing.
 
 The full schema is `howto-schema.json`; the example document shows every field populated from a
 real case.
@@ -79,14 +85,30 @@ Extraction is a build step, not runtime: the JSONL it produces is committed unde
 
 ## 3. Version tags are earned by running, not declared
 
-**[decided]** A how-to's `verified` map has one entry per Revit version, and only the harness writes
-it. `TestHowToCorpusScriptsStillRun` **[proposed]** runs every document's `script` against whichever
-Revit is connected (the same `--revit-version` sweep the rest of tier 2 uses), and on success stamps
-`verified[<version>] = {at, script_sha256, by: "harness"}`. A script that fails is not deleted: the
-entry is marked `failed` with the diagnostic, and the document keeps serving for the versions where it
-still passes, with the failure visible to the agent. That is the mechanism for "constantly updated
-with fixes": drift (the `BuiltInParameterGroup` → `GroupTypeId` class of change) is detected by the
-same thing that detects it in the connector's own code.
+**[decided]** Verification records live in a **sidecar**, `howto-verified.jsonl`, one line per
+(document `id`, `script_sha256`, Revit version) — schema in `howto-verification-schema.json`. Only the
+harness writes it (or, weaker and local-only, the submitting session — §6). The corpus file itself is
+never edited to record a run, which is what lets §6 keep it append-only; the broker joins the two at
+index time, and a stamp whose hash no longer matches the document's script is stale and ignored.
+
+`TestHowToCorpusScriptsStillRun` **[proposed]** runs every document's `script` against the connected
+Revit — the version comes from the instance record the harness already reads (`revit_version` on
+`list_instances`), not from a flag — and appends a `passed` or `failed` (with the §01 diagnostic) line
+for that version. A failing script is not deleted: the document keeps serving for the versions where
+it passes, with the failure visible to the agent. That is the mechanism for "constantly updated with
+fixes": drift (the `BuiltInParameterGroup` → `GroupTypeId` class of change) is detected by the same
+thing that detects it in the connector's own code.
+
+**Fixture rule [decided]:** the sweep never runs a script against the operator's document. It creates
+a throwaway fixture document (the harness's `createBlankFixtureDocument`), routes the script at it by
+`document_id`, and closes it afterwards. The script text is executed unchanged — `Document` resolves
+to the routed fixture — so the hash the stamp binds to is the hash the agent will read. A how-to
+whose script cannot run against a blank fixture (needs a family, a link, a workshared central) says so
+in `task` and is skipped by the sweep with a `not-sweepable` note rather than stamped `failed`.
+
+A passing run proves the script executes without error and returns a non-empty value. It does not
+prove the result is *right*; that is what review (§6) is for, and why a `fix` sentence can go stale
+while its script still passes (§9).
 
 At query time the connected instance's `revit_version` is a **pre-ranking preference**, not a filter:
 documents verified on that version rank first; others are still returned, labelled with the versions
@@ -98,18 +120,20 @@ versions; they are not verification and are shown as such.
 
 ## 4. Search: the same pipeline, a second corpus
 
-**[decided]** The how-to corpus is a second `semsearch.Index`, built at broker start and rebuilt on
-corpus change. Fields for BM25F and the static embedder: `title`, `task` (highest weight), `pitfalls`
-text, and `members` (which gives an exact-name hit when the agent already suspects a member). The
-cross-encoder reranks the fused top 20 exactly as for the API. Cost is negligible: a corpus of a few
-thousand documents embeds in well under a second with the static model, so rebuilding on every update
-is fine.
+**[decided]** The how-to corpus is a second index built by the same pipeline. Today's
+`semsearch.Index` is typed to the API `Doc` with three fixed fields and a `namespace` mask, so this
+means **generalising** it (a field-set per corpus, and a version *preference* — a rank boost, which
+the API index does not have today) rather than instantiating it twice. Fields for BM25F and the static
+embedder: `title`, `task` (highest weight), `pitfalls` text, and `members` (an exact-name hit when the
+agent already suspects a member). The cross-encoder reranks the fused top 20 exactly as for the API.
+Cost is negligible: a few thousand documents is two orders of magnitude below the 68k-member API
+corpus that embeds in ~1.1 s (§10.3 of the ranking note), so rebuilding on every update is fine.
 
 Two tools **[proposed]**, mirroring the API pair:
 
 - `search_howto(query, revit_version?, cursor?, top_n?)` → short hits: `id`, `title`, `task`,
-  `members`, `verified_on[]`, `score`, `source` (`shared` / `local`), plus the same `ranker` and
-  `guidance` fields `search_functions` carries.
+  `members`, `verified_on[]` (from the sidecar), `score`, `source` (`seed` / `shared` / `local`), plus
+  the same `ranker`, `guidance` and `notices[]` fields `search_functions` carries.
 - `describe_howto(id)` → the full document.
 
 **Cross-promotion [open]:** `search_functions` could surface the top how-to hit when its rerank
@@ -126,25 +150,45 @@ query returns only members.
 | **local** | `<app-data>/howto/local/*.json`, one document per file | `submit_howto` writes here first; a person can also drop files | unreviewed, the user's own |
 | **seed** | `revit/howto/corpus.jsonl` in the repo, embedded in the broker | harness extraction (§2) | reviewed, harness-verified; the offline floor |
 
-**Distribution [decided]:** the shared corpus is **not embedded** in the broker — it changes far more
-often than the broker does. The broker already polls GitHub releases every 6 hours
-(`internal/updatecheck`); the same loop fetches `howto-corpus.jsonl` when its release tag or ETag
-changes, validates every line against the schema (a document that fails validation is skipped and
-logged, never fatal), caches it under `<app-data>/howto/shared/`, and reindexes. Offline, the cached
-copy serves; with no cache, the embedded seed serves. The corpus carries `corpus_version`
-(monotonic) and `schema_version`; a broker older than the schema serves the documents it can parse
-and says so in `guidance`.
+**Distribution [decided, with one open question]:** the shared corpus is **not embedded** in the
+broker. The intent is that it changes more often than the broker; **whether it does is §9 D1** — if
+the corpus only ever ships inside a broker release, the fetch machinery below buys nothing and the
+seed alone suffices. Assuming it does: the broker's existing 6-hourly release poll
+(`internal/updatecheck`) is extended — today it reads only `tag_name` through a 1 MB limit and has no
+asset or ETag handling — to also fetch the corpus asset with its digest, and a corpus-only release
+must **not** flip the ribbon's "update available" (PRD §12), so corpus releases are tagged distinctly
+(`howto-vN`) and the broker-update check ignores them. Every line is validated against the schema; a
+line that fails is skipped and counted, never fatal, and the count reaches the agent as a
+`notices[]` record. The cache is `<app-data>/howto/shared/`; offline, the cache serves; with no
+cache, the embedded seed serves.
 
-**Local corpus:** anything under `<app-data>/howto/local/` is indexed alongside, marked
-`source: "local"` on every hit so the agent knows it is unreviewed, and re-scanned when a file changes
-(mtime check on search is enough; no watcher). An `id` collision between local and shared resolves to
-local, with a `supersedes_shared: true` flag on the hit — that is the intended way for a user to
-override a shared how-to for their own environment. Local documents are never uploaded except through
-the explicit submit flow below.
+**The corpus is code the agent will run, so it is verified like code [decided]:** the release pipeline
+already publishes `checksums.txt` and Authenticode-signs the binaries; the corpus asset's sha256 is
+listed there and the broker refuses a corpus whose digest does not match. A signature on the corpus
+itself is the stronger follow-up once a real code-signing certificate replaces the self-signed one.
+
+**Forward compatibility [decided]:** documents allow unknown top-level fields, so an older broker reads
+a newer corpus, validates the fields it knows, and reports `howto-corpus-newer-than-broker` in
+`guidance` and `notices[]` rather than skipping the whole corpus.
+
+**Local corpus:** PRD §09 keeps human-browsed files under the exchange root, never app-data, so the
+local corpus lives at `<exchange-root>/howto/` (beside `imports/` and `exports/`), one document per
+`.json` file. It is indexed alongside, marked `source: "local"` on every hit so the agent knows it is
+unreviewed, and re-scanned when a file changes (mtime check on search; no watcher). An `id` collision
+between local and seed/shared resolves to local with `supersedes_shared: true` on the hit — the
+intended way to override a shared how-to for one environment; two local files with one `id` is a
+validation error naming both files. Local documents are never uploaded except through the explicit
+submit flow below.
+
+**Local documents are an injection surface.** A how-to is text the agent reads and a script it may
+run, and anyone who can write to the exchange root can plant one. `source: "local"` on the hit is
+the minimum; `skill.md` tells the agent that local how-tos carry no review and their scripts should be
+read before being run. Whether that is enough is §9 D4.
 
 **Bounds** (CONVENTIONS.md): a document's `script` ≤ 16 KB; a corpus ≤ 20,000 documents / 64 MB;
-the local directory ≤ 2,000 files. Beyond any bound the broker logs and stops loading rather than
-degrading silently.
+the local directory ≤ 2,000 files. Beyond any bound the broker stops loading, logs, and reports the
+truncation as a `notices[]` record on every `search_howto` response (the precedent is
+`search_functions`' `search-index-building` notice), never silently.
 
 ## 6. Submission: `submit_howto` → review queue → shared corpus
 
@@ -157,49 +201,86 @@ private model data, and cheap for the maintainer.
 submit_howto(title, task, script, members[], pitfalls[]?, queries?, notes?, confirm_submission: bool)
 ```
 
-1. The broker assembles a schema-valid document with `provenance.kind = "submission"`, `verified`
-   set for the connected instance's version only if the exact `script` just ran successfully in this
-   session (the broker has the execution record; that is `by: "session"`, weaker than `harness` and
-   shown as such), and writes it to the **local corpus immediately**. The submitter benefits at once
-   whether or not the shared review ever happens.
-2. **Outward-facing, so confirmation-gated** — the same shape as `confirm_lifecycle_actions`: without
-   `confirm_submission: true` the tool stops after step 1 and returns the document plus a
-   `howto-submission-confirmation-required` record. Posting to a public issue tracker is a
-   side-effect the transaction model does not cover.
-3. **Scrub before sending.** The broker rewrites absolute paths to placeholders, drops anything that
-   looks like a document title, project path, user name or machine name, and returns the scrubbed
-   document in the response so the user can see exactly what will leave the machine. Scripts that
-   still contain a UNC or drive path after scrubbing are refused with a `remedy` naming the line.
+1. The broker assembles a schema-valid document with `provenance.kind = "local"` and writes it to
+   the **local corpus immediately**; the submitter benefits at once whether or not the shared review
+   ever happens. If the exact `script` text was executed successfully in this session, the broker
+   appends a `by: "session"` line to the local verification sidecar. Today's execution record keeps
+   status and result but not the script text or its hash, and is evicted after 200 runs or 10
+   minutes, so this needs the broker to retain the sha256 of each executed script for the record's
+   lifetime **[proposed]**; a `session` stamp is weaker than `harness`, shown as such, and never
+   promoted to the shared corpus.
+2. **Outward-facing, so confirmation-gated.** Without `confirm_submission: true` the tool stops after
+   step 1 and returns the document plus a `howto-submission-confirmation-required` record. This
+   differs from `confirm_lifecycle_actions`, which refuses *before* any side effect: here the local
+   write is the intended non-gated half, and only the outward half is gated.
+3. **Scrub, then show.** The broker rewrites absolute and UNC paths to placeholders and drops anything
+   that looks like a document title, project path, user name, machine name or bind address, across
+   **every** text field — `task`, `summary`, `pitfalls[].symptom` (which §01 diagnostics deliberately
+   fill with concrete identifiers), `queries[].text` and the script's string literals — and returns
+   the scrubbed document so the user sees exactly what will leave the machine. Anything that still
+   matches a path or host pattern after scrubbing is refused with a `remedy` naming the field and
+   line. The scrubber is a filter, not a guarantee; the confirmation step is where the user reads it.
 4. **Open the review-queue issue.** One GitHub issue in this repo, label `howto-submission`, title
    from `title`, body = the scrubbed document in a fenced ` ```json ` block plus the target version.
-   **Credentials [decided]:** the connector never holds a repo token. If the `gh` CLI is present and
-   authenticated on the machine, the broker uses it (`gh issue create`); otherwise it returns a
-   prefilled `https://github.com/eichler-ai/connectors/issues/new?...` URL for the person to open
-   themselves. Either way the response carries the issue URL or the prefilled URL as `queue_ref`.
-5. **Review** happens on the issue, by a maintainer or a scheduled review agent: schema check, a
-   harness run of the script against the tagged version (which is what earns `verified.by: "harness"`),
-   de-duplication against existing documents (same `members` set + similar `task` embedding), and an
-   edit pass on `task`/`pitfalls` wording. Accepting is a PR that appends the document to
-   `revit/howto/corpus.jsonl` **[decided: append-only in git; edits are new documents with
-   `supersedes`]**, so the file's history is the audit trail, and the next release publishes it.
+   **Credentials [decided]:** the connector never holds a repo token and never spawns `gh` — a
+   PATH-resolved subprocess is a new capability class for the broker, and posting through the user's
+   own login would attach the identity the scrubber just removed. The tool returns a prefilled
+   `issues/new` URL as `queue_ref` for the person to open; because URLs cap at roughly 8 KB and a
+   script may be 16 KB, the prefill carries title, task, members and pitfalls, and the body asks the
+   person to paste the JSON the tool also wrote to `<exchange-root>/howto/outbox/<id>.json`.
+   Attribution is opt-in (`provenance.submitter`), never inferred.
+5. **Review** happens on the issue and is **human-gated before any execution [decided]**: a
+   maintainer reads the submission and applies `howto-reviewed`; only then does the review agent
+   (a `/schedule` routine is the natural home) run the script — against a disposable fixture
+   document on a review VM holding no real model data — which is what earns a `harness` stamp;
+   then de-duplicates (same `members` set plus similar `task` embedding), edits `task`/`pitfalls`
+   wording, and opens the append PR for a human to merge. Running an arbitrary public submission
+   under the `Connector` global without that label would be remote code execution from a public
+   queue. Accepting appends the document to `revit/howto/corpus.jsonl` **[decided: append-only in
+   git; edits are new documents with `supersedes`]**, so the file's history is the audit trail;
+   uniqueness of `id` across the file is a CI check on the PR.
 
-The scheduled review agent is the natural place for `/schedule`: a routine that triages
-`howto-submission` issues, runs the harness case, and opens the append PR for a human to merge.
+## 7. Relationship to the ranking note
 
-## 7. What is not in scope
+[`search-ranking-redesign.md`](search-ranking-redesign.md) §4 sketched the how-to index as "embedded
+once, shipped" with the two result streams merged into one `search_functions` response. This note
+supersedes both points: the shared corpus is fetched rather than embedded (§5, with §9 D1 open), and
+the two corpora get separate tools with cross-promotion deferred (§4). The ranking note's §10.4
+entry for 8.5 points here.
+
+## 8. What is not in scope
 
 - Ranking quality for how-tos is not measured yet; the API ranking corpus (`ranking-corpus.tsv`)
   pattern applies once there are enough documents, and the recorded misses are its seed.
 - No authoring UI, no Markdown front-matter format, no per-document licensing beyond the repo's.
 - Cross-promotion into `search_functions` (§4, open).
 
-## 8. Implementation order [proposed]
+## 9. Open decisions (from review)
 
-1. Schema + validator package (Go), and the harness extractor producing the seed
-   `revit/howto/corpus.jsonl` from the annotated tests (≈ a dozen documents). Tier-1 tests on the
-   validator and extractor.
-2. Second index + `search_howto` / `describe_howto`, with the version preference; `skill.md` gains
-   one bullet. Live: the pitfall queries recorded in the harness must return their document at rank 1.
-3. Local corpus directory + `TestHowToCorpusScriptsStillRun` (the verification stamp).
-4. Shared corpus as a release asset + the update loop.
-5. `submit_howto` with the gate, the scrubber, and the `gh`/prefilled-URL queue.
+- **D1 — corpus cadence.** Does the shared corpus really ship more often than the broker? If not,
+  drop §5's fetch machinery and ship the corpus embedded, in the broker release. Decide from the
+  submission rate after the seed lands; the design works either way.
+- **D2 — trust model for stamps.** The sidecar makes it structural (only the harness writes it), but
+  who runs the harness that writes the *shared* sidecar, and how does the broker know a sidecar line
+  came from it? Today: it ships in the same digest-checked release asset. A signed sidecar is the
+  stronger form.
+- **D3 — public-queue hygiene.** Spam and volume on `howto-submission` issues; rate limits; the
+  human label as the only gate before execution; attribution opt-in.
+- **D4 — local corpus as a prompt-injection surface.** Is `source: "local"` plus a `skill.md` warning
+  enough, or should local scripts be shown but never auto-run?
+- **D5 — prose drift.** A `fix` or `symptom` can go stale while the script still passes the sweep;
+  nothing detects that except re-review. Consider a `reviewed_at` age shown on the hit.
+
+## 10. Implementation order [proposed]
+
+1. Schemas + validator package (Go; document and sidecar), and the harness extractor producing the
+   seed `revit/howto/corpus.jsonl` from the annotated tests (≈ a dozen documents), with a check that a
+   seed document's script hash matches its source test. Tier-1 tests on the validator and extractor.
+2. Generalise `semsearch.Index` (field set per corpus, version preference) + `search_howto` /
+   `describe_howto`; `skill.md` gains one bullet. Live: the pitfall queries recorded in the harness
+   must return their document at rank 1.
+3. `TestHowToCorpusScriptsStillRun` with the fixture rule, writing the sidecar; local corpus directory.
+4. Shared corpus as a digest-checked, distinctly-tagged release asset + the extended update loop —
+   only if D1 says the cadence warrants it.
+5. `submit_howto` with the gate, the scrubber, the outbox file and the prefilled-URL queue; the
+   `howto-reviewed` label gate and the review routine.

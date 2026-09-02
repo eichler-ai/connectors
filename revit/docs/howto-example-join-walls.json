@@ -2,7 +2,7 @@
   "schema_version": 1,
   "id": "walls-closed-footprint-confirm-joins",
   "kind": "howto",
-  "title": "Model a closed rectangular wall footprint and confirm the corners join",
+  "title": "Model a closed rectangular wall footprint and confirm its corners are allowed to join",
   "task": "Create four walls forming a closed rectangular loop on a level, then confirm that each wall's ends are allowed to join at the corners. Use WallUtils to check joins, not JoinGeometryUtils.",
   "summary": "Pick a Basic wall type from the document, create four walls from bound lines whose endpoints chain p1->p2->p3->p4->p1, regenerate, then ask WallUtils.IsWallJoinAllowedAtEnd for both ends (0 and 1) of every wall. Loop closure is checked geometrically from each wall's LocationCurve endpoints.",
   "queries": {
@@ -11,8 +11,7 @@
         "text": "join walls at corner",
         "tool": "search_functions",
         "surfaced": "mostly BuiltInParameter and PostableCommand noise; JoinGeometryUtils did not appear",
-        "revit_version": "2027",
-        "ranker": "legacy-tiered"
+        "ranker": "keyword-fallback"
       }
     ],
     "hit": [
@@ -20,8 +19,7 @@
         "text": "AreElementsJoined geometry",
         "tool": "search_functions",
         "rank": 1,
-        "revit_version": "2027",
-        "ranker": "legacy-tiered"
+        "ranker": "keyword-fallback"
       }
     ]
   },
@@ -30,8 +28,7 @@
     "Autodesk.Revit.DB.WallUtils.IsWallJoinAllowedAtEnd",
     "Autodesk.Revit.DB.Line.CreateBound",
     "Autodesk.Revit.DB.LocationCurve.Curve",
-    "Autodesk.Revit.DB.Document.Regenerate",
-    "Autodesk.Revit.DB.JoinGeometryUtils.AreElementsJoined"
+    "Autodesk.Revit.DB.Document.Regenerate"
   ],
   "script_language": "csharp-script",
   "script": "var doc = Document;\nvar level = Autodesk.Revit.DB.Level.Create(doc, 0.0);\nAutodesk.Revit.DB.WallType wallType = null;\nforeach (Autodesk.Revit.DB.WallType wt in new Autodesk.Revit.DB.FilteredElementCollector(doc).OfClass(typeof(Autodesk.Revit.DB.WallType))) {\n  if (wt.Kind == Autodesk.Revit.DB.WallKind.Basic) { wallType = wt; break; }\n}\n\nvar p1 = new Autodesk.Revit.DB.XYZ(0, 0, 0);\nvar p2 = new Autodesk.Revit.DB.XYZ(20, 0, 0);\nvar p3 = new Autodesk.Revit.DB.XYZ(20, 15, 0);\nvar p4 = new Autodesk.Revit.DB.XYZ(0, 15, 0);\n\nvar w1 = Autodesk.Revit.DB.Wall.Create(doc, Autodesk.Revit.DB.Line.CreateBound(p1, p2), wallType.Id, level.Id, 10.0, 0.0, false, false);\nvar w2 = Autodesk.Revit.DB.Wall.Create(doc, Autodesk.Revit.DB.Line.CreateBound(p2, p3), wallType.Id, level.Id, 10.0, 0.0, false, false);\nvar w3 = Autodesk.Revit.DB.Wall.Create(doc, Autodesk.Revit.DB.Line.CreateBound(p3, p4), wallType.Id, level.Id, 10.0, 0.0, false, false);\nvar w4 = Autodesk.Revit.DB.Wall.Create(doc, Autodesk.Revit.DB.Line.CreateBound(p4, p1), wallType.Id, level.Id, 10.0, 0.0, false, false);\ndoc.Regenerate();\n\nvar walls = new[] { w1, w2, w3, w4 };\nvar allEndsAllowJoin = true;\nforeach (var w in walls) {\n  if (!Autodesk.Revit.DB.WallUtils.IsWallJoinAllowedAtEnd(w, 0)) allEndsAllowJoin = false;\n  if (!Autodesk.Revit.DB.WallUtils.IsWallJoinAllowedAtEnd(w, 1)) allEndsAllowJoin = false;\n}\n\nvar loopCloses =\n  ((Autodesk.Revit.DB.LocationCurve)w1.Location).Curve.GetEndPoint(1).IsAlmostEqualTo(((Autodesk.Revit.DB.LocationCurve)w2.Location).Curve.GetEndPoint(0)) &&\n  ((Autodesk.Revit.DB.LocationCurve)w2.Location).Curve.GetEndPoint(1).IsAlmostEqualTo(((Autodesk.Revit.DB.LocationCurve)w3.Location).Curve.GetEndPoint(0)) &&\n  ((Autodesk.Revit.DB.LocationCurve)w3.Location).Curve.GetEndPoint(1).IsAlmostEqualTo(((Autodesk.Revit.DB.LocationCurve)w4.Location).Curve.GetEndPoint(0)) &&\n  ((Autodesk.Revit.DB.LocationCurve)w4.Location).Curve.GetEndPoint(1).IsAlmostEqualTo(((Autodesk.Revit.DB.LocationCurve)w1.Location).Curve.GetEndPoint(0));\n\nreturn new { wallTypeFound = wallType != null, wallCount = walls.Length, loopCloses, allEndsAllowJoin };\n",
@@ -52,20 +49,9 @@
     "joins",
     "geometry"
   ],
-  "verified": {
-    "2027": {
-      "status": "passed",
-      "at": "2026-08-31T11:30:07-07:00",
-      "by": "harness",
-      "script_sha256": "4ac72d3d5e31d22118ea91096439c16dca4f2c4fac4b54520ee700312484d93e",
-      "connector_version": "dev"
-    }
-  },
   "provenance": {
     "kind": "validation-corpus",
-    "ref": "revit/test-harness/validation_corpus_test.go TestValidationCorpus_ClosedRectangularFootprint (validation-corpus case #2)",
-    "reviewed_by": "maintainer",
-    "reviewed_at": "2026-09-01T00:00:00Z"
+    "ref": "revit/test-harness/validation_corpus_test.go TestValidationCorpus_ClosedRectangularFootprint (validation-corpus case #2)"
   },
   "created_at": "2026-09-01T00:00:00Z",
   "updated_at": "2026-09-01T00:00:00Z"
