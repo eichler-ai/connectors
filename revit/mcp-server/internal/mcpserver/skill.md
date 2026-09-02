@@ -343,7 +343,10 @@ Anything under `Eichler.Connectors.Revit` is reached through the `Connector` glo
 `Eichler.Connectors.Revit.Connector.Publish` is written `Connector.Publish(path)`.
 
 - **`search_functions`** — start here when you know *what* you want, not the name.
-  `{"query": "create wall"}` → ranked matches with summaries.
+  `{"query": "create wall"}` → ranked matches with summaries. Ranking is fuzzy: a weak or empty
+  result does **not** mean the API is absent — retry with different wording (a synonym, the operation
+  verb, or the domain noun; "get all walls" → a `FilteredElementCollector`), or browse with
+  `list_functions`. Each response repeats this as a `guidance` note.
 - **`list_functions`** — drill down. Omit `namespace` for the namespace list; pass `namespace` for its
   types; pass `namespace` + `type_name` for that type's members.
 - **`describe_function`** — full signature, parameters and docs for one member.

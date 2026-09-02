@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -221,6 +222,88 @@ func TestSearchFunctionsToolSuccess(t *testing.T) {
 	}
 	if out.TotalMatched != 57 {
 		t.Errorf("out.TotalMatched = %d, want 57", out.TotalMatched)
+	}
+	// total_matched 57 is well past searchManyResults (50), so this exercises the
+	// "narrow it" branch: many matched, the wanted member may rank below the page,
+	// so the hint steers toward narrowing -- never the empty-result wording.
+	if out.Guidance == "" {
+		t.Error("out.Guidance is empty; want a hint on every search response")
+	}
+	if strings.Contains(out.Guidance, "No members matched") {
+		t.Errorf("out.Guidance used the empty-result wording for a non-empty result set: %q", out.Guidance)
+	}
+	if !strings.Contains(out.Guidance, "Narrow") {
+		t.Errorf("out.Guidance = %q, want the narrow-it wording for a broad match set", out.Guidance)
+	}
+}
+
+// TestSearchFunctionsToolWorkableSetGuidance pins the middle branch: a small,
+// non-empty match set gets the reworded-retry nudge (the top hit can still be
+// wrong), not the "narrow it" wording reserved for broad sets.
+func TestSearchFunctionsToolWorkableSetGuidance(t *testing.T) {
+	r := discovery.NewRouter(registry.New())
+	attachFakeDiscoveryInstance(t, r, "inst-1", func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
+		return map[string]any{
+			"results": []any{
+				map[string]any{"member_id": "M:Autodesk.Revit.DB.Wall.Create", "kind": "Method", "name": "Create"},
+			},
+			"total_matched": 4,
+		}, nil
+	})
+	cs := connectDiscoveryClient(t, r)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	res, err := cs.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "search_functions",
+		Arguments: map[string]any{"query": "create a wall"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	var out SearchFunctionsOut
+	sc, _ := json.Marshal(res.StructuredContent)
+	json.Unmarshal(sc, &out)
+	if strings.Contains(out.Guidance, "Narrow") || strings.Contains(out.Guidance, "No members matched") {
+		t.Errorf("out.Guidance = %q, want the middle reworded-retry wording for a small match set", out.Guidance)
+	}
+	if !strings.Contains(out.Guidance, "different wording") {
+		t.Errorf("out.Guidance = %q, want the reworded-retry nudge", out.Guidance)
+	}
+}
+
+// TestSearchFunctionsToolEmptyGuidance pins the stronger guidance wording for a
+// zero-match search -- the moment an agent is likeliest to wrongly conclude the
+// API is absent (POC: recall@1 ~53%, but the target is in the candidate pool
+// ~93% of the time under different wording).
+func TestSearchFunctionsToolEmptyGuidance(t *testing.T) {
+	r := discovery.NewRouter(registry.New())
+	attachFakeDiscoveryInstance(t, r, "inst-1", func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
+		return map[string]any{"results": []any{}, "total_matched": 0}, nil
+	})
+	cs := connectDiscoveryClient(t, r)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	res, err := cs.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "search_functions",
+		Arguments: map[string]any{"query": "nonexistent gibberish"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected tool error: %+v", res.Content)
+	}
+	var out SearchFunctionsOut
+	sc, _ := json.Marshal(res.StructuredContent)
+	json.Unmarshal(sc, &out)
+	if len(out.Results) != 0 {
+		t.Fatalf("out.Results = %+v, want empty", out.Results)
+	}
+	if !strings.Contains(out.Guidance, "No members matched") {
+		t.Errorf("out.Guidance = %q, want the empty-result retry wording", out.Guidance)
+	}
+	if !strings.Contains(out.Guidance, "list_functions") {
+		t.Errorf("out.Guidance = %q, want it to point at list_functions as the fallback", out.Guidance)
 	}
 }
 
