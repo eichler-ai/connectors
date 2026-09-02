@@ -50,8 +50,14 @@ needs editing.
 **The script dialect is itself versioned by the connector, not only by Revit.** #146 (in progress as
 this is written) replaces the ambient-transaction model with group-always / transaction-on-write:
 after it lands, a top-level `Level.Create(Document, …)` is refused with
-`script-write-outside-transaction` and must be wrapped in `Connector.WithTransaction(doc, () => …)`.
-Every script in the seed — including the example beside this note — is written in the pre-#146
+`script-write-outside-transaction`. The Phase 3 dialect, as described by its author (branch
+`feat/tx-redesign-phase3`, `skill.md` section "Writing: one block per batch, nothing open in between";
+not merged as this is written): reads at top level; writes inside
+`Connector.WithTransaction(doc, () => { … })`, which returns the body's value, one block per batch;
+self-transacting calls (`LoadFamily`, `RequestViewChange`, EditScope start/commit, `Export`) go
+*between* blocks; `Connector.Settle` unchanged; `OpenForWriting` and `WithoutTransaction` gone. The
+validation-corpus case #3 pitfalls about `LoadFamily` and open transactions are therefore about to
+change shape too — a second concrete instance of D6. Every script in the seed — including the example beside this note — is written in the pre-#146
 dialect and will fail the sweep the day #146 deploys. That is the mechanism working as intended (§3):
 the stamps go `failed` with the diagnostic naming the fix, the seed is re-extracted from the harness
 tests once they are updated, and the sidecar's `connector_version` records which broker verified
