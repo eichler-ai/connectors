@@ -310,6 +310,12 @@ if ($Uninstall) {
     }
     Unregister-ScheduledTask -TaskName (Get-PendingUpdateTaskName $Scope) -Confirm:$false -ErrorAction SilentlyContinue
     Remove-Item $appDir -Recurse -Force -ErrorAction SilentlyContinue
+    # The broker's search_functions ranker (issue #107) materializes its cross-encoder model files
+    # (~24MB) under the PRD §09 app-data root at first run, because the inference library needs real
+    # paths. That root is otherwise left alone here (broker.json is per-machine runtime state the
+    # next install recreates), but the model directory is a copy of bytes embedded in the exe being
+    # removed, so it goes with it. Same path singleton.AppDataDir() resolves on Windows.
+    Remove-Item "$env:LocalAppData\Connectors\Revit\models" -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item $uninstallKeyPath -Recurse -Force -ErrorAction SilentlyContinue
     if (Get-Command claude -ErrorAction SilentlyContinue) {
         & claude mcp remove revit 2>$null | Out-Null
