@@ -468,20 +468,54 @@ public class RoslynScriptRunnerTests
     /// of a competing transaction: it can only exist INSIDE an open one, commits into it (so the §07
     /// failure preprocessor on the connector's commit still sees everything), and gives a script the
     /// one thing the connector-owned model otherwise lacks, an intra-run savepoint to roll back to.
-    /// Pinned at compile time via the pre-flight (no live Document needed), in every spelling the
-    /// denied types are pinned in, so the permission cannot silently narrow back to one syntax shape.
+    /// PERMITTED ONLY AS THE RESOURCE OF A `using` (independent review of #150): a SubTransaction left
+    /// open when the enclosing transaction closes was accepted silently by Revit and crashed it on the
+    /// next Document.Close, and the connector cannot see the script's object to guard it at runtime.
+    /// Dispose ends an active sub-transaction, so `using` is the one syntactic shape that makes the crash
+    /// unreachable -- and the denylist is already a syntactic walk. Pinned at compile time via the
+    /// pre-flight (no live Document needed), in every `using` spelling.
+    ///
+    /// Null means "nothing to reject before the event is raised". A compile regression in one of these
+    /// rows would also read as non-null -- distinguishable by the exception type in the outcome, and
+    /// accepted here because these scripts are trivially well-formed.
     /// </summary>
     [Theory]
     [InlineData("using (var st = new Autodesk.Revit.DB.SubTransaction(Document)) { st.Start(); st.Commit(); } return 1;")]
-    [InlineData("Autodesk.Revit.DB.SubTransaction s = new(Document); return 1;")]
-    [InlineData("using St = Autodesk.Revit.DB.SubTransaction; var s = new St(Document); return 1;")]
-    [InlineData("dynamic d = Document; dynamic s = new Autodesk.Revit.DB.SubTransaction(d); return 1;")]
-    public void TryPreflight_SubTransactionConstruction_IsNotDenied(string script)
+    // A `using` DECLARATION is only legal inside a block in a script (at top level Roslyn parses
+    // `using var` as a directive: CS1002), so it is exercised in braces.
+    [InlineData("{ using var st = new Autodesk.Revit.DB.SubTransaction(Document); st.Start(); st.RollBack(); } return 1;")]
+    [InlineData("using (Autodesk.Revit.DB.SubTransaction st = new(Document)) { st.Start(); st.Commit(); } return 1;")]
+    [InlineData("using St = Autodesk.Revit.DB.SubTransaction; using (var st = new St(Document)) { st.Start(); st.Commit(); } return 1;")]
+    [InlineData("using (new Autodesk.Revit.DB.SubTransaction(Document)) { } return 1;")]
+    public void TryPreflight_SubTransactionHeldInAUsing_IsNotDenied(string script)
     {
         var runner = NewRunner();
 
-        // Null means "nothing to reject before the event is raised" -- the script would run.
         Assert.Null(runner.TryPreflight(script));
+    }
+
+    /// <summary>
+    /// The other half of the rule: every spelling that constructs a SubTransaction WITHOUT a `using` is
+    /// refused, with a message that names the fix rather than the generic "you are already in a
+    /// transaction" denial -- an agent that wrote a SubTransaction on purpose must not be told to remove it.
+    /// </summary>
+    [Theory]
+    [InlineData("var st = new Autodesk.Revit.DB.SubTransaction(Document); st.Start(); st.Commit(); return 1;")]
+    [InlineData("Autodesk.Revit.DB.SubTransaction s = new(Document); return 1;")]
+    [InlineData("using St = Autodesk.Revit.DB.SubTransaction; var s = new St(Document); return 1;")]
+    [InlineData("dynamic d = Document; dynamic s = new Autodesk.Revit.DB.SubTransaction(d); return 1;")]
+    [InlineData("System.Func<Autodesk.Revit.DB.SubTransaction> f = () => new Autodesk.Revit.DB.SubTransaction(Document); return 1;")]
+    public void TryPreflight_SubTransactionNotHeldInAUsing_IsDenied(string script)
+    {
+        var runner = NewRunner();
+
+        var outcome = runner.TryPreflight(script);
+
+        var ex = Assert.IsType<ScriptApiDenylistViolationException>(outcome?.Exception);
+        Assert.Equal(ScriptApiDenylistViolationException.DeniedCode, ex.Code);
+        Assert.Contains("SubTransaction", ex.Message);
+        Assert.Contains("using", ex.Message);
+        Assert.DoesNotContain("Just make your changes directly", ex.Message);
     }
 
     [Fact]

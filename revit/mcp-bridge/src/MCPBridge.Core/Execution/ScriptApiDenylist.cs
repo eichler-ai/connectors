@@ -15,9 +15,9 @@ namespace MCPBridge.Core.Execution;
 ///
 /// 1. TRANSACTION OWNERSHIP -- the load-bearing one. TransactionScriptExecutor opens an ambient
 ///    TransactionGroup + Transaction around every script run, before compilation even happens, and
-///    Revit permits only one open Transaction per Document. A script constructing its own
-///    Transaction/TransactionGroup against that same document therefore always fails,
-///    and worse, could leave the executor's own transaction state ambiguous. This check is what makes
+///    Revit permits only one open Transaction per Document. A script constructing its own Transaction or
+///    TransactionGroup against that same document therefore always fails, and worse, could leave the
+///    executor's own transaction state ambiguous. This check is what makes
 ///    exposing the real Document safe at all; everything else a script does with the real API (reads,
 ///    writes, element queries, geometry) rides the ambient transaction correctly with no new
 ///    transaction-ownership scheme -- confirmed live before Phase 3 shipped.
@@ -102,6 +102,7 @@ internal static class ScriptApiDenylist
 {
     private const string TransactionType = "Autodesk.Revit.DB.Transaction";
     private const string TransactionGroupType = "Autodesk.Revit.DB.TransactionGroup";
+    private const string SubTransactionType = "Autodesk.Revit.DB.SubTransaction";
 
     /// <summary>
     /// Types a script must never construct -- see check 1 in the class doc comment.
@@ -114,12 +115,20 @@ internal static class ScriptApiDenylist
     /// it adds is the one thing a connector-owned transaction otherwise lacks: an intra-run SAVEPOINT --
     /// try a slice, roll just that slice back, carry on. Verified live (Revit 2025): create-in-sub,
     /// RollBack, element gone, ambient writes intact. Its "no open transaction" failure is mapped by
-    /// RequestDispatcher to name Connector.WithTransaction. The one hazard, also live-verified: a
-    /// SubTransaction LEFT OPEN when the enclosing block commits is accepted silently (slice kept, no
-    /// exception) and Revit 2025 then crashed on the next Document.Close -- the connector cannot see the
-    /// script's SubTransaction objects to guard it, so skill.md and the remedies insist on `using` +
-    /// Commit/RollBack before the block ends. A connector-owned savepoint wrapper would close this
-    /// (#146, Phase 4 candidate).
+    /// RequestDispatcher to name Connector.WithTransaction.
+    ///
+    /// PERMITTED WITH ONE SYNTACTIC CONDITION, enforced by <see cref="RequireSubTransactionHeldInUsing"/>:
+    /// the construction must be the resource of a `using`. Live-verified hazard (Revit 2025): a
+    /// SubTransaction still active when the enclosing transaction closes -- the WithTransaction block
+    /// ending, Connector.WithoutTransaction committing, Connector.Settle, or an exception unwinding
+    /// through RunBody's rollback -- is accepted silently (slice kept, no exception) and Revit then
+    /// crashed on the next Document.Close. Nothing at runtime can guard it: the connector never sees the
+    /// script's SubTransaction object, and Document exposes no open-sub-transaction observable. Dispose
+    /// ends an active sub-transaction, so `using` is the one shape that makes the crash unreachable by
+    /// construction, and this walk already judges construction sites. Fails open on the deliberate
+    /// spellings the denylist accepts everywhere (reflection, a factory method) -- the accidental,
+    /// plausible-looking `var st = new SubTransaction(doc)` is exactly what it catches. A connector-owned
+    /// savepoint wrapper would make even that unnecessary (#146, Phase 4 candidate).
     /// </summary>
     private static readonly HashSet<string> DeniedConstructedTypes = new()
     {
@@ -248,7 +257,16 @@ internal static class ScriptApiDenylist
                 {
                     if (method.MethodKind == MethodKind.Constructor)
                     {
-                        CheckConstruction(FullName(method.ContainingType));
+                        var constructedType = FullName(method.ContainingType);
+                        CheckConstruction(constructedType);
+                        // The BOUND-constructor path is the one every ordinary spelling takes (the
+                        // fallback below runs only when the symbol did not resolve), so the `using`
+                        // requirement has to be applied here too -- found by the tier-1 rows: with the
+                        // check only in the fallback, every bare construction sailed through.
+                        if (constructedType == SubTransactionType && node is BaseObjectCreationExpressionSyntax boundCreation)
+                        {
+                            RequireSubTransactionHeldInUsing(boundCreation);
+                        }
                     }
 
                     var lifecycleMember = LifecycleMemberOrNull(method);
@@ -276,9 +294,14 @@ internal static class ScriptApiDenylist
                 // script here: `dynamic d = 1; d.ToString()` runs, so Microsoft.CSharp is present and the
                 // premise was testable, not vacuous.) The fallback exists so this does not silently
                 // depend on that Roslyn detail continuing to hold.
-                if (node is BaseObjectCreationExpressionSyntax)
+                if (node is BaseObjectCreationExpressionSyntax creation)
                 {
-                    CheckConstruction(FullName(semanticModel.GetTypeInfo(node).Type));
+                    var constructedType = FullName(semanticModel.GetTypeInfo(node).Type);
+                    CheckConstruction(constructedType);
+                    if (constructedType == SubTransactionType)
+                    {
+                        RequireSubTransactionHeldInUsing(creation);
+                    }
                 }
 
                 // COMPILER-SYNTHESIZED DISPOSE (v1 integrated review; live-exploitable before this):
@@ -367,6 +390,52 @@ internal static class ScriptApiDenylist
         }
 
         return lifecycleMembers.Count == 0 ? ScriptApiAnalysis.Clean : new ScriptApiAnalysis(lifecycleMembers);
+    }
+
+    /// <summary>
+    /// Refuses a SubTransaction construction that is not the resource of a `using` statement or `using`
+    /// declaration -- see <see cref="DeniedConstructedTypes"/>' comment for the live crash this closes.
+    /// Judged on SYNTAX (the creation's parent chain), which is the right tool here: whether the object is
+    /// disposed at scope end is a property of where it sits in the tree, not of what it binds to. Accepted
+    /// shapes: <c>using (var st = new SubTransaction(doc))</c>, <c>using var st = new SubTransaction(doc);</c>,
+    /// <c>using (new SubTransaction(doc))</c>, and the target-typed/aliased spellings of each -- the type
+    /// was already resolved semantically by the caller, so any spelling reaches here identically.
+    /// </summary>
+    private static void RequireSubTransactionHeldInUsing(BaseObjectCreationExpressionSyntax creation)
+    {
+        SyntaxNode? node = creation;
+        // Walk up through the wrappers a `using` resource can legitimately carry: parentheses, a cast
+        // (`using (var d = (IDisposable)new SubTransaction(doc))`), and the declarator/declaration
+        // pair of a declared resource.
+        while (node.Parent is ParenthesizedExpressionSyntax or CastExpressionSyntax)
+        {
+            node = node.Parent;
+        }
+
+        var parent = node.Parent;
+        switch (parent)
+        {
+            case UsingStatementSyntax usingStatement when usingStatement.Expression == node:
+                return;
+            case EqualsValueClauseSyntax { Parent: VariableDeclaratorSyntax { Parent: VariableDeclarationSyntax declaration } }:
+                switch (declaration.Parent)
+                {
+                    case UsingStatementSyntax:
+                        return;
+                    case LocalDeclarationStatementSyntax local when local.UsingKeyword.IsKind(SyntaxKind.UsingKeyword):
+                        return;
+                }
+
+                break;
+        }
+
+        throw ScriptApiDenylistViolationException.Denied(
+            SubTransactionType,
+            "A SubTransaction is allowed as a savepoint inside the connector's transaction, but only when " +
+            "it is held in a `using`: one still active when the enclosing transaction closes is accepted " +
+            "silently by Revit and has crashed it afterwards, and disposing it is what prevents that.",
+            "Write `using (var st = new Autodesk.Revit.DB.SubTransaction(doc)) { st.Start(); ... st.Commit(); }` " +
+            "(or RollBack()) so it is disposed when the block ends.");
     }
 
     /// <summary>
@@ -475,8 +544,8 @@ internal static class ScriptApiDenylist
             "your own always fails.",
             "Just make your changes directly -- they are committed automatically if the script succeeds " +
             "and rolled back if it throws. For a savepoint inside the run, a native " +
-            "Autodesk.Revit.DB.SubTransaction is permitted: hold it in a using, Start it, and RollBack " +
-            "or Commit it before the enclosing block ends -- one left open destabilizes Revit.");
+            "Autodesk.Revit.DB.SubTransaction held in a `using` is permitted: Start it, then Commit or " +
+            "RollBack it before the enclosing transaction closes.");
     }
 
     /// <summary>

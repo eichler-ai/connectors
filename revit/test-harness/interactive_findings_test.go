@@ -1216,9 +1216,10 @@ return new { before, rolledBack, committed, after };
 		// PROPAGATE so the code on the wire is what is asserted.
 		rej := runRejectedScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+`
 Connector.WithoutTransaction(doc, () => {
-  var st = new Autodesk.Revit.DB.SubTransaction(doc);
-  st.Start();
-  st.RollBack();
+  using (var st = new Autodesk.Revit.DB.SubTransaction(doc)) {
+    st.Start();
+    st.RollBack();
+  }
 });
 return "started";
 `)
@@ -1240,8 +1241,38 @@ return "started";
 	// So the connector's Commit met the open sub-transaction and Revit reported nothing: no
 	// exception, the slice was kept, the next block ran. The document was then unstable -- the likely
 	// mechanism is the script's undisposed SubTransaction wrapper being finalized against a
-	// transaction that had already ended. A script must therefore `using` its SubTransaction and
-	// Commit/RollBack it before the block ends; skill.md and the denial remedy both say so. A live
-	// test that crashes the shared Revit session cannot stay in the suite; if the connector ever
-	// grows a guard for this (a savepoint wrapper it owns), that is when a pin belongs here.
+	// transaction that had already ended. ScriptApiDenylist therefore refuses any SubTransaction
+	// construction that is not a `using` resource (compile-time; pinned at tier 1 and in
+	// TestDenylistRejectsOwnTransaction), and the `using`-only path -- Dispose doing the rollback with
+	// no explicit Commit/RollBack -- is pinned live in the subtest below. A live test that crashes the
+	// shared Revit session cannot stay in the suite.
+
+	t.Run("DisposeAloneRollsBackAnUnfinishedSubTransaction", func(t *testing.T) {
+		// The safety net the `using` requirement rests on, verified rather than assumed: a
+		// SubTransaction that is Started and then only DISPOSED (no Commit, no RollBack) must roll its
+		// slice back, leave the enclosing block committable, and leave the document closable -- the
+		// fixture's cleanup Close is the same call that crashed Revit in the bare-construction probe.
+		out := runScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+`
+using (var st = new Autodesk.Revit.DB.SubTransaction(doc)) {
+  st.Start();
+  Autodesk.Revit.DB.Level.Create(doc, 76.6);
+  // no Commit, no RollBack: Dispose is all that ends it
+}
+Autodesk.Revit.DB.Level.Create(doc, 77.7);
+int disposedOnly = 0, after = 0;
+foreach (var e in new Autodesk.Revit.DB.FilteredElementCollector(doc).OfClass(typeof(Autodesk.Revit.DB.Level))) {
+  var lvl = e as Autodesk.Revit.DB.Level;
+  if (lvl == null) continue;
+  if (System.Math.Abs(lvl.Elevation - 76.6) < 0.01) disposedOnly++;
+  if (System.Math.Abs(lvl.Elevation - 77.7) < 0.01) after++;
+}
+return new { disposedOnly, after };
+`)
+		if out.Status != "success" {
+			t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
+		}
+		if !strings.Contains(out.ReturnValue, `"disposedOnly":0`) || !strings.Contains(out.ReturnValue, `"after":1`) {
+			t.Errorf("Dispose alone must roll back the unfinished sub-transaction's slice and leave the enclosing transaction usable -- this is the property the `using` requirement in ScriptApiDenylist rests on; (%s)", out.diag())
+		}
+	})
 }

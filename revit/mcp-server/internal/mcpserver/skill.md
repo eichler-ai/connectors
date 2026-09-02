@@ -175,14 +175,13 @@ except the active document, activate the one you want to keep, then close the ot
 
 ### Calls that need their target *not* modifiable
 
-Some Revit APIs manage their own transaction and refuse to run while one is open on the document they
-act on: `UIDocument.RequestViewChange`/`ActiveView`, `Document.LoadFamily`,
+Some Revit APIs manage their own transaction and refuse a target with one open: `UIDocument.RequestViewChange`/`ActiveView`, `Document.LoadFamily`,
 `UIApplication.OpenAndActivateDocument`, and every `EditScope`. **The document your call is routed at is
 modifiable for the whole run**, so against it they always fail ("must not be modifiable") — reported with
 `code` `script-target-must-not-be-modifiable`.
 
-Wrap them. The connector closes its transaction for the block and restores it afterwards (a document that
-had none open stays non-modifiable), so your changes still roll back if the script throws:
+Wrap them. The connector closes its transaction for the block and restores it afterwards (one that had
+none stays non-modifiable), so your changes still roll back if the script throws:
 
 ```csharp
 Connector.WithoutTransaction(Document, () => {
@@ -192,8 +191,8 @@ Connector.WithoutTransaction(Document, () => {
 
 Don't write inside that block — the document isn't modifiable there. To write, nest
 `Connector.WithTransaction` (it also returns a value: `var id = Connector.WithTransaction(doc, () =>
-Level.Create(doc, 3.0).Id);` — being overloaded, `describe_function` lists its two overloads; pass a
-`member_id` for the text). That pair is what makes **stairs** work, and the closing edge is the point:
+Level.Create(doc, 3.0).Id);`; `describe_function` lists its overloads — pass a `member_id`). That pair
+is what makes **stairs** work, and the closing edge is the point:
 an edit scope can't commit while a transaction is open.
 
 ```csharp
@@ -229,14 +228,13 @@ have run in is rolled back cleanly.
 **1. Flatly rejected — `new Transaction(...)`, `new TransactionGroup(...)`.**
 Your script is already inside one, and Revit allows only one open transaction per document, so your own
 can never work. There is no flag for this. Just make your changes directly; they commit on success and
-roll back on failure. The error record's `code` is `script-api-denied`. The refusal ignores *which*
-document you meant it for, including one you just created. That is not a gap to work around: use
-`Connector.CreateProjectDocument`/`Connector.CreateFamilyDocument` above and the connector owns that document's transaction
-for you, so there is never a reason to construct one. A native `SubTransaction` **is** allowed: it is a
-savepoint inside the open transaction — `using (var st = new SubTransaction(doc)) { st.Start(); …
-st.Commit(); }` (or `RollBack()`). **Always dispose it and end it before the block ends**: one left open
-is accepted silently and crashed Revit on the next document close. Starting one where no transaction is
-open fails with `script-subtransaction-needs-transaction`.
+roll back on failure. The error record's `code` is `script-api-denied`. It applies to every document,
+including one you just created — use `Connector.CreateProjectDocument`/`CreateFamilyDocument` above,
+which own that document's transaction. A native `SubTransaction` **is** allowed as a savepoint inside
+the open transaction, **but only held in a `using`** — `using (var st = new
+Autodesk.Revit.DB.SubTransaction(doc)) { st.Start(); … st.Commit(); }` (or `RollBack()`); any other
+construction is rejected. Disposal is the safety net: one still active when the enclosing transaction
+closed (block end, `WithoutTransaction`, `Settle`, an exception) crashed Revit later.
 
 **2. Allowed, but only if you confirm — the document-lifecycle and worksharing calls.**
 
@@ -391,6 +389,7 @@ absent. For the why, a human can click **MCP Bridge → Status** on the Revit ri
 | Error `code` is `script-api-denied` | You used something flatly rejected — most often opening your own `Transaction` | See "What you may not do". Nothing ran and nothing changed; no argument lifts this, the script has to change. |
 | Error `code` is `script-lifecycle-confirmation-required` | A gated lifecycle/worksharing member without confirmation | Nothing ran. If genuinely intended, resend the **identical** call with `confirm_lifecycle_actions: true`. The `message` names every gated member used. |
 | Error `code` is `script-target-must-not-be-modifiable` | A self-transacting API (`LoadFamily`, `RequestViewChange`, an `EditScope`) hit the connector's open transaction | Wrap the call in `Connector.WithoutTransaction` — see "Calls that need their target *not* modifiable". |
+| Error `code` is `script-subtransaction-needs-transaction` | `SubTransaction.Start()` with no transaction open | Nest the code in `Connector.WithTransaction(doc, () => { … })`. |
 
 For a human debugging deeper: the add-in writes `connection.log` and `startup-errors.log` to
 `%LOCALAPPDATA%\Connectors\Revit\` on the machine running Revit. `broker.json` lives there too in

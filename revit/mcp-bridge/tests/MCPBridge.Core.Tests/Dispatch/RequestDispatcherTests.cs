@@ -295,6 +295,23 @@ public class RequestDispatcherTests
         Assert.Contains("Connector.WithTransaction", string.Join(" ", ParseRemedy(json)));
     }
 
+    /// <summary>Same false-positive guard for the sub-transaction matcher: a script's own error that merely mentions one.</summary>
+    [Fact]
+    public async Task ExecuteScript_AnUnrelatedExceptionMentioningASubTransaction_StaysScriptExecutionFailed()
+    {
+        var executionManager = NewExecutionManager();
+        var bridge = new ExternalEventBridge<ScriptExecutionOutcome>(new FakeExternalEventRaiser());
+        var dispatcher = new RequestDispatcher(executionManager, bridge, NewScriptExecutor());
+
+        var dispatchTask = dispatcher.DispatchAsync(ExecuteScriptRequest(1, "exec-1",
+            "throw new System.InvalidOperationException(\"my sub-transaction helper failed\");"));
+        bridge.OnExecute(NewUiApp());
+
+        var json = await dispatchTask;
+
+        Assert.Contains("\"code\":\"script-execution-failed\"", json);
+    }
+
     /// <summary>The message match must not fire on an ordinary "modifiable" mention in a script's own error.</summary>
     [Fact]
     public async Task ExecuteScript_AnUnrelatedExceptionMentioningModifiable_StaysScriptExecutionFailed()

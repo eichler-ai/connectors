@@ -841,8 +841,8 @@ public sealed class RequestDispatcher
                 $"Remove {denial.DeniedMember} from the script; no argument to execute_script permits it.",
                 "Make document changes directly instead -- the connector already runs every script inside " +
                 "its own Transaction, which is committed on success and rolled back if the script throws. " +
-                "For a savepoint within the run, a native Autodesk.Revit.DB.SubTransaction is permitted -- " +
-                "hold it in a using and Commit/RollBack it before the enclosing block ends.",
+                "For a savepoint within the run, a native Autodesk.Revit.DB.SubTransaction held in a `using` " +
+                "is permitted; Commit or RollBack it before the enclosing transaction closes.",
             }),
         ScriptAwaitNotAllowedException =>
             (ScriptAwaitNotAllowedException.Code, new[]
