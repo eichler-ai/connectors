@@ -343,10 +343,14 @@ Anything under `Eichler.Connectors.Revit` is reached through the `Connector` glo
 - **`search_functions`** — start here when you know *what* you want, not the name. Ranking fuses a
   sentence-embedding pass with a keyword pass, then a cross-encoder reranks — so write `query` as
   **one plain sentence naming the element type and the operation** (`"move an element to a new
-  location"`, not `"move"`); a suspected type or member name in it also scores through the keyword pass; `namespace`
-  filters before ranking. A weak or empty result does **not** mean the API is absent — rephrase, or
-  browse with `list_functions`. Each response says which `ranker` answered (`keyword-fallback` while
-  a just-connected instance's index builds) and repeats this as `guidance`.
+  location"`, not `"move"`); `namespace` filters before ranking. A weak or empty result does **not**
+  mean the API is absent — rephrase, or browse with `list_functions`. Each response says which
+  `ranker` answered (`keyword-fallback` while a just-connected instance's index builds) plus `guidance`.
+- **`submit_howto`** — after a task that needed a reworded query or got past a pitfall, once the
+  script ran: `title`, one-sentence `task`, `script`, `members`, `pitfalls` (symptom → cause → fix).
+  Saves to the user's local how-to corpus; `confirm_submission: true` scrubs it into a review-queue
+  issue, filed by the connector if the user set a GitHub token, else by you from the returned `issue`
+  fields with your GitHub tool (ask first). `id` + `change_note` improves an existing how-to.
 - **`list_functions`** — drill down. Omit `namespace` for the namespace list; pass `namespace` for its
   types; pass `namespace` + `type_name` for that type's members.
 - **`describe_function`** — full signature, parameters and docs for one member.

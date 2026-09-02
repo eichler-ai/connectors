@@ -483,6 +483,15 @@ func runPrimary(ctx context.Context, bindAddr string, port int, dataDir string, 
 	searchIndex := newSearchManager(discoveryRouter, dataDir, logger)
 	mcpserver.RegisterDiscovery(mcpServer, discoveryRouter, searchIndex)
 	mcpserver.RegisterInstances(mcpServer, reg, execMgr)
+	mcpserver.RegisterHowTo(mcpServer, mcpserver.HowToDeps{
+		LocalDir:    mcpserver.LocalCorpusDir(dataDir),
+		OutboxDir:   mcpserver.OutboxDir(dataDir),
+		GitHubToken: os.Getenv("REVIT_MCP_GITHUB_TOKEN"),
+		Registry:    reg,
+		Router:      discoveryRouter,
+		Exec:        execMgr,
+		Version:     versionLine(),
+	})
 	// No dependencies and no Revit needed: get_skills answers even with nothing connected.
 	mcpserver.RegisterSkills(mcpServer, version)
 

@@ -31,8 +31,8 @@ connector — a Revit API task, or the connector's own mechanics (transaction bl
 documents, routing, publishing, undo) — so long as it is a worked example. Not API reference (that
 is `describe_function`), not orientation or rules (that is `get_skills`). The unit of value is the **pitfall**: the harness comments are
 full of them ("`AreElementsJoined` and `IsWallJoinAllowedAtEnd` measure different things";
-"`LoadFamily` needs *both* documents to have no open transaction, so load first, then open for
-writing") and nothing today serves them to an agent at the moment it needs them.
+"`LoadFamily` needs its *target* document to have no open transaction — a modifiable source loads
+fine — so load between blocks, then place inside one") and nothing today serves them to an agent at the moment it needs them.
 
 A document carries:
 
@@ -181,9 +181,9 @@ installer work that makes it cheap, is in `howto-seed-plan.md` §1.
 a newer corpus, validates the fields it knows, and reports `howto-corpus-newer-than-broker` in
 `guidance` and `notices[]` rather than skipping the whole corpus.
 
-**Local corpus:** PRD §09 keeps human-browsed files under the exchange root, never app-data, so the
-local corpus lives at `<exchange-root>/howto/` (beside `imports/` and `exports/`), one document per
-`.json` file. It is indexed alongside, marked `source: "local"` on every hit so the agent knows it is
+**Local corpus:** lives with the broker, at `<broker app-data>/howto/local/`, one document per
+`.json` file (the seed plan §4b records why it is not Revit's exchange root: the broker indexes it,
+and in remote mode the two are different machines; every tool response names the path). It is indexed alongside, marked `source: "local"` on every hit so the agent knows it is
 unreviewed, and re-scanned when a file changes (mtime check on search; no watcher). An `id` collision
 between local and seed/shared resolves to local with `supersedes_shared: true` on the hit — the
 intended way to override a shared how-to for one environment; two local files with one `id` is a
