@@ -78,6 +78,11 @@ public static class ExecutionResultMessage
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public List<PublishedFileRecord>? Files { get; set; }
 
+        /// <summary>#146 Phase 2. Absent, not zeroed, when the run changed nothing -- the Go side's Result.Mutations is a pointer for the same reason.</summary>
+        [JsonPropertyName("mutations")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public MutationReport? Mutations { get; set; }
+
         [JsonPropertyName("error")]
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public DiagnosticRecord? Error { get; set; }
@@ -127,6 +132,7 @@ public static class ExecutionResultMessage
             ReturnValue = record.Result,
             Notices = notices,
             Files = record.Files.Count > 0 ? new List<PublishedFileRecord>(record.Files) : null,
+            Mutations = record.Mutations,
             Error = record.Error,
         };
 

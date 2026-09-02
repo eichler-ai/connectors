@@ -1276,3 +1276,113 @@ return new { disposedOnly, after };
 		}
 	})
 }
+
+// TestMutationReportDescribesWhatTheRunChanged is the live half of the #146
+// Phase 2 mutation report. Tier 1 pins the tracker's set algebra over
+// hand-built events; only here can we learn what Revit's DocumentChanged
+// actually raises -- one event per commit, category names, the shape of a
+// group rollback -- and that the field reaches the caller with the names the
+// broker reads.
+func TestMutationReportDescribesWhatTheRunChanged(t *testing.T) {
+	c, instanceID, documentID := targetDocument(t)
+	fixtureTitle := createBlankFixtureDocument(t, c, instanceID, documentID)
+
+	t.Run("ReadOnlyRunCarriesNoReport", func(t *testing.T) {
+		out := runScript(t, c, instanceID, documentID, `return new Autodesk.Revit.DB.FilteredElementCollector(Document).OfClass(typeof(Autodesk.Revit.DB.Level)).GetElementCount();`)
+		if out.Status != "success" {
+			t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
+		}
+		if out.Mutations != nil {
+			t.Errorf("a read-only run must carry no mutations field, got %+v", *out.Mutations)
+		}
+	})
+
+	t.Run("NetCountsAndCategoriesAcrossOneRun", func(t *testing.T) {
+		// Two levels created; one of them then edited (still "created", once); a third created and
+		// deleted (nets to nothing); one PRE-EXISTING level edited (modified). Expected: created 2,
+		// deleted 0, modified >= 1 (Revit may mark dependents modified on regeneration, so >=), and
+		// by_category.Levels.created == 2.
+		out := runScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+`
+var a = Autodesk.Revit.DB.Level.Create(doc, 80.1);
+var b = Autodesk.Revit.DB.Level.Create(doc, 81.1);
+b.Elevation = 81.2;
+var gone = Autodesk.Revit.DB.Level.Create(doc, 82.1);
+doc.Delete(gone.Id);
+Autodesk.Revit.DB.Level existing = null;
+foreach (var e in new Autodesk.Revit.DB.FilteredElementCollector(doc).OfClass(typeof(Autodesk.Revit.DB.Level))) {
+  var lvl = e as Autodesk.Revit.DB.Level;
+  if (lvl != null && lvl.Id != a.Id && lvl.Id != b.Id) { existing = lvl; break; }
+}
+if (existing == null) { return "no-preexisting-level"; }
+existing.Name = existing.Name + " (renamed)";
+return "wrote";
+`)
+		if out.Status != "success" {
+			t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
+		}
+		if strings.Contains(out.ReturnValue, "no-preexisting-level") {
+			t.Skip("fixture template has no pre-existing level to modify")
+		}
+		if out.Mutations == nil {
+			t.Fatalf("a run that wrote must carry a mutations field; result: %s", out.diag())
+		}
+		m := *out.Mutations
+		if m.Created != 2 {
+			t.Errorf("created = %d, want 2 (a created-then-deleted element must net to nothing; a created-then-edited one counts once): %+v", m.Created, m)
+		}
+		if m.Deleted != 0 {
+			t.Errorf("deleted = %d, want 0 -- the deleted level was created in this same run: %+v", m.Deleted, m)
+		}
+		if m.Modified < 1 || m.ByCategory["Levels"].Modified < 1 {
+			t.Errorf("modified = %d (Levels.modified = %d), want >= 1 with the renamed pre-existing level counted under its category -- regeneration noise alone must not be what satisfies this: %+v", m.Modified, m.ByCategory["Levels"].Modified, m)
+		}
+		if got := m.ByCategory["Levels"].Created; got != 2 {
+			t.Errorf("by_category.Levels.created = %d, want 2 -- category names must be resolved at event time: %+v", got, m)
+		}
+		if m.Truncated {
+			t.Errorf("a handful of elements must not hit the category cap: %+v", m)
+		}
+	})
+
+	t.Run("ACaughtThrowInsideWithTransactionContributesNothing", func(t *testing.T) {
+		// The rolled-back block's level must not appear: either Revit raises no event for a
+		// transaction that never committed, or it raises the reverse -- both net to zero.
+		out := runScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+`
+Connector.WithoutTransaction(doc, () => {
+  try {
+    Connector.WithTransaction(doc, () => {
+      Autodesk.Revit.DB.Level.Create(doc, 83.1);
+      throw new System.InvalidOperationException("harness: deliberate");
+    });
+  } catch (System.InvalidOperationException) { }
+  Connector.WithTransaction(doc, () => { Autodesk.Revit.DB.Level.Create(doc, 84.1); });
+});
+return "done";
+`)
+		if out.Status != "success" {
+			t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
+		}
+		if out.Mutations == nil || out.Mutations.Created != 1 {
+			t.Errorf("want exactly the surviving block's level (created 1), got %+v", out.Mutations)
+		}
+	})
+
+	t.Run("ASettleDiscardedDocumentIsLeftOut", func(t *testing.T) {
+		// #146 verification item 4: whatever DocumentChanged raises for TransactionGroup.RollBack, a
+		// document settled with keep:false must contribute nothing. Its writes are gone.
+		scratchTitle := createBlankFixtureDocument(t, c, instanceID, documentID)
+		out := decodeToolResult[executeScriptOut](t, callExecuteScriptWith(t, c, instanceID, documentID,
+			fixtureWritePreamble(scratchTitle)+`
+Autodesk.Revit.DB.Level.Create(doc, 85.1);
+Autodesk.Revit.DB.Level.Create(doc, 86.1);
+Connector.Settle(doc, false);
+return "discarded";
+`, map[string]any{"confirm_lifecycle_actions": true}))
+		if out.Status != "success" {
+			t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
+		}
+		if out.Mutations != nil {
+			t.Errorf("a run whose only writes were discarded by Settle(keep:false) must carry no mutations, got %+v", *out.Mutations)
+		}
+	})
+}

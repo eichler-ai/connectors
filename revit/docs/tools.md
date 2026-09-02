@@ -59,11 +59,21 @@ Design rationale for all of it: [`PRD.md`](PRD.md) §06 (execution), §07 (dialo
 
 Results are one of two shapes (all three execution tools share it): a terminal result —
 `status` `success` / `error` / `cancelled` / `unrecoverable`, with `return_value`, `output`,
-`notices[]`, `files[]`, and `error` as relevant — or a non-terminal `pending` / `running` / `busy` status
+`notices[]`, `files[]`, `mutations`, and `error` as relevant — or a non-terminal `pending` / `running` / `busy` status
 carrying the `execution_id` to pass to `poll_execution`. `busy` means the instance is already
 running some other script (one at a time per instance, it's Revit's UI thread); the returned
 `execution_id` is that script's.
 
+> **`mutations`** (present only on a `success` that changed something): the run's NET effect across
+> every document it changed — `created`, `modified`, `deleted` counts, `by_category` created/modified
+> tallies keyed by Revit category name, and `truncated` (a per-run cap on category resolution or id
+> retention was hit; totals still exact). Net means an element created and deleted in the same run
+> contributes nothing, and a created-then-edited one counts once, as created. Documents the script
+> settled with `keep: false` are left out. `modified` is noisy by nature (Revit marks dependents modified
+> on regeneration). Absent on a read-only run and on every failed one — including a partial commit or a
+> failure after `Settle(keep: true)`, where some writes may still have landed; `notices[]` says so.
+> Use it instead of a read-after-write script.
+>
 > **`return_value` vs `output`.** `return_value` is what your script `return`ed; `output` is stdout
 > captured while it ran. They are separate fields because `output` is not your script's alone —
 > Revit writes to the process console during a run (`PlayerServer:Warning:No subscriber

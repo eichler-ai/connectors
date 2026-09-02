@@ -720,7 +720,7 @@ public sealed class RequestDispatcher
         }
         else if (outcome.Success)
         {
-            _executionManager.CompleteSuccess(executionId, _now(), SafeFormatReturnValue(outcome.ReturnValue), outcome.StdOut, outcome.Notices, outcome.Files);
+            _executionManager.CompleteSuccess(executionId, _now(), SafeFormatReturnValue(outcome.ReturnValue), outcome.StdOut, outcome.Notices, outcome.Files, outcome.Mutations);
         }
         else
         {

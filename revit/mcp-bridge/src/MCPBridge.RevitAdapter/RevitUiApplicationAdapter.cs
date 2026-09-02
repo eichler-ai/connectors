@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using Autodesk.Revit.UI;
 
 namespace MCPBridge.RevitAdapter;
@@ -12,8 +13,153 @@ namespace MCPBridge.RevitAdapter;
 /// IDocumentCreationSource members below hand back an IDocumentAdapter whose CreateTransaction a script
 /// could then call. Public, it was a one-line route to an unmanaged transaction on a brand-new document.
 /// </summary>
-internal sealed class RevitUiApplicationAdapter : IUiApplicationAdapter, IRawUiApplicationSource, IDocumentCreationSource, IExistingDocumentSource
+internal sealed class RevitUiApplicationAdapter : IUiApplicationAdapter, IRawUiApplicationSource, IDocumentCreationSource, IExistingDocumentSource, IDocumentChangeSource
 {
+    /// <summary>
+    /// Category resolution cap per event (#146 Phase 2). Resolving a category is a Document.GetElement
+    /// per id, on the UI thread, inside the commit that raised the event; a script that touches a whole
+    /// model would otherwise pay for it twice. Past the cap the ids still count (the totals stay exact)
+    /// and the event is flagged truncated so by_category is known to undercount.
+    /// </summary>
+    private const int CategoryResolutionCap = 20_000;
+
+    /// <summary>
+    /// See <see cref="IDocumentChangeSource"/>. The handler NEVER throws -- translation AND the
+    /// subscriber's callback are both inside the catch (independent review: the first version wrapped
+    /// only the translation, so a throwing subscriber would have escaped into Revit's dispatch). It runs
+    /// inside Revit's own event dispatch on the UI thread, where an unhandled exception is Revit's to deal
+    /// with, not ours; a broken report is not worth a broken session, so any failure drops that one event.
+    ///
+    /// ONE Application wrapper for both += and -= (review): UIApplication.Application mints a wrapper per
+    /// access, and while Revit's event add/remove is native-backed and very likely tolerates that, a
+    /// leaked handler here would resolve categories on the UI thread for every later user edit, forever.
+    /// Capturing the wrapper once removes the question.
+    /// </summary>
+    public IDisposable Subscribe(Action<DocumentChange> onChange)
+    {
+        var application = _uiApplication.Application;
+        // Identity resolved once per document per subscription: e.GetDocument() hands back a fresh
+        // wrapper per event, so DocumentIdentity's ConditionalWeakTable cache would miss every time and
+        // re-run the path hashing (and a P/Invoke for mapped drives) inside every commit. Document.Equals
+        // compares the underlying document, which is what makes this small list work across wrappers.
+        var knownDocuments = new List<(Autodesk.Revit.DB.Document Document, string Id)>();
+
+        EventHandler<Autodesk.Revit.DB.Events.DocumentChangedEventArgs> handler = (_, e) =>
+        {
+            try
+            {
+                var change = Translate(e, knownDocuments);
+                if (change is not null)
+                {
+                    onChange(change);
+                }
+            }
+            catch
+            {
+                // By contract -- see the doc comment.
+            }
+        };
+
+        application.DocumentChanged += handler;
+        return new Unsubscriber(() => application.DocumentChanged -= handler);
+    }
+
+    /// <summary>
+    /// Null when the changed document's identity cannot be resolved (a document mid-transition, the
+    /// case TryResolveId's catch exists for): the event is dropped rather than filed under an invented
+    /// shared key, which would conflate distinct documents and defeat the settle-discard exclusion --
+    /// the same continue-on-null posture <see cref="OpenDocuments"/> takes.
+    /// </summary>
+    private static DocumentChange? Translate(Autodesk.Revit.DB.Events.DocumentChangedEventArgs e, List<(Autodesk.Revit.DB.Document Document, string Id)> knownDocuments)
+    {
+        var document = e.GetDocument();
+        string? documentId = null;
+        foreach (var known in knownDocuments)
+        {
+            if (known.Document.Equals(document))
+            {
+                documentId = known.Id;
+                break;
+            }
+        }
+
+        if (documentId is null)
+        {
+            documentId = TryResolveId(document);
+            if (documentId is null)
+            {
+                return null;
+            }
+
+            knownDocuments.Add((document, documentId));
+        }
+
+        var operationName = e.Operation.ToString();
+        var operation = operationName switch
+        {
+            "TransactionCommitted" => DocumentChangeOperation.Committed,
+            "TransactionUndone" => DocumentChangeOperation.Undone,
+            "TransactionRedone" => DocumentChangeOperation.Redone,
+            _ => DocumentChangeOperation.Other,
+        };
+
+        var budget = CategoryResolutionCap;
+        var truncated = false;
+        var added = Resolve(document, e.GetAddedElementIds(), ref budget, ref truncated);
+        var modified = Resolve(document, e.GetModifiedElementIds(), ref budget, ref truncated);
+        var deleted = e.GetDeletedElementIds().Select(id => id.Value).ToArray();
+
+        return new DocumentChange(documentId, operation, operationName, e.GetTransactionNames().ToArray(), added, modified, deleted, truncated);
+    }
+
+    private static IReadOnlyList<ChangedElement> Resolve(Autodesk.Revit.DB.Document document, ICollection<Autodesk.Revit.DB.ElementId> ids, ref int budget, ref bool truncated)
+    {
+        var result = new List<ChangedElement>(ids.Count);
+        foreach (var id in ids)
+        {
+            string? category = null;
+            if (budget > 0)
+            {
+                budget--;
+                try
+                {
+                    category = document.GetElement(id)?.Category?.Name;
+                }
+                catch
+                {
+                    // An element mid-transition can throw from Category; it still counts, uncategorised.
+                }
+            }
+            else
+            {
+                truncated = true;
+            }
+
+            result.Add(new ChangedElement(id.Value, category));
+        }
+
+        return result;
+    }
+
+    private sealed class Unsubscriber : IDisposable
+    {
+        private Action? _dispose;
+        public Unsubscriber(Action dispose) => _dispose = dispose;
+        public void Dispose()
+        {
+            var dispose = _dispose;
+            _dispose = null;
+            try
+            {
+                dispose?.Invoke();
+            }
+            catch
+            {
+                // Unsubscribing after the Application is gone is not worth failing a run over.
+            }
+        }
+    }
+
     private readonly UIApplication _uiApplication;
 
     public RevitUiApplicationAdapter(UIApplication uiApplication)

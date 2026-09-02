@@ -182,6 +182,58 @@ func TestExecuteScriptToolAddInReportedErrorIsToolError(t *testing.T) {
 	}
 }
 
+// TestExecuteScriptToolMutationsRoundTrip pins the #146 Phase 2 `mutations`
+// field's passage through execution.Result and ExecutionOut: the add-in
+// computes it, the broker must carry it verbatim, and it must be absent (not
+// zeroed) when the add-in sent none -- a read-only run has no field at all.
+func TestExecuteScriptToolMutationsRoundTrip(t *testing.T) {
+	mgr := execution.NewManager()
+	calls := 0
+	attachFakeInstance(t, mgr, "inst-1", func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
+		var p map[string]any
+		json.Unmarshal(params, &p)
+		calls++
+		res := map[string]any{"status": "success", "execution_id": p["execution_id"]}
+		if calls == 1 {
+			res["mutations"] = map[string]any{
+				"created": 2, "modified": 1, "deleted": 0,
+				"by_category": map[string]any{"Walls": map[string]any{"created": 2, "modified": 0}},
+				"truncated":   false,
+			}
+		}
+		return res, nil
+	})
+	cs := connectClient(t, mgr)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	call := func(script string) ExecutionOut {
+		res, err := cs.CallTool(ctx, &mcp.CallToolParams{
+			Name:      "execute_script",
+			Arguments: map[string]any{"instance_id": "inst-1", "document_id": "doc-1", "script": script},
+		})
+		if err != nil {
+			t.Fatalf("CallTool: %v", err)
+		}
+		var out ExecutionOut
+		sc, _ := json.Marshal(res.StructuredContent)
+		if err := json.Unmarshal(sc, &out); err != nil {
+			t.Fatalf("decoding structured content: %v", err)
+		}
+		return out
+	}
+
+	withWrites := call("Level.Create(Document, 1);")
+	if withWrites.Mutations == nil || withWrites.Mutations.Created != 2 || withWrites.Mutations.Modified != 1 ||
+		withWrites.Mutations.ByCategory["Walls"].Created != 2 {
+		t.Errorf("Mutations = %+v", withWrites.Mutations)
+	}
+	readOnly := call("return 1;")
+	if readOnly.Mutations != nil {
+		t.Errorf("a result the add-in sent without mutations must carry none, got %+v", readOnly.Mutations)
+	}
+}
+
 // TestExecuteScriptToolOverwriteOutputFilesAndFilesRoundTrip is a regression
 // test for PRD §09's file-exchange wire fields: overwrite_output_files set
 // on the tool call must reach the add-in's execute_script params, and a
