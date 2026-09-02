@@ -125,8 +125,8 @@ Connector.WithTransaction(doc, () => { Autodesk.Revit.DB.Level.Create(doc, 10.0)
 **What you get is headless**: in memory, no window, never the active document — writable by *script*,
 invisible to the person. Making it visible takes **two calls**:
 `UIApplication.OpenAndActivateDocument` needs a path, so `Connector.Settle(doc, true)` then `SaveAs` in
-the creating run, then activate from a second call routed at any document **other than the active one**
-(activation is refused only while the *active* document is modifiable, and your call's target always is).
+the creating run, then activate in a second call. Activation is refused only inside a block on the
+*active* document; between blocks it works.
 
 **The raw `UIApplication.Application.NewProjectDocument`/`NewFamilyDocument` still work** — a
 `WithTransaction` block adopts any open document — but nothing tracks them, so prefer the `Connector`
@@ -217,12 +217,11 @@ Two different things here, and the difference matters. Both are caught **before 
 semantic check over the compiled code — so a refused script changes nothing.
 
 **1. Flatly rejected — `new Transaction(...)`, `new TransactionGroup(...)`.**
-Your script is already inside one, and Revit allows only one open transaction per document, so your own
-can never work. There is no flag for this. Just make your changes directly; they commit on success and
-roll back on failure. The error record's `code` is `script-api-denied`. It applies to every document,
-including one you just created — use `Connector.CreateProjectDocument`/`CreateFamilyDocument` above,
-which own that document's transaction. A native `SubTransaction` **is** allowed as a savepoint inside
-the open transaction, **but only held in a `using`** — `using (var st = new
+The connector owns every transaction: the one it opens for your `WithTransaction` block carries the
+warning/error capture your result's `notices[]` comes from, and yours would bypass it and the run's
+rollback. There is no flag for this; write inside a block instead. The error record's `code` is
+`script-api-denied`, for every document including one you just created. A native `SubTransaction`
+**is** allowed as a savepoint inside a block, **but only held in a `using`** — `using (var st = new
 Autodesk.Revit.DB.SubTransaction(doc)) { st.Start(); … st.Commit(); }` (or `RollBack()`); any other
 construction is rejected. Disposal is the safety net: one still active when the enclosing transaction
 closed (block end, `Settle`, an exception) crashed Revit later.
@@ -237,12 +236,12 @@ closed (block end, `Settle`, an exception) crashed Revit later.
 | `Document.SaveAsCloudModel` | a cloud project other people can open |
 | `Document.Print`, `.PrintToFile`, `PrintManager.SubmitPrint` | a physical device |
 | `UIDocument.SaveAndClose` | the filesystem, then that person's session |
-| `UIApplication.PostCommand` | anything, after your script's transaction has already closed |
+| `UIApplication.PostCommand` | anything, after your script's run has already ended |
 | `WorksharingUtils.RelinquishOwnership` | another user's ability to edit |
 | `Connector.Settle` | this run's own rollback guarantee for that document — see above |
 
-**Why these and nothing else:** everything else you change is covered by the transaction wrapped around
-your script, so if the script throws, your changes are undone automatically. These are not — they act
+**Why these and nothing else:** everything else you change is covered by the group wrapped around your
+run, so if the script throws, your changes are undone automatically. These are not — they act
 outside this document's own content, and no exception takes them back. That one question ("would a thrown
 exception actually undo this?") is the whole rule.
 

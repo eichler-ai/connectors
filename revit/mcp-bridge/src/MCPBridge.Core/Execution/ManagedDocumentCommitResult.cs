@@ -79,7 +79,7 @@ public sealed class ManagedDocumentCommitResult
 
     /// <summary>
     /// True when a committed document could be a document the script did NOT itself create this run --
-    /// i.e. one adopted via ScriptGlobals.a Connector.WithTransaction block adopting an existing document (DocumentOrigin.AdoptedExisting), or the ambient
+    /// i.e. one adopted via a Connector.WithTransaction block (DocumentOrigin.AdoptedExisting), or the ambient
     /// document itself (DocumentOrigin.Ambient). Independent PR review finding: PartialCommitNotice's
     /// remedy text used to unconditionally claim every committed document is "unsaved and in-memory," which
     /// was true when CreateProjectDocument/CreateFamilyDocument were the only two members of this tier, but

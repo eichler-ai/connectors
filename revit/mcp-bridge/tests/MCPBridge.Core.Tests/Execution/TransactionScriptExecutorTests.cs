@@ -44,6 +44,55 @@ public class TransactionScriptExecutorTests
         Assert.Equal(new[] { "Start", "RollBack", "Dispose" }, document.LastTransactionGroup!.Calls);
     }
 
+    [Fact]
+    public async Task AnObservedChangeWithNoBlock_MakesTheRunAssimilateTheGroup()
+    {
+        // Independent review of #160: a self-transacting Revit API called between blocks (LoadFamily,
+        // EditScope.Commit, Export) commits into the group and raises DocumentChanged, but no connector
+        // transaction closes. The run must keep that work, not roll it back as "empty".
+        var executor = NewExecutor();
+        var document = new FakeDocumentAdapter();
+        var uiApp = new FakeUiApplicationAdapter
+        {
+            OnSubscribed = self => self.EmitChange(new DocumentChange(
+                document.DocumentId, DocumentChangeOperation.Committed, "TransactionCommitted", new[] { "Load Family" },
+                new[] { new ChangedElement(1, "Generic Models") },
+                Array.Empty<ChangedElement>(),
+                Array.Empty<long>(),
+                categoriesTruncated: false)),
+        };
+
+        var outcome = await executor.ExecuteAsync(document, uiApp, null, "1 + 1", CancellationToken.None);
+
+        Assert.True(outcome.Success);
+        Assert.Null(document.LastTransaction);
+        Assert.Contains("Assimilate", document.LastTransactionGroup!.Calls);
+        Assert.DoesNotContain("RollBack", document.LastTransactionGroup!.Calls);
+        Assert.Equal(1, Assert.IsType<MutationReport>(outcome.Mutations).Created);
+    }
+
+    [Fact]
+    public async Task ARefusedUndoLabel_IsReportedAsAnInfoNotice_AndTheRunStillSucceeds()
+    {
+        // Independent review of #160 (finding 14): ManagedDocumentTransactions records the refusal; this
+        // pins the executor turning that record into the undo-label-not-applied notice.
+        var executor = NewExecutor();
+        var document = new FakeDocumentAdapter { GroupThrowOnSetName = true };
+        var uiApp = new FakeUiApplicationAdapter
+        {
+            OnSubscribed = self => self.EmitChange(new DocumentChange(
+                document.DocumentId, DocumentChangeOperation.Committed, "TransactionCommitted", new[] { "x" },
+                new[] { new ChangedElement(1, "Walls") }, Array.Empty<ChangedElement>(), Array.Empty<long>(), categoriesTruncated: false)),
+        };
+
+        var outcome = await executor.ExecuteAsync(document, uiApp, null, "1 + 1", CancellationToken.None);
+
+        Assert.True(outcome.Success);
+        var notice = Assert.Single(outcome.Notices, n => n.Code == "undo-label-not-applied");
+        Assert.Equal(DiagnosticSeverity.Info, notice.Severity);
+        Assert.Contains("Assimilate", document.LastTransactionGroup!.Calls);
+    }
+
     // ------------------------------------------------------------------------------------------
     // #146 Phase 2: the mutation report rides the run's DocumentChanged subscription
     // ------------------------------------------------------------------------------------------

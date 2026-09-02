@@ -106,7 +106,13 @@ internal sealed class TransactionScriptExecutor
         // the commits CommitAll performs after the script finishes are still observed, and nothing keeps
         // listening once the run is over.
         var mutations = new MutationTracker();
-        var changeSubscription = (uiApplication as IDocumentChangeSource)?.Subscribe(mutations.Record);
+        var changeSubscription = (uiApplication as IDocumentChangeSource)?.Subscribe(change =>
+        {
+            mutations.Record(change);
+            // #146 Phase 3: a self-transacting API between blocks commits into the group without the
+            // connector seeing a CloseTransaction; this is how CommitAll learns the group is not empty.
+            transactions.NoteDocumentChanged(change.DocumentId);
+        });
 
         try
         {
@@ -316,7 +322,7 @@ internal sealed class TransactionScriptExecutor
                 "(not this one) and reach it through UIApplication.Application.Documents, matching its Title AND " +
                 "PathName == \"\" (so a saved file of the same name is never closed), then call Document.Close(false) " +
                 "-- or SaveAs to keep it -- with confirm_lifecycle_actions: true. Routing the call AT this document " +
-                "instead makes the connector open a transaction on it, which Revit refuses to Close; see get_skills " +
+                "instead makes the connector open a transaction group on it, which Revit refuses to Close; see get_skills " +
                 "for the full scratch-document recipe. Leaving it open is fine too.",
             });
     }
@@ -368,7 +374,7 @@ internal sealed class TransactionScriptExecutor
         {
             // Independent PR review finding (PR #28 #1): this used to unconditionally claim every
             // committed document is "unsaved and in-memory." That was true when CreateProjectDocument/
-            // CreateFamilyDocument were the only two members of this tier, but ScriptGlobals.WithTransaction-adoption
+            // CreateFamilyDocument were the only two members of this tier, but adoption via ScriptGlobals.WithTransaction
             // adds a genuine adopt-by-title WRITE path (a script can now open a managed transaction on a
             // document it did not itself create this run, including one that is saved on disk), so the
             // claim is a straightforward lie whenever ManagedDocumentCommitResult.AnyCommittedDocumentMayBeReal
@@ -383,8 +389,8 @@ internal sealed class TransactionScriptExecutor
             // NOT "or undo": the connector has no way to un-commit an already-committed Transaction (Revit
             // itself offers none), and this run's own script can never open a fresh transaction on a
             // document from a later, separate execute_script call (ScriptApiDenylist check 1) -- so even
-            // with WithTransaction-adoption's adopt-by-title path, a follow-up script can inspect a committed
-            // document and open ITS OWN new managed transaction on it (via WithTransaction-adoption again) to make
+            // with the adopt-by-title path, a follow-up script can inspect a committed
+            // document and open ITS OWN new managed transaction on it (via another WithTransaction block) to make
             // further changes, but it can never undo what already committed.
             remedy.Add(
                 "Find a committed document by Title in UIApplication.Application.Documents from a follow-up " +

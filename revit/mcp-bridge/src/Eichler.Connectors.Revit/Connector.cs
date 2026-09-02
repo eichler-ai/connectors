@@ -84,11 +84,10 @@ public sealed class Connector
     /// steal focus from whatever a person has open, so making one visible should stay an explicit act.
     /// It takes one further call now, not two: SaveAs is reachable in the creating run once
     /// <see cref="Settle"/> has finished the document, so only OpenAndActivateDocument -- which needs a
-    /// path -- has to wait for a later call. Activation itself is refused
-    /// only while the ACTIVE document is modifiable, which is not a general bar: route that call at any
-    /// document other than the currently active one and it succeeds. All verified live against Revit 2027,
-    /// including the negative -- the raw NewProjectDocument path, having no managed transaction, can SaveAs
-    /// in its own run.
+    /// path -- has to wait for a later call. Activation itself is refused only inside a
+    /// <see cref="WithTransaction(Autodesk.Revit.DB.Document, System.Action)"/> block on the ACTIVE
+    /// document; between blocks it succeeds (verified live, Revit 2025 and 2027). The raw
+    /// NewProjectDocument path, having no managed group, can SaveAs in its own run.
     /// </remarks>
     /// <param name="templatePath">Path to a project template. Defaults to the Revit install's own default
     /// project template, which is what a blank document needing no template asset should use.</param>

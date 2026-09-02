@@ -797,29 +797,31 @@ return new {
 	// second Transaction on a different document (one-open-transaction is a
 	// per-document rule) -- it is ScriptApiDenylist check 1 that refuses to
 	// construct one, unconditionally and without regard to which document it
-	// targets. Closing that gap is a separate, deliberate piece of work, tracked
-	// as issue #24 -- and its chosen fix does NOT narrow check 1: the executor
-	// will auto-wrap every document a script creates in its own managed
-	// transaction, so the refusal stays unconditional. Until that lands, a script
-	// can CREATE a blank document and READ it, not write to it.
-	t.Run("NewDocumentIsOutsideTheAmbientTransaction", func(t *testing.T) {
+	// targets. Since #146 Phase 3 NO document is writable at top level, so what is
+	// distinctive about a raw-created document is only that nothing tracks it:
+	// a Connector.WithTransaction block adopts it like any other open document,
+	// and the write inside the block lands.
+	t.Run("NewDocumentIsWritableOnlyThroughABlock", func(t *testing.T) {
 		out := runScript(t, c, instanceID, documentID, `
 var app = UIApplication.Application;
 var doc = app.NewProjectDocument(app.DefaultProjectTemplate);
 System.Console.WriteLine("cleanup-title=" + doc.Title + ";");
+string topLevel;
 try {
   Autodesk.Revit.DB.Level.Create(doc, 123.0);
-  return "modified";
+  topLevel = "modified";
 } catch (Autodesk.Revit.Exceptions.ModificationOutsideTransactionException) {
-  return "outside-transaction";
+  topLevel = "outside-transaction";
 }
+var inBlock = Connector.WithTransaction(doc, () => Autodesk.Revit.DB.Level.Create(doc, 124.0)) != null ? "created" : "null";
+return new { topLevel, inBlock };
 `)
 		if out.Status != "success" {
 			t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
 		}
 		registerCreatedDocumentCleanup(t, c, instanceID, documentID, out.Output)
-		if !strings.Contains(out.ReturnValue, "outside-transaction") {
-			t.Fatalf("a freshly created document was writable without its own transaction -- if that is now genuinely true, this test and the corpus plan's fixture design both need revisiting; %s", out.diag())
+		if !strings.Contains(out.ReturnValue, `"topLevel":"outside-transaction"`) || !strings.Contains(out.ReturnValue, `"inBlock":"created"`) {
+			t.Fatalf("a raw-created document must refuse a top-level write and accept one inside a WithTransaction block; %s", out.diag())
 		}
 	})
 

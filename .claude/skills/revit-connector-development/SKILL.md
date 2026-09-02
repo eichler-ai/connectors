@@ -249,14 +249,16 @@ per-version fixture rule are in `dev-environment.md`.
 
 ## Script API surface — the denylist principle
 
-`ScriptApiDenylist` is a guard, not a sandbox. Every script already runs inside an ambient
-`Transaction`/`TransactionGroup`, so a thrown exception rolls back document content for free. The
-denylist covers only the surface where that guarantee doesn't hold. One question decides membership
-and tier: **does a thrown exception in the script actually undo this?**
+`ScriptApiDenylist` is a guard, not a sandbox. Every document a script touches sits inside a
+connector-owned `TransactionGroup` for the run (#146 Phase 3: group-always, transaction-on-write), so a
+thrown exception rolls back document content for free. The denylist covers only the surface where that
+guarantee doesn't hold. One question decides membership and tier: **does a thrown exception in the
+script actually undo this?**
 
-- **Hard-blocked, no override** — no, because the problem is structural: constructing
-  `Transaction`/`TransactionGroup` violates the one-open-transaction-per-document invariant. No
-  confirmation parameter rescues this; it conflicts with the execution model itself. (`SubTransaction`
+- **Hard-blocked, no override** — no, because the problem is structural: a script-constructed
+  `Transaction`/`TransactionGroup` bypasses the failure capture the connector attaches to every
+  `WithTransaction` block and can outlive the run's group. No confirmation parameter rescues this; it
+  conflicts with the execution model itself. (`SubTransaction`
   is permitted since #146 Phase 1 — it nests inside the connector's transaction as a savepoint.)
 - **Confirmation-gated** — no, because the effect escapes the transaction boundary entirely: it
   changes a human's session (`Close`), the filesystem (`Save`/`SaveAs`), a shared central model

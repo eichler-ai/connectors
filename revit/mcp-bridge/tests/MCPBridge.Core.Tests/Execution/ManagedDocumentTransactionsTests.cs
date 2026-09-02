@@ -367,7 +367,9 @@ public class ManagedDocumentTransactionsTests
     {
         var journal = new List<string>();
         var set = NewSet();
-        set.OpenAdoptedForTesting(new JournalingDocumentAdapter("adopted", journal));
+        var adopted = new JournalingDocumentAdapter("adopted", journal);
+        set.OpenAdoptedForTesting(adopted);
+        Write(set, adopted);
 
         var result = set.CommitAll();
 
@@ -383,7 +385,9 @@ public class ManagedDocumentTransactionsTests
         // through the Revit-typed OpenExisting.
         var journal = new List<string>();
         var set = NewSet();
-        set.OpenAdoptedForTesting(new JournalingDocumentAdapter("adopted", journal));
+        var adopted = new JournalingDocumentAdapter("adopted", journal);
+        set.OpenAdoptedForTesting(adopted);
+        Write(set, adopted);
 
         var result = set.CommitAll();
 
@@ -858,8 +862,12 @@ public class ManagedDocumentTransactionsTests
         // point of the fix rather than a gap in it.
         var journal = new List<string>();
         var set = NewSet();
-        set.Open(new JournalingDocumentAdapter("ambient", journal), isAmbient: true);
-        set.Open(new ThrowingTitleDocumentAdapter("created", journal));
+        var ambient = new JournalingDocumentAdapter("ambient", journal);
+        var created = new ThrowingTitleDocumentAdapter("created", journal);
+        set.Open(ambient, isAmbient: true);
+        set.Open(created);
+        Write(set, ambient);
+        Write(set, created);
 
         var result = set.CommitAll();
 
@@ -1675,8 +1683,79 @@ public class ManagedDocumentTransactionsTests
 
         Assert.True(result.Success);
         Assert.Equal(new[] { "ambient:group.RollBack", "ambient:group.Dispose" }, journal);
-        Assert.Equal(new[] { "ambient (active document)" }, result.CommittedDocuments);   // closed cleanly
+        // Closed cleanly but NOT "committed": nothing of it remains, so the partial-commit notice must
+        // never count it among documents whose changes stay (independent review of #160).
+        Assert.Empty(result.CommittedDocuments);
         Assert.Equal(0, set.Count);
+    }
+
+    [Fact]
+    public void CommitAll_AssimilatesAGroupAnObservedExternalCommitLandedIn_WithNoConnectorTransaction()
+    {
+        // Independent review of #160: LoadFamily, EditScope.Commit and Export commit THEIR OWN transactions
+        // into the run's group between blocks. CommittedCount never sees them, so the group looked empty
+        // and was rolled back -- silently undoing the work while reporting success. The executor forwards
+        // every DocumentChanged it observes; one for this document is enough to make the group real.
+        var journal = new List<string>();
+        var set = NewSet();
+        var document = new JournalingDocumentAdapter("ambient", journal);
+        set.Open(document, isAmbient: true);
+        journal.Clear();
+
+        set.NoteDocumentChanged(document.DocumentId);
+        var result = set.CommitAll();
+
+        Assert.True(result.Success);
+        Assert.Contains("ambient:group.Assimilate", journal);
+        Assert.DoesNotContain("ambient:group.RollBack", journal);
+        Assert.Equal(new[] { "ambient (active document)" }, result.CommittedDocuments);
+    }
+
+    [Fact]
+    public void NoteDocumentChanged_ForADocumentThisRunDoesNotManage_IsIgnored()
+    {
+        var journal = new List<string>();
+        var set = NewSet();
+        set.Open(new JournalingDocumentAdapter("ambient", journal), isAmbient: true);
+        journal.Clear();
+
+        set.NoteDocumentChanged("tmp-somebody-else");
+        var result = set.CommitAll();
+
+        Assert.True(result.Success);
+        Assert.Equal(new[] { "ambient:group.RollBack", "ambient:group.Dispose" }, journal);
+    }
+
+    [Fact]
+    public void Settle_KeepAfterAnObservedExternalCommit_Assimilates()
+    {
+        var journal = new List<string>();
+        var set = NewSet();
+        var document = new JournalingDocumentAdapter("ambient", journal);
+        set.Open(document, isAmbient: true);
+        journal.Clear();
+
+        set.NoteDocumentChanged(document.DocumentId);
+        set.SettleCore(document, keep: true);
+
+        Assert.Equal(new[] { "ambient:group.Assimilate", "ambient:group.Dispose" }, journal);
+    }
+
+    [Fact]
+    public void WithTransaction_AdoptingADocument_UnwindsTheGroupWhenTheTransactionCannotStart()
+    {
+        // Independent review of #160 (finding 13): the adoption path opened a group and then started the
+        // block's transaction with no unwind between them, so a transaction that failed to start left a
+        // group registered that nothing asked for -- the document stayed adopted for the rest of the run
+        // and a retry could never get a clean group.
+        var set = NewSet();
+        var document = new FakeDocumentAdapter { DocumentId = "tmp-adopted", TransactionThrowOnStart = true };
+
+        Assert.ThrowsAny<Exception>(() => set.RunWithTransactionCore(document, () => { }));
+
+        Assert.Equal(0, set.Count);
+        Assert.Contains("RollBack", document.LastTransactionGroup!.Calls);
+        Assert.Contains("Dispose", document.LastTransactionGroup!.Calls);
     }
 
     [Fact]

@@ -1099,9 +1099,9 @@ public sealed class RequestDispatcher
                 "Move this call OUTSIDE your Connector.WithTransaction block -- documents are not modifiable " +
                 "between blocks, which is what this API needs; open a new block afterwards for any further " +
                 "writes. Your earlier blocks' changes still roll back if the script throws.",
-                "Document.LoadFamily needs BOTH documents non-modifiable: call it with no block open on " +
-                "either the source or the target. An EditScope starts and commits outside a block, with " +
-                "its writes in a block in between.",
+                "Document.LoadFamily needs its TARGET document non-modifiable: call it with no block open on " +
+                "the target (a modifiable source is fine). An EditScope starts and commits outside a block, " +
+                "with its writes in a block in between.",
             }),
         // #146 Phase 1 (H8). A native SubTransaction is permitted, and the one state it cannot start in
         // is "no open transaction" -- the resting state since #146 Phase 3: anywhere outside a

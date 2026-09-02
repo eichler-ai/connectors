@@ -65,11 +65,11 @@ internal sealed class ManagedDocumentTransactions
 {
     /// <summary>
     /// Independent PR review finding: a plain <c>bool IsAmbient</c> conflated two genuinely different
-    /// kinds of "not ambient" document once <c>WithTransaction-adoption</c> shipped. Before it, every non-ambient
+    /// kinds of "not ambient" document once adoption of existing documents (originally OpenForWriting, now a WithTransaction block) shipped. Before it, every non-ambient
     /// entry was a document THIS run created (unsaved, in-memory, touching no file/central model/session)
     /// -- the entire justification <see cref="CommitAll"/>'s "created first, ambient last" ordering and
     /// <see cref="TransactionScriptExecutor"/>'s partial-commit remedy text both give for why confining
-    /// partial-failure fallout to non-ambient documents is safe. <c>WithTransaction-adoption</c> can adopt a
+    /// partial-failure fallout to non-ambient documents is safe. A WithTransaction block can adopt a
     /// PRE-EXISTING document that is just as real as the ambient one -- a saved, possibly workshared model
     /// that merely isn't the active document -- and a bare bool would have silently let that document
     /// commit FIRST, alongside genuinely-throwaway created ones, exposing it to exactly the fallout the
@@ -112,6 +112,19 @@ internal sealed class ManagedDocumentTransactions
         /// run provably undo-invisible regardless of how Revit treats an empty Assimilate.
         /// </summary>
         public int CommittedCount { get; set; }
+
+        /// <summary>
+        /// A DocumentChanged event named this document while its group was open (#146 Phase 3, review
+        /// finding). Self-transacting Revit APIs called between blocks -- LoadFamily, EditScope.Commit,
+        /// Export -- commit THEIR OWN transactions into the run's group without passing through
+        /// CloseTransaction, so <see cref="CommittedCount"/> alone would call the group empty and roll
+        /// their work back at CommitAll while reporting success. The executor forwards every change it
+        /// observes through <see cref="ManagedDocumentTransactions.NoteDocumentChanged"/>.
+        /// </summary>
+        public bool ExternalCommitObserved { get; set; }
+
+        /// <summary>Something committed into this group: a connector transaction or an observed external one.</summary>
+        public bool HasCommittedWork => CommittedCount > 0 || ExternalCommitObserved;
 
         public DocumentOrigin Origin { get; }
 
@@ -156,7 +169,7 @@ internal sealed class ManagedDocumentTransactions
     /// <paramref name="document"/> and tracks it. <paramref name="isAmbient"/> marks the run's active document -- at most one, opened by
     /// TransactionScriptExecutor before the script runs; created documents are opened lazily as the
     /// script creates them (via the internal <see cref="DocumentOrigin"/> overload below, which
-    /// distinguishes them from a document WithTransaction-adoption adopted -- see that enum's own doc comment).
+    /// distinguishes them from a document a WithTransaction block adopted -- see that enum's own doc comment).
     ///
     /// Guards against opening the SAME document twice, by <see cref="IDocumentAdapter.DocumentId"/>.
     ///
@@ -174,7 +187,7 @@ internal sealed class ManagedDocumentTransactions
     /// live document can pass that DocumentId does not already catch on its own. Closing this gap for real
     /// needs a comparison on something that stays stable ACROSS wrapper instances (e.g. a value read off
     /// the document itself, not the wrapper), which needs live-Revit verification before it's added here --
-    /// not done as part of this fix. Until then: WithTransaction-adoption on a document reached through a DIFFERENT
+    /// not done as part of this fix. Until then: a WithTransaction block on a document reached through a DIFFERENT
     /// API entry point than however it's already tracked (e.g. re-found via `Application.Documents` when
     /// it was originally opened as the ambient document) can silently open a SECOND transaction on it
     /// rather than being refused -- Revit's own one-open-transaction-per-document rule is what actually
@@ -182,12 +195,12 @@ internal sealed class ManagedDocumentTransactions
     ///
     /// KNOWN, ACCEPTED gap in the other direction: a workshared document's DocumentId is derived from its
     /// CentralModelPath, so a local copy and its own central model opened in the same session legitimately
-    /// share one DocumentId -- WithTransaction-adoption on the second would be refused as a false-positive "already
+    /// share one DocumentId -- a block on the second would be refused as a false-positive "already
     /// open". Not worth restructuring for; noted so a future reader doesn't have to rediscover it live.
     ///
-    /// This guard was never needed before WithTransaction-adoption shipped: CreateProjectDocument/CreateFamilyDocument
+    /// This guard was never needed before adoption shipped: CreateProjectDocument/CreateFamilyDocument
     /// only ever hand back a document that didn't exist until that call returned -- nothing else could
-    /// already reference it -- but WithTransaction-adoption specifically targets a document that MAY already be
+    /// already reference it -- but adoption specifically targets a document that MAY already be
     /// tracked (the ambient one, or one opened earlier this same run), which a second Transaction.Start()
     /// on the same document cannot safely do (Revit allows only one open Transaction per document at a
     /// time) and which CommitAll/RollBackAll were never written to iterate twice for one document. Fails
@@ -244,7 +257,7 @@ internal sealed class ManagedDocumentTransactions
         // same reason Describe routes through SafeDescribe); DocumentId is safe, it was just read above.
         // De-duped by document_id: a created document that is Settle'd (which empties _entries, so the
         // duplicate-open guard above no longer fires) and then re-Opened -- via a fresh WithTransaction or
-        // WithTransaction-adoption -- would otherwise be captured twice (independent PR review finding).
+        // adoption via WithTransaction -- would otherwise be captured twice (independent PR review finding).
         if (origin == DocumentOrigin.CreatedThisRun && !_createdDocuments.Any(d => d.DocumentId == document.DocumentId))
         {
             string title;
@@ -338,6 +351,24 @@ internal sealed class ManagedDocumentTransactions
     public IReadOnlyList<string> DiscardedDocumentIds => _discardedDocumentIds;
 
     /// <summary>
+    /// A DocumentChanged event named <paramref name="documentId"/> (#146 Phase 3, review finding). Marks
+    /// that document's group as holding work even when no connector transaction committed into it, so
+    /// CommitAll assimilates rather than rolling back what a self-transacting API (LoadFamily,
+    /// EditScope.Commit, Export) committed between blocks. Unknown ids -- documents this run does not
+    /// manage, or one already settled -- are ignored.
+    /// </summary>
+    public void NoteDocumentChanged(string documentId)
+    {
+        foreach (var entry in _entries)
+        {
+            if (entry.Document.DocumentId == documentId)
+            {
+                entry.ExternalCommitObserved = true;
+            }
+        }
+    }
+
+    /// <summary>
     /// Failures accumulated by documents that have since been SETTLED and deregistered. Without this they
     /// vanished: <see cref="Entry.AccumulatedFailures"/> exists precisely so a document committing N times
     /// keeps all N failure sets, but <see cref="CommitAll"/> is its only reader and walks <c>_entries</c> --
@@ -422,7 +453,21 @@ internal sealed class ManagedDocumentTransactions
             // last, which is the ordering guarantee CommitAll exists to provide.
             Open(document, OriginFor(document.DocumentId, DocumentOrigin.AdoptedExisting));
             entry = FindEntry(document)!;
-            ReopenTransaction(entry);
+            try
+            {
+                ReopenTransaction(entry);
+            }
+            catch
+            {
+                // Same unwind RunBody performs for a body that throws: a group nobody asked for must not
+                // stay registered (a caught failure would otherwise leave the document adopted for the
+                // rest of the run, and a retry could never get a clean group).
+                SafeRollBack(entry.Group.RollBack);
+                SafeDispose(null, entry.Group);
+                _entries.Remove(entry);
+                throw;
+            }
+
             RunBody(entry, body, openedGroupHere: true);
             return;
         }
@@ -546,7 +591,7 @@ internal sealed class ManagedDocumentTransactions
                 // label when one was given, else the default. Only CommitAll derives names. An EMPTY group
                 // (nothing committed) is rolled back instead: identical outcome, no undo entry (#146 Phase 3).
                 CloseTransaction(entry);
-                if (entry.CommittedCount == 0)
+                if (!entry.HasCommittedWork)
                 {
                     entry.Group.RollBack();
                 }
@@ -653,7 +698,7 @@ internal sealed class ManagedDocumentTransactions
     private IDocumentAdapter ResolveAdapter(Autodesk.Revit.DB.Document rawDocument, string memberName)
     {
         // Signposted rather than left to fail deep inside DocumentIdentity's ConditionalWeakTable with a
-        // bare ArgumentNullException naming "key" -- the same PRD §01 fix OpenExisting already carries,
+        // bare ArgumentNullException naming "key" -- the same PRD §01 fix the adoption path already carries,
         // and the same easy mistake (a by-Title lookup that found nothing and was not null-checked).
         if (rawDocument is null)
         {
@@ -840,7 +885,7 @@ internal sealed class ManagedDocumentTransactions
     public ManagedDocumentCommitResult CommitAll(Func<string, string?>? undoLabel = null)
     {
         // Three tiers now, not two (independent PR review finding) -- CreatedThisRun (safest: unsaved,
-        // in-memory) first, AdoptedExisting (may be a real, saved model WithTransaction-adoption adopted) next,
+        // in-memory) first, AdoptedExisting (may be a real, saved model a WithTransaction block adopted) next,
         // Ambient (the run's active document) always last. See DocumentOrigin's own doc comment for why
         // collapsing AdoptedExisting into the old "commit early" bucket alongside CreatedThisRun would
         // have been wrong.
@@ -894,7 +939,7 @@ internal sealed class ManagedDocumentTransactions
         Exception? failure = null;
         // Independent PR review finding: PartialCommitNotice's remedy used to unconditionally claim every
         // committed document was "unsaved and in-memory" -- true when every non-ambient entry was
-        // CreatedThisRun, false the moment WithTransaction-adoption could adopt a real, saved document as
+        // CreatedThisRun, false the moment a block could adopt a real, saved document as
         // AdoptedExisting or the ambient one itself commits. Tracked here, at the one place that already
         // knows each entry's origin AND which of them actually committed.
         var anyCommittedDocumentMayBeReal = false;
@@ -906,10 +951,13 @@ internal sealed class ManagedDocumentTransactions
             var attempt = AttemptCommit(entry, failures, undoLabel, undoLabelFailures);
             if (attempt.Succeeded)
             {
-                committed.Add(SafeDescribe(entry));
-                if (entry.Origin != DocumentOrigin.CreatedThisRun)
+                if (attempt.CommittedWork)
                 {
-                    anyCommittedDocumentMayBeReal = true;
+                    committed.Add(SafeDescribe(entry));
+                    if (entry.Origin != DocumentOrigin.CreatedThisRun)
+                    {
+                        anyCommittedDocumentMayBeReal = true;
+                    }
                 }
 
                 // Issue #34: terminal for this entry (committed, failures read, described) -- release
@@ -967,7 +1015,13 @@ internal sealed class ManagedDocumentTransactions
 
         public bool Succeeded => Error is null;
 
-        public static CommitAttempt Committed() => new(null, rollbackVerified: true);
+        public static CommitAttempt Committed() => new(null, rollbackVerified: true) { CommittedWork = true };
+
+        /// <summary>The group held nothing and was rolled back: a clean terminal step, but no changes remain.</summary>
+        public static CommitAttempt RolledBackEmpty() => new(null, rollbackVerified: true);
+
+        /// <summary>True when changes actually landed (assimilated); false for a rolled-back empty group.</summary>
+        public bool CommittedWork { get; init; }
 
         public static CommitAttempt Failed(Exception error, bool rollbackVerified) => new(error, rollbackVerified);
     }
@@ -993,15 +1047,16 @@ internal sealed class ManagedDocumentTransactions
         var transaction = entry.Transaction;
         if (transaction is null)
         {
-            if (entry.CommittedCount == 0)
+            if (!entry.HasCommittedWork)
             {
                 // NOTHING WAS COMMITTED INTO THIS GROUP -- a read-only run, the resting state (#146 Phase 3).
                 // Rolled back, not assimilated: the outcome is identical (there is nothing to keep) and the
                 // rollback is the one that provably leaves no undo entry, whatever Revit does with an empty
-                // Assimilate. Reported as committed: the document closed cleanly with all of its (zero)
-                // changes intact.
+                // Assimilate. Succeeded, but NOT "committed": the document closed cleanly having changed
+                // nothing, and the partial-commit notice must not count it among documents whose changes
+                // remain.
                 return SafeRollBack(entry.Group.RollBack)
-                    ? CommitAttempt.Committed()
+                    ? CommitAttempt.RolledBackEmpty()
                     : CommitAttempt.Failed(new InvalidOperationException($"rolling back the empty group for '{SafeDescribe(entry)}' failed"), rollbackVerified: false);
             }
 
