@@ -237,7 +237,7 @@ choose issues itself, and loads `revit-connector-development` for the harness ru
 7. **Report.** Issues closed, documents added, documents superseded, and — the same net-count
    discipline `/triage-issues` uses — the queue size before and after.
 
-The command lives at `.claude/skills/triage-howto-submission/SKILL.md` and is written when the
+The command lives at `.claude/commands/triage-howto-submission.md` (beside `triage-issues.md`) and is written when the
 validator and the fixture-run helper exist (§6 step 2); its text is this section.
 
 ### 4d. Queue hygiene
@@ -273,7 +273,7 @@ Nothing is annotated or extracted until this table is settled.
 
 1. Schemas + validator (Go) — shared by everything below.
 2. **`submit_howto`** (local write, gate, scrubber, outbox + prefilled URL, `skill.md` bullet) and
-   the fixture-run helper; then `/triage-howto-submission` as a skill file. The queue can start
+   the fixture-run helper; then `/triage-howto-submission` as a command file. The queue can start
    filling from real sessions while the seed is audited.
 3. Harness extractor + the audited seed (`revit/howto/corpus.jsonl`), the tier-2 sweep writing the
    sidecar, and the corpus embedded in the broker with its version in `-version` / `get_skills`.
