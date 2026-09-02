@@ -30,7 +30,8 @@ What the connector *does* promise, and what a report should therefore target:
   mistakes, not a sandbox** — reflection can route around it, and that is an accepted,
   documented position (PRD §02), not a gap to report. What is enforced, and worth reporting
   if bypassable *without reflection*: a script may not construct its own
-  `Transaction`/`TransactionGroup`/`SubTransaction` (unconditional), and the
+  `Transaction`/`TransactionGroup` (unconditional; a `SubTransaction` is allowed only inside a
+  `using`), and the
   document-lifecycle members (`Document.Close`/`Save`/`SynchronizeWithCentral`/`Print`, …)
   require the request-level `confirm_lifecycle_actions` flag. Three independent review
   rounds have already closed non-reflection bypass routes through the connector's own public

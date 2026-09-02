@@ -840,7 +840,9 @@ public sealed class RequestDispatcher
             {
                 $"Remove {denial.DeniedMember} from the script; no argument to execute_script permits it.",
                 "Make document changes directly instead -- the connector already runs every script inside " +
-                "its own Transaction, which is committed on success and rolled back if the script throws.",
+                "its own Transaction, which is committed on success and rolled back if the script throws. " +
+                "For a savepoint within the run, a native Autodesk.Revit.DB.SubTransaction held in a `using` " +
+                "is permitted; Commit or RollBack it before the enclosing transaction closes.",
             }),
         ScriptAwaitNotAllowedException =>
             (ScriptAwaitNotAllowedException.Code, new[]
@@ -882,8 +884,27 @@ public sealed class RequestDispatcher
                 "Document.LoadFamily needs BOTH documents non-modifiable: nest one WithoutTransaction " +
                 "per document (source and target).",
             }),
+        // #146 Phase 1 (H8). A native SubTransaction is permitted, and the one state it cannot start in
+        // is "no open transaction" -- inside Connector.WithoutTransaction, or on a document this run never
+        // wrote to. Revit's message is accurate and names no way to get a transaction open here.
+        Exception subTransaction when IsSubTransactionOutsideTransaction(subTransaction) =>
+            ("script-subtransaction-needs-transaction", new[]
+            {
+                "A SubTransaction is a savepoint INSIDE a transaction. Open one first: wrap this code in " +
+                "Connector.WithTransaction(document, () => { ... }) and start the SubTransaction inside it.",
+                "If this is inside Connector.WithoutTransaction, that block is deliberately not " +
+                "modifiable; nest Connector.WithTransaction inside it.",
+            }),
         _ => ("script-execution-failed", null),
     };
+
+    /// <summary>
+    /// Revit's wording for SubTransaction.Start() with no enclosing transaction, verified live (Revit
+    /// 2025): "A sub-transaction can only be active inside an open Transaction." Message-matched for the
+    /// same reason as <see cref="IsTargetMustNotBeModifiable"/>; fails open if reworded, pinned live.
+    /// </summary>
+    private static bool IsSubTransactionOutsideTransaction(Exception exception) =>
+        exception.Message.Contains("sub-transaction can only be active inside an open Transaction", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// Matched on the MESSAGE, and that is a weaker match than <see cref="IsModificationOutsideTransaction"/>'s

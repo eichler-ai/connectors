@@ -9,8 +9,9 @@ namespace MCPBridge.RevitAdapter;
 /// replaces the unsupported reflection-into-a-private-field workaround `skill.md` used to document.
 /// CreateTransaction/CreateTransactionGroup remain executor-only concerns -- they are OUR adapter methods,
 /// not real Revit API. What keeps real Document exposure safe is ScriptApiDenylist (MCPBridge.Core), which
-/// rejects at compile time any script that opens its own Autodesk.Revit.DB.Transaction/TransactionGroup/
-/// SubTransaction against the same document the executor has already opened one on.
+/// rejects at compile time any script that opens its own Autodesk.Revit.DB.Transaction/TransactionGroup
+/// against the same document the executor has already opened one on (a SubTransaction is permitted -- it
+/// nests inside the executor's transaction as a savepoint; #146 Phase 1).
 ///
 /// THIS COMMENT USED TO CLAIM THESE METHODS "were never reachable from a script anyway", AND THAT WAS
 /// FALSE -- recorded here because the claim is the kind that gets believed on re-reading. Live-verified

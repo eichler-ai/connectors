@@ -1161,3 +1161,118 @@ return new { before, after };
 		t.Errorf("WithoutTransaction reopened a transaction the document did not have when the block began -- the H1 regression: the scope must restore the state it found, not always-open; (%s)", out.diag())
 	}
 }
+
+// TestSubTransactionIsASavepointInsideTheConnectorsTransaction is the live
+// half of #146 Phase 1 (#143): a native Autodesk.Revit.DB.SubTransaction is
+// PERMITTED, and it behaves as the intra-run savepoint the design leans on.
+// Tier 1 pins only that the denylist no longer refuses the construction;
+// everything below is a fact about Revit that a fake cannot supply.
+func TestSubTransactionIsASavepointInsideTheConnectorsTransaction(t *testing.T) {
+	c, instanceID, documentID := targetDocument(t)
+	fixtureTitle := createBlankFixtureDocument(t, c, instanceID, documentID)
+
+	t.Run("RollBackDiscardsOnlyTheSubTransactionsSlice", func(t *testing.T) {
+		// Inside the connector's ambient transaction (fixtureWritePreamble opened it):
+		// a level created before the savepoint and one created after it both
+		// survive; the one created INSIDE the rolled-back sub-transaction is gone.
+		out := runScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+`
+Autodesk.Revit.DB.Level.Create(doc, 71.1);
+using (var st = new Autodesk.Revit.DB.SubTransaction(doc)) {
+  st.Start();
+  Autodesk.Revit.DB.Level.Create(doc, 72.2);
+  st.RollBack();
+}
+using (var st = new Autodesk.Revit.DB.SubTransaction(doc)) {
+  st.Start();
+  Autodesk.Revit.DB.Level.Create(doc, 73.3);
+  st.Commit();
+}
+Autodesk.Revit.DB.Level.Create(doc, 74.4);
+int before = 0, rolledBack = 0, committed = 0, after = 0;
+foreach (var e in new Autodesk.Revit.DB.FilteredElementCollector(doc).OfClass(typeof(Autodesk.Revit.DB.Level))) {
+  var lvl = e as Autodesk.Revit.DB.Level;
+  if (lvl == null) continue;
+  if (System.Math.Abs(lvl.Elevation - 71.1) < 0.01) before++;
+  if (System.Math.Abs(lvl.Elevation - 72.2) < 0.01) rolledBack++;
+  if (System.Math.Abs(lvl.Elevation - 73.3) < 0.01) committed++;
+  if (System.Math.Abs(lvl.Elevation - 74.4) < 0.01) after++;
+}
+return new { before, rolledBack, committed, after };
+`)
+		if out.Status != "success" {
+			t.Fatalf("expected status=success -- if the code is script-api-denied, SubTransaction is back in ScriptApiDenylist's constructed-types table; got %q (%s)", out.Status, out.diag())
+		}
+		for _, want := range []string{`"before":1`, `"rolledBack":0`, `"committed":1`, `"after":1`} {
+			if !strings.Contains(out.ReturnValue, want) {
+				t.Errorf("wanted %s -- a SubTransaction must be a savepoint: RollBack discards exactly its own slice, Commit keeps it, and writes outside it are untouched either way; (%s)", want, out.diag())
+			}
+		}
+	})
+
+	t.Run("StartOutsideAnyTransactionIsMappedToItsOwnCode", func(t *testing.T) {
+		// Inside WithoutTransaction the document has no open transaction, which is
+		// the one state a SubTransaction cannot start in. Revit's own message names
+		// neither the connector nor the fix; the mapping does. Lets the exception
+		// PROPAGATE so the code on the wire is what is asserted.
+		rej := runRejectedScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+`
+Connector.WithoutTransaction(doc, () => {
+  using (var st = new Autodesk.Revit.DB.SubTransaction(doc)) {
+    st.Start();
+    st.RollBack();
+  }
+});
+return "started";
+`)
+		if rej.Error.Code != "script-subtransaction-needs-transaction" {
+			t.Fatalf("SubTransaction.Start with no open transaction must map to `script-subtransaction-needs-transaction`, got %q -- if this is `script-execution-failed`, Revit's message no longer contains a phrase RequestDispatcher.IsSubTransactionOutsideTransaction matches and the mapping is failing open; message: %s", rej.Error.Code, rej.Error.Message)
+		}
+		if joined := strings.Join(rej.Error.Remedy, " "); !strings.Contains(joined, "Connector.WithTransaction") {
+			t.Errorf("the remedy must name Connector.WithTransaction as the way to have a transaction open; got: %q", joined)
+		}
+	})
+
+	// DELIBERATELY NO SUBTEST for a SubTransaction LEFT OPEN at the end of a WithTransaction block
+	// (#146 H8). It was run live once, on Revit 2025, and the evidence is recorded here instead:
+	//
+	//   {"blockError":"","secondBlockRan":true,"forgotten":1}   -- and then Revit CRASHED
+	//   ("A software problem has caused Revit 2025.4 to close unexpectedly") on the fixture
+	//   document's Close(false) in this test's cleanup, ~45s later.
+	//
+	// So the connector's Commit met the open sub-transaction and Revit reported nothing: no
+	// exception, the slice was kept, the next block ran. The document was then unstable -- the likely
+	// mechanism is the script's undisposed SubTransaction wrapper being finalized against a
+	// transaction that had already ended. ScriptApiDenylist therefore refuses any SubTransaction
+	// construction that is not a `using` resource (compile-time; pinned at tier 1 and in
+	// TestDenylistRejectsOwnTransaction), and the `using`-only path -- Dispose doing the rollback with
+	// no explicit Commit/RollBack -- is pinned live in the subtest below. A live test that crashes the
+	// shared Revit session cannot stay in the suite.
+
+	t.Run("DisposeAloneRollsBackAnUnfinishedSubTransaction", func(t *testing.T) {
+		// The safety net the `using` requirement rests on, verified rather than assumed: a
+		// SubTransaction that is Started and then only DISPOSED (no Commit, no RollBack) must roll its
+		// slice back, leave the enclosing block committable, and leave the document closable -- the
+		// fixture's cleanup Close is the same call that crashed Revit in the bare-construction probe.
+		out := runScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+`
+using (var st = new Autodesk.Revit.DB.SubTransaction(doc)) {
+  st.Start();
+  Autodesk.Revit.DB.Level.Create(doc, 76.6);
+  // no Commit, no RollBack: Dispose is all that ends it
+}
+Autodesk.Revit.DB.Level.Create(doc, 77.7);
+int disposedOnly = 0, after = 0;
+foreach (var e in new Autodesk.Revit.DB.FilteredElementCollector(doc).OfClass(typeof(Autodesk.Revit.DB.Level))) {
+  var lvl = e as Autodesk.Revit.DB.Level;
+  if (lvl == null) continue;
+  if (System.Math.Abs(lvl.Elevation - 76.6) < 0.01) disposedOnly++;
+  if (System.Math.Abs(lvl.Elevation - 77.7) < 0.01) after++;
+}
+return new { disposedOnly, after };
+`)
+		if out.Status != "success" {
+			t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
+		}
+		if !strings.Contains(out.ReturnValue, `"disposedOnly":0`) || !strings.Contains(out.ReturnValue, `"after":1`) {
+			t.Errorf("Dispose alone must roll back the unfinished sub-transaction's slice and leave the enclosing transaction usable -- this is the property the `using` requirement in ScriptApiDenylist rests on; (%s)", out.diag())
+		}
+	})
+}

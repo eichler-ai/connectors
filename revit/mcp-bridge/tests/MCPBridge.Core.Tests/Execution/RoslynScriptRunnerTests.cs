@@ -444,7 +444,6 @@ public class RoslynScriptRunnerTests
     [Theory]
     [InlineData("new Autodesk.Revit.DB.Transaction(Document, \"x\");", "Transaction")]
     [InlineData("new Autodesk.Revit.DB.TransactionGroup(Document, \"x\");", "TransactionGroup")]
-    [InlineData("new Autodesk.Revit.DB.SubTransaction(Document);", "SubTransaction")]
     public async Task RunAsync_ScriptOpensItsOwnTransaction_IsRejectedByTheDenylist(string script, string expectedNamedType)
     {
         // THE load-bearing check. TransactionScriptExecutor opens the ambient TransactionGroup/
@@ -461,6 +460,76 @@ public class RoslynScriptRunnerTests
         Assert.IsType<ScriptApiDenylistViolationException>(outcome.Exception);
         Assert.Contains(ScriptApiDenylistViolationException.DeniedCode, outcome.Exception!.Message);
         Assert.Contains(expectedNamedType, outcome.Exception.Message);
+    }
+
+    /// <summary>
+    /// #146 Phase 1 (#143): SubTransaction is PERMITTED. It was in check 1's table by association --
+    /// "a script must never construct a transaction of any kind" -- but a SubTransaction is the opposite
+    /// of a competing transaction: it can only exist INSIDE an open one, commits into it (so the §07
+    /// failure preprocessor on the connector's commit still sees everything), and gives a script the
+    /// one thing the connector-owned model otherwise lacks, an intra-run savepoint to roll back to.
+    /// PERMITTED ONLY AS THE RESOURCE OF A `using` (independent review of #150): a SubTransaction left
+    /// open when the enclosing transaction closes was accepted silently by Revit and crashed it on the
+    /// next Document.Close, and the connector cannot see the script's object to guard it at runtime.
+    /// Dispose ends an active sub-transaction, so `using` is the one syntactic shape that makes the crash
+    /// unreachable -- and the denylist is already a syntactic walk. Pinned at compile time via the
+    /// pre-flight (no live Document needed), in every `using` spelling.
+    ///
+    /// Null means "nothing to reject before the event is raised". A compile regression in one of these
+    /// rows would also read as non-null -- distinguishable by the exception type in the outcome, and
+    /// accepted here because these scripts are trivially well-formed.
+    /// </summary>
+    [Theory]
+    [InlineData("using (var st = new Autodesk.Revit.DB.SubTransaction(Document)) { st.Start(); st.Commit(); } return 1;")]
+    // A `using` DECLARATION is only legal inside a block in a script (at top level Roslyn parses
+    // `using var` as a directive: CS1002), so it is exercised in braces.
+    [InlineData("{ using var st = new Autodesk.Revit.DB.SubTransaction(Document); st.Start(); st.RollBack(); } return 1;")]
+    [InlineData("using (Autodesk.Revit.DB.SubTransaction st = new(Document)) { st.Start(); st.Commit(); } return 1;")]
+    [InlineData("using St = Autodesk.Revit.DB.SubTransaction; using (var st = new St(Document)) { st.Start(); st.Commit(); } return 1;")]
+    [InlineData("using (new Autodesk.Revit.DB.SubTransaction(Document)) { } return 1;")]
+    public void TryPreflight_SubTransactionHeldInAUsing_IsNotDenied(string script)
+    {
+        var runner = NewRunner();
+
+        Assert.Null(runner.TryPreflight(script));
+    }
+
+    /// <summary>
+    /// The other half of the rule: every spelling that constructs a SubTransaction WITHOUT a `using` is
+    /// refused, with a message that names the fix rather than the generic "you are already in a
+    /// transaction" denial -- an agent that wrote a SubTransaction on purpose must not be told to remove it.
+    /// </summary>
+    [Theory]
+    [InlineData("var st = new Autodesk.Revit.DB.SubTransaction(Document); st.Start(); st.Commit(); return 1;")]
+    [InlineData("Autodesk.Revit.DB.SubTransaction s = new(Document); return 1;")]
+    [InlineData("using St = Autodesk.Revit.DB.SubTransaction; var s = new St(Document); return 1;")]
+    [InlineData("dynamic d = Document; dynamic s = new Autodesk.Revit.DB.SubTransaction(d); return 1;")]
+    [InlineData("System.Func<Autodesk.Revit.DB.SubTransaction> f = () => new Autodesk.Revit.DB.SubTransaction(Document); return 1;")]
+    public void TryPreflight_SubTransactionNotHeldInAUsing_IsDenied(string script)
+    {
+        var runner = NewRunner();
+
+        var outcome = runner.TryPreflight(script);
+
+        var ex = Assert.IsType<ScriptApiDenylistViolationException>(outcome?.Exception);
+        Assert.Equal(ScriptApiDenylistViolationException.DeniedCode, ex.Code);
+        Assert.Contains("SubTransaction", ex.Message);
+        Assert.Contains("using", ex.Message);
+        Assert.DoesNotContain("Just make your changes directly", ex.Message);
+    }
+
+    [Fact]
+    public void TryPreflight_PermittingSubTransaction_DidNotLoosenTheOtherTwo()
+    {
+        // The permission is one entry leaving a set, not a relaxation of check 1. Both siblings stay
+        // denied in the same breath, asserted together so a future edit cannot drop the wrong line.
+        var runner = NewRunner();
+
+        var transaction = runner.TryPreflight("var t = new Autodesk.Revit.DB.Transaction(Document, \"x\"); return 1;");
+        var group = runner.TryPreflight("var g = new Autodesk.Revit.DB.TransactionGroup(Document, \"x\"); return 1;");
+
+        Assert.IsType<ScriptApiDenylistViolationException>(transaction?.Exception);
+        Assert.IsType<ScriptApiDenylistViolationException>(group?.Exception);
     }
 
     // --- PRD §14: the confirmation-gated half ---
@@ -691,7 +760,6 @@ public class RoslynScriptRunnerTests
     [Theory]
     [InlineData("new Autodesk.Revit.DB.Transaction(Document, \"x\");", "Transaction")]
     [InlineData("Autodesk.Revit.DB.TransactionGroup g = new(Document, \"x\"); return 1;", "TransactionGroup")]
-    [InlineData("using Tx = Autodesk.Revit.DB.SubTransaction; var s = new Tx(Document); return 1;", "SubTransaction")]
     public async Task RunAsync_TransactionConstruction_IsRejectedEvenWithConfirmation(string script, string expectedNamedType)
     {
         // Check 1 is NOT gated and has no opt-in, by design: a second Transaction on the same document
@@ -717,7 +785,6 @@ public class RoslynScriptRunnerTests
     // real Document" design rests on, so it is pinned per denied type, not just once.
     [InlineData("Autodesk.Revit.DB.Transaction t = new(Document, \"x\"); return 1;", "Transaction")]
     [InlineData("Autodesk.Revit.DB.TransactionGroup g = new(Document, \"x\"); return 1;", "TransactionGroup")]
-    [InlineData("Autodesk.Revit.DB.SubTransaction s = new(Document); return 1;", "SubTransaction")]
     // A using-alias is another spelling the semantic check must see through.
     [InlineData("using Tx = Autodesk.Revit.DB.Transaction; var t = new Tx(Document, \"x\"); return 1;", "Transaction")]
     public async Task RunAsync_TransactionOpenedBySomeOtherSpellingOfNew_IsStillRejected(string script, string expectedNamedType)
@@ -745,7 +812,6 @@ public class RoslynScriptRunnerTests
     [InlineData("dynamic d = Document; var t = new Autodesk.Revit.DB.Transaction(d, \"x\"); return 1;", "Transaction")]
     [InlineData("dynamic d = Document; dynamic n = \"x\"; var t = new Autodesk.Revit.DB.Transaction(d, n); return 1;", "Transaction")]
     [InlineData("dynamic d = Document; Autodesk.Revit.DB.TransactionGroup g = new(d, \"x\"); return 1;", "TransactionGroup")]
-    [InlineData("dynamic d = Document; dynamic s = new Autodesk.Revit.DB.SubTransaction(d); return 1;", "SubTransaction")]
     public async Task RunAsync_TransactionConstructedWithALateBoundArgument_IsStillRejected(string script, string expectedNamedType)
     {
         var runner = NewRunner();

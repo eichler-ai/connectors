@@ -255,8 +255,9 @@ denylist covers only the surface where that guarantee doesn't hold. One question
 and tier: **does a thrown exception in the script actually undo this?**
 
 - **Hard-blocked, no override** — no, because the problem is structural: constructing
-  `Transaction`/`TransactionGroup`/`SubTransaction` violates the one-open-transaction-per-document
-  invariant. No confirmation parameter rescues this; it conflicts with the execution model itself.
+  `Transaction`/`TransactionGroup` violates the one-open-transaction-per-document invariant. No
+  confirmation parameter rescues this; it conflicts with the execution model itself. (`SubTransaction`
+  is permitted since #146 Phase 1 — it nests inside the connector's transaction as a savepoint.)
 - **Confirmation-gated** — no, because the effect escapes the transaction boundary entirely: it
   changes a human's session (`Close`), the filesystem (`Save`/`SaveAs`), a shared central model
   (`SynchronizeWithCentral`), a device (`Print`), or another user's ability to edit
