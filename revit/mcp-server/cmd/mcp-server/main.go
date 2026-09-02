@@ -38,6 +38,10 @@ import (
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/execution"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/mcpserver"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/registry"
+	"github.com/eichler-ai/connectors/revit/mcp-server/internal/semsearch/crossenc"
+	"github.com/eichler-ai/connectors/revit/mcp-server/internal/semsearch/manager"
+	"github.com/eichler-ai/connectors/revit/mcp-server/internal/semsearch/models"
+	"github.com/eichler-ai/connectors/revit/mcp-server/internal/semsearch/staticembed"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/singleton"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/transport"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/updatecheck"
@@ -266,10 +270,25 @@ func main() {
 	// without launching a session or having a Go toolchain to hand
 	// (issue #116).
 	showVersion := flag.Bool("version", false, "print this binary's version and the source revision it was built from, then exit")
+	// -search-models lets the release pipeline (and a person) confirm the
+	// search_functions ranking models were embedded: a build made without
+	// the fetch step compiles and runs, just ranks keyword-only, so nothing
+	// else would ever say so out loud.
+	showSearchModels := flag.Bool("search-models", false, "print whether the search_functions ranking models are bundled in this binary, then exit")
 	flag.Parse()
 
 	if *showVersion {
 		fmt.Println(serverName + " " + versionLine())
+		return
+	}
+	if *showSearchModels {
+		// Verify distinguishes both failure modes itself: a missing file
+		// names the fetch step, a bad one names the pin mismatch.
+		if err := models.Verify(); err != nil {
+			fmt.Println("search models: not usable --", err, "-- this binary ranks keyword-only")
+			os.Exit(1)
+		}
+		fmt.Println("search models: bundled (potion-base-8M static embedder + ms-marco-MiniLM-L-6-v2 int8 cross-encoder, sha256-verified)")
 		return
 	}
 
@@ -460,7 +479,8 @@ func runPrimary(ctx context.Context, bindAddr string, port int, dataDir string, 
 	mcpserver.Register(mcpServer, execMgr)
 	reg := registry.New()
 	discoveryRouter := discovery.NewRouter(reg)
-	mcpserver.RegisterDiscovery(mcpServer, discoveryRouter)
+	searchIndex := newSearchManager(discoveryRouter, dataDir, logger)
+	mcpserver.RegisterDiscovery(mcpServer, discoveryRouter, searchIndex)
 	mcpserver.RegisterInstances(mcpServer, reg, execMgr)
 	// No dependencies and no Revit needed: get_skills answers even with nothing connected.
 	mcpserver.RegisterSkills(mcpServer, version)
@@ -470,6 +490,7 @@ func runPrimary(ctx context.Context, bindAddr string, port int, dataDir string, 
 		Registry:  reg,
 		Execution: execMgr,
 		Discovery: discoveryRouter,
+		Search:    searchIndex,
 		MCPServer: mcpServer,
 		Logger:    logger,
 	}
@@ -619,4 +640,43 @@ func runSecondary(ctx context.Context, dataDir string, logger *log.Logger, stdin
 		close(stop)
 		return err
 	}
+}
+
+// newSearchManager wires the broker-side search_functions index (issue #107,
+// revit/docs/search-ranking-redesign.md). The two models are embedded in the
+// binary by internal/semsearch/models; a build made without fetching them
+// still serves search, lexical-only, and says so in every response's
+// guidance -- observability over silence (PRD §01) -- rather than failing
+// or silently ranking worse.
+func newSearchManager(router *discovery.Router, dataDir string, logger *log.Logger) *manager.Manager {
+	logf := logger.Printf
+	// Model loading is synchronous on the startup path; the log line makes
+	// its cost visible so a slow machine's "broker took N seconds to come
+	// up" has an attribution.
+	start := time.Now()
+	defer func() {
+		logger.Printf("semsearch: search models loaded in %v", time.Since(start).Round(time.Millisecond))
+	}()
+	tok, st, normalize, err := models.Embedder()
+	if err != nil {
+		// Covers the not-fetched build: read() names the fetch step.
+		logger.Printf("semsearch: %v; search_functions ranks lexical-only", err)
+		return manager.New(router, nil, nil, logf)
+	}
+	emb, err := staticembed.Load(tok, st, normalize)
+	if err != nil {
+		logger.Printf("semsearch: loading static embedder: %v; search_functions ranks lexical-only", err)
+		return manager.New(router, nil, nil, logf)
+	}
+	modelDir, err := models.Materialize(filepath.Join(dataDir, "models"))
+	if err != nil {
+		logger.Printf("semsearch: materializing reranker model: %v; search_functions ranks without the cross-encoder", err)
+		return manager.New(router, emb, nil, logf)
+	}
+	rr, err := crossenc.Load(context.Background(), modelDir)
+	if err != nil {
+		logger.Printf("semsearch: loading cross-encoder: %v; search_functions ranks without the cross-encoder", err)
+		return manager.New(router, emb, nil, logf)
+	}
+	return manager.New(router, emb, rr, logf)
 }

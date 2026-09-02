@@ -94,12 +94,14 @@ func (r *Router) AttachInstance(instanceID string, conn *transport.Conn) {
 // late teardown (a half-open socket finally erroring out after the add-in
 // already redialed and re-registered) must not tear down the live
 // replacement it was displaced by.
-func (r *Router) DetachInstance(instanceID string, conn *transport.Conn) {
+func (r *Router) DetachInstance(instanceID string, conn *transport.Conn) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.conns[instanceID] == conn {
 		delete(r.conns, instanceID)
+		return true
 	}
+	return false
 }
 
 func errNoInstanceConnected() *diag.Record {
@@ -231,19 +233,40 @@ func callWire(ctx context.Context, conn *transport.Conn, method string, params m
 // the instance isn't in the registry) so the mcpserver layer can stamp
 // every discovery response with which Revit version it reflects.
 func (r *Router) call(ctx context.Context, instanceID, method string, params map[string]any) (json.RawMessage, string, *diag.Record) {
-	conn, resolvedID, drec := r.resolveConn(instanceID)
+	conn, _, revitVersion, drec := r.resolve(instanceID)
 	if drec != nil {
 		return nil, "", drec
-	}
-	revitVersion := ""
-	if inst, ok := r.reg.Get(resolvedID); ok {
-		revitVersion = inst.RevitVersion
 	}
 	raw, callErr := callWire(ctx, conn, method, params)
 	if callErr != nil {
 		return nil, "", callErr
 	}
 	return raw, revitVersion, nil
+}
+
+// ResolveInstance applies the same instance selection as the wire calls
+// (explicit id, or the single connected version, else ambiguous-instance-
+// version) without making a call, returning the resolved instance_id and
+// its Revit version. The broker-side search_functions ranker uses it so an
+// index lookup honours exactly the routing an add-in call would have.
+func (r *Router) ResolveInstance(instanceID string) (string, string, *diag.Record) {
+	_, resolvedID, revitVersion, drec := r.resolve(instanceID)
+	return resolvedID, revitVersion, drec
+}
+
+// resolve is resolveConn plus the registry's Revit version for the resolved
+// instance (empty when the registry no longer has it) -- the one place the
+// "which version answered" rule lives.
+func (r *Router) resolve(instanceID string) (*transport.Conn, string, string, *diag.Record) {
+	conn, resolvedID, drec := r.resolveConn(instanceID)
+	if drec != nil {
+		return nil, "", "", drec
+	}
+	revitVersion := ""
+	if inst, ok := r.reg.Get(resolvedID); ok {
+		revitVersion = inst.RevitVersion
+	}
+	return conn, resolvedID, revitVersion, nil
 }
 
 // ListFunctions forwards to the add-in's list_functions wire method. See
@@ -262,4 +285,12 @@ func (r *Router) SearchFunctions(ctx context.Context, instanceID string, params 
 // See PRD §08.
 func (r *Router) DescribeFunction(ctx context.Context, instanceID string, params map[string]any) (json.RawMessage, string, *diag.Record) {
 	return r.call(ctx, instanceID, "describe_function", params)
+}
+
+// DumpMembers forwards to the add-in's dump_members wire method (issue #107):
+// one page of the whole documented member corpus, from which the broker
+// builds its own search_functions index. Unlike the three tools above it is
+// never agent-facing; internal/semsearch/manager pages through it on attach.
+func (r *Router) DumpMembers(ctx context.Context, instanceID string, offset, limit int) (json.RawMessage, string, *diag.Record) {
+	return r.call(ctx, instanceID, "dump_members", map[string]any{"offset": offset, "limit": limit})
 }

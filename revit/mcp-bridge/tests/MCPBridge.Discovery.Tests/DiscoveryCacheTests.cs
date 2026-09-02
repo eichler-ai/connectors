@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.Linq;
 using MCPBridge.Core.Discovery;
 using MCPBridge.Discovery.Tests.Fixtures;
@@ -18,6 +19,76 @@ public class DiscoveryCacheTests
     private const string FixturesNamespace = "MCPBridge.Discovery.Tests.Fixtures";
 
     private static DiscoveryCache NewCache() => new(":memory:");
+
+    // ---------------------------------------------------------------------------------------------
+    // Whole-corpus dump (issue #107)
+    // ---------------------------------------------------------------------------------------------
+
+    [Fact]
+    public void EnumerateMembers_PagesPartitionTheDocumentedCorpusExactlyOnce()
+    {
+        using var cache = NewCache();
+        cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+
+        var total = cache.CountMembers();
+        Assert.True(total > 0);
+
+        var seen = new List<string>();
+        const int page = 3;
+        for (var offset = 0; ; offset += page)
+        {
+            var rows = cache.EnumerateMembers(offset, page);
+            if (rows.Count == 0) break;
+            Assert.True(rows.Count <= page);
+            seen.AddRange(rows.Select(r => r.MemberId));
+        }
+
+        Assert.Equal(total, seen.Count);
+        Assert.Equal(seen.Count, seen.Distinct().Count());
+        Assert.All(seen, id => Assert.False(string.IsNullOrEmpty(id)));
+        // Same population Search ranks over: a member Search can find is in the dump.
+        var viaSearch = cache.Search("Describe", namespaceFilter: null).Select(s => s.Member.MemberId).First(id => id.Contains("Widget.Describe"));
+        Assert.Contains(viaSearch, seen);
+    }
+
+    [Fact]
+    public void EnumerateMembers_CarriesCoreFlagAndUntruncatedSummary()
+    {
+        using var cache = NewCache();
+        cache.Sync(new[] { ("addin", typeof(Widget).Assembly) });
+
+        var rows = cache.EnumerateMembers(0, 10_000);
+
+        Assert.NotEmpty(rows);
+        Assert.All(rows, r => Assert.False(r.IsCoreAssembly));
+        Assert.Contains(rows, r => r.Name == "Describe" && !string.IsNullOrEmpty(r.Summary));
+    }
+
+    [Fact]
+    public void CorpusFingerprint_IsStableAcrossIdenticalSyncsAndChangesWithAssemblyBytes()
+    {
+        using var cache = NewCache();
+        cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+        var first = cache.CorpusFingerprint();
+        cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+
+        Assert.Equal(64, first.Length); // SHA-256 hex
+        Assert.Equal(first, cache.CorpusFingerprint());
+
+        cache.SetStoredHashForTesting(typeof(Widget).Assembly.Location, "deliberately-stale-hash");
+        Assert.NotEqual(first, cache.CorpusFingerprint());
+    }
+
+    [Fact]
+    public void CorpusFingerprint_DiffersByAssemblyKind()
+    {
+        using var asCore = NewCache();
+        asCore.Sync(new[] { ("core", typeof(Widget).Assembly) });
+        using var asAddin = NewCache();
+        asAddin.Sync(new[] { ("addin", typeof(Widget).Assembly) });
+
+        Assert.NotEqual(asCore.CorpusFingerprint(), asAddin.CorpusFingerprint());
+    }
 
     // ---------------------------------------------------------------------------------------------
     // Sync

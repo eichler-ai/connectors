@@ -161,7 +161,34 @@ public sealed class DiscoveryService
         };
     }
 
-    private static MemberSignature ToMemberSignature(DiscoveryMemberRow row) => new()
+    /// <summary>
+    /// dump_members (issue #107): one page of the whole documented corpus for the broker's ranker.
+    /// Untruncated summaries -- see <see cref="DumpedMember"/>.
+    /// </summary>
+    public DumpMembersResult DumpMembers(int offset, int limit)
+    {
+        var rows = _cache.EnumerateMembers(offset, limit);
+        var total = _cache.CountMembers();
+        var next = offset + rows.Count;
+        return new DumpMembersResult
+        {
+            Members = rows.Select(r => new DumpedMember
+            {
+                Member = ToMemberSignature(r, truncateSummary: false),
+                IsCore = r.IsCoreAssembly,
+            }).ToList(),
+            Total = total,
+            NextOffset = rows.Count > 0 && next < total ? next : null,
+            Fingerprint = _cache.CorpusFingerprint(),
+        };
+    }
+
+    /// <param name="truncateSummary">
+    /// list_functions/search_functions truncate for display; describe_function (below) doesn't, and
+    /// dump_members ships the full text as ranking input -- see DiscoveryReflector.MaxSummaryLength's own
+    /// doc comment for why truncation happens here, not at reflection/insert time.
+    /// </param>
+    private static MemberSignature ToMemberSignature(DiscoveryMemberRow row, bool truncateSummary = true) => new()
     {
         MemberId = row.MemberId,
         Kind = row.Kind,
@@ -169,10 +196,7 @@ public sealed class DiscoveryService
         DeclaringType = row.DeclaringType,
         Name = row.Name,
         Signature = row.Signature,
-        // list_functions/search_functions truncate; describe_function (below) doesn't -- see
-        // DiscoveryReflector.MaxSummaryLength's own doc comment for why this happens here, not at
-        // reflection/insert time.
-        Summary = DiscoveryReflector.Truncate(row.Summary),
+        Summary = truncateSummary ? DiscoveryReflector.Truncate(row.Summary) : row.Summary,
     };
 
     // -------------------------------------------------------------------------------------------------

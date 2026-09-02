@@ -106,9 +106,24 @@ carries the `revit_version` that answered.
 - `list_functions(namespace?, type_name?, cursor?, page_size?)` — strict one-level tree:
   no args → namespaces; `namespace` → its types; `namespace` + `type_name` → that type's
   member names. Paginated via `next_cursor`.
-- `search_functions(query, namespace?, cursor?, top_n?)` — ranked (exact `Type.Member`
-  match, then name+declaring-type token match, then FTS5 BM25 over names+summaries); core
-  Revit API results rank ahead of other loaded add-ins' at equal relevance.
+- `search_functions(query, namespace?, cursor?, top_n?)` — semantic search, ranked in the broker
+  (issue #107; design in [`search-ranking-redesign.md`](search-ranking-redesign.md)): a BM25F
+  keyword pass and a static sentence-embedding pass over member names, namespaces and summaries are
+  fused by reciprocal rank, then a cross-encoder reranks the top 20. `query` is one plain sentence
+  naming the element type and the operation. `namespace` is an exact-match pre-ranking filter.
+  `BuiltInCategory`/`BuiltInParameter`/`BuiltInParameterGroup`/`BuiltInFailures`/`PostableCommand`
+  members are masked from search (they flooded every keyword match) but remain reachable through
+  `list_functions` and `describe_function`. Core Revit API results win exact ties over other loaded
+  add-ins'. Every response carries `ranker` — `semantic` (the broker index), `lexical` (a broker
+  built without the bundled models), or `keyword-fallback` (the add-in's own ranker, while the
+  instance's index is still building in the seconds after it connects) — and a `guidance` note;
+  a fallback response also carries the reason as a §01 record in `notices[]`
+  (`search-index-building` / `search-index-build-failed`). Cursor pages are served from the
+  ranked list the first page produced, so paging never re-runs the reranker, and a cursor is
+  bound to that ranked set (a cursor minted under the keyword fallback is rejected once the
+  index answers).
+  The corpus comes from the add-in over an internal `dump_members` wire method, keyed by a
+  fingerprint of the loaded assembly set, so two instances of one Revit build share an index.
 - `describe_function(member?, member_id?)` — one member's full signature, parameters, returns,
   and XML docs; requires at least one of `member`/`member_id`. An overloaded `member` with no
   `member_id` returns its overload list to pick from instead — `member_id` (from that list or

@@ -51,6 +51,38 @@ public sealed class ListFunctionsResult
     public required int TotalScoped { get; init; }
 }
 
+/// <summary>
+/// One page of the whole documented member corpus, for the broker's own ranker (issue #107,
+/// <c>revit/docs/search-ranking-redesign.md</c>): the same member object shape search_functions returns,
+/// plus <see cref="DumpedMember.IsCore"/>, which the broker uses as a tie-break in favour of Revit's own API
+/// (never to exclude add-ins -- PRD §08). <see cref="Summary"/> is deliberately the UNTRUNCATED text: this
+/// is ranking input, not display output, and the broker applies <see cref="DiscoveryReflector.MaxSummaryLength"/>
+/// itself when it renders a result.
+/// </summary>
+public sealed class DumpedMember
+{
+    public required MemberSignature Member { get; init; }
+    public required bool IsCore { get; init; }
+}
+
+public sealed class DumpMembersResult
+{
+    public required IReadOnlyList<DumpedMember> Members { get; init; }
+
+    /// <summary>Documented members in the whole corpus, so the caller can size its index up front.</summary>
+    public required int Total { get; init; }
+
+    /// <summary>Offset of the next page, or null when this page reached the end.</summary>
+    public int? NextOffset { get; init; }
+
+    /// <summary>
+    /// Identity of the reflected assembly set (see <see cref="DiscoveryCache.CorpusFingerprint"/>). Two
+    /// instances reporting the same fingerprint have byte-identical corpora, so the broker can share one
+    /// index between them and skip a rebuild on reconnect.
+    /// </summary>
+    public required string Fingerprint { get; init; }
+}
+
 /// <summary>MemberSignature plus the numeric relevance score search_functions' wire shape adds on top of the shared member object shape.</summary>
 public sealed class ScoredMember
 {

@@ -1,9 +1,10 @@
 # search_functions ranking redesign — semantic hybrid retrieval
 
-**Status: design note / proposal (issue #107).** Draft. Captures the direction, the POC evidence
-behind it, and the open decisions — it is not yet a committed plan, and nothing here has shipped
-except the agent-facing `guidance` note (see §7). Design rationale for the current tool:
-[`PRD.md`](PRD.md) §08 (API discovery); the current implementation is mapped in §2 below.
+**Status: implemented (issue #107); §10 records what shipped and what the implementation measured.**
+§§1–7 are the design note as written before implementation, kept because the POC evidence and the
+rejected alternatives are what a later reader needs; §8's open decisions are each resolved in §10.
+Design rationale for the tool: [`PRD.md`](PRD.md) §08 (API discovery), which carries a revision note
+pointing here.
 
 Throughout, findings are tagged **[measured]** (a run made in the POC, numbers reproducible from the
 scratch harness), **[proposed]** (a design choice not yet built), or **[open]** (an unresolved
@@ -242,3 +243,134 @@ want… name the specific element type and operation, or scope with namespace."*
 - **Pending, this design:** everything in §4 (encoder, vector/hybrid retrieval, reranker, docs merge),
   the §5 query-interface change, and the §6 skill.md teaching — all gated on resolving §8, with the
   latency budget (§8.3) as the first measurement to take.
+
+
+---
+
+## 10. Implementation record — what shipped, and what the spike measured
+
+Everything here is **[measured]** in this repo's own code unless marked otherwise; the numbers come
+from `go test -v` runs of the gated tests named beside them (Apple M1 Max unless stated).
+
+### 10.1 The go/no-go spike (§8.3) — pure Go, and what it ruled out
+
+The broker is a single cgo-free binary by PRD §04, and the release runner has no C toolchain, so
+ONNX Runtime was never an option without breaking that. hugot's GoMLX (pure Go) backend was
+measured instead (`scratchpad/onnx-spike`, fp32 and int8, on the Mac and natively inside the
+Windows arm64 guest with 4 cores):
+
+| Measurement | M1 Max | Windows guest (arm64, 4 cores) |
+|---|---|---|
+| BGE-small: one query embedding | 70 ms | 74 ms |
+| BGE-small: corpus embedding throughput | 13.9 docs/s → **4.6 h** for 76,601 members × 3 fields | 13.4 docs/s → 4.8 h |
+| ms-marco-MiniLM cross-encoder, pool 20 / 50 / 100 (fp32) | 0.95 s / 2.1 s / 4.3 s | 1.0 s / 2.4 s / 4.8 s |
+| same, int8 model | 1.27 s / 3.3 s / 6.8 s | — |
+
+Two conclusions decided the design:
+
+1. **A transformer bi-encoder cannot embed the corpus live in pure Go.** Hours per index rules out
+   §4's "embed on first connect"; precomputing per-Revit-version vectors offline would have meant a
+   ~79 MB download per version and no coverage of third-party add-ins.
+2. **The reranker is affordable only at a small pool.** Re-running the POC eval at pools 10–100
+   (`eval_pool.py`): pool 20 already gives the full gain — recall@1 23/43, MRR 0.629, identical to
+   pool 50 — so `semsearch.DefaultRerankPool = 20`, ~1 s.
+
+### 10.2 The substitution that made §4 buildable: static embeddings
+
+model2vec static models (a token-embedding table, mean-pooled) were evaluated in the same harness
+(`eval_static.py`) as the bi-encoder in the hybrid pipeline:
+
+| Embedder | vector only | hybrid RRF | + rerank pool 20 | + rerank pool 50 |
+|---|---|---|---|---|
+| BGE-small (transformer, POC) | 18 / 0.527 | 19 / 0.543 | **23 / 0.629** | 23 / 0.629 |
+| potion-base-8M (static) | 18 / 0.503 | 16 / 0.483 | **23 / 0.624** | 23 / 0.660 |
+| potion-base-32M (static) | 18 / 0.521 | 15 / 0.477 | 23 / 0.633 | 23 / 0.662 |
+
+(recall@1 / MRR on the 43 labelled queries.) Once the cross-encoder reranks, the 8M static model is
+indistinguishable from BGE-small — and it embeds the whole corpus in **2.4 s** in Python, **1.4 s**
+in Go (`TestRealCorpusRecall`). The retrieval stage only has to get the answer into the top 20; the
+reranker does the discrimination. So the shipped bi-encoder is `potion-base-8M` (MIT, 30 MB), read
+by `internal/semsearch/staticembed` — a pure-Go WordPiece tokenizer + safetensors reader with no
+third-party dependency, pinned to the Python implementation by `TestParityWithPythonModel2Vec`
+(identical token ids; cosine ≥ 0.9999 on the reference vectors).
+
+### 10.3 What shipped (resolving §8)
+
+| §8 decision | Resolution |
+|---|---|
+| 8.1 Lexical in Go or C# FTS5 | **Go.** `internal/semsearch` implements BM25F over name / path / summary with the POC's field weights, the identifier splitter mirroring the add-in's `IdentifierRelevance.SplitWords`, RRF (1.5 : 1, k = 60), the `BuiltIn*`/`PostableCommand` junk mask, the namespace pre-mask, and core-wins-exact-ties. The C# ranker is untouched and still answers as the fallback. |
+| 8.2 Index build timing | **On attach, in the background, never blocking a call.** `internal/semsearch/manager` pages the corpus over a new add-in wire method `dump_members` (5,000 members a page, ~16 pages for 2027), builds lexical (0.3 s) then dense (1.4 s), and caches by corpus fingerprint (SHA-256 of the loaded assembly set, computed by `DiscoveryCache.CorpusFingerprint`) so a reconnect or a sibling instance reuses the index after one page. Until ready, `search_functions` forwards to the add-in's keyword ranker and the response says `ranker: keyword-fallback`. |
+| 8.3 Latency budget | Query path: static embed < 1 ms, brute-force cosine over 3 × 68k × 256 ≈ 80 ms, int8 cross-encoder pool 20 ≈ 1.2–1.5 s on the M1 Max (fp32 was 0.95 s; the guest measured fp32 only). No ANN index needed at this corpus size. Cursor pages are slices of a small bounded cache of ranked lists (16 entries), so a second page costs nothing; the cursor's scope includes the corpus fingerprint and ranker so it cannot replay across ranked sets. |
+| 8.4 Corpus freshness | The fingerprint. A fingerprint change between pages fails the build (the add-in re-synced mid-dump) and the next attach rebuilds; a failed build never blocks search (fallback). |
+| 8.5 How-to-docs corpus | **Not shipped**; the merge point in §4 remains open. |
+
+**Model bundling.** Both models are `go:embed`ded by `internal/semsearch/models`, fetched at build
+time by `fetch-models.{sh,ps1}` against sha256 pins and never committed; CI and the release workflow
+fetch them, and the release asserts `mcp-server -search-models` reports them bundled. A build
+without them compiles and ranks lexical-only (`ranker: lexical`, said in every `guidance`).
+Measured binary: **79.5 MB** with models (from 11.6 MB) — the cross-encoder ships int8 (23 MB) and
+the static model fp32 (30 MB); hugot/GoMLX add ~15 MB of code.
+
+**Go pipeline measured on the 43 labelled queries** (`TestRealCorpusRecall` with all three model
+env vars set; real 2027 corpus, 68,410 non-junk members indexed; Apple M1 Max) — recall@1 / 3 / 10:
+
+| Stage (Go, shipped code) | recall@1 | @3 | @10 | per query |
+|---|---|---|---|---|
+| lexical (BM25F) | 14 / 43 | 21 | 28 | 2 ms |
+| hybrid RRF (potion-base-8M) | 17 / 43 | 23 | 33 | 77 ms |
+| **hybrid + cross-encoder, pool 20 (what ships)** | **24 / 43** | **29** | **34** | 1.54 s |
+
+Against the Python POC's 14 / 20 / 26, 16 / 22 / 32 and 23 / 29 / 33 for the same three stages: the
+port reproduces the POC within one query at every rank. Lexical build 0.25 s, dense build 1.14 s.
+
+**Cross-encoder parity** (`crossenc.TestScoresMatchPythonCrossEncoder`, int8): 0.9960 / 0.9978 /
+0.0000 against Python fp32 sigmoid 0.9971 / 0.9987 / 0.0000 on the reference pairs; same ordering.
+
+**Live, Revit 2025 (dev VM, remote mode, broker on the Mac)** — `TestSemanticSearchAnswersTaskSentences`
+and the broker log: the corpus the add-in ships is **46,877 documented members** (2025 has fewer than
+2027's 76,601), paged in 10 `dump_members` calls; the index was **ready 21 s after registration**
+(wire transfer through the Parallels guest dominates — the same corpus indexes in ~1.5 s from a local
+file); model load at broker start 139–157 ms; a semantic query round trip including the reranker
+~1.5 s; `move an element to a new location` → `ElementTransformUtils.MoveElement`, `delete an element
+from the document` → `Document.Delete`, `get the parameter of an element by its name` →
+`Element.LookupParameter` all within the top 3; namespace pre-mask, cursor paging and the junk mask
+hold live. The known miss reproduced too: `find every element of a given class in the document`
+ranks `ElementClassFilter`'s constructor first and leaves `FilteredElementCollector.OfClass` outside
+the top 5 — the idiom shape §3.3 predicted.
+
+**Race detector.** hugot's Go backend uses unsafe pointer arithmetic that `-race`'s checkptr rejects
+(fatal `pointer arithmetic result points to invalid allocation` in gomlx's matmul). Tests that run a
+model carry a `!race` constraint; CI's `go test -race ./...` still covers everything except model
+inference, and the plain gated runs cover that.
+
+### 10.4 Still open after this implementation
+
+- **§8.5 how-to-docs corpus** — the pipeline merges API hits only.
+- **Junk-mask escape hatch** — `BuiltInCategory` and friends are unreachable through search even
+  when the query names them; `list_functions` / `describe_function` still reach them. A query-side
+  exception (name the enum type → unmask it) is the obvious next step if agents hit this.
+- **Retire the C# ranker** once the fallback has proved unnecessary in the field; today it is still
+  the answer for the first seconds after connect and for model-less builds.
+- **Go toolchain**: hugot requires Go 1.26, so `revit/mcp-server/go.mod` moved from 1.25.4.
+- **Efficiency headroom, deliberately not taken yet** (from the pre-PR quality review): the ~700
+  distinct namespace strings are embedded and stored once per member rather than once per string
+  (~78 MB per index); `topIdx` sorts every positive-score doc to take 200; dense scoring is
+  single-threaded; model loading (~sha256 of 53 MB, tokenizer parse, GoMLX graph) runs on the
+  broker's startup path and is logged; the add-in's `dump_members` deserialises `params_json` for
+  every row it ships and recounts the corpus per page. Each is a measured-cost, low-risk follow-up
+  once the live latency numbers say which matters.
+- **Structural junk rule**: the mask is a hardcoded type list; the deeper fix is an `enum` flag on
+  the wire and a member-count threshold.
+- **Attach/detach plumbing**: the manager is told about instances through a third broker hook
+  (`Broker.Search`); an observer on `discovery.Router` would fence once for every consumer.
+- **Corpus freshness after the deferred sync** (independent review of #154): the add-in re-checks its
+  assembly set ~8 s after startup; if that sync changes the corpus after the index is ready, nothing
+  today tells the broker (`register` carries no fingerprint). Ship the fingerprint on `register`
+  and rebuild on change. Related: `DiscoveryService.DumpMembers` takes its three cache locks
+  separately, so a page's rows and fingerprint can straddle a sync; the mid-dump fingerprint check
+  catches the cross-page case, not the intra-page one.
+- **Result semantics worth documenting for agents**: `total_matched` is now the size of the fused
+  candidate set (≤ 400), not a corpus match count; `score` is the cross-encoder's sigmoid for the
+  reranked head and 1/rank beyond it.
+- **Build-time network**: CI and the release runner fetch the two models from Hugging Face on every
+  run (sha256-pinned, revision-pinned); a mirror or cache would remove the egress dependency.

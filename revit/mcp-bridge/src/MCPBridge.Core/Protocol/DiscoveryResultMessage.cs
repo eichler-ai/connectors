@@ -47,6 +47,28 @@ public static class DiscoveryResultMessage
         public double Score { get; set; }
     }
 
+    private sealed class DumpedMemberDto : MemberDto
+    {
+        [JsonPropertyName("core")]
+        public bool Core { get; set; }
+    }
+
+    private sealed class DumpMembersResultDto
+    {
+        [JsonPropertyName("members")]
+        public List<DumpedMemberDto> Members { get; set; } = new();
+
+        [JsonPropertyName("total")]
+        public int Total { get; set; }
+
+        [JsonPropertyName("next_offset")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public int? NextOffset { get; set; }
+
+        [JsonPropertyName("fingerprint")]
+        public string Fingerprint { get; set; } = "";
+    }
+
     private sealed class NamespaceEntryDto
     {
         [JsonPropertyName("namespace")]
@@ -243,6 +265,24 @@ public static class DiscoveryResultMessage
         return Serialize(id, dto);
     }
 
+    /// <summary>dump_members (issue #107): {members:[member + core], total, next_offset?, fingerprint}.</summary>
+    public static string DumpMembers(JsonElement id, DumpMembersResult result)
+    {
+        var dto = new DumpMembersResultDto
+        {
+            Members = result.Members.Select(m =>
+            {
+                var dto = ToMemberDto<DumpedMemberDto>(m.Member);
+                dto.Core = m.IsCore;
+                return dto;
+            }).ToList(),
+            Total = result.Total,
+            NextOffset = result.NextOffset,
+            Fingerprint = result.Fingerprint,
+        };
+        return Serialize(id, dto);
+    }
+
     public static string DescribeFunction(JsonElement id, DescribeFunctionResult result)
     {
         if (result.Single is { } single)
@@ -274,7 +314,8 @@ public static class DiscoveryResultMessage
         return Serialize(id, overloadDto);
     }
 
-    private static ScoredMemberDto ToScoredMemberDto(MemberSignature m) => new()
+    /// <summary>Populates the shared member fields of any <see cref="MemberDto"/> subclass -- one mapping for search_functions' scored rows and dump_members' rows alike.</summary>
+    private static T ToMemberDto<T>(MemberSignature m) where T : MemberDto, new() => new()
     {
         MemberId = m.MemberId,
         Kind = m.Kind,
@@ -284,6 +325,8 @@ public static class DiscoveryResultMessage
         Signature = m.Signature,
         Summary = m.Summary,
     };
+
+    private static ScoredMemberDto ToScoredMemberDto(MemberSignature m) => ToMemberDto<ScoredMemberDto>(m);
 
     private static string Serialize<TResult>(JsonElement id, TResult dto)
     {
