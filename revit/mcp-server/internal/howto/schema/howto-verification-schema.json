@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/eichler-ai/connectors/revit/docs/howto-verification-schema.json",
+  "$id": "https://github.com/eichler-ai/connectors/revit/mcp-server/internal/howto/schema/howto-verification-schema.json",
   "title": "Revit connector how-to verification record",
   "description": "One line per (document id, script hash, Revit version) in howto-verified.jsonl. Written ONLY by the harness sweep (or, weaker, by the submitting session for its own local document); never by a submitter, never inside a document. Merged with the corpus at index time; a stamp whose script_sha256 no longer matches the document's script is stale and ignored.",
   "type": "object",
