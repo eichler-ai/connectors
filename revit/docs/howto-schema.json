@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/eichler-ai/connectors/revit/docs/howto-schema.json",
   "title": "Revit connector how-to document",
-  "description": "One task, the shortest correct path to doing it on a given Revit version, and the mistakes that path avoids. Interchange format for the how-to corpus (see howto-corpus-design.md). One document per JSONL line. Unknown top-level fields are ALLOWED so an older broker can still read a newer corpus (it ignores what it does not know and reports the newer corpus_version in guidance); the fields it does know are validated strictly.",
+  "description": "One task, the shortest correct path to doing it on a given Revit version, and the mistakes that path avoids. Interchange format for the how-to corpus (see howto-corpus-design.md). One document per JSONL line. Unknown top-level fields are ALLOWED so an older broker can still read a newer corpus (it ignores what it does not know and reports the newer corpus_version in guidance); the fields it does know are validated strictly. Cross-field rules the Go validator enforces beyond this schema: absorbs excludes own id; contributors[].rev <= rev; updated_at >= created_at; hit/miss query shape.",
   "type": "object",
   "additionalProperties": true,
   "required": [
@@ -223,11 +223,6 @@
       ],
       "description": "Maintainer-facing only: never returned by search_howto or describe_howto, and never indexed. Credit lives in `contributors`, which is agent-visible."
     },
-    "supersedes": {
-      "type": "string",
-      "pattern": "^[a-z0-9][a-z0-9-]{2,79}$",
-      "description": "Lineage MERGE only: the id of another lineage this one replaces (a duplicate found at triage). Ordinary edits do not use this; they bump rev."
-    },
     "created_at": {
       "type": "string",
       "format": "date-time",
@@ -258,8 +253,8 @@
         "properties": {
           "handle": {
             "type": "string",
-            "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$",
-            "description": "A GitHub login (the same identity the review queue sees), or a display name the submitter chose. Never an email or machine name."
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9 ._-]{0,38}$",
+            "description": "A GitHub login or a display name the submitter chose (letters, digits, space, dot, underscore, hyphen). Never an email (no @) or a machine/host name (no backslash or slash)."
           },
           "role": {
             "type": "string",
@@ -273,7 +268,7 @@
           "rev": {
             "type": "integer",
             "minimum": 1,
-            "description": "The revision this credit applies to."
+            "description": "The revision this credit applies to; must not exceed the document's rev (validator check; triage renumbers on acceptance)."
           },
           "at": {
             "type": "string",
@@ -282,6 +277,16 @@
           }
         }
       }
+    },
+    "absorbs": {
+      "type": "array",
+      "maxItems": 20,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9][a-z0-9-]{2,79}$"
+      },
+      "description": "Lineage MERGE record, set only at triage: ids of other lineages folded into this one. Their lines are deleted from the corpus; describe_howto on an absorbed id follows the pointer here. Must not contain this document's own id."
     }
   },
   "allOf": [
@@ -346,7 +351,8 @@
           ],
           "description": "The ranker value the response reported, so a recorded rank is read against the ranker that produced it. Episodes recorded before #107 shipped were served by the add-in's tiered ranker, which is what keyword-fallback names today."
         }
-      }
+      },
+      "description": "A recorded phrasing. In queries.hit, rank is required and surfaced absent; in queries.miss, surfaced is required and rank absent (enforced by the validator)."
     }
   }
 }

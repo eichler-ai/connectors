@@ -81,10 +81,12 @@ The seed is extracted from the harness, and only from tests that opt in. Mechani
    the members it calls, and the recorded queries in the surrounding comment are extracted; the rest
    of the comment is not (it is written for maintainers, not agents). A test without the header yields
    nothing, so guard-style tests never leak into the corpus by accident.
-3. **Fixture preamble is stripped at extraction.** Harness scripts open with a fixture preamble
-   (`fixtureWritePreamble`) that looks the document up by title; the how-to's script starts at the
-   first line after it and uses `Document` as the routed document. The verification sweep (design
-   note §3) runs the how-to's script, so the hash it stamps is the hash the agent reads.
+3. **Fixture preamble is replaced at extraction, the transaction wrapper is kept.** Harness scripts
+   are `fixtureWritePreamble(title) + withTx(body)`: a preamble that finds the fixture document by
+   title and guards it, then `return Connector.WithTransaction(doc, () => { body });`. The extractor
+   replaces the preamble with `var doc = Document;` and keeps the wrapper and body verbatim, so the
+   how-to's script is exactly what the test ran except for how `doc` is bound. The verification sweep
+   (design note §3) runs the how-to's script, so the hash it stamps is the hash the agent reads.
 4. **Dialect is current.** #146 Phase 3 (#160) rewrote the harness to the `WithTransaction` dialect,
    so extracted scripts are already in the shipped dialect; the design note's warning that seed
    scripts would fail the sweep no longer applies to a seed extracted after #160.
@@ -108,7 +110,7 @@ example of a common task; L = covered by `get_skills` or by `describe_function` 
 | # | Proposed id | Source | Kind | Task (draft) | Recorded pitfalls / queries | Value | Recommendation |
 |---|---|---|---|---|---|---|---|
 | 1 | `wall-create-on-level` | phase A `CreateWall` | howto | Create a wall from a line on a level using a Basic wall type | — | M | accept; merge #16's type-lookup pitfall in |
-| 2 | `collect-elements-by-category` | phase A `QueryElementsByCategory` | howto | Find every element of a category in the document | the `FilteredElementCollector` idiom `search_functions` cannot return as a member (design note §3.3; live miss on 2025) | H | accept; add a sibling `collect-elements-by-class` (OfClass) — the recorded miss "get all walls" |
+| 2 | `collect-elements-by-category` | phase A `QueryElementsByCategory` | howto | Find every element of a category in the document | the `FilteredElementCollector` idiom `search_functions` cannot return as a member (`search-ranking-redesign.md` §3.3; live miss on 2025) | H | accept; add a sibling `collect-elements-by-class` (OfClass) — the recorded miss "get all walls" |
 | 3 | `parameter-get-set-by-name` | phase A `GetSetParameter` | howto | Read and set an element parameter by name | — | M | accept |
 | 4 | `element-delete` | phase A `DeleteElement` | howto | Delete an element and confirm it is gone | — | L | accept as short doc, or fold into #3 as "CRUD basics" — decide |
 | 5 | `shared-parameter-create-and-bind` | phase A `CreateSharedParameter` | howto | Define a shared parameter in a fresh shared-parameter file and bind it to a category | (1) there is **no** `Application.CreateSharedParameterFile`: write the tab-delimited file with `System.IO`, then `OpenSharedParameterFile`; (2) `BuiltInParameterGroup` is gone → `GroupTypeId` (2025+) | H | accept; the missing-API fact goes in the `task` sentence and the step comment (guideline 5), not a separate document |
@@ -119,7 +121,7 @@ example of a common task; L = covered by `get_skills` or by `describe_function` 
 | 10 | `schedule-create-wall` | phase B `CreateWallSchedule` | howto | Create a wall schedule with fields | — | M | accept |
 | 11 | `floor-create-from-loop` | phase C `CreateFloor` | howto | Create a floor from a closed curve loop | — | M | accept |
 | 12 | `grid-create` | phase C `CreateGrid` | howto | Create a grid line | — | L | accept as short doc or merge with #1/#21 into "datum elements" — decide |
-| 13 | `sheet-create-and-place-view` | phase C `CreateSheetAndPlaceView` | howto + pitfall | Create a sheet and place a view on it | recorded miss: `create sheet place view` never surfaced `ViewSheet.Create` (issue #65; tsv row 1); `Viewport.Create` throws `ArgumentException` for a view already placed on any sheet (the default template ships 22 sheets with views on them) — check `Viewport.CanAddViewToSheet` or create a fresh `ViewPlan` | H | accept |
+| 13 | `sheet-create-and-place-view` | phase C `CreateSheetAndPlaceView` | howto + pitfall | Create a sheet and place a view on it | recorded miss: `create sheet place view` never surfaced `ViewSheet.Create` (issue #65; tsv row 1); `Viewport.Create` throws `ArgumentException` for a view already placed on any sheet (the default template ships 22 sheets, several with views already placed) — check `Viewport.CanAddViewToSheet` or create a fresh `ViewPlan` | H | accept |
 | 14 | `text-note-create` | phase C `CreateTextNote` | howto + pitfall | Add a text note to a view | `TextNote.Text` comes back with a trailing `\r` appended, undocumented in Autodesk's XML doc | M | accept; pitfall is the value |
 | 15 | `export-view-dwg` | validation #1 | howto | Export a view to DWG | recorded hit: `export view to dwg` → `Document.Export` rank 6, `DWGExportOptions` rank 1 | M | accept |
 | 16 | `walls-closed-footprint-confirm-joins` | validation #2 | howto | (the shipped example) | recorded miss/hit; `AreElementsJoined` vs `IsWallJoinAllowedAtEnd` | H | accept (already drafted) |
@@ -163,7 +165,7 @@ route (guideline 5), so the query that would look for the missing API finds the 
 - no `Application.CreateSharedParameterFile` → #5
 - no group-edit-scope API → #6
 - no floor-plan view is created with a level → #21
-- `BuiltInParameterGroup` / `ParameterType` gone in 2025+ (`GroupTypeId` / `SpecTypeId`) → #5
+- `BuiltInParameterGroup` gone in 2025+ (`GroupTypeId`) → #5 (the parallel `ParameterType` → `SpecTypeId` rule is in the development skill, not in a harness test)
 
 No standalone `negative` document is in the seed; the kind stays available for a genuinely
 route-less case.
@@ -201,7 +203,8 @@ should either help the ranker find the document or help the agent do the task.
    would already have is included but labelled as setup; numbered comments mark the recipe's steps
    and say *why* at the step where it matters ("no group edit mode in the API; in-place edits are
    refused once two instances exist"). Test-only assertions and comparison scaffolding are removed.
-   Target well under 3 KB.
+   Target well under 3 KB. `members` lists every member the script *calls*, in call order; a
+   member the document only warns about goes in the pitfall's own `members`.
 4. **Pitfalls are one line each**: the symptom the agent sees (error text as recorded), the cause,
    the fix as an instruction. A pitfall that is a task in its own right becomes its own `pitfall`
    document.
@@ -254,7 +257,7 @@ than the first line.
 ```
 submit_howto(
   title, task, script, members[],           # required for a NEW document
-  pitfalls[]?, queries?, tags?, summary?,   # schema fields, optional
+  pitfalls[]?, queries?, tags?,             # schema fields, optional
   id?,                                      # to IMPROVE an existing how-to: its id (see below)
   change_note?,                             # one sentence: what changed and why (required with id)
   credit_as?,                               # handle to record in contributors[] (opt-in; omitted = no credit)
@@ -262,12 +265,12 @@ submit_howto(
   confirm_submission: bool                  # outward half; default false
 ) -> {
   document,        # the schema-valid document as written locally (id assigned: slug of title)
-  local_path,      # <exchange-root>/howto/local/<id>.json
+  local_path,      # <local-corpus>/<id>.json  (the local corpus directory, design note §5)
   verified,        # the session stamp, if the exact script ran successfully this session, else null
   submission?: {   # only with confirm_submission: true
     scrubbed_document,   # what leaves the machine, shown in full
-    outbox_path,         # <exchange-root>/howto/outbox/<id>.json -- the issue body
-    issue_url            # prefilled https://github.com/eichler-ai/connectors/issues/new?labels=howto-submission&title=...
+    outbox_path,         # <local-corpus>/outbox/<id>.json -- the issue body
+    issue_url            # prefilled https://github.com/eichler-ai/connectors/issues/new?template=howto-submission.yml&title=...
   },
   notices[], guidance
 }
@@ -298,14 +301,24 @@ Behaviour, in order:
 4. **Gate**: without `confirm_submission: true`, stop here and return
    `howto-submission-confirmation-required` (info) with the document, so the agent can show the user
    what would be sent. With it:
-5. **Scrub** every text field and the script's string literals; refuse (`howto-submission-unscrubbed`,
-   naming field and line) if any path or host survives.
+5. **Scrub** every text field, the script's string literals **and the script's comments** (the
+   comments are the explanation, so they are exactly where a project name gets typed); refuse
+   (`howto-submission-unscrubbed`, naming field and line) if any path or host survives.
 6. **Write the outbox file and return the prefilled issue URL.** The broker never files the issue: it
    holds no token and spawns nothing (design note §6). **Filing is the agent's job**, using the
    `gh` the agent session already has: the returned `guidance` says
-   `gh issue create --label howto-submission --title "<title>" --body-file "<outbox_path>"`, and the
-   agent runs it under its own permission model, which is where the user sees and approves the
-   outward action. An agent without `gh` hands the user the prefilled URL and the outbox path.
+   `gh issue create --template howto-submission.yml --title "<title>" --body-file "<outbox_path>"`,
+   and the agent runs it under its own permission model, which is where the user sees and approves
+   the outward action. An agent without `gh` hands the user the prefilled URL and the outbox path.
+   **The queue is defined by an Issue Form template, not by a label the submitter applies:** GitHub
+   silently drops labels supplied by anyone without push access (both `labels=` in a URL and
+   `gh --label`), so `.github/ISSUE_TEMPLATE/howto-submission.yml` carries `labels:
+   [howto-submission]` — template-applied labels work for any author — and the three labels
+   (`howto-submission`, `howto-edit`, `howto-reviewed`) are created in the repo as part of step 2.
+   Filing through the agent's own `gh` attaches the user's GitHub identity as the issue author; that
+   is inherent to a public tracker and accepted here (the design note's earlier objection is
+   superseded by this plan): the scrubber protects *model data*, not authorship, and credit in the
+   document stays opt-in via `credit_as`.
 
 The outbox file *is* the issue body: a one-line summary, the target Revit version and connector
 version, a checklist for the reviewer (schema valid · script ran on `<version>` · scrubbed · not a
@@ -330,8 +343,11 @@ choose issues itself, and loads `revit-connector-development` for the harness ru
    This is the `howto-reviewed` gate made concrete: the human reads before the script runs.
 4. **De-duplicate, or apply the edit.** For a new document, search the existing corpus (`search_howto`
    once it exists; a `members`-set match until then): a near-duplicate is either folded into the
-   existing lineage as its next revision (with `supersedes` on the merged-away id if it had one) or
-   answered with a comment pointing at the existing document. For a `howto-edit` submission, diff the
+   existing lineage as its next revision — the surviving document lists the merged-away id in
+   `absorbs`, the merged-away line is deleted, and `describe_howto(<old id>)` follows the pointer —
+   or answered with a comment pointing at the existing document. **Triage assigns `rev`**: the
+   submitter's broker cannot know the shared corpus's current revision, so the command sets `rev`
+   to shared `rev + 1` and renumbers the submission's `contributors[].rev` to match. For a `howto-edit` submission, diff the
    new revision against the previous one (the command prints the field-level diff) and judge the
    *change*, not the whole document: a good pitfall added to an otherwise unchanged how-to is accepted
    on the strength of the pitfall; a rewritten script is re-run before it replaces the old one.
@@ -343,19 +359,34 @@ choose issues itself, and loads `revit-connector-development` for the harness ru
    revision lives on in git history only) — with `provenance.kind: "submission"`, `ref` = the issue
    URL, `reviewed_by` = the maintainer's login; keep the submitter's `contributors` entry as submitted
    and optionally append the maintainer as `reviewer`; drop sidecar stamps whose `script_sha256` no
-   longer matches the current script (a changed script is unverified until the sweep runs again);
+   longer matches the current script (a changed script is unverified until the sweep runs again),
+   and CI fails the PR if any stamp's hash is absent from the corpus;
    append the harness stamp from step 3 to `revit/howto/verified.jsonl`; open one PR per triage run
    listing the issues it closes (`Closes #171`), CI validates both files.
-7. **Report.** Issues closed, documents added, documents superseded, and — the same net-count
+7. **Report.** Issues closed, documents added, revised and merged, and — the same net-count
    discipline `/triage-issues` uses — the queue size before and after.
 
 The command lives at `.claude/commands/triage-howto-submission.md` (beside `triage-issues.md`) and is written when the
 validator and the fixture-run helper exist (§6 step 2); its text is this section.
 
-### 4d. Queue hygiene
+### 4d. Local overrides and the update path
 
-- Label `howto-submission` is applied by the prefilled URL and by the `gh` command; an issue without
-  the label is not in the queue.
+Two cases the review walked, decided here:
+
+- **A local document that was later accepted upstream.** After the release that carries it, the
+  user has an identical document twice: local (`source: local`, "unreviewed") and shared. The broker
+  detects a local file whose `id` and `script_sha256` match a shared document and **stops indexing
+  the local copy**, reporting `howto-local-superseded-by-shared` once in `notices[]`; the file is left
+  for the user to delete. An override is only an override when the content differs.
+- **A local revision that shadows every later shared revision.** A local `id` collision hides the
+  shared lineage for that user indefinitely, including fixes. The hit therefore carries
+  `shared_rev` beside the local `rev` when the shared corpus has moved past the local copy, and
+  `describe_howto` says so; the user decides whether to drop the override.
+
+### 4e. Queue hygiene
+
+- Label `howto-submission` is applied by the Issue Form template (the only way a non-collaborator's
+  issue gets a label); an issue without the label is not in the queue.
 - A submission that mentions a document title, a file path or a machine name in *any* field is
   closed with a comment, never edited into shape by the maintainer — the point of the scrubber is
   that nothing private reaches the tracker, and a leak is a bug report against the scrubber.
@@ -385,13 +416,16 @@ Nothing is annotated or extracted until this table is settled.
 ## 6. Implementation order [proposed, revised]
 
 1. Schemas + validator (Go) — shared by everything below.
-2. **`submit_howto`** (local write, gate, scrubber, outbox + prefilled URL, `skill.md` bullet) and
-   the fixture-run helper; then `/triage-howto-submission` as a command file. The queue can start
-   filling from real sessions while the seed is audited.
+2. **`submit_howto`** (local write, gate, scrubber, outbox + prefilled URL, `skill.md` bullet), the
+   Issue Form template and the three labels, and the fixture-run helper; then
+   `/triage-howto-submission` as a command file. The queue can start filling from real sessions while
+   the seed is audited.
 3. Harness extractor + the audited seed (`revit/howto/corpus.jsonl`), the tier-2 sweep writing the
    sidecar, and the corpus embedded in the broker with its version in `-version` / `get_skills`.
 4. Generalised index + `search_howto` / `describe_howto`; local corpus indexed alongside.
-5. Release manifest + install.ps1 per-component skip; release-notes diff of the corpus.
+5. Release manifest + install.ps1 per-component skip + broker stage-and-swap and reconnect
+   messaging (the full scope is in §1); release-notes diff of the corpus. Prerequisite for frequent
+   corpus-only releases.
 6. **Batch verifier: one end-to-end live integration test** that exercises the whole series against
    Revit 2025 and 2027 and is the acceptance gate for the batch, not any single PR: an agent session
    calls `submit_howto` for a new how-to (local write, session stamp, gate, scrub, outbox), the

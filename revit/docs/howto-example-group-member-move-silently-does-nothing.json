@@ -11,8 +11,8 @@
   ],
   "pitfalls": [
     {
-      "symptom": "MoveElement(doc, memberId, translation) returns with no warning, error or notice, and nothing moved.",
-      "cause": "A group member's own id is not a movable target while it is in the group.",
+      "symptom": "MoveElement(doc, memberId, translation) returns with no warning or error, and nothing moved.",
+      "cause": "Revit ignores a move addressed to a group member's own id while it is in the group (observed live; the reason is not documented).",
       "fix": "Move the group's ElementId (rigid-body move of the instance), or MoveElements with the group id plus member ids; to move one member alone, ungroup first.",
       "members": [
         "Autodesk.Revit.DB.ElementTransformUtils.MoveElement"
