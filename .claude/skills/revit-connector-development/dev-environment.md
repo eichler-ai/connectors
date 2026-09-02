@@ -288,9 +288,12 @@ re-resolve rather than hardcoding either. `robocopy` from `cmd /c` mangles a `\\
 - **Prefer local mode** (`BrokerDiscoveryOptions.Local()`,
   `%LOCALAPPDATA%\Connectors\Revit\broker.json`) for VM-local iteration; it sidesteps the shared
   folder entirely. Reserve remote mode for actually testing the Mac↔VM path.
-- **`-app-data-dir` takes the full `...\Connectors\Revit` path**, not the root — the broker writes
-  `broker.json` directly into whatever it is given, and one level too high produces an endless
-  `broker discovery failed` loop with no other symptom.
+- **`-shared-root` takes the full `...\Connectors\Revit` path**, not the root — in remote mode the
+  broker writes `broker.json` directly into whatever it is given, and one level too high produces an
+  endless `broker discovery failed` loop with no other symptom. (This flag was `-app-data-dir`, which
+  still works as a deprecated alias but now warns; `-app-data-dir` proper overrides only the broker's
+  *private* root — the models cache and how-to corpus, which since the two-roots split stay on the
+  broker's own platform app-data and no longer land on the shared drive.)
 - **A broker started for testing needs a stdin that stays open** — it speaks MCP over stdio and exits
   ~immediately otherwise, having already written `broker.json`, so it looks started while every
   connection is refused. Use `sleep 100000 | ./mcp-server-mac ...`.

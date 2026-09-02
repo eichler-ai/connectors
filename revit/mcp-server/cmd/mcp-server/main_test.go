@@ -411,7 +411,7 @@ func TestRunRejectsUnparseableBindAddr(t *testing.T) {
 	}
 	for _, bindAddr := range cases {
 		t.Run(bindAddr, func(t *testing.T) {
-			err := run("remote", bindAddr, 0, t.TempDir(), logger)
+			err := run("remote", bindAddr, 0, t.TempDir(), "", logger)
 			if err == nil {
 				t.Fatalf("run(mode=remote, bind=%q) = nil error, want it rejected as an unparseable -bind value", bindAddr)
 			}
@@ -422,24 +422,109 @@ func TestRunRejectsUnparseableBindAddr(t *testing.T) {
 	}
 }
 
-// TestRunRemoteModeRequiresAppDataDir is the regression test for the fix
-// where -mode=remote with no explicit -app-data-dir used to silently fall
-// back to singleton.AppDataDir() (the local platform app-data directory)
-// instead of failing fast. Per PRD §05, remote mode must write broker.json
-// to the shared drive's agreed root, not the local app-data directory, so
-// omitting -app-data-dir in remote mode must be a loud, actionable error
-// rather than a silent misconfiguration the add-in side can never discover.
-func TestRunRemoteModeRequiresAppDataDir(t *testing.T) {
+// TestRunRemoteModeRequiresSharedRoot is the regression test for the rule
+// that -mode=remote with no rendezvous root must fail fast rather than
+// silently fall back to singleton.AppDataDir() (the local platform app-data
+// directory). Per PRD §05, remote mode must publish broker.json to the shared
+// drive's agreed root, which the add-in on the other machine can reach — the
+// local app-data directory it cannot — so omitting both -shared-root and the
+// deprecated -app-data-dir fallback must be a loud, actionable error rather
+// than a silent misconfiguration the add-in side can never discover.
+func TestRunRemoteModeRequiresSharedRoot(t *testing.T) {
 	logger := log.New(io.Discard, "", 0)
 	// A valid non-loopback -bind, so the error under test is the
-	// dataDir one, not an earlier -bind validation failure.
-	err := run("remote", "192.0.2.1", 0, "", logger)
+	// rendezvous-root one, not an earlier -bind validation failure.
+	err := run("remote", "192.0.2.1", 0, "", "", logger)
 	if err == nil {
-		t.Fatal("run(mode=remote, app-data-dir=\"\") = nil error, want it rejected for missing -app-data-dir")
+		t.Fatal("run(mode=remote, shared-root=\"\") = nil error, want it rejected for missing -shared-root")
 	}
-	if !strings.Contains(err.Error(), "-app-data-dir is required in remote mode") {
-		t.Errorf("run(mode=remote, app-data-dir=\"\") error = %q, want it to name the missing -app-data-dir reason", err.Error())
+	if !strings.Contains(err.Error(), "-shared-root is required in remote mode") {
+		t.Errorf("run(mode=remote, shared-root=\"\") error = %q, want it to name the missing -shared-root reason", err.Error())
 	}
+}
+
+// TestResolveRootsSplitsByOwner covers resolveRoots directly (no socket
+// binding), since it carries the private/rendezvous split that is the point
+// of this change.
+func TestResolveRootsSplitsByOwner(t *testing.T) {
+	// Local mode with an explicit override: both roots are that one directory
+	// (the add-in shares the machine), so nothing splits.
+	t.Run("local override collapses to one dir", func(t *testing.T) {
+		priv, rdv, dep, err := resolveRoots("local", "/tmp/appdata", "")
+		if err != nil {
+			t.Fatalf("resolveRoots: %v", err)
+		}
+		if priv != "/tmp/appdata" || rdv != "/tmp/appdata" {
+			t.Errorf("private=%q rendezvous=%q, want both %q", priv, rdv, "/tmp/appdata")
+		}
+		if dep {
+			t.Error("deprecatedFallback = true, want false in local mode")
+		}
+	})
+
+	// Remote mode with both flags: the private root stays on this machine
+	// (the override), the rendezvous root is the shared drive. This is the
+	// split that keeps the model cache off the shared drive.
+	t.Run("remote keeps private local, rendezvous shared", func(t *testing.T) {
+		priv, rdv, dep, err := resolveRoots("remote", "/home/me/appdata", "/mnt/shared/Connectors/Revit")
+		if err != nil {
+			t.Fatalf("resolveRoots: %v", err)
+		}
+		if priv != "/home/me/appdata" {
+			t.Errorf("private=%q, want the local override to stay local", priv)
+		}
+		if rdv != "/mnt/shared/Connectors/Revit" {
+			t.Errorf("rendezvous=%q, want the shared root", rdv)
+		}
+		if dep {
+			t.Error("deprecatedFallback = true, want false when -shared-root is given")
+		}
+	})
+
+	// Remote mode with only the legacy -app-data-dir: it doubles as the
+	// rendezvous root AND stays the private root (old behavior), with the
+	// deprecation flag set so the caller can warn.
+	t.Run("remote legacy app-data-dir doubles as rendezvous", func(t *testing.T) {
+		priv, rdv, dep, err := resolveRoots("remote", "/mnt/shared/Connectors/Revit", "")
+		if err != nil {
+			t.Fatalf("resolveRoots: %v", err)
+		}
+		if priv != "/mnt/shared/Connectors/Revit" || rdv != "/mnt/shared/Connectors/Revit" {
+			t.Errorf("private=%q rendezvous=%q, want both the legacy dir", priv, rdv)
+		}
+		if !dep {
+			t.Error("deprecatedFallback = false, want true on the legacy fallback")
+		}
+	})
+
+	// Remote mode with neither: hard error, so a misconfigured broker never
+	// writes broker.json where the add-in can't find it.
+	t.Run("remote with no rendezvous root errors", func(t *testing.T) {
+		_, _, _, err := resolveRoots("remote", "", "")
+		if err == nil || !strings.Contains(err.Error(), "-shared-root is required in remote mode") {
+			t.Errorf("err = %v, want the -shared-root-required error", err)
+		}
+	})
+
+	// Remote mode, no override, shared root given: THE production path. The
+	// private root falls back to the broker's own platform app-data
+	// (singleton.AppDataDir()), distinct from the shared rendezvous root --
+	// this is exactly what keeps the model cache off the shared drive.
+	t.Run("remote default private is the broker's own app-data", func(t *testing.T) {
+		priv, rdv, dep, err := resolveRoots("remote", "", "/mnt/shared/Connectors/Revit")
+		if err != nil {
+			t.Fatalf("resolveRoots: %v", err)
+		}
+		if rdv != "/mnt/shared/Connectors/Revit" {
+			t.Errorf("rendezvous=%q, want the shared root", rdv)
+		}
+		if priv == "" || priv == rdv {
+			t.Errorf("private=%q, want a non-empty platform app-data path distinct from the shared root %q", priv, rdv)
+		}
+		if dep {
+			t.Error("deprecatedFallback = true, want false")
+		}
+	})
 }
 
 // TestRunRejectsUnspecifiedBindAddr confirms the pre-existing
@@ -449,7 +534,7 @@ func TestRunRejectsUnspecifiedBindAddr(t *testing.T) {
 	logger := log.New(io.Discard, "", 0)
 	for _, bindAddr := range []string{"0.0.0.0", "::", "::0"} {
 		t.Run(bindAddr, func(t *testing.T) {
-			err := run("remote", bindAddr, 0, t.TempDir(), logger)
+			err := run("remote", bindAddr, 0, t.TempDir(), "", logger)
 			if err == nil {
 				t.Fatalf("run(mode=remote, bind=%q) = nil error, want it rejected as an every-interface address", bindAddr)
 			}
