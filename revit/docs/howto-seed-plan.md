@@ -369,3 +369,12 @@ Nothing is annotated or extracted until this table is settled.
    sidecar, and the corpus embedded in the broker with its version in `-version` / `get_skills`.
 4. Generalised index + `search_howto` / `describe_howto`; local corpus indexed alongside.
 5. Release manifest + install.ps1 per-component skip; release-notes diff of the corpus.
+6. **Batch verifier: one end-to-end live integration test** that exercises the whole series against
+   Revit 2025 and 2027 and is the acceptance gate for the batch, not any single PR: an agent session
+   calls `submit_howto` for a new how-to (local write, session stamp, gate, scrub, outbox), the
+   triage command takes the outbox document through fixture-run, edit and write into
+   `corpus.jsonl` plus the sidecar, the broker is rebuilt with the corpus embedded and reports its
+   version, and `search_howto` returns the document at rank 1 for its recorded query while
+   `describe_howto` shows the stamp for the version it ran on; then a revision of the same lineage
+   goes round again and replaces the line. Per-PR gates stay as they are (CI, review, harness where
+   discovery is touched); this test is what says the pieces work *together*.
