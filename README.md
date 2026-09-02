@@ -12,10 +12,12 @@ an in-process **Bridge** (a plugin/add-in inside the host app) plus a standalone
 - [`revit/`](./revit/) — **Revit connector** (Revit MCP Bridge + Revit MCP Server). Rather
   than a fixed catalog of pre-built tools, its primary surface is `execute_script` — dynamic
   C# compiled and run against the live document — plus API-discovery tools that let an agent
-  read Revit's own API documentation on demand. Working today against Revit 2025 and 2027:
-  the core execution loop, dialog suppression, multi-instance addressing, API discovery, and
-  file exchange are shipped and live-validated; signed release distribution is not yet built
-  (install from source — see the [quickstart](./revit/docs/quickstart.md)). Design:
+  read Revit's own API documentation on demand, and a searchable, version-verified how-to
+  corpus of worked examples that grows from agent submissions. Working today against Revit
+  2025 and 2027: the core execution loop, dialog suppression, multi-instance addressing, API
+  discovery, file exchange and the how-to corpus are shipped and live-validated; releases are
+  built and self-signed by the release pipeline (a CA certificate is deferred), or install from
+  source — see the [quickstart](./revit/docs/quickstart.md). Design:
   [`revit/docs/PRD.md`](./revit/docs/PRD.md); per-phase status: PRD §15.
 
 ## Contributing & security
