@@ -221,7 +221,7 @@
           }
         }
       ],
-      "description": "Maintainer-facing only: never returned by search_howto or describe_howto, and never indexed. Credit lives in `contributors`, which is agent-visible."
+      "description": "Maintainer-facing only: never returned by search_howtos or describe_howto, and never indexed. Credit lives in `contributors`, which is agent-visible."
     },
     "created_at": {
       "type": "string",
@@ -372,14 +372,14 @@
         "text": {
           "type": "string",
           "maxLength": 300,
-          "description": "The query as sent to search_functions or search_howto.",
+          "description": "The query as sent to search_functions or search_howtos.",
           "minLength": 1
         },
         "tool": {
           "type": "string",
           "enum": [
             "search_functions",
-            "search_howto"
+            "search_howtos"
           ],
           "default": "search_functions"
         },

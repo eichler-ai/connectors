@@ -64,8 +64,12 @@ func TestSaveWritesAValidLocalDocument(t *testing.T) {
 	if err != nil || local.Len() != 1 {
 		t.Fatalf("LoadLocalDir: %v len=%d problems=%v", err, local.Len(), local.Problems)
 	}
-	// A second new submission with the same title gets a suffixed id.
-	saved2, err := Save(env, goodSubmission())
+	// A second, DIFFERENT new submission with the same title gets a suffixed
+	// id (an identical resend replaces the first; see
+	// TestSaveResendOfTheSameSubmissionReplacesItsLocalFile).
+	other := goodSubmission()
+	other.Script = other.Script + "\n// a different document\n"
+	saved2, err := Save(env, other)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -434,5 +438,37 @@ func TestFileIssuePostsToTheIssuesAPIWithTheUsersToken(t *testing.T) {
 	}
 	if _, err := FileIssue(context.Background(), nil, srv.URL, "eichler-ai/connectors", "", prep); err == nil {
 		t.Fatal("no token must not attempt a request")
+	}
+}
+
+func TestSaveResendOfTheSameSubmissionReplacesItsLocalFile(t *testing.T) {
+	env := Env{LocalDir: filepath.Join(t.TempDir(), "local"), Now: func() time.Time { return time.Date(2026, 9, 2, 0, 0, 0, 0, time.UTC) }}
+	sub := Submission{Title: "Tag every door on a level", Task: "Place a door tag on every door instance hosted on a given level using IndependentTag.Create in the level's plan view.",
+		Script: "return 1;", Members: []string{"Autodesk.Revit.DB.IndependentTag.Create"}}
+	first, err := Save(env, sub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The gate's remedy: the same fields again, this time to confirm. The
+	// tool loads the local corpus into Bases on every call, so the earlier
+	// save is also visible there.
+	local, _ := LoadLocalDir(env.LocalDir)
+	env.Bases = []*Corpus{local}
+	again, err := Save(env, sub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Doc.ID != first.Doc.ID || !again.Replaced {
+		t.Fatalf("a resend must replace the earlier local save, not mint a new id: first=%s again=%s replaced=%v", first.Doc.ID, again.Doc.ID, again.Replaced)
+	}
+	// A different document with the same title is still a new lineage.
+	other := sub
+	other.Script = "return 2;"
+	third, err := Save(env, other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if third.Doc.ID == first.Doc.ID {
+		t.Fatalf("a different script under the same title must not overwrite the first document")
 	}
 }
