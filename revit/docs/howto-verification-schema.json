@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/eichler-ai/connectors/revit/docs/howto-verification-schema.json",
+  "title": "Revit connector how-to verification record",
+  "description": "One line per (document id, script hash, Revit version) in howto-verified.jsonl. Written ONLY by the harness sweep (or, weaker, by the submitting session for its own local document); never by a submitter, never inside a document. Merged with the corpus at index time; a stamp whose script_sha256 no longer matches the document's script is stale and ignored.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "id",
+    "script_sha256",
+    "revit_version",
+    "status",
+    "at",
+    "by"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{2,79}$"
+    },
+    "script_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "sha256 of the exact script text that ran; the binding between a stamp and a document version."
+    },
+    "revit_version": {
+      "type": "string",
+      "pattern": "^20[2-9][0-9]$"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "passed",
+        "failed"
+      ]
+    },
+    "at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$"
+    },
+    "by": {
+      "type": "string",
+      "enum": [
+        "harness",
+        "session"
+      ],
+      "description": "harness: the repo's tier-2 sweep. session: the submitting session ran this exact script successfully just before submit_howto (the broker re-hashes the script it executed); weaker, and shown as such, and never promoted to shared without a harness stamp."
+    },
+    "connector_version": {
+      "type": "string",
+      "maxLength": 40,
+      "description": "The broker's -version line at the time of the run."
+    },
+    "diagnostic": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1000,
+      "description": "For failed: the §01 diagnostic message the run produced. Required when status is failed."
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "failed"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "diagnostic"
+        ]
+      }
+    }
+  ]
+}

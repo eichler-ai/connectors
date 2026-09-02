@@ -1,0 +1,315 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/eichler-ai/connectors/revit/docs/howto-schema.json",
+  "title": "Revit connector how-to document",
+  "description": "One task, the shortest correct path to doing it on a given Revit version, and the mistakes that path avoids. Interchange format for the how-to corpus (see howto-corpus-design.md). One document per JSONL line. Unknown top-level fields are ALLOWED so an older broker can still read a newer corpus (it ignores what it does not know and reports the newer corpus_version in guidance); the fields it does know are validated strictly.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "schema_version",
+    "id",
+    "kind",
+    "title",
+    "task",
+    "members",
+    "provenance",
+    "created_at",
+    "updated_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Schema revision this document was written against. A broker validates the fields it knows and ignores the rest; when the corpus declares a schema_version above the broker's, every response says so in guidance (howto-corpus-newer-than-broker)."
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{2,79}$",
+      "description": "Stable kebab-case slug, unique across the shared corpus. A local document with the same id overrides the shared one for that user (supersedes_shared on the hit)."
+    },
+    "kind": {
+      "type": "string",
+      "enum": [
+        "howto",
+        "negative",
+        "pitfall"
+      ],
+      "description": "howto: a working path to a task. negative: the API does NOT offer this; here is what to do instead (the ranker always returns something, so 'stop looking' must be a document). pitfall: a single mistake and its fix, without a full task script."
+    },
+    "title": {
+      "type": "string",
+      "minLength": 8,
+      "maxLength": 120,
+      "description": "Short noun phrase, the way a person would name the example."
+    },
+    "task": {
+      "type": "string",
+      "minLength": 20,
+      "maxLength": 600,
+      "description": "The task in agent language, one to three plain sentences naming the element types and the operation. Primary embedding text for search."
+    },
+    "summary": {
+      "type": "string",
+      "maxLength": 1200,
+      "description": "Optional: the approach in prose, for describe_howto. Not indexed."
+    },
+    "queries": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Recorded phrasings from real sessions. Misses are the most valuable rows: they are where API search failed and this document earns its keep.",
+      "properties": {
+        "hit": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/query"
+          },
+          "maxItems": 20,
+          "description": "Phrasings that found the right member or this document."
+        },
+        "miss": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/query"
+          },
+          "maxItems": 20,
+          "description": "Phrasings that did NOT surface the answer, with what they surfaced instead."
+        }
+      }
+    },
+    "members": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 40,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Za-z_][A-Za-z0-9_]*(\\.[A-Za-z_][A-Za-z0-9_`]*){2,}(\\.#ctor)?$"
+      },
+      "description": "Fully-qualified Namespace.Type.Member names the script calls (describe_function's 'member' shape; constructors as Type.#ctor, generic arity with a backtick). Indexed for exact-name hits and used to cross-link API results. Empty is legal for kind=negative, whose 'related' member (the one that does NOT exist) goes in pitfalls[].members as free text."
+    },
+    "script": {
+      "type": "string",
+      "maxLength": 16384,
+      "description": "The C# script body in the connector's dialect: ambient transaction (never open your own), `Document`/`UIApplication`/`Connector` globals, `return` a value. Required for kind=howto; optional otherwise. 16 KB bound.",
+      "minLength": 1
+    },
+    "script_language": {
+      "type": "string",
+      "const": "csharp-script"
+    },
+    "pitfalls": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "symptom",
+          "cause",
+          "fix"
+        ],
+        "properties": {
+          "symptom": {
+            "type": "string",
+            "maxLength": 400,
+            "description": "What the agent sees: the error text, the wrong result, the silent nothing.",
+            "minLength": 8
+          },
+          "cause": {
+            "type": "string",
+            "maxLength": 600,
+            "minLength": 8
+          },
+          "fix": {
+            "type": "string",
+            "maxLength": 600,
+            "minLength": 8
+          },
+          "members": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "maxItems": 10,
+            "description": "Members this pitfall is about, when different from the document's. Free text (a negative how-to names a member that does not exist)."
+          }
+        }
+      },
+      "description": "One entry per mistake the path avoids. Indexed text."
+    },
+    "tags": {
+      "type": "array",
+      "maxItems": 12,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9][a-z0-9-]{1,31}$"
+      },
+      "description": "Free-form facets (walls, views, sheets, worksharing, transactions). Not indexed for ranking; for browsing and de-duplication."
+    },
+    "api_since": {
+      "type": "string",
+      "pattern": "^20[2-9][0-9]$",
+      "description": "Declared hint: first Revit version whose API offers the members used. Not verification."
+    },
+    "api_until": {
+      "type": "string",
+      "pattern": "^20[2-9][0-9]$",
+      "description": "Declared hint: last Revit version before a used member was removed or deprecated."
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "harness",
+            "validation-corpus",
+            "submission",
+            "local",
+            "maintainer"
+          ],
+          "description": "harness/validation-corpus: extracted from a repo test. submission: arrived through submit_howto and the review queue. local: written by submit_howto into the user's own corpus, never reviewed. maintainer: authored directly in the repo."
+        },
+        "ref": {
+          "type": "string",
+          "maxLength": 300,
+          "description": "Where it came from: a test function name (harness), an issue URL (submission), a validation-corpus case number."
+        },
+        "reviewed_by": {
+          "type": "string",
+          "maxLength": 120,
+          "description": "GitHub login of the reviewer, or 'review-agent', set when accepted into the shared corpus. Never set on a local document."
+        },
+        "reviewed_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$"
+        },
+        "submitter": {
+          "type": "string",
+          "maxLength": 120,
+          "description": "Optional public handle the submitter chose to attach. Never an email or machine name; the scrubber removes those."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "submission"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "ref"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "local"
+              }
+            }
+          },
+          "then": {
+            "not": {
+              "required": [
+                "reviewed_by"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "supersedes": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{2,79}$",
+      "description": "id of the document this one replaces. The shared corpus is append-only; an edit is a new document pointing at the old one, and search hides superseded documents."
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$"
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "howto"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "script"
+        ]
+      }
+    }
+  ],
+  "$defs": {
+    "query": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "text"
+      ],
+      "properties": {
+        "text": {
+          "type": "string",
+          "maxLength": 300,
+          "description": "The query as sent to search_functions or search_howto.",
+          "minLength": 1
+        },
+        "tool": {
+          "type": "string",
+          "enum": [
+            "search_functions",
+            "search_howto"
+          ],
+          "default": "search_functions"
+        },
+        "rank": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "For hits: the rank the answer appeared at."
+        },
+        "surfaced": {
+          "type": "string",
+          "maxLength": 300,
+          "description": "For misses: what came back instead, in a few words."
+        },
+        "revit_version": {
+          "type": "string",
+          "pattern": "^20[2-9][0-9]$"
+        },
+        "ranker": {
+          "type": "string",
+          "enum": [
+            "semantic",
+            "semantic-no-rerank",
+            "lexical",
+            "keyword-fallback"
+          ],
+          "description": "The ranker value the response reported, so a recorded rank is read against the ranker that produced it. Episodes recorded before #107 shipped were served by the add-in's tiered ranker, which is what keyword-fallback names today."
+        }
+      }
+    }
+  }
+}

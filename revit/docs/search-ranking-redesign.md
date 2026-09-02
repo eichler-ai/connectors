@@ -345,7 +345,10 @@ inference, and the plain gated runs cover that.
 
 ### 10.4 Still open after this implementation
 
-- **§8.5 how-to-docs corpus** — the pipeline merges API hits only.
+- **§8.5 how-to-docs corpus** — the pipeline merges API hits only. Designed separately in
+  [`howto-corpus-design.md`](howto-corpus-design.md), which supersedes §4's "embedded once, shipped"
+  and "merge the two streams" sketches: the shared corpus is fetched, and the two corpora get their
+  own tools with cross-promotion deferred.
 - **Junk-mask escape hatch** — `BuiltInCategory` and friends are unreachable through search even
   when the query names them; `list_functions` / `describe_function` still reach them. A query-side
   exception (name the enum type → unmask it) is the obvious next step if agents hit this.
