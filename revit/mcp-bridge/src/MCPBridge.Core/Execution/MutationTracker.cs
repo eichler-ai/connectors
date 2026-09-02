@@ -132,7 +132,12 @@ internal sealed class MutationTracker
     /// contribute nothing -- not even their truncation flag -- even if Revit raised no rollback event for
     /// them.
     /// </summary>
-    public MutationReport? Build(IEnumerable<string>? excludedDocumentIds = null)
+    public MutationReport? Build(IEnumerable<string>? excludedDocumentIds = null) => Build(excludedDocumentIds, onlyDocumentId: null);
+
+    /// <summary>ONE document's net report (#146 Phase 2b): what its own Undo entry should say. Null when it changed nothing.</summary>
+    public MutationReport? BuildForDocument(string documentId) => Build(null, documentId);
+
+    private MutationReport? Build(IEnumerable<string>? excludedDocumentIds, string? onlyDocumentId)
     {
         var excluded = excludedDocumentIds is null ? new HashSet<string>() : new HashSet<string>(excludedDocumentIds);
         var created = 0;
@@ -143,7 +148,7 @@ internal sealed class MutationTracker
 
         foreach (var (documentId, tally) in _byDocument)
         {
-            if (excluded.Contains(documentId))
+            if (excluded.Contains(documentId) || (onlyDocumentId is not null && documentId != onlyDocumentId))
             {
                 continue;
             }

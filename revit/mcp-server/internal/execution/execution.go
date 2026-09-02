@@ -363,6 +363,11 @@ type ScriptOptions struct {
 	// the ambient transaction's rollback boundary (PRD §14). Without it the
 	// add-in refuses such a script before running it.
 	ConfirmLifecycleActions bool
+
+	// Label, when non-empty, names this run's entry in Revit's Undo history
+	// (#146 Phase 2b) -- the add-in prefixes it "MCP: ". Sent only when set,
+	// so an older add-in sees the params it always did.
+	Label string
 }
 
 // ExecuteScript forwards a script to instanceID's add-in connection. See
@@ -413,6 +418,9 @@ func (m *Manager) ExecuteScript(ctx context.Context, instanceID, documentID, scr
 		// complete statement of what this request asked for rather than
 		// something a reader has to reconstruct from absence.
 		"confirm_lifecycle_actions": opts.ConfirmLifecycleActions,
+	}
+	if opts.Label != "" {
+		params["label"] = opts.Label
 	}
 	res, drec := m.callWire(ctx, conn, "execute_script", executionID, timeoutMs, params)
 	if drec != nil {

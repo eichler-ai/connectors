@@ -59,6 +59,9 @@ public class ManagedDocumentTransactionsTests
         /// </summary>
         public bool ThrowOnReadingCommitFailures { get; set; }
 
+        /// <summary>Makes the group's SetName throw -- the cosmetic rename Revit might refuse (#146 Phase 2b).</summary>
+        public bool ThrowOnSetName { get; set; }
+
         public IReadOnlyList<FailureSummary> FailuresToReport { get; set; } = Array.Empty<FailureSummary>();
 
         public ITransactionAdapter CreateTransaction(string name) => new JournalingTransaction(this);
@@ -124,6 +127,15 @@ public class ManagedDocumentTransactionsTests
             public void Dispose() => _owner.Record("group.Dispose");
 
             public void Start() => _owner.Record("group.Start");
+
+            public void SetName(string name)
+            {
+                _owner.Record("group.SetName:" + name);
+                if (_owner.ThrowOnSetName)
+                {
+                    throw new InvalidOperationException($"{_owner.Title}: simulated SetName refusal");
+                }
+            }
 
             public void Assimilate()
             {
@@ -906,6 +918,8 @@ public class ManagedDocumentTransactionsTests
 
             public void Start() => _owner.Record("group.Start");
 
+            public void SetName(string name) => _owner.Record("group.SetName:" + name);
+
             public void Assimilate() => _owner.Record("group.Assimilate");
 
             public void Dispose() => _owner.Record("group.Dispose");
@@ -993,6 +1007,8 @@ public class ManagedDocumentTransactionsTests
             public void Dispose() => _owner.Record("group.Dispose");
 
             public void Start() => _owner.Record("group.Start");
+
+            public void SetName(string name) => _owner.Record("group.SetName:" + name);
 
             public void Assimilate() => _owner.Record("group.Assimilate");
 
@@ -1653,6 +1669,97 @@ public class ManagedDocumentTransactionsTests
         // and both re-acquisition points now route through this one rule.
         Assert.Equal(ManagedDocumentTransactions.DocumentOrigin.Ambient, set.OriginForTesting(ambient.DocumentId));
         Assert.Equal(ManagedDocumentTransactions.DocumentOrigin.AdoptedExisting, set.OriginForTesting("tmp-never-seen"));
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // #146 Phase 2b: the undo label is applied per document, after commit, before assimilate
+    // ------------------------------------------------------------------------------------------
+
+    [Fact]
+    public void CommitAll_SetsEachDocumentsOwnUndoLabel_AfterCommitAndBeforeAssimilate()
+    {
+        // The ORDER is the point: the label is derived from the document's net effect, which is only
+        // known once its transaction has committed (that raises the last DocumentChanged), and the group
+        // can only be renamed before it assimilates. PER DOCUMENT (independent review): a run-wide tally
+        // stamped on every entry told a scratch document's Undo menu about walls that live in the model.
+        var journal = new List<string>();
+        var set = NewSet();
+        var created = new JournalingDocumentAdapter("created", journal);
+        var ambient = new JournalingDocumentAdapter("ambient", journal);
+        set.Open(ambient, isAmbient: true);
+        set.Open(created);
+        journal.Clear();
+
+        var asked = new List<string>();
+        var result = set.CommitAll(undoLabel: documentId =>
+        {
+            asked.Add(documentId);
+            return documentId == created.DocumentId ? "MCP: 3 Levels created" : "MCP: 12 Walls created";
+        });
+
+        Assert.True(result.Success);
+        Assert.Equal(new[] { created.DocumentId, ambient.DocumentId }, asked);
+        Assert.Equal(
+            new[]
+            {
+                "created:tx.Commit", "created:group.SetName:MCP: 3 Levels created", "created:group.Assimilate", "created:tx.Dispose", "created:group.Dispose",
+                "ambient:tx.Commit", "ambient:group.SetName:MCP: 12 Walls created", "ambient:group.Assimilate", "ambient:tx.Dispose", "ambient:group.Dispose",
+            },
+            journal);
+        Assert.Empty(set.UndoLabelFailures);
+    }
+
+    [Fact]
+    public void CommitAll_ARefusedSetName_IsRecorded_AndNeverFailsTheCommit()
+    {
+        // Cosmetic by contract, but never silent (review): the rename is a human-visible signal, so its
+        // failure must be observable or a Revit version rejecting it would go undetected forever.
+        var journal = new List<string>();
+        var set = NewSet();
+        var ambient = new JournalingDocumentAdapter("ambient", journal) { ThrowOnSetName = true };
+        set.Open(ambient, isAmbient: true);
+
+        var result = set.CommitAll(undoLabel: _ => "MCP: 1 element created (Walls)");
+
+        Assert.True(result.Success);
+        Assert.Contains("ambient:group.Assimilate", journal);
+        var failure = Assert.Single(set.UndoLabelFailures);
+        Assert.Contains("ambient (active document)", failure);
+        Assert.Contains("simulated SetName refusal", failure);
+    }
+
+    [Fact]
+    public void CommitAll_LeavesTheGroupsNameAlone_WhenNoLabelFunctionOrANullLabelIsGiven()
+    {
+        var journal = new List<string>();
+        var set = NewSet();
+        var ambient = new JournalingDocumentAdapter("ambient", journal);
+        set.Open(ambient, isAmbient: true);
+
+        set.CommitAll();
+        Assert.DoesNotContain(journal, j => j.Contains("group.SetName"));
+
+        var again = NewSet();
+        var other = new JournalingDocumentAdapter("other", journal);
+        again.Open(other, isAmbient: true);
+        again.CommitAll(undoLabel: _ => null);
+        Assert.DoesNotContain(journal, j => j.Contains("group.SetName"));
+    }
+
+    [Fact]
+    public void CommitAll_AThrowingLabelFunction_NeverFailsTheCommit()
+    {
+        // The name is cosmetic; the writes it would label are already permanent by the time it is asked.
+        var journal = new List<string>();
+        var set = NewSet();
+        var ambient = new JournalingDocumentAdapter("ambient", journal);
+        set.Open(ambient, isAmbient: true);
+
+        var result = set.CommitAll(undoLabel: _ => throw new InvalidOperationException("label blew up"));
+
+        Assert.True(result.Success);
+        Assert.Contains("ambient:group.Assimilate", journal);
+        Assert.Single(set.UndoLabelFailures);
     }
 
     // ------------------------------------------------------------------------------------------

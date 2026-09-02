@@ -182,6 +182,39 @@ func TestExecuteScriptToolAddInReportedErrorIsToolError(t *testing.T) {
 	}
 }
 
+// TestExecuteScriptToolLabelReachesTheWire pins the #146 Phase 2b `label`
+// argument: sent to the add-in verbatim when given, and absent from the
+// params -- not sent as "" -- when not, so an older add-in sees exactly the
+// request shape it always did.
+func TestExecuteScriptToolLabelReachesTheWire(t *testing.T) {
+	mgr := execution.NewManager()
+	var seen []map[string]any
+	attachFakeInstance(t, mgr, "inst-1", func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
+		var p map[string]any
+		json.Unmarshal(params, &p)
+		seen = append(seen, p)
+		return map[string]any{"status": "success", "execution_id": p["execution_id"]}, nil
+	})
+	cs := connectClient(t, mgr)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	for _, args := range []map[string]any{
+		{"instance_id": "inst-1", "document_id": "doc-1", "script": "1", "label": "create L1 walls"},
+		{"instance_id": "inst-1", "document_id": "doc-1", "script": "1"},
+	} {
+		if _, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "execute_script", Arguments: args}); err != nil {
+			t.Fatalf("CallTool: %v", err)
+		}
+	}
+	if got, _ := seen[0]["label"].(string); got != "create L1 walls" {
+		t.Errorf("label did not reach the wire verbatim: %v", seen[0]["label"])
+	}
+	if _, present := seen[1]["label"]; present {
+		t.Errorf("an omitted label must not be sent at all, got %v", seen[1]["label"])
+	}
+}
+
 // TestExecuteScriptToolMutationsRoundTrip pins the #146 Phase 2 `mutations`
 // field's passage through execution.Result and ExecutionOut: the add-in
 // computes it, the broker must carry it verbatim, and it must be absent (not

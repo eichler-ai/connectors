@@ -205,6 +205,25 @@ public class MutationTrackerTests
     }
 
     [Fact]
+    public void BuildForDocument_ReportsOnlyThatDocument()
+    {
+        // #146 Phase 2b: each document's Undo entry is named from ITS effect, not the run's.
+        var tracker = new MutationTracker();
+        tracker.Record(Committed(doc: "doc-model", modified: new (long, string?)[] { (1, "Walls"), (2, "Walls") }));
+        tracker.Record(Committed(doc: "doc-scratch", added: new (long, string?)[] { (1, "Levels"), (2, "Levels"), (3, "Levels") }));
+
+        var scratch = tracker.BuildForDocument("doc-scratch")!;
+        Assert.Equal(3, scratch.Created);
+        Assert.Equal(0, scratch.Modified);
+
+        var model = tracker.BuildForDocument("doc-model")!;
+        Assert.Equal(0, model.Created);
+        Assert.Equal(2, model.Modified);
+
+        Assert.Null(tracker.BuildForDocument("doc-untouched"));
+    }
+
+    [Fact]
     public void ByCategory_IsOrderedByName_ForAStableWireShape()
     {
         var tracker = new MutationTracker();

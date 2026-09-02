@@ -70,6 +70,78 @@ public class TransactionScriptExecutorTests
         Assert.Equal(0, uiApp.ChangeSubscribers);
     }
 
+    // ------------------------------------------------------------------------------------------
+    // #146 Phase 2b: readable undo labels
+    // ------------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task AnAgentLabel_NamesTheRunsTransactionAndGroupFromTheStart()
+    {
+        var executor = NewExecutor();
+        var document = new FakeDocumentAdapter();
+        var uiApp = new FakeUiApplicationAdapter { ActiveUiDocument = new FakeUiDocumentAdapter { Document = document } };
+
+        var outcome = await executor.ExecuteAsync(document, uiApp, null, "1 + 1", CancellationToken.None, label: "create L1 walls");
+
+        Assert.True(outcome.Success);
+        Assert.Equal("MCP: create L1 walls", document.LastTransactionGroup!.Name);
+        Assert.Equal("MCP: create L1 walls", document.LastTransaction!.Name);
+        // Given a label, the derived name is NOT applied over it.
+        Assert.DoesNotContain("SetName", document.LastTransactionGroup.Calls);
+    }
+
+    [Fact]
+    public async Task WithoutALabel_TheGroupIsRenamedFromTheMutationReport_BeforeAssimilate()
+    {
+        var executor = NewExecutor();
+        var document = new FakeDocumentAdapter();
+        var uiApp = new FakeUiApplicationAdapter { ActiveUiDocument = new FakeUiDocumentAdapter { Document = document } };
+        document.OnTransactionCommit = () => uiApp.EmitChange(new DocumentChange(
+            document.DocumentId, DocumentChangeOperation.Committed, "TransactionCommitted", Array.Empty<string>(),
+            new[] { new ChangedElement(1, "Walls"), new ChangedElement(2, "Walls") },
+            Array.Empty<ChangedElement>(), Array.Empty<long>(), categoriesTruncated: false));
+
+        var outcome = await executor.ExecuteAsync(document, uiApp, null, "1 + 1", CancellationToken.None);
+
+        Assert.True(outcome.Success);
+        Assert.Equal("MCP Bridge Script", document.LastTransactionGroup!.Name);   // created with the default...
+        Assert.Equal("MCP: 2 Walls created", document.LastTransactionGroup.LastName);   // ...renamed from the net effect
+        Assert.Equal(new[] { "Start", "SetName", "Assimilate", "Dispose" }, document.LastTransactionGroup.Calls);
+    }
+
+    [Fact]
+    public async Task ARefusedRename_IsReportedAsANotice_AndTheRunStillSucceeds()
+    {
+        var executor = NewExecutor();
+        var document = new FakeDocumentAdapter();
+        var uiApp = new FakeUiApplicationAdapter { ActiveUiDocument = new FakeUiDocumentAdapter { Document = document } };
+        document.OnTransactionCommit = () =>
+        {
+            document.LastTransactionGroup!.ThrowOnSetName = true;
+            uiApp.EmitChange(new DocumentChange(document.DocumentId, DocumentChangeOperation.Committed, "TransactionCommitted", Array.Empty<string>(),
+                new[] { new ChangedElement(1, "Walls") }, Array.Empty<ChangedElement>(), Array.Empty<long>(), categoriesTruncated: false));
+        };
+
+        var outcome = await executor.ExecuteAsync(document, uiApp, null, "1 + 1", CancellationToken.None);
+
+        Assert.True(outcome.Success);
+        var notice = Assert.Single(outcome.Notices, n => n.Code == "undo-label-not-applied");
+        Assert.Contains("simulated SetName refusal", notice.Message);
+        Assert.NotNull(outcome.Mutations);   // the writes themselves are unaffected
+    }
+
+    [Fact]
+    public async Task WithoutALabelAndWithoutChanges_TheGroupKeepsItsDefaultName()
+    {
+        var executor = NewExecutor();
+        var document = new FakeDocumentAdapter();
+        var uiApp = new FakeUiApplicationAdapter { ActiveUiDocument = new FakeUiDocumentAdapter { Document = document } };
+
+        await executor.ExecuteAsync(document, uiApp, null, "1 + 1", CancellationToken.None);
+
+        Assert.DoesNotContain("SetName", document.LastTransactionGroup!.Calls);
+    }
+
     [Fact]
     public async Task ReadOnlyScript_CarriesNoMutationReport()
     {

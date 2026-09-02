@@ -56,6 +56,9 @@ type ExecuteScriptIn struct {
 	// text, so the decision is deliberately made at run time, not folded
 	// into that cache.
 	ConfirmLifecycleActions bool `json:"confirm_lifecycle_actions,omitempty" jsonschema:"set true to allow this script to call Document.Close/Save/SaveAs/SynchronizeWithCentral/Print or WorksharingUtils.RelinquishOwnership; these act outside the transaction that otherwise rolls a failed script back (a person's open session, the filesystem, the shared central model, a printer, another user's checkout), so without this flag such a script is refused before it runs"`
+
+	// Label is the human-readable name for this run's Undo entry (#146 Phase 2b).
+	Label string `json:"label,omitempty" jsonschema:"short name for what this script does, shown as this run's entry in Revit's Undo history prefixed 'MCP: ' (e.g. 'create L1 walls'); omit and the connector derives one from what changed ('MCP: 12 Walls created')"`
 }
 
 // PollExecutionIn is the input schema for the poll_execution tool.
@@ -126,6 +129,7 @@ func Register(s *mcp.Server, mgr *execution.Manager) {
 		res, drec := mgr.ExecuteScript(ctx, in.InstanceID, in.DocumentID, in.Script, timeoutMs, maxDurationMs, execution.ScriptOptions{
 			OverwriteOutputFiles:    in.OverwriteOutputFiles,
 			ConfirmLifecycleActions: in.ConfirmLifecycleActions,
+			Label:                   in.Label,
 		})
 		return toolResult(res, drec)
 	})

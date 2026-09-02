@@ -1386,3 +1386,51 @@ return "discarded";
 		}
 	})
 }
+
+// TestUndoLabelIsAcceptedByRevit is the live half of #146 Phase 2b. Revit's
+// Undo history is not API-inspectable, so what a person SEES ("MCP: create
+// L1 walls" instead of "MCP Bridge Script") is a visual check, to be recorded
+// on the epic by whoever performs it. What CAN be pinned live is that both
+// label paths run to completion against real Revit AND that the derived
+// path's TransactionGroup.SetName -- called between the ambient commit and
+// Assimilate, a moment whose legality only Revit can confirm -- was accepted:
+// a refused rename is reported as an `undo-label-not-applied` notice, so its
+// absence here is the assertion (the first version of this test could not
+// tell a refused rename from an applied one; independent review).
+func TestUndoLabelIsAcceptedByRevit(t *testing.T) {
+	c, instanceID, documentID := targetDocument(t)
+	fixtureTitle := createBlankFixtureDocument(t, c, instanceID, documentID)
+
+	t.Run("AgentLabel", func(t *testing.T) {
+		out := decodeToolResult[executeScriptOut](t, callExecuteScriptWith(t, c, instanceID, documentID,
+			fixtureWritePreamble(fixtureTitle)+`
+Autodesk.Revit.DB.Level.Create(doc, 90.1);
+return "labelled";
+`, map[string]any{"label": "harness: label\nwith newline and a very long tail " + strings.Repeat("x", 200)}))
+		if out.Status != "success" {
+			t.Fatalf("a labelled run must succeed -- if Revit rejected the sanitised name as a transaction name, this is where it shows; got %q (%s)", out.Status, out.diag())
+		}
+		if out.Mutations == nil || out.Mutations.Created != 1 {
+			t.Errorf("the labelled run's write must land like any other: %+v", out.Mutations)
+		}
+	})
+
+	t.Run("DerivedLabel", func(t *testing.T) {
+		out := runScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+`
+Autodesk.Revit.DB.Level.Create(doc, 91.1);
+Autodesk.Revit.DB.Level.Create(doc, 92.1);
+return "derived";
+`)
+		if out.Status != "success" {
+			t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
+		}
+		if out.Mutations == nil || out.Mutations.Created != 2 {
+			t.Errorf("want created:2 so the derived label would read 'MCP: 2 Levels created': %+v", out.Mutations)
+		}
+		for _, n := range out.Notices {
+			if n.Code == "undo-label-not-applied" {
+				t.Errorf("Revit refused TransactionGroup.SetName between commit and Assimilate -- the derived-label tier is a no-op live: %s", n.Message)
+			}
+		}
+	})
+}
