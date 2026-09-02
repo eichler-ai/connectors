@@ -76,6 +76,27 @@ jobs:
             *unknown*) echo "the built broker reports no source revision -- VCS stamping is off; see internal/buildinfo" && exit 1 ;;
           esac
 
+  installer:
+    name: Installer (PowerShell)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # install.ps1's pure parts -- the release manifest, per-component change detection and the
+      # broker stage-and-swap -- run under pwsh anywhere (howto-seed-plan.md §1, step 5). The
+      # deploy loop itself needs a Windows machine with Revit and stays live-only. Ubuntu runners
+      # ship pwsh with Pester 5.
+      - name: parse install.ps1
+        shell: pwsh
+        run: |
+          $tokens = $null; $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile("$PWD/revit/install.ps1", [ref]$tokens, [ref]$errors) | Out-Null
+          if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Host $_ }; throw "install.ps1 does not parse" }
+      - name: Pester
+        shell: pwsh
+        run: |
+          $r = Invoke-Pester -Path revit/install.tests.ps1 -Output Detailed -PassThru
+          if ($r.FailedCount -gt 0 -or $r.PassedCount -eq 0) { throw "installer tests: $($r.PassedCount) passed, $($r.FailedCount) failed" }
+
   test-harness:
     name: Test harness type-check (Go)
     runs-on: ubuntu-latest

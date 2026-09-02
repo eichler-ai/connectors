@@ -67,6 +67,14 @@ var version = "dev"
 // -version, the startup log, and the version the MCP server advertises to its
 // client in initialize -- so the answer covers stale tool schemas and stale
 // broker logic, not just the stale skill.md that exposed the gap.
+// buildInfo is the -build-info shape.
+type buildInfo struct {
+	Version          string         `json:"version"`
+	Revision         string         `json:"revision,omitempty"`
+	HowToCorpus      *howto.Version `json:"howto_corpus,omitempty"`
+	HowToCorpusError string         `json:"howto_corpus_error,omitempty"`
+}
+
 func versionLine() string {
 	return version + " (" + buildinfo.Read().Summary() + ")"
 }
@@ -279,7 +287,28 @@ func main() {
 	// the fetch step compiles and runs, just ranks keyword-only, so nothing
 	// else would ever say so out loud.
 	showSearchModels := flag.Bool("search-models", false, "print whether the search_functions ranking models are bundled in this binary, then exit")
+	// -build-info is what the release workflow reads into manifest.json
+	// (seed plan §1): the same facts -version prints, as JSON, so the
+	// installer can record which how-to corpus a release carried without
+	// parsing prose.
+	showBuildInfo := flag.Bool("build-info", false, "print this binary's version, source revision and how-to corpus version as JSON, then exit")
 	flag.Parse()
+
+	if *showBuildInfo {
+		info := buildInfo{Version: version, Revision: buildinfo.Read().Revision}
+		if _, _, ver, err := howto.Embedded(); err == nil {
+			info.HowToCorpus = &ver
+		} else {
+			info.HowToCorpusError = err.Error()
+		}
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(info); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	if *showVersion {
 		fmt.Println(serverName + " " + versionLine())

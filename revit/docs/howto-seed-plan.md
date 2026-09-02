@@ -59,8 +59,14 @@ available" until the broker restarts, because the add-in compares the version wr
 3. After the swap the broker's start rewrites `broker.json` with the new version, which is what
    clears the ribbon.
 
-Until step 5 lands, corpus releases ride ordinary connector releases (add-in + broker), which is
-fine for the seed and the first submissions; the frequency the user wants comes with step 5.
+**Step 5 landed (2026-09-02):** `manifest.json` (built by `install.ps1`'s own `New-PackageManifest`
+from the broker's `-build-info`), per-component skip with the three review-named paths fixed
+(nothing-changed is not "unsupported"; the marker moves forward when everything was already current;
+Revit is relaunched only when an add-in was deployed), broker stage-and-swap that never overwrites a
+locked file or stops a broker (`swapped` / `staged` / `pending` outcomes, the summary and the ribbon's
+Update Now text say what to do), and the "How-tos" release-notes section from `howto-corpus-notes`
+(which also fails a release whose script changed without a rev bump). Corpus-only releases are now
+cheap: `server` is the only component that changes, so Revit stays open.
 
 Cost of the bundled choice: a corpus edit needs a release. That is the point while churn is high —
 every change is reviewed, signed (self-signed today, PRD §12) and recorded — and the release pipeline
@@ -486,12 +492,12 @@ Nothing is annotated or extracted until this table is settled.
    `instance_id` / `revit_version` (design note §3) and are pinned live by `TestHowToSearchLive`.
 5. Release manifest + install.ps1 per-component skip + broker stage-and-swap and reconnect
    messaging (the full scope is in §1); release-notes diff of the corpus. Prerequisite for frequent
-   corpus-only releases.
+   corpus-only releases. **Done** (2026-09-02, see §1).
 6. **Batch verifier: one end-to-end live integration test** that exercises the whole series against
    Revit 2025 and 2027 and is the acceptance gate for the batch, not any single PR: an agent session
    calls `submit_howto` for a new how-to (local write, session stamp, gate, scrub, outbox), the
    triage command takes the outbox document through fixture-run, edit and write into
-   `corpus.jsonl` plus the sidecar, the broker is rebuilt with the corpus embedded and reports its
+   `corpus/<id>.json` plus the sidecar, the broker is rebuilt with the corpus embedded and reports its
    version, and `search_howtos` returns the document at rank 1 for its recorded query while
    `describe_howto` shows the stamp for the version it ran on; then a revision of the same lineage
    goes round again and replaces the line. Per-PR gates stay as they are (CI, review, harness where

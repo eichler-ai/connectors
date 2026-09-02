@@ -140,8 +140,14 @@ func LoadCorpus(r io.Reader, source string) (*Corpus, error) {
 	if dupErr != nil {
 		return nil, dupErr
 	}
-	// Consistency of absorbs across the file: a merged-away id must not still
-	// have a line, and must not be claimed by two survivors.
+	c.indexAbsorbs()
+	return c, nil
+}
+
+// indexAbsorbs records every absorbs pointer so Get follows merges, checking
+// consistency: a merged-away id must not still have a document, and must
+// not be claimed by two survivors.
+func (c *Corpus) indexAbsorbs() {
 	for _, id := range c.order {
 		d := c.docs[id]
 		for _, old := range d.Absorbs {
@@ -156,7 +162,6 @@ func LoadCorpus(r io.Reader, source string) (*Corpus, error) {
 			c.absorbed[old] = d.ID
 		}
 	}
-	return c, nil
 }
 
 func (c *Corpus) problem(msg string) {

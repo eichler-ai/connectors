@@ -34,13 +34,17 @@ param(
     # since closed, and if so applies it; re-arms itself (by leaving the task running) otherwise.
     [switch]$ApplyPendingUpdate,
 
-    # Testing/offline escape hatch: PRD §12's own "Known gap" -- there is no release pipeline yet
-    # producing real signed GitHub Release artifacts this script can download. This lets the deploy
-    # mechanics (path resolution, per-version detection, idempotency, registry writes, MCP
-    # registration) be exercised live against a real Revit install NOW, against a hand-built local zip
-    # matching the same expected layout, without waiting on that pipeline. Production installs never
-    # pass this -- its presence is itself a signal this is a dev/test invocation.
-    [string]$LocalPackagePath
+    # Testing/offline escape hatch: exercise the deploy mechanics (path resolution, per-version
+    # detection, idempotency, registry writes, MCP registration) against a hand-built local zip in
+    # the release layout instead of a download. Production installs never pass this -- its presence
+    # is itself a signal this is a dev/test invocation.
+    [string]$LocalPackagePath,
+
+    # Internal, for tests and the release workflow: define this script's functions and return
+    # before doing anything (no elevation, no detection, no network). `. .\install.ps1
+    # -LoadFunctionsOnly` then gives Pester (revit/install.tests.ps1) and release.yml
+    # (New-PackageManifest) the same code an install runs, rather than a copy of it.
+    [switch]$LoadFunctionsOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -205,6 +209,145 @@ function Copy-SelfIfNeeded([string]$Source, [string]$Destination) {
     }
 }
 
+# --- Release manifest: per-component change detection (howto-seed-plan.md §1, step 5) -----------
+# A release zip carries manifest.json at its root: the release tag, one sha256 per component
+# (addin-2025, addin-2027, server -- a content hash over the component's files, see
+# Get-DirectoryContentHash) and the how-to corpus version the broker embeds. The version marker
+# records the hashes that were actually installed, so a later run redeploys only what changed: a
+# corpus-only release changes the `server` hash alone, and the add-in payloads -- and therefore the
+# running Revit -- are left untouched. A zip without a manifest (a hand-built local package, or a
+# release older than this scheme) is treated as "everything changed", which is the old behaviour.
+
+function Get-DirectoryContentHash([string]$Dir) {
+    # sha256 over "relative/path\n<sha256 of the file>\n" for every file, sorted by path, so the
+    # hash is stable across zip tools and timestamps and changes when any file's bytes or name do.
+    # Forward slashes and lower-case hex on both sides, so the workflow (Windows) and a test (any
+    # OS) agree byte for byte.
+    $root = (Resolve-Path $Dir).Path
+    $lines = Get-ChildItem $root -Recurse -File | ForEach-Object {
+        $rel = $_.FullName.Substring($root.Length).TrimStart('\', '/').Replace('\', '/')
+        "$rel`n$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant())`n"
+    } | Sort-Object
+    $bytes = [Text.Encoding]::UTF8.GetBytes(($lines -join ''))
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { ([BitConverter]::ToString($sha.ComputeHash($bytes)) -replace '-', '').ToLowerInvariant() } finally { $sha.Dispose() }
+}
+
+function New-PackageManifest([string]$StageDir, [string]$Version, $HowToCorpus) {
+    # $HowToCorpus is the broker's `-build-info` howto_corpus object (documents, hash, verified_on),
+    # or $null. Components are whatever addin-*/ and server/ directories the stage holds.
+    $components = [ordered]@{}
+    Get-ChildItem $StageDir -Directory | Where-Object { $_.Name -like 'addin-*' -or $_.Name -eq 'server' } | Sort-Object Name | ForEach-Object {
+        $components[$_.Name] = [ordered]@{ sha256 = (Get-DirectoryContentHash $_.FullName) }
+    }
+    $manifest = [ordered]@{ schema_version = 1; version = $Version; components = $components }
+    if ($HowToCorpus) { $manifest['howto_corpus'] = $HowToCorpus }
+    $manifest
+}
+
+function Read-PackageManifest([string]$ExtractDir) {
+    $path = Join-Path $ExtractDir 'manifest.json'
+    if (-not (Test-Path $path)) { return $null }
+    Get-Content $path -Raw | ConvertFrom-Json
+}
+
+function Get-ManifestComponentHash($Manifest, [string]$Component) {
+    if (-not $Manifest -or -not $Manifest.PSObject.Properties['components']) { return $null }
+    $entry = $Manifest.components.PSObject.Properties[$Component]
+    if ($entry -and $entry.Value -and $entry.Value.PSObject.Properties['sha256'] -and $entry.Value.sha256) { return [string]$entry.Value.sha256 }
+    return $null
+}
+
+function Get-InstalledComponentHash($Marker, [string]$Component) {
+    if (-not $Marker -or -not $Marker.PSObject.Properties['components'] -or -not $Marker.components) { return $null }
+    $entry = $Marker.components.PSObject.Properties[$Component]
+    if ($entry -and $entry.Value) { return [string]$entry.Value }
+    return $null
+}
+
+function Test-ComponentUnchanged($Manifest, $Marker, [string]$Component, [bool]$PresentOnDisk) {
+    # Skip a component only when three things hold: the package says what it contains (a hash),
+    # the last install recorded the same hash, AND the files are actually on disk. Any of them
+    # missing means deploy -- the third is the repair case the idempotency check exists for.
+    $new = Get-ManifestComponentHash $Manifest $Component
+    if (-not $new) { return $false }
+    $old = Get-InstalledComponentHash $Marker $Component
+    return (($old -eq $new) -and $PresentOnDisk)
+}
+
+function Get-BrokerProcess([string]$AppDir) {
+    # The broker(s) started from THIS install: every MCP client session spawns one (the singleton
+    # makes all but one a proxy), and each is owned by that session -- killing it breaks the
+    # session, which is why the installer never does.
+    # 'mcp-server*': a broker still running from a renamed mcp-server.exe.old image (a staged swap)
+    # may report that name.
+    Get-Process -Name 'mcp-server*' -ErrorAction SilentlyContinue | Where-Object {
+        try { $_.Path -like (Join-Path $AppDir '*') } catch { $false }
+    }
+}
+
+function Install-BrokerStaged([string]$ServerPayloadDir, [string]$AppDir) {
+    # Stage-and-swap for mcp-server.exe (seed plan §1 item 2). Never overwrites a locked file and
+    # never stops a broker. Returns one of:
+    #   swapped  -- the new exe is in place and nothing was running it; the next start uses it.
+    #   staged   -- a broker was running: the running image was renamed to .old (Windows allows
+    #               renaming a mapped executable, not overwriting it) and the new exe took its
+    #               path, so the running broker keeps serving the old code until the MCP client
+    #               next starts it; broker.json -- and the ribbon's "update available" -- clear then.
+    #   pending  -- the rename was refused (an AV scan, a non-Windows lock): the new exe waits as
+    #               mcp-server.exe.new and the next run of this script (or the watcher) completes
+    #               the swap once nothing holds the file.
+    New-Item -ItemType Directory -Force -Path $AppDir | Out-Null
+    $exe = Join-Path $AppDir 'mcp-server.exe'
+    $new = "$exe.new"
+    $old = "$exe.old"
+    # A leftover .old from an earlier staged swap: gone once its broker exited, else still mapped.
+    Remove-Item $old -Force -ErrorAction SilentlyContinue
+    # Everything beside the exe (nothing today; kept so a future server-side file is not silently
+    # dropped by the exe-only staging below).
+    Get-ChildItem $ServerPayloadDir -File | Where-Object { $_.Name -ne 'mcp-server.exe' } | ForEach-Object {
+        Copy-Item $_.FullName (Join-Path $AppDir $_.Name) -Force
+    }
+    Copy-Item (Join-Path $ServerPayloadDir 'mcp-server.exe') $new -Force
+    if (-not (Test-Path $exe)) {
+        Move-Item $new $exe -Force
+        return 'swapped'
+    }
+    $running = @(Get-BrokerProcess $AppDir)
+    try {
+        Move-Item $exe $old -Force
+        Move-Item $new $exe -Force
+    } catch {
+        return 'pending'
+    }
+    if ($running.Count -gt 0) { return 'staged' }
+    Remove-Item $old -Force -ErrorAction SilentlyContinue
+    return 'swapped'
+}
+
+function Complete-PendingBrokerSwap([string]$AppDir) {
+    # Finishes a 'pending' outcome from an earlier run, and tidies the .old image a 'staged' swap
+    # left behind once its broker has exited (the removal is refused, harmlessly, while it is still
+    # mapped). Runs on every install, not only when the server changes -- found live: a run that
+    # skipped an unchanged broker left the previous run's .old in place. Returns $true when a swap
+    # happened.
+    $exe = Join-Path $AppDir 'mcp-server.exe'
+    $new = "$exe.new"
+    Remove-Item "$exe.old" -Force -ErrorAction SilentlyContinue
+    if (-not (Test-Path $new)) { return $false }
+    if (Get-BrokerProcess $AppDir) { return $false }
+    try {
+        if (Test-Path $exe) { Move-Item $exe "$exe.old" -Force }
+        Move-Item $new $exe -Force
+        Remove-Item "$exe.old" -Force -ErrorAction SilentlyContinue
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+if ($LoadFunctionsOnly) { return }
+
 try {
 
 # --- AllUsers self-elevation ----------------------------------------------------------------------
@@ -250,6 +393,10 @@ if ($ApplyPendingUpdate) {
         return
     }
     $manifest = Get-Content $manifestPath | ConvertFrom-Json
+    $brokerSwapped = Complete-PendingBrokerSwap $appDir
+    $serverStillPending = $manifest.PSObject.Properties['components'] -and $manifest.components -and
+        $manifest.components.PSObject.Properties['server'] -and -not $brokerSwapped -and
+        (Test-Path (Join-Path $appDir 'mcp-server.exe.new'))
     $stillPending = @()
     foreach ($version in $manifest.versions) {
         if (Get-RevitProcess $version) { $stillPending += $version; continue }
@@ -270,16 +417,39 @@ if ($ApplyPendingUpdate) {
         # that field is asked about. Dropping these fields would silently send the next run back to the
         # old check-every-detected-version behaviour.
         $priorMarker = if (Test-Path $versionMarkerPath) { Get-Content $versionMarkerPath | ConvertFrom-Json } else { $null }
-        $priorDeployed = if ($priorMarker -and $priorMarker.PSObject.Properties['deployed']) { @($priorMarker.deployed) } else { @() }
-        $priorSkipped = if ($priorMarker -and $priorMarker.PSObject.Properties['skipped']) { @($priorMarker.skipped) } else { @() }
-        $priorDeferred = if ($priorMarker -and $priorMarker.PSObject.Properties['deferred']) { @($priorMarker.deferred) } else { @() }
+        # @( ) OUTSIDE the if: assigning an if-expression's output unrolls a one-element array into
+        # a scalar, and a string + array is string concatenation -- found live (step 5): a marker
+        # read back as "2027" plus the pending "2027" recorded `deployed: "20272027"`, after which
+        # every later run treated 2027 as never installed.
+        $priorDeployed = @(if ($priorMarker -and $priorMarker.PSObject.Properties['deployed']) { $priorMarker.deployed })
+        $priorSkipped = @(if ($priorMarker -and $priorMarker.PSObject.Properties['skipped']) { $priorMarker.skipped })
+        $priorDeferred = @(if ($priorMarker -and $priorMarker.PSObject.Properties['deferred']) { $priorMarker.deferred })
         $nowDeployed = @($priorDeployed + @($manifest.versions) | Sort-Object -Unique)
+        # The staged payloads' component hashes were parked in the pending manifest at stage time
+        # (they must not be recorded as installed until the files are actually on disk).
+        $components = @{}
+        if ($priorMarker -and $priorMarker.PSObject.Properties['components'] -and $priorMarker.components) {
+            foreach ($prop in $priorMarker.components.PSObject.Properties) { $components[$prop.Name] = $prop.Value }
+        }
+        if ($manifest.PSObject.Properties['components'] -and $manifest.components) {
+            foreach ($prop in $manifest.components.PSObject.Properties) {
+                # The server hash is recorded only when the swap really happened; a broker still
+                # running from the old image keeps the .new waiting, and the next run's
+                # Complete-PendingBrokerSwap (before the idempotency check) finishes it.
+                if ($prop.Name -eq 'server' -and $serverStillPending) { continue }
+                $components[$prop.Name] = $prop.Value
+            }
+        }
         @{
             version  = $manifest.version
             deployed = $nowDeployed
             # A version can be in exactly one list; anything just applied leaves the other two.
             skipped  = @($priorSkipped | Where-Object { $nowDeployed -notcontains $_ } | Sort-Object -Unique)
             deferred = @($priorDeferred | Where-Object { $nowDeployed -notcontains $_ } | Sort-Object -Unique)
+            components = $components
+            # Carried from the prior marker: an all-deferred run only happens when the server was
+            # unchanged (a server change is accounted on its own), so the corpus is the prior one.
+            howto_corpus = if ($priorMarker -and $priorMarker.PSObject.Properties['howto_corpus']) { $priorMarker.howto_corpus } else { $null }
         } | ConvertTo-Json | Out-File $versionMarkerPath -Encoding utf8
         Remove-Item (Get-PendingUpdateDir $Scope) -Recurse -Force -ErrorAction SilentlyContinue
         Unregister-ScheduledTask -TaskName (Get-PendingUpdateTaskName $Scope) -Confirm:$false -ErrorAction SilentlyContinue
@@ -320,11 +490,12 @@ if ($Uninstall) {
     # $leftoverVersions is non-empty only when a version's add-in DLL survived removal (a running
     # Revit had it locked), which means a broker may still be running and relying on this root -- so
     # only clear the whole root when NO add-in remains for this account. Otherwise fall back to the
-    # old behaviour of dropping just the models directory (a locked, in-use model file simply fails to
-    # delete and stays). Path scope is per-account -- the %LOCALAPPDATA% of whoever runs this
-    # uninstaller -- so under -Scope AllUsers other users' copies (and, if UAC was answered with a
-    # different admin account, the invoking user's own) stay behind, the same per-account scoping the
-    # claude-mcp deregistration below already has.
+    # old behaviour of dropping just the models directory. A locked, in-use model file -- e.g. one a
+    # broker still running from a renamed .old image holds open -- simply fails to delete and stays;
+    # it goes when that process exits, and nothing else references it. Path scope is per-account --
+    # the %LOCALAPPDATA% of whoever runs this uninstaller -- so under -Scope AllUsers other users'
+    # copies (and, if UAC was answered with a different admin account, the invoking user's own) stay
+    # behind, the same per-account scoping the claude-mcp deregistration below already has.
     if ($leftoverVersions.Count -eq 0) {
         Remove-Item "$env:LocalAppData\Connectors\Revit" -Recurse -Force -ErrorAction SilentlyContinue
     } else {
@@ -372,14 +543,23 @@ if ($LocalPackagePath) {
 $marker = if (Test-Path $versionMarkerPath) { Get-Content $versionMarkerPath | ConvertFrom-Json } else { $null }
 $installed = if ($marker) { $marker.version } else { $null }
 
+# A broker swap an earlier run could not finish (a locked exe) completes here, before the
+# "already up to date" short-circuit below can return -- independent review of #174: with the
+# completion only inside the deploy block, a broker-only release whose exe was locked stranded its
+# .new until the NEXT release, while the summary told the user to re-run. The marker recorded the
+# new server hash only once the swap actually happened, so this is the one step still owed.
+if (Complete-PendingBrokerSwap $appDir) {
+    if (-not $Silent) { Write-Host "Finished a broker update that was waiting for the previous broker to exit." }
+}
+
 # Only require a DLL for versions the LAST INSTALL ACTUALLY COVERED. Checking every detected version
 # is wrong whenever a release ships no `addin-<year>/` payload for one of them: the deploy loop below
 # skips such a version by design, so its DLL never appears, so this check could never become true, so
 # the "already up to date" short-circuit below could never fire. Every subsequent run would then
 # re-download the release and re-enter the deploy loop -- which for a running Revit prompts the user
 # or, under -Silent, force-closes it. PRD §12's self-upgrade path would be interrupting a perfectly
-# healthy install on every invocation. `install.md` notes the release pipeline doesn't exist yet, so
-# the first releases shipping 2027-only while 2025 is also installed is a realistic first encounter.
+# healthy install on every invocation. A release shipping 2027-only while 2025 is also installed is
+# a realistic encounter.
 #
 # TWO SEPARATE QUESTIONS, so two separate sets. Conflating them into one `covered` list was the
 # first attempt at this fix and it did not work at all: a SKIPPED version has, by definition, no DLL,
@@ -462,11 +642,36 @@ try {
     # running, OR whose running instance the user (or -Silent) explicitly agreed to close now. A
     # version left running gets its update staged and finishes automatically once it's closed (see
     # "Deferred updates" above), not left to sit as a broken promise.
+    $packageManifest = Read-PackageManifest $extractDir
+    if ($LocalPackagePath -and $packageManifest -and $packageManifest.PSObject.Properties['version'] -and $packageManifest.version) {
+        # A local package that carries a manifest names its own version; the timestamp tag is only
+        # for hand-built zips without one.
+        $releaseTag = [string]$packageManifest.version
+    }
+    # The pending manifest parks the hashes of staged (deferred) add-in payloads, so the version
+    # marker records them only once ApplyPendingUpdate has put the files on disk.
+    $pendingComponents = @{}
+    $installedComponents = @{}
+    # Prior hashes carry forward only when this package has a manifest to compare them against. A
+    # package without one redeploys every component, so a hash it cannot vouch for must not survive
+    # into the marker (review of #174: a hand-built zip after a real release left the release's
+    # hashes in place, and the next real install then skipped the dev build as "already current").
+    if ($packageManifest -and $marker -and $marker.PSObject.Properties['components'] -and $marker.components) {
+        foreach ($prop in $marker.components.PSObject.Properties) { $installedComponents[$prop.Name] = $prop.Value }
+    }
     $skippedVersions = @()
+    $unchangedVersions = @()
     foreach ($version in $detectedVersions) {
         $payloadDir = Join-Path $extractDir "addin-$version"
         if (-not (Test-Path $payloadDir)) {
             $skippedVersions += $version
+            continue
+        }
+        $dllPresent = Test-Path (Join-Path (Get-AddinsDir $version $Scope) 'MCPBridge.AddIn.dll')
+        if (Test-ComponentUnchanged $packageManifest $marker "addin-$version" $dllPresent) {
+            # Same bytes as what is installed: nothing to deploy, and -- the point of the manifest --
+            # no reason to touch a running Revit for this version.
+            $unchangedVersions += $version
             continue
         }
 
@@ -516,6 +721,8 @@ try {
                 }
                 $deferredVersions += $version
                 $deferredProcessIds += @($proc | ForEach-Object { $_.Id })
+                $h = Get-ManifestComponentHash $packageManifest "addin-$version"
+                if ($h) { $pendingComponents["addin-$version"] = $h }
                 continue
             }
         }
@@ -524,18 +731,34 @@ try {
         New-Item -ItemType Directory -Force -Path $dir | Out-Null
         Copy-Item "$payloadDir\*" $dir -Force -Recurse
         $deployedVersions += $version
+        $h = Get-ManifestComponentHash $packageManifest "addin-$version"
+        if ($h) { $installedComponents["addin-$version"] = $h }
     }
     if ($skippedVersions.Count -gt 0) {
         Write-Host "This release doesn't include a build for Revit $($skippedVersions -join ', ') -- skipping it."
     }
-    if ($deployedVersions.Count -eq 0 -and $deferredVersions.Count -eq 0) {
+    # "Doesn't support any of them" means NO payload existed for any detected version -- not that
+    # every payload was already installed (review of the seed plan: the old check threw on the
+    # nothing-changed case too, which a corpus-only release makes the common case).
+    if ($deployedVersions.Count -eq 0 -and $deferredVersions.Count -eq 0 -and $unchangedVersions.Count -eq 0) {
         throw "Found Revit $($detectedVersions -join ', ') on this machine, but this release doesn't support any of them yet. Check for a newer release or contact support."
     }
 
     New-Item -ItemType Directory -Force -Path $appDir | Out-Null
     $serverPayloadDir = Join-Path $extractDir 'server'
+    $serverExe = Join-Path $appDir 'mcp-server.exe'
+    $brokerOutcome = $null
+    if (Complete-PendingBrokerSwap $appDir) { $brokerOutcome = 'swapped' }
     if (Test-Path $serverPayloadDir) {
-        Copy-Item "$serverPayloadDir\*" $appDir -Force -Recurse
+        if (Test-ComponentUnchanged $packageManifest $marker 'server' (Test-Path $serverExe)) {
+            if (-not $brokerOutcome) { $brokerOutcome = 'unchanged' }
+        } else {
+            $brokerOutcome = Install-BrokerStaged $serverPayloadDir $appDir
+            $h = Get-ManifestComponentHash $packageManifest 'server'
+            if ($h) {
+                if ($brokerOutcome -eq 'pending') { $pendingComponents['server'] = $h } else { $installedComponents['server'] = $h }
+            }
+        }
     }
 
     # Create the broker's private app-data root now, so it exists before the first launch. The broker
@@ -545,28 +768,36 @@ try {
     # installer owns this directory's whole lifecycle.
     New-Item -ItemType Directory -Force -Path "$env:LocalAppData\Connectors\Revit" | Out-Null
 
-    if ($deployedVersions.Count -gt 0 -or $deferredVersions.Count -gt 0) {
-        Copy-SelfIfNeeded $ScriptPath $selfCopyPath
-    }
-    # Only mark the release current once at least one version was actually fully deployed -- a
-    # version that's only deferred isn't "installed" yet, it's pending (see below).
-    if ($deployedVersions.Count -gt 0) {
+    Copy-SelfIfNeeded $ScriptPath $selfCopyPath
+    # The marker is written whenever this run accounted for the release: something deployed, or
+    # everything was already current (which must still move `version` forward, or the next run
+    # would download the same release again -- the re-download-forever path the seed plan's review
+    # named). A run where every add-in was deferred and nothing else changed is the exception: the
+    # release is not installed yet, it is pending, and the watcher writes the marker when it lands.
+    $accounted = ($deployedVersions.Count -gt 0) -or ($unchangedVersions.Count -gt 0) -or ($brokerOutcome -eq 'swapped') -or ($brokerOutcome -eq 'staged')
+    if ($accounted) {
         # Recorded SEPARATELY, not merged: the idempotency check above needs `deployed` to know which
         # versions must have a DLL on disk, and `deployed` + `skipped` to know which versions this
         # release accounted for at all. Merging them into one list is what made the first attempt at
-        # this fix a no-op -- see the comment there.
+        # this fix a no-op -- see the comment there. Unchanged versions have their DLL on disk, so
+        # they belong in `deployed`.
+        $howtoCorpus = if ($packageManifest -and $packageManifest.PSObject.Properties['howto_corpus']) { $packageManifest.howto_corpus } else { $null }
         @{
             version  = $releaseTag
-            deployed = @($deployedVersions | Sort-Object -Unique)
+            deployed = @(@($deployedVersions) + @($unchangedVersions) | Sort-Object -Unique)
             skipped  = @($skippedVersions | Sort-Object -Unique)
             # Staged but not yet applied; the watcher task finishes these. Recorded so they don't
             # read as new-since-last-install on every subsequent run.
             deferred = @($deferredVersions | Sort-Object -Unique)
+            # Per-component content hashes actually on disk (manifest.json's), so the next run can
+            # skip what did not change. Absent for a package without a manifest.
+            components = $installedComponents
+            howto_corpus = $howtoCorpus
         } | ConvertTo-Json | Out-File $versionMarkerPath -Encoding utf8
     }
     if ($deferredVersions.Count -gt 0) {
         $manifestPath = Get-PendingUpdateManifestPath $Scope
-        @{ version = $releaseTag; versions = $deferredVersions } | ConvertTo-Json | Out-File $manifestPath -Encoding utf8
+        @{ version = $releaseTag; versions = $deferredVersions; components = $pendingComponents } | ConvertTo-Json | Out-File $manifestPath -Encoding utf8
         Register-PendingUpdateWatcher $Scope $selfCopyPath $deferredProcessIds
     }
 } finally {
@@ -574,9 +805,9 @@ try {
     if ($zipDownloaded -and (Test-Path $zipPath)) { Remove-Item $zipPath -Force -ErrorAction SilentlyContinue }
 }
 
-if ($deployedVersions.Count -eq 0) {
-    # Every detected+shippable version was deferred (still running, user declined to close it now) --
-    # the watcher task takes it from here; nothing more to do this run.
+if (-not $accounted) {
+    # Every detected+shippable version was deferred (still running, user declined to close it now)
+    # and nothing else changed -- the watcher task takes it from here; nothing more to do this run.
     return
 }
 
@@ -584,7 +815,6 @@ if ($deployedVersions.Count -eq 0) {
 # Local-mode (this machine runs both Revit and Claude Code) only -- the Mac+Parallels remote-mode
 # case is a separate, shorter macOS/bash counterpart script that runs on the Mac host and points
 # -mode remote at the VM's shared folder (PRD §12 "Mac + Parallels"), not this script's job.
-$serverExe = Join-Path $appDir 'mcp-server.exe'
 if ((Test-Path $serverExe) -and (Get-Command claude -ErrorAction SilentlyContinue)) {
     # Remove-then-add rather than checking for an existing entry first: idempotent by construction
     # (matches this whole script's own design principle) without needing to parse `claude mcp list`
@@ -607,8 +837,22 @@ if (-not $Silent -and $deployedVersions.Count -gt 0) {
     Start-Process "C:\Program Files\Autodesk\Revit $($deployedVersions[0])\Revit.exe"
 }
 
-$summary = "Revit MCP Bridge $releaseTag installed for Revit $($deployedVersions -join ', ')."
+$parts = @()
+if ($deployedVersions.Count -gt 0) { $parts += "installed for Revit $($deployedVersions -join ', ')" }
+if ($unchangedVersions.Count -gt 0) { $parts += "add-in already current for Revit $($unchangedVersions -join ', ') (left untouched)" }
+$summary = "Revit MCP Bridge $releaseTag"
+if ($parts.Count -gt 0) { $summary += ": $($parts -join '; ')" }
+$summary += "."
 if ($deferredVersions.Count -gt 0) { $summary += " Revit $($deferredVersions -join ', ') will update automatically once you close it." }
+switch ($brokerOutcome) {
+    'swapped'   { $summary += " Broker updated." }
+    'staged'    { $summary += " Broker updated on disk, but a running broker is still serving the previous version: it takes effect when your MCP client next starts it -- reconnect the revit MCP server (e.g. /mcp in Claude Code) or restart the client. The Revit ribbon shows the update as available until then." }
+    'pending'   {
+        $summary += " The new broker is waiting as mcp-server.exe.new; re-run this installer once no broker is running to finish the swap."
+        if (-not (Test-Path $serverExe)) { $summary += " Until then there is NO mcp-server.exe in place (the old one was moved aside before the swap was refused), so a new MCP client session cannot start the broker." }
+    }
+    'unchanged' { $summary += " Broker already current." }
+}
 Write-Host $summary
 
 } finally {

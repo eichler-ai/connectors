@@ -72,7 +72,10 @@ jobs:
       # blocks. Route it through a job-level env var instead, and gate on that.
       SIGNING_CONFIGURED: ${{ secrets.SELFSIGNED_CERT_PFX_BASE64 != '' }}
     steps:
+      # Full history: the how-to release notes below diff the corpus against the previous tag.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Determine release tag
         run: |
@@ -244,6 +247,17 @@ jobs:
           $server = New-Item -ItemType Directory -Force "$($stage.FullName)\server"
           Copy-Item revit\mcp-server\mcp-server.exe $server
 
+          # manifest.json (howto-seed-plan.md §1, step 5): one content hash per component so
+          # install.ps1 redeploys only what changed -- a corpus-only release touches `server`
+          # alone and leaves a running Revit open -- plus the how-to corpus version this broker
+          # embeds. Built by install.ps1's own New-PackageManifest so the two sides cannot drift.
+          $buildInfo = (& revit\mcp-server\mcp-server.exe -build-info) | ConvertFrom-Json
+          if (-not $buildInfo.howto_corpus) { throw "the release broker reports no how-to corpus: $($buildInfo.howto_corpus_error)" }
+          . .\revit\install.ps1 -LoadFunctionsOnly
+          $manifest = New-PackageManifest $stage.FullName $env:RELEASE_TAG $buildInfo.howto_corpus
+          $manifest | ConvertTo-Json -Depth 5 | Out-File "$($stage.FullName)\manifest.json" -Encoding utf8
+          Get-Content "$($stage.FullName)\manifest.json" | Write-Host
+
           $zipPath = "$env:RUNNER_TEMP\mcpbridge-release.zip"
           if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
           Compress-Archive "$($stage.FullName)\*" $zipPath
@@ -267,6 +281,39 @@ jobs:
           $lines -join "`n" | Out-File -FilePath $checksumsPath -Encoding ascii -NoNewline
           echo "CHECKSUMS_PATH=$checksumsPath" >> $env:GITHUB_ENV
 
+      # --- How-to release notes: what the corpus changed since the previous tag (seed plan §1).
+      # The previous tag's corpus directory is extracted with git archive (no checkout switch);
+      # howto-corpus-notes lists added / revised / merged / removed lineages by id and title, and
+      # fails the release (exit 2) if a script changed without a revision bump, which would ship
+      # stale verification stamps.
+      - name: How-to corpus release notes
+        working-directory: revit/mcp-server
+        run: |
+          $prev = git tag -l 'v*' --sort=-v:refname | Where-Object { $_ -ne $env:RELEASE_TAG } | Select-Object -First 1
+          $oldDir = ""
+          if ($prev) {
+            $oldZip = "$env:RUNNER_TEMP\corpus-$prev.zip"
+            git archive --format=zip -o $oldZip "$prev`:revit/mcp-server/internal/howto/corpus"
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "previous tag $prev has no how-to corpus directory; treating this as the first corpus release"
+            } else {
+              $oldDir = "$env:RUNNER_TEMP\corpus-$prev"
+              Expand-Archive $oldZip -DestinationPath $oldDir -Force
+            }
+          } else {
+            Write-Host "no previous release tag; treating this as the first corpus release"
+          }
+          # Built, not `go run`: go run folds the tool's exit 2 into exit 1. The tool writes the
+          # file itself (-o): Windows PowerShell would re-encode piped UTF-8 stdout and Out-File
+          # would add a BOM, both of which reach the release body verbatim.
+          $notesPath = "$env:RUNNER_TEMP\howto-notes.md"
+          go build -o "$env:RUNNER_TEMP\howto-corpus-notes.exe" ./cmd/howto-corpus-notes
+          if ($oldDir) { & "$env:RUNNER_TEMP\howto-corpus-notes.exe" -old $oldDir -o $notesPath | Out-Null }
+          else { & "$env:RUNNER_TEMP\howto-corpus-notes.exe" -o $notesPath | Out-Null }
+          if ($LASTEXITCODE -ne 0) { throw "howto-corpus-notes failed (exit $LASTEXITCODE; 2 = a script changed without a rev bump); see above" }
+          Get-Content $notesPath -Encoding UTF8 | Write-Host
+          echo "HOWTO_NOTES_PATH=$notesPath" >> $env:GITHUB_ENV
+
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -275,8 +322,10 @@ jobs:
           # GitHub's own auto-generated notes (merged-PR titles since the previous release tag,
           # same as the "Generate release notes" button in the UI) -- no authoring step needed here
           # or in the /release command, and it naturally degrades to "every PR ever" for a first
-          # release with no previous tag, which is the correct answer for that case too.
+          # release with no previous tag, which is the correct answer for that case too. The
+          # how-to section above is prepended as the body.
           generate_release_notes: true
+          body_path: ${{ env.HOWTO_NOTES_PATH }}
           files: |
             ${{ env.ZIP_PATH }}
             ${{ env.CHECKSUMS_PATH }}
