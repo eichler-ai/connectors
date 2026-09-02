@@ -130,19 +130,17 @@ public sealed class Connector
         (Autodesk.Revit.DB.Document)_runtime.OpenForWriting(document);
 
     /// <summary>
-    /// Runs your code with this document temporarily NOT modifiable, then makes it writable again. Use it
-    /// for the Revit calls that refuse to run while a transaction is open on their target — <c>Document.LoadFamily</c>,
-    /// <c>UIDocument.RequestViewChange</c>, <c>UIApplication.OpenAndActivateDocument</c>, and starting any
-    /// edit scope such as <c>StairsEditScope</c>.
+    /// Runs your code with this document temporarily NOT modifiable, then restores the state it found: a
+    /// writable document is writable again, one that was not stays that way. Use it for the Revit calls
+    /// that refuse a modifiable target — <c>Document.LoadFamily</c>, <c>UIDocument.RequestViewChange</c>,
+    /// <c>UIApplication.OpenAndActivateDocument</c>, and starting any edit scope such as <c>StairsEditScope</c>.
     ///
-    /// <para>Your changes are still undone if the script throws: the connector keeps this document's
-    /// transaction group open across the block, and that is what the rollback guarantee rests on. Do not
-    /// write to the document inside the block — it is not modifiable there. To write, nest
-    /// <see cref="WithTransaction"/>, which is how stairs are built.</para>
+    /// <para>Your changes are still undone if the script throws: the document's transaction group stays
+    /// open across the block. Do not write inside the block — it is not modifiable there. To write, nest
+    /// <see cref="WithTransaction(Autodesk.Revit.DB.Document, System.Action)"/>, which is how stairs are built.</para>
     ///
-    /// <para>Nesting this on the SAME document is refused; nesting it on DIFFERENT documents is allowed,
-    /// and is how a call needing two non-modifiable documents, like <c>Document.LoadFamily</c>, is
-    /// written.</para>
+    /// <para>Nesting this on the SAME document is refused; nesting on DIFFERENT documents is allowed, and is
+    /// how a call needing two non-modifiable documents, like <c>Document.LoadFamily</c>, is written.</para>
     /// </summary>
     /// <param name="document">The document to make temporarily non-modifiable.</param>
     /// <param name="body">Your code. Runs once, immediately.</param>
@@ -168,6 +166,23 @@ public sealed class Connector
         _runtime.WithTransaction(document, body);
 
     /// <summary>
+    /// Runs your code with a transaction the connector opens for this document and commits when the block
+    /// ends, and hands back what the block returned — so
+    /// <c>var id = Connector.WithTransaction(Document, () => Level.Create(Document, 3.0).Id);</c> needs no
+    /// local hoisted out of the block. Use it inside <see cref="WithoutTransaction"/> when something there
+    /// needs to write, or on a document this run does not already manage (it adopts it for the rest of the run).
+    ///
+    /// <para>Nesting on the same document is refused — inside the block it is already writable, so write
+    /// directly. If the block throws, its changes are rolled back and nothing is returned.</para>
+    /// </summary>
+    /// <typeparam name="T">Whatever your block returns.</typeparam>
+    /// <param name="document">The document to write to.</param>
+    /// <param name="body">Your code. Runs once, immediately; its return value is the call's result.</param>
+    /// <returns>The value your block returned.</returns>
+    public T WithTransaction<T>(Autodesk.Revit.DB.Document document, System.Func<T> body) =>
+        _runtime.WithTransaction(document, body);
+
+    /// <summary>
     /// Finishes this document for the rest of the run, so Revit will allow <c>Close</c>, <c>Save</c>,
     /// <c>SaveAs</c> and <c>SynchronizeWithCentral</c> on it — all of which refuse while the connector
     /// holds anything open. Call it before those, in the same script.
@@ -178,8 +193,8 @@ public sealed class Connector
     /// what you are about to do.</para>
     ///
     /// <para>Needs <c>confirm_lifecycle_actions</c>, like the members it exists to enable. To write to
-    /// the document again afterwards, go through <see cref="WithTransaction"/> — it is no longer open for
-    /// writing, and nothing settled can be recovered.</para>
+    /// the document again afterwards, go through <see cref="WithTransaction(Autodesk.Revit.DB.Document, System.Action)"/>
+    /// — it is no longer open for writing, and nothing settled can be recovered.</para>
     /// </summary>
     /// <param name="document">The document to finish.</param>
     /// <param name="keep">True to keep this document's changes permanently; false to discard them.</param>

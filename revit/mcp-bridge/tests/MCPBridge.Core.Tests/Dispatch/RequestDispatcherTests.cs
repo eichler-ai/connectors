@@ -239,6 +239,58 @@ public class RequestDispatcherTests
         Assert.Contains("\"code\":\"script-execution-failed\"", json);
     }
 
+    /// <summary>
+    /// #146 Phase 0 (H10's inverse mapping). Revit refuses a self-transacting API -- Document.LoadFamily,
+    /// UIDocument.RequestViewChange, every EditScope -- with "must not be modifiable" when the connector's
+    /// own transaction is what makes the target modifiable. Under always-open that is the connector's
+    /// doing, not the script's, and the raw message names no way out; the fix is one specific wrap. The
+    /// match is on the MESSAGE (a Revit phrase no script would coin) because the exception type is
+    /// Autodesk.Revit.Exceptions.InvalidOperationException, which this host can neither construct nor name
+    /// -- see IsModificationOutsideTransaction for the same type-load hazard one rung over.
+    /// </summary>
+    [Theory]
+    [InlineData("The document must not be modifiable before calling LoadFamily.")]
+    [InlineData("Cannot change the active view of a modifiable document.")]
+    [InlineData("EditScope cannot be closed, for there is a transaction or transaction group still open in the document.")]
+    public async Task ExecuteScript_TargetMustNotBeModifiable_ReportsItsOwnCodeAndTheWrapRemedy(string revitMessage)
+    {
+        var executionManager = NewExecutionManager();
+        var bridge = new ExternalEventBridge<ScriptExecutionOutcome>(new FakeExternalEventRaiser());
+        var dispatcher = new RequestDispatcher(executionManager, bridge, NewScriptExecutor());
+
+        var dispatchTask = dispatcher.DispatchAsync(ExecuteScriptRequest(1, "exec-1",
+            $"throw new System.InvalidOperationException(\"{revitMessage}\");"));
+        bridge.OnExecute(NewUiApp());
+
+        var json = await dispatchTask;
+
+        Assert.Contains("\"status\":\"error\"", json);
+        Assert.Contains("\"code\":\"script-target-must-not-be-modifiable\"", json);
+        Assert.DoesNotContain("\"code\":\"script-execution-failed\"", json);
+
+        var remedy = string.Join(" ", ParseRemedy(json));
+        Assert.Contains("Connector.WithoutTransaction", remedy);
+        // The two-document case is the one that trips people even after they know the wrap.
+        Assert.Contains("LoadFamily", remedy);
+    }
+
+    /// <summary>The message match must not fire on an ordinary "modifiable" mention in a script's own error.</summary>
+    [Fact]
+    public async Task ExecuteScript_AnUnrelatedExceptionMentioningModifiable_StaysScriptExecutionFailed()
+    {
+        var executionManager = NewExecutionManager();
+        var bridge = new ExternalEventBridge<ScriptExecutionOutcome>(new FakeExternalEventRaiser());
+        var dispatcher = new RequestDispatcher(executionManager, bridge, NewScriptExecutor());
+
+        var dispatchTask = dispatcher.DispatchAsync(ExecuteScriptRequest(1, "exec-1",
+            "throw new System.InvalidOperationException(\"the list is not modifiable\");"));
+        bridge.OnExecute(NewUiApp());
+
+        var json = await dispatchTask;
+
+        Assert.Contains("\"code\":\"script-execution-failed\"", json);
+    }
+
     // PRD §01/§14, from an independent PR review: the two denylist refusals define their own codes and
     // skill.md tells agents to match on them -- but every script failure was reported with a hardcoded
     // code of "script-execution-failed", so those codes only ever appeared as a SUBSTRING of `message`

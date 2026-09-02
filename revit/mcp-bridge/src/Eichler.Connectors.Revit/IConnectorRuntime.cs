@@ -61,8 +61,13 @@ internal interface IConnectorRuntime
     /// unchanged.</summary>
     void WithoutTransaction(object document, System.Action body);
 
-    /// <summary>Backs <see cref="Connector.WithTransaction"/>.</summary>
+    /// <summary>Backs <see cref="Connector.WithTransaction(Autodesk.Revit.DB.Document, System.Action)"/>.</summary>
     void WithTransaction(object document, System.Action body);
+
+    /// <summary>Backs <see cref="Connector.WithTransaction{T}"/>. <c>System.Func&lt;T&gt;</c> names no
+    /// Revit type, so -- like <c>System.Action</c> above -- it passes through this seam unchanged; only
+    /// the document is erased to <c>object</c>.</summary>
+    T WithTransaction<T>(object document, System.Func<T> body);
 
     /// <summary>Backs <see cref="Connector.Settle"/>.</summary>
     void Settle(object document, bool keep);

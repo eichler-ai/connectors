@@ -4,6 +4,7 @@ package harness_test
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -990,5 +991,173 @@ return new {
 		if !strings.Contains(after.ReturnValue, want) {
 			t.Errorf("wanted %q -- the failed edit scope must leave NOTHING behind, and a partially-built stair surviving would be worse than the current silent no-op; (%s)", want, after.diag())
 		}
+	}
+}
+
+// TestWithTransactionReturnsTheBodysValue pins the value-returning overload
+// added by #146 Phase 0 (H4): `var id = Connector.WithTransaction(doc, () =>
+// Level.Create(doc, e).Id);` hands the block's result back, so the "create X,
+// return its id" shape needs no local hoisted out of the block.
+//
+// Two things only live Revit can prove. First, OVERLOAD RESOLUTION on a real
+// script: an expression-bodied lambda whose body is a non-void call is
+// applicable to BOTH the Action and the Func<T> form, and C# is supposed to
+// prefer the value-returning delegate -- `created` being non-null below is
+// that rule holding against the real compiler and the real API. Second, that
+// the generic form rides the SAME commit/unwind path as the Action form: its
+// committed level survives, and a body that throws leaves nothing behind
+// even when the script catches (the WEDGE/silent-commit pair tier 1 pins on a
+// fake, asserted here on a real document).
+func TestWithTransactionReturnsTheBodysValue(t *testing.T) {
+	c, instanceID, documentID := targetDocument(t)
+	fixtureTitle := createBlankFixtureDocument(t, c, instanceID, documentID)
+
+	out := runScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+`
+Autodesk.Revit.DB.ElementId created = null;
+bool caught = false;
+Connector.WithoutTransaction(doc, () => {
+  // Expression-bodied, non-void: must bind to the Func<T> overload.
+  created = Connector.WithTransaction(doc, () => Autodesk.Revit.DB.Level.Create(doc, 66.6).Id);
+
+  // The throwing shape, caught by the script: the generic form must unwind its
+  // own block exactly as the Action form does.
+  try {
+    Connector.WithTransaction<int>(doc, () => {
+      Autodesk.Revit.DB.Level.Create(doc, 67.6);
+      throw new System.InvalidOperationException("harness: deliberate throw inside WithTransaction<T>");
+    });
+  } catch (System.InvalidOperationException) {
+    caught = true;
+  }
+});
+
+int atReturned = 0, atThrown = 0;
+foreach (var e in new Autodesk.Revit.DB.FilteredElementCollector(doc).OfClass(typeof(Autodesk.Revit.DB.Level))) {
+  var lvl = e as Autodesk.Revit.DB.Level;
+  if (lvl == null) continue;
+  if (System.Math.Abs(lvl.Elevation - 66.6) < 0.01) atReturned++;
+  if (System.Math.Abs(lvl.Elevation - 67.6) < 0.01) atThrown++;
+}
+var found = created == null ? null : doc.GetElement(created) as Autodesk.Revit.DB.Level;
+return new {
+  hasId = created != null && created != Autodesk.Revit.DB.ElementId.InvalidElementId,
+  foundByReturnedId = found != null && System.Math.Abs(found.Elevation - 66.6) < 0.01,
+  caught, atReturned, atThrown,
+};
+`)
+	if out.Status != "success" {
+		t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
+	}
+	for _, want := range []string{`"hasId":true`, `"foundByReturnedId":true`, `"caught":true`, `"atReturned":1`, `"atThrown":0`} {
+		if !strings.Contains(out.ReturnValue, want) {
+			t.Errorf("wanted %s in the result -- hasId/foundByReturnedId prove the Func<T> overload was chosen and returned the real id; atThrown:0 proves the generic form unwinds a thrown block like the Action form; (%s)", want, out.diag())
+		}
+	}
+}
+
+// TestTargetMustNotBeModifiableIsMappedToItsOwnCode is the live half of the
+// `script-target-must-not-be-modifiable` mapping (#146 Phase 0, H10's inverse).
+// Tier 1 pins the code and remedy against the MESSAGE strings; only here can we
+// prove those strings are Revit's actual wording -- the match fails OPEN if
+// they are not (the run would report plain script-execution-failed), which is
+// exactly the failure mode a fake cannot see. Each subtest lets the real
+// exception propagate out of the script, unlike the sibling RequestViewChange
+// test that catches it to inspect the message.
+func TestTargetMustNotBeModifiableIsMappedToItsOwnCode(t *testing.T) {
+	c, instanceID, documentID := targetDocument(t)
+
+	assertMapped := func(t *testing.T, rej rejectedScript, api string) {
+		t.Helper()
+		if rej.Error.Code != "script-target-must-not-be-modifiable" {
+			t.Fatalf("%s against a modifiable target must map to `script-target-must-not-be-modifiable`, got %q -- if this is `script-execution-failed`, Revit's message no longer contains a phrase RequestDispatcher.IsTargetMustNotBeModifiable matches and the mapping is failing open; message: %s", api, rej.Error.Code, rej.Error.Message)
+		}
+		if joined := strings.Join(rej.Error.Remedy, " "); !strings.Contains(joined, "Connector.WithoutTransaction") {
+			t.Errorf("the remedy must name the one wrap that fixes this (Connector.WithoutTransaction); got: %q", joined)
+		}
+	}
+
+	t.Run("LoadFamilyFromAModifiableSourceDocument", func(t *testing.T) {
+		probe := runScript(t, c, instanceID, documentID, `
+var app = UIApplication.Application;
+foreach (var f in System.IO.Directory.EnumerateFiles(app.FamilyTemplatePath, "Generic Model.rft", System.IO.SearchOption.AllDirectories)) { return f; }
+return "";
+`)
+		template := strings.TrimSpace(strings.Trim(probe.ReturnValue, `"`))
+		if template == "" {
+			t.Skip("no Generic Model.rft under Application.FamilyTemplatePath; cannot build a family to load")
+		}
+
+		// The family document is created WRITABLE (its managed transaction stays
+		// open for the run), so LoadFamily from it into the active document fails
+		// on the SOURCE side with Revit's "must not be modifiable". The created
+		// document outlives the rejected run; the marker lets us close it.
+		rej := runRejectedScript(t, c, instanceID, documentID, fmt.Sprintf(`
+var fam = Connector.CreateFamilyDocument(%s);
+System.Console.WriteLine("cleanup-title=" + fam.Title + ";");
+var loaded = fam.LoadFamily(Document);
+return loaded == null ? "not-loaded" : "loaded";
+`, strconv.Quote(template)))
+		for _, title := range cleanupTitles(rej.Output) {
+			title := title
+			t.Cleanup(func() { closeDocumentByTitle(t, c, instanceID, documentID, title, "") })
+		}
+		assertMapped(t, rej, "Document.LoadFamily")
+	})
+
+	t.Run("RequestViewChangeAtTheActiveDocument", func(t *testing.T) {
+		probe := runScript(t, c, instanceID, documentID, `
+foreach (Autodesk.Revit.DB.Element e in new Autodesk.Revit.DB.FilteredElementCollector(Document).OfClass(typeof(Autodesk.Revit.DB.ViewPlan))) {
+  var v = (Autodesk.Revit.DB.View)e;
+  if (!v.IsTemplate && v.Id != UIDocument.ActiveView.Id) { return "has-other-view"; }
+}
+return "no-other-view";
+`)
+		if !strings.Contains(probe.ReturnValue, "has-other-view") {
+			t.Skip("active document has fewer than two non-template plan views; nothing to switch between")
+		}
+		rej := runRejectedScript(t, c, instanceID, documentID, `
+Autodesk.Revit.DB.View target = null;
+foreach (Autodesk.Revit.DB.Element e in new Autodesk.Revit.DB.FilteredElementCollector(Document).OfClass(typeof(Autodesk.Revit.DB.ViewPlan))) {
+  var v = (Autodesk.Revit.DB.View)e;
+  if (!v.IsTemplate && v.Id != UIDocument.ActiveView.Id) { target = v; break; }
+}
+UIDocument.RequestViewChange(target);
+return "accepted";
+`)
+		assertMapped(t, rej, "UIDocument.RequestViewChange")
+	})
+}
+
+// TestWithoutTransactionRestoresTheStateItFound pins #146 H1 live. The scope
+// used to reopen a transaction UNCONDITIONALLY when it ended, so on a document
+// that entered it with NO transaction -- settled, then written through
+// WithTransaction, which closes at block end -- WithoutTransaction handed the
+// document back MODIFIABLE for the rest of the run. That silently reinstated
+// always-open on a document skill.md says "is unmanaged after a settle", and it
+// is the one path that would have defeated a group-only default outright. Now
+// the block restores what it found: not modifiable in, not modifiable out.
+func TestWithoutTransactionRestoresTheStateItFound(t *testing.T) {
+	c, instanceID, documentID := targetDocument(t)
+	fixtureTitle := createBlankFixtureDocument(t, c, instanceID, documentID)
+
+	// Settle is confirmation-gated, hence the flag -- the fixture is a throwaway
+	// document and keep:false discards nothing of value.
+	out := decodeToolResult[executeScriptOut](t, callExecuteScriptWith(t, c, instanceID, documentID,
+		fixtureWritePreamble(fixtureTitle)+`
+Connector.Settle(doc, false);
+Connector.WithTransaction(doc, () => { });      // fresh group; transaction closed at block end
+bool before = doc.IsModifiable;
+Connector.WithoutTransaction(doc, () => { });
+bool after = doc.IsModifiable;
+return new { before, after };
+`, map[string]any{"confirm_lifecycle_actions": true}))
+	if out.Status != "success" {
+		t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
+	}
+	if !strings.Contains(out.ReturnValue, `"before":false`) {
+		t.Fatalf("precondition: after Settle + a closed WithTransaction block the document must NOT be modifiable, or this test is not exercising the no-transaction entry state; (%s)", out.diag())
+	}
+	if !strings.Contains(out.ReturnValue, `"after":false`) {
+		t.Errorf("WithoutTransaction reopened a transaction the document did not have when the block began -- the H1 regression: the scope must restore the state it found, not always-open; (%s)", out.diag())
 	}
 }

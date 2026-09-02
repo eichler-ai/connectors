@@ -215,7 +215,7 @@ Its cost is that it puts the routed document in a state a whole class of Revit A
 
 | Scope | Does | Reaches |
 |---|---|---|
-| `Connector.WithoutTransaction(doc, body)` | commits and closes the transaction, **keeps** the group, and opens a fresh transaction in that same group at block end | `LoadFamily`, `RequestViewChange`, activation, `EditScope.Start` |
+| `Connector.WithoutTransaction(doc, body)` | commits and closes the transaction, **keeps** the group, and at block end restores the state it found — a fresh transaction in that group if one was open on entry, none otherwise (#146 H1) | `LoadFamily`, `RequestViewChange`, activation, `EditScope.Start` |
 | `Connector.WithTransaction(doc, body)` | opens a transaction inside that window, closes it at block end | the write inside an edit scope — and closing it is what lets `EditScope.Commit()` succeed |
 | `Connector.Settle(doc, keep:)` | settles the group — assimilate to keep, roll back to discard | `Close`/`Save`/`SaveAs`/`SynchronizeWithCentral` **in-run** |
 
