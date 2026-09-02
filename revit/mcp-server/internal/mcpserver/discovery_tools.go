@@ -137,10 +137,10 @@ func searchGuidance(returned, total int) string {
 
 // SearchFunctionsOut is the output schema for the search_functions tool.
 type SearchFunctionsOut struct {
-	Results      []Member     `json:"results,omitempty"`
-	NextCursor   string       `json:"next_cursor,omitempty"`
-	TotalMatched int          `json:"total_matched,omitempty"`
-	RevitVersion string       `json:"revit_version,omitempty"`
+	Results      []Member `json:"results,omitempty"`
+	NextCursor   string   `json:"next_cursor,omitempty"`
+	TotalMatched int      `json:"total_matched,omitempty"`
+	RevitVersion string   `json:"revit_version,omitempty"`
 	// Guidance is a broker-added retry hint (searchGuidance), not part of the
 	// add-in's response; it tells the agent that fuzzy ranking can miss a member
 	// that exists under different wording, so a weak result set warrants a
