@@ -24,35 +24,76 @@ internal sealed class RevitUiApplicationAdapter : IUiApplicationAdapter, IRawUiA
     private const int CategoryResolutionCap = 20_000;
 
     /// <summary>
-    /// See <see cref="IDocumentChangeSource"/>. The handler NEVER throws: it runs inside Revit's own
-    /// event dispatch on the UI thread, where an unhandled exception is Revit's to deal with, not ours --
-    /// a broken report is not worth a broken session, so any failure drops that one event.
+    /// See <see cref="IDocumentChangeSource"/>. The handler NEVER throws -- translation AND the
+    /// subscriber's callback are both inside the catch (independent review: the first version wrapped
+    /// only the translation, so a throwing subscriber would have escaped into Revit's dispatch). It runs
+    /// inside Revit's own event dispatch on the UI thread, where an unhandled exception is Revit's to deal
+    /// with, not ours; a broken report is not worth a broken session, so any failure drops that one event.
+    ///
+    /// ONE Application wrapper for both += and -= (review): UIApplication.Application mints a wrapper per
+    /// access, and while Revit's event add/remove is native-backed and very likely tolerates that, a
+    /// leaked handler here would resolve categories on the UI thread for every later user edit, forever.
+    /// Capturing the wrapper once removes the question.
     /// </summary>
     public IDisposable Subscribe(Action<DocumentChange> onChange)
     {
+        var application = _uiApplication.Application;
+        // Identity resolved once per document per subscription: e.GetDocument() hands back a fresh
+        // wrapper per event, so DocumentIdentity's ConditionalWeakTable cache would miss every time and
+        // re-run the path hashing (and a P/Invoke for mapped drives) inside every commit. Document.Equals
+        // compares the underlying document, which is what makes this small list work across wrappers.
+        var knownDocuments = new List<(Autodesk.Revit.DB.Document Document, string Id)>();
+
         EventHandler<Autodesk.Revit.DB.Events.DocumentChangedEventArgs> handler = (_, e) =>
         {
-            DocumentChange change;
             try
             {
-                change = Translate(e);
+                var change = Translate(e, knownDocuments);
+                if (change is not null)
+                {
+                    onChange(change);
+                }
             }
             catch
             {
-                return;
+                // By contract -- see the doc comment.
             }
-
-            onChange(change);
         };
 
-        _uiApplication.Application.DocumentChanged += handler;
-        return new Unsubscriber(() => _uiApplication.Application.DocumentChanged -= handler);
+        application.DocumentChanged += handler;
+        return new Unsubscriber(() => application.DocumentChanged -= handler);
     }
 
-    private static DocumentChange Translate(Autodesk.Revit.DB.Events.DocumentChangedEventArgs e)
+    /// <summary>
+    /// Null when the changed document's identity cannot be resolved (a document mid-transition, the
+    /// case TryResolveId's catch exists for): the event is dropped rather than filed under an invented
+    /// shared key, which would conflate distinct documents and defeat the settle-discard exclusion --
+    /// the same continue-on-null posture <see cref="OpenDocuments"/> takes.
+    /// </summary>
+    private static DocumentChange? Translate(Autodesk.Revit.DB.Events.DocumentChangedEventArgs e, List<(Autodesk.Revit.DB.Document Document, string Id)> knownDocuments)
     {
         var document = e.GetDocument();
-        var documentId = TryResolveId(document) ?? "(unknown document)";
+        string? documentId = null;
+        foreach (var known in knownDocuments)
+        {
+            if (known.Document.Equals(document))
+            {
+                documentId = known.Id;
+                break;
+            }
+        }
+
+        if (documentId is null)
+        {
+            documentId = TryResolveId(document);
+            if (documentId is null)
+            {
+                return null;
+            }
+
+            knownDocuments.Add((document, documentId));
+        }
+
         var operationName = e.Operation.ToString();
         var operation = operationName switch
         {

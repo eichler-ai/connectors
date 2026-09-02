@@ -84,12 +84,20 @@ public class TransactionScriptExecutorTests
     }
 
     [Fact]
-    public async Task ThrowingScript_CarriesNoMutationReport_ItsChangesWereRolledBack()
+    public async Task ThrowingScript_CarriesNoMutationReport_EvenThoughChangesWereRaisedDuringTheRun()
     {
+        // A change IS raised during the run (independent review: the first version raised none, so the
+        // assertion held for any executor). The script then throws; the rollback undoes the change, and
+        // a report of it would be the exact thing an agent must not act on.
         var executor = NewExecutor();
         var document = new FakeDocumentAdapter();
-        var uiApp = new FakeUiApplicationAdapter { ActiveUiDocument = new FakeUiDocumentAdapter { Document = document } };
-        var subscribedDuringRun = false;
+        var uiApp = new FakeUiApplicationAdapter
+        {
+            ActiveUiDocument = new FakeUiDocumentAdapter { Document = document },
+            OnSubscribed = self => self.EmitChange(new DocumentChange(
+                "doc-fake0000000000", DocumentChangeOperation.Committed, "TransactionCommitted", Array.Empty<string>(),
+                new[] { new ChangedElement(1, "Walls") }, Array.Empty<ChangedElement>(), Array.Empty<long>(), categoriesTruncated: false)),
+        };
 
         var outcome = await executor.ExecuteAsync(document, uiApp, null,
             "throw new System.InvalidOperationException(\"boom\");", CancellationToken.None);
@@ -97,7 +105,32 @@ public class TransactionScriptExecutorTests
         Assert.False(outcome.Success);
         Assert.Null(outcome.Mutations);
         Assert.Equal(0, uiApp.ChangeSubscribers);
-        _ = subscribedDuringRun;
+    }
+
+    [Fact]
+    public void BuildMutationReport_DropsDocumentsTheRunSettledWithKeepFalse()
+    {
+        // The WIRING between tracker and transaction set (review: Build's exclusion was tested, the
+        // executor passing DiscardedDocumentIds was not -- dropping the argument left every test green).
+        var transactions = new ManagedDocumentTransactions("MCP Bridge Script", new FakeUiApplicationAdapter());
+        var kept = new FakeDocumentAdapter { DocumentId = "doc-kept" };
+        var discarded = new FakeDocumentAdapter { DocumentId = "doc-discarded" };
+        transactions.Open(kept, isAmbient: true);
+        transactions.OpenAdoptedForTesting(discarded);
+
+        var tracker = new MutationTracker();
+        foreach (var id in new[] { "doc-kept", "doc-discarded" })
+        {
+            tracker.Record(new DocumentChange(id, DocumentChangeOperation.Committed, "TransactionCommitted", Array.Empty<string>(),
+                new[] { new ChangedElement(1, "Walls") }, Array.Empty<ChangedElement>(), Array.Empty<long>(), categoriesTruncated: false));
+        }
+
+        transactions.SettleCore(discarded, keep: false);
+
+        var report = TransactionScriptExecutor.BuildMutationReport(tracker, transactions);
+
+        Assert.NotNull(report);
+        Assert.Equal(1, report!.Created);
     }
 
     [Fact]

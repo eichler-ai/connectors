@@ -31,9 +31,13 @@ internal sealed class FakeUiApplicationAdapter : IUiApplicationAdapter, IDocumen
         }
     }
 
+    /// <summary>Runs when the executor subscribes -- a hook to raise a change "during the run" from a test whose script cannot touch Revit.</summary>
+    public Action<FakeUiApplicationAdapter>? OnSubscribed { get; init; }
+
     public IDisposable Subscribe(Action<DocumentChange> onChange)
     {
         _changeSubscribers.Add(onChange);
+        OnSubscribed?.Invoke(this);
         return new Unsubscriber(() => _changeSubscribers.Remove(onChange));
     }
 

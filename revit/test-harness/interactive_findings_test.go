@@ -1333,8 +1333,8 @@ return "wrote";
 		if m.Deleted != 0 {
 			t.Errorf("deleted = %d, want 0 -- the deleted level was created in this same run: %+v", m.Deleted, m)
 		}
-		if m.Modified < 1 {
-			t.Errorf("modified = %d, want >= 1 for the renamed pre-existing level: %+v", m.Modified, m)
+		if m.Modified < 1 || m.ByCategory["Levels"].Modified < 1 {
+			t.Errorf("modified = %d (Levels.modified = %d), want >= 1 with the renamed pre-existing level counted under its category -- regeneration noise alone must not be what satisfies this: %+v", m.Modified, m.ByCategory["Levels"].Modified, m)
 		}
 		if got := m.ByCategory["Levels"].Created; got != 2 {
 			t.Errorf("by_category.Levels.created = %d, want 2 -- category names must be resolved at event time: %+v", got, m)

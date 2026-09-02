@@ -138,6 +138,59 @@ public class MutationTrackerTests
     }
 
     [Fact]
+    public void Truncated_IsPerDocument_SoAnExcludedDocumentsCapDoesNotTaintTheReport()
+    {
+        var tracker = new MutationTracker();
+        tracker.Record(Committed(doc: "doc-kept", added: new (long, string?)[] { (1, "Walls") }));
+        tracker.Record(Committed(doc: "doc-discarded", added: new (long, string?)[] { (2, "Walls") }, truncated: true));
+
+        Assert.False(tracker.Build(excludedDocumentIds: new[] { "doc-discarded" })!.Truncated);
+    }
+
+    [Fact]
+    public void DeletedThenAdded_ElementIdReuse_CountsTheNewElementAndDropsTheDeletion()
+    {
+        // Revit re-issues ids across undo; the id now names a new element, and the deletion it reverses
+        // is no longer part of the run's net effect.
+        var tracker = new MutationTracker();
+        tracker.Record(Committed(deleted: new long[] { 7 }));
+        tracker.Record(Committed(added: new (long, string?)[] { (7, "Doors") }));
+
+        var report = tracker.Build()!;
+
+        Assert.Equal(1, report.Created);
+        Assert.Equal(0, report.Deleted);
+    }
+
+    [Fact]
+    public void ModifiedThenAdded_UndoThenRedo_CountsOnceAsCreated()
+    {
+        var tracker = new MutationTracker();
+        tracker.Record(Committed(modified: new (long, string?)[] { (3, "Walls") }));
+        tracker.Record(Committed(added: new (long, string?)[] { (3, "Walls") }));
+
+        var report = tracker.Build()!;
+
+        Assert.Equal(1, report.Created);
+        Assert.Equal(0, report.Modified);
+    }
+
+    [Fact]
+    public void PastTheRetainedIdCap_TotalsStayExact_AndTheReportIsTruncated()
+    {
+        // CONVENTIONS.md: a stated bound, and an honest report when it bites.
+        var tracker = new MutationTracker();
+        var many = Enumerable.Range(1, MutationTracker.RetainedIdCap + 5).Select(i => ((long)i, (string?)"Walls"));
+        tracker.Record(Committed(added: many));
+
+        var report = tracker.Build()!;
+
+        Assert.Equal(MutationTracker.RetainedIdCap + 5, report.Created);
+        Assert.Equal(MutationTracker.RetainedIdCap, report.ByCategory["Walls"].Created);
+        Assert.True(report.Truncated);
+    }
+
+    [Fact]
     public void SameIdAcrossDifferentDocuments_IsNotConflated()
     {
         // ElementId values are per document; id 1 in two documents is two elements.

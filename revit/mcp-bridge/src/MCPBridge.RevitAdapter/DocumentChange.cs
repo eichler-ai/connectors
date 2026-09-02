@@ -35,11 +35,18 @@ internal sealed class DocumentChange
     /// <summary>PRD §09 identity of the changed document, so the tracker can drop a settled-and-discarded document's tally.</summary>
     public string DocumentId { get; }
 
+    /// <summary>
+    /// Not read by the mutation report, whose netting is operation-agnostic (an undo IS a reverse delta).
+    /// Translated now, with <see cref="TransactionNames"/>, as plumbing for Phase 2b -- readable undo labels
+    /// and the undo/redo tools, which need to tell a commit from an undo and name the transaction -- so the
+    /// seam changes once.
+    /// </summary>
     public DocumentChangeOperation Operation { get; }
 
     /// <summary>Revit's own <c>UndoOperation</c> name, verbatim -- kept beside the mapped enum so an unmapped value is still legible in a log.</summary>
     public string OperationName { get; }
 
+    /// <summary>See <see cref="Operation"/>: Phase 2b plumbing, not read by the mutation report.</summary>
     public IReadOnlyList<string> TransactionNames { get; }
 
     public IReadOnlyList<ChangedElement> Added { get; }

@@ -80,8 +80,9 @@ with `document-not-found` and an `open_documents` list; omitted means the active
 `UIDocument` is null unless the routed document is the active one; use `Document` for a background
 one. `return` a value and it comes back as `return_value` — strings verbatim, collections and
 anonymous types as JSON, anything else as a self-explaining `<...>` marker. `output` is stdout,
-Revit's own writes too. A successful run that changed the model also carries **`mutations`** (net
-`created`/`modified`/`deleted` counts plus `by_category`), so skip the read-after-write check.
+Revit's own writes too. A successful run that changed anything also carries **`mutations`** (net
+`created`/`modified`/`deleted` across every document it touched, plus `by_category`), so skip the
+read-after-write check.
 
 ```csharp
 return Document.Title;

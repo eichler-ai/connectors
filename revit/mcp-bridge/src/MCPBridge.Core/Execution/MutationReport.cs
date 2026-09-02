@@ -38,13 +38,9 @@ public sealed class MutationReport
     [JsonPropertyName("by_category")]
     public IReadOnlyDictionary<string, CategoryTally> ByCategory { get; }
 
-    /// <summary>True when category resolution hit its cap during the run, so <see cref="ByCategory"/> undercounts; the totals are still exact.</summary>
+    /// <summary>True when category resolution or id retention hit its cap for a document in this report, so <see cref="ByCategory"/> (and, past the retention cap, the netting) undercounts; the totals are still exact.</summary>
     [JsonPropertyName("truncated")]
     public bool Truncated { get; }
-
-    /// <summary>Convenience for callers; never on the wire (the field is omitted entirely when empty).</summary>
-    [JsonIgnore]
-    public bool IsEmpty => Created == 0 && Modified == 0 && Deleted == 0;
 }
 
 public sealed class CategoryTally

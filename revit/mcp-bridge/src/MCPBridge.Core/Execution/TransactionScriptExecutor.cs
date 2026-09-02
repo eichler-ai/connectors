@@ -172,7 +172,7 @@ internal sealed class TransactionScriptExecutor
             // DocumentChanged for that rollback is not something this code should have to know (the live
             // harness records it); the tracker drops them by name either way. Named by DESCRIPTION rather
             // than id in SettlementRecord, so match on the ids the transaction set tracked for them.
-            var report = mutations.Build(transactions.DiscardedDocumentIds);
+            var report = BuildMutationReport(mutations, transactions);
             return ScriptExecutionOutcome.Completed(outcome.ReturnValue, outcome.StdOut, notices, globals.PublishedFiles, report);
         }
         finally
@@ -187,6 +187,14 @@ internal sealed class TransactionScriptExecutor
             ActiveDialogContext.ClearActive();
         }
     }
+
+    /// <summary>
+    /// The one place the tracker and the transaction set meet (#146 Phase 2): documents this run settled
+    /// with keep: false leave the report. Split out so the WIRING is tier-1 testable -- a tracker test
+    /// covers Build's argument, this covers that the executor passes the right one.
+    /// </summary>
+    internal static MutationReport? BuildMutationReport(MutationTracker mutations, ManagedDocumentTransactions transactions) =>
+        mutations.Build(transactions.DiscardedDocumentIds);
 
     private static List<DiagnosticRecord> CombinedNotices(IReadOnlyList<FailureSummary> commitFailures)
     {
