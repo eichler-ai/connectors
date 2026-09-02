@@ -41,6 +41,192 @@ public class TransactionScriptExecutorTests
         Assert.Equal(new[] { "Start", "Assimilate", "Dispose" }, document.LastTransactionGroup!.Calls);
     }
 
+    // ------------------------------------------------------------------------------------------
+    // #146 Phase 2: the mutation report rides the run's DocumentChanged subscription
+    // ------------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task SuccessfulScript_ReportsNetMutations_FromChangesRaisedDuringTheRun()
+    {
+        var executor = NewExecutor();
+        var document = new FakeDocumentAdapter();
+        var uiApp = new FakeUiApplicationAdapter { ActiveUiDocument = new FakeUiDocumentAdapter { Document = document } };
+        // The fake raises the change INSIDE the commit, exactly where Revit raises DocumentChanged.
+        document.OnTransactionCommit = () => uiApp.EmitChange(new DocumentChange(
+            document.DocumentId, DocumentChangeOperation.Committed, "TransactionCommitted", new[] { "MCP Bridge Script" },
+            new[] { new ChangedElement(1, "Walls"), new ChangedElement(2, "Walls") },
+            new[] { new ChangedElement(9, "Levels") },
+            Array.Empty<long>(),
+            categoriesTruncated: false));
+
+        var outcome = await executor.ExecuteAsync(document, uiApp, null, "1 + 1", CancellationToken.None);
+
+        Assert.True(outcome.Success);
+        var report = Assert.IsType<MutationReport>(outcome.Mutations);
+        Assert.Equal(2, report.Created);
+        Assert.Equal(1, report.Modified);
+        Assert.Equal(2, report.ByCategory["Walls"].Created);
+        // The subscription is per run: nothing may keep listening after the executor returns.
+        Assert.Equal(0, uiApp.ChangeSubscribers);
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // #146 Phase 2b: readable undo labels
+    // ------------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task AnAgentLabel_NamesTheRunsTransactionAndGroupFromTheStart()
+    {
+        var executor = NewExecutor();
+        var document = new FakeDocumentAdapter();
+        var uiApp = new FakeUiApplicationAdapter { ActiveUiDocument = new FakeUiDocumentAdapter { Document = document } };
+
+        var outcome = await executor.ExecuteAsync(document, uiApp, null, "1 + 1", CancellationToken.None, label: "create L1 walls");
+
+        Assert.True(outcome.Success);
+        Assert.Equal("MCP: create L1 walls", document.LastTransactionGroup!.Name);
+        Assert.Equal("MCP: create L1 walls", document.LastTransaction!.Name);
+        // Given a label, the derived name is NOT applied over it.
+        Assert.DoesNotContain("SetName", document.LastTransactionGroup.Calls);
+    }
+
+    [Fact]
+    public async Task WithoutALabel_TheGroupIsRenamedFromTheMutationReport_BeforeAssimilate()
+    {
+        var executor = NewExecutor();
+        var document = new FakeDocumentAdapter();
+        var uiApp = new FakeUiApplicationAdapter { ActiveUiDocument = new FakeUiDocumentAdapter { Document = document } };
+        document.OnTransactionCommit = () => uiApp.EmitChange(new DocumentChange(
+            document.DocumentId, DocumentChangeOperation.Committed, "TransactionCommitted", Array.Empty<string>(),
+            new[] { new ChangedElement(1, "Walls"), new ChangedElement(2, "Walls") },
+            Array.Empty<ChangedElement>(), Array.Empty<long>(), categoriesTruncated: false));
+
+        var outcome = await executor.ExecuteAsync(document, uiApp, null, "1 + 1", CancellationToken.None);
+
+        Assert.True(outcome.Success);
+        Assert.Equal("MCP Bridge Script", document.LastTransactionGroup!.Name);   // created with the default...
+        Assert.Equal("MCP: 2 Walls created", document.LastTransactionGroup.LastName);   // ...renamed from the net effect
+        Assert.Equal(new[] { "Start", "SetName", "Assimilate", "Dispose" }, document.LastTransactionGroup.Calls);
+    }
+
+    [Fact]
+    public async Task ARefusedRename_IsReportedAsANotice_AndTheRunStillSucceeds()
+    {
+        var executor = NewExecutor();
+        var document = new FakeDocumentAdapter();
+        var uiApp = new FakeUiApplicationAdapter { ActiveUiDocument = new FakeUiDocumentAdapter { Document = document } };
+        document.OnTransactionCommit = () =>
+        {
+            document.LastTransactionGroup!.ThrowOnSetName = true;
+            uiApp.EmitChange(new DocumentChange(document.DocumentId, DocumentChangeOperation.Committed, "TransactionCommitted", Array.Empty<string>(),
+                new[] { new ChangedElement(1, "Walls") }, Array.Empty<ChangedElement>(), Array.Empty<long>(), categoriesTruncated: false));
+        };
+
+        var outcome = await executor.ExecuteAsync(document, uiApp, null, "1 + 1", CancellationToken.None);
+
+        Assert.True(outcome.Success);
+        var notice = Assert.Single(outcome.Notices, n => n.Code == "undo-label-not-applied");
+        Assert.Contains("simulated SetName refusal", notice.Message);
+        Assert.NotNull(outcome.Mutations);   // the writes themselves are unaffected
+    }
+
+    [Fact]
+    public async Task WithoutALabelAndWithoutChanges_TheGroupKeepsItsDefaultName()
+    {
+        var executor = NewExecutor();
+        var document = new FakeDocumentAdapter();
+        var uiApp = new FakeUiApplicationAdapter { ActiveUiDocument = new FakeUiDocumentAdapter { Document = document } };
+
+        await executor.ExecuteAsync(document, uiApp, null, "1 + 1", CancellationToken.None);
+
+        Assert.DoesNotContain("SetName", document.LastTransactionGroup!.Calls);
+    }
+
+    [Fact]
+    public async Task ReadOnlyScript_CarriesNoMutationReport()
+    {
+        var executor = NewExecutor();
+        var document = new FakeDocumentAdapter();
+        var uiApp = new FakeUiApplicationAdapter { ActiveUiDocument = new FakeUiDocumentAdapter { Document = document } };
+
+        var outcome = await executor.ExecuteAsync(document, uiApp, null, "1 + 1", CancellationToken.None);
+
+        Assert.True(outcome.Success);
+        Assert.Null(outcome.Mutations);
+    }
+
+    [Fact]
+    public async Task ThrowingScript_CarriesNoMutationReport_EvenThoughChangesWereRaisedDuringTheRun()
+    {
+        // A change IS raised during the run (independent review: the first version raised none, so the
+        // assertion held for any executor). The script then throws; the rollback undoes the change, and
+        // a report of it would be the exact thing an agent must not act on.
+        var executor = NewExecutor();
+        var document = new FakeDocumentAdapter();
+        var uiApp = new FakeUiApplicationAdapter
+        {
+            ActiveUiDocument = new FakeUiDocumentAdapter { Document = document },
+            OnSubscribed = self => self.EmitChange(new DocumentChange(
+                "doc-fake0000000000", DocumentChangeOperation.Committed, "TransactionCommitted", Array.Empty<string>(),
+                new[] { new ChangedElement(1, "Walls") }, Array.Empty<ChangedElement>(), Array.Empty<long>(), categoriesTruncated: false)),
+        };
+
+        var outcome = await executor.ExecuteAsync(document, uiApp, null,
+            "throw new System.InvalidOperationException(\"boom\");", CancellationToken.None);
+
+        Assert.False(outcome.Success);
+        Assert.Null(outcome.Mutations);
+        Assert.Equal(0, uiApp.ChangeSubscribers);
+    }
+
+    [Fact]
+    public void BuildMutationReport_DropsDocumentsTheRunSettledWithKeepFalse()
+    {
+        // The WIRING between tracker and transaction set (review: Build's exclusion was tested, the
+        // executor passing DiscardedDocumentIds was not -- dropping the argument left every test green).
+        var transactions = new ManagedDocumentTransactions("MCP Bridge Script", new FakeUiApplicationAdapter());
+        var kept = new FakeDocumentAdapter { DocumentId = "doc-kept" };
+        var discarded = new FakeDocumentAdapter { DocumentId = "doc-discarded" };
+        transactions.Open(kept, isAmbient: true);
+        transactions.OpenAdoptedForTesting(discarded);
+
+        var tracker = new MutationTracker();
+        foreach (var id in new[] { "doc-kept", "doc-discarded" })
+        {
+            tracker.Record(new DocumentChange(id, DocumentChangeOperation.Committed, "TransactionCommitted", Array.Empty<string>(),
+                new[] { new ChangedElement(1, "Walls") }, Array.Empty<ChangedElement>(), Array.Empty<long>(), categoriesTruncated: false));
+        }
+
+        transactions.SettleCore(discarded, keep: false);
+
+        var report = TransactionScriptExecutor.BuildMutationReport(tracker, transactions);
+
+        Assert.NotNull(report);
+        Assert.Equal(1, report!.Created);
+    }
+
+    [Fact]
+    public async Task AnAdapterWithoutADocumentChangeSource_StillRuns_WithNoReport()
+    {
+        // Every pre-#146 fake and any future adapter that does not opt in: the report is a capability,
+        // not a requirement, and its absence must not change the run.
+        var executor = NewExecutor();
+        var document = new FakeDocumentAdapter();
+        var uiApp = new NoChangeSourceUiApplicationAdapter { ActiveUiDocument = new FakeUiDocumentAdapter { Document = document } };
+
+        var outcome = await executor.ExecuteAsync(document, uiApp, null, "1 + 1", CancellationToken.None);
+
+        Assert.True(outcome.Success);
+        Assert.Null(outcome.Mutations);
+    }
+
+    private sealed class NoChangeSourceUiApplicationAdapter : IUiApplicationAdapter
+    {
+        public IUiDocumentAdapter? ActiveUiDocument { get; init; }
+        public System.Collections.Generic.IReadOnlyList<OpenDocumentInfo> OpenDocuments => Array.Empty<OpenDocumentInfo>();
+        public IDocumentAdapter? FindOpenDocument(string documentId) => null;
+    }
+
     [Fact]
     public async Task ThrowingScript_RollsBackTransaction_AndGroup_NeverCommits()
     {

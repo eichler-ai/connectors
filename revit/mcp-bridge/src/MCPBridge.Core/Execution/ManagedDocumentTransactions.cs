@@ -379,6 +379,16 @@ internal sealed class ManagedDocumentTransactions
     private readonly List<SettlementRecord> _settlements = new();
 
     /// <summary>
+    /// The DocumentIds settled with keep: false this run (#146 Phase 2) -- their group was rolled back,
+    /// so whatever DocumentChanged reported for them is not in the model any more and must leave the
+    /// mutation report. Ids, not descriptions, because that is what the tracker keys on.
+    /// </summary>
+    private readonly List<string> _discardedDocumentIds = new();
+
+    /// <summary>See <see cref="_discardedDocumentIds"/>.</summary>
+    public IReadOnlyList<string> DiscardedDocumentIds => _discardedDocumentIds;
+
+    /// <summary>
     /// Failures accumulated by documents that have since been SETTLED and deregistered. Without this they
     /// vanished: <see cref="Entry.AccumulatedFailures"/> exists precisely so a document committing N times
     /// keeps all N failure sets, but <see cref="CommitAll"/> is its only reader and walks <c>_entries</c> --
@@ -652,6 +662,9 @@ internal sealed class ManagedDocumentTransactions
         {
             if (keep)
             {
+                // No derived undo label here (#146 Phase 2b): this group assimilates mid-run, before the
+                // document's net effect is known, so it keeps the name it was created with -- the agent's
+                // label when one was given, else the default. Only CommitAll derives names.
                 CloseTransaction(entry);
                 entry.Group.Assimilate();
             }
@@ -695,6 +708,10 @@ internal sealed class ManagedDocumentTransactions
         _settledFailures.AddRange(entry.AccumulatedFailures);
         _entries.Remove(entry);
         _settlements.Add(new SettlementRecord(description, keep));
+        if (!keep)
+        {
+            _discardedDocumentIds.Add(entry.Document.DocumentId);
+        }
     }
 
     /// <summary>
@@ -950,7 +967,14 @@ internal sealed class ManagedDocumentTransactions
     /// does NOT empty the set is an exception escaping it anyway -- see the clearing comment below, which
     /// is where that deliberate asymmetry lives.
     /// </summary>
-    public ManagedDocumentCommitResult CommitAll()
+    /// <param name="undoLabel">
+    /// #146 Phase 2b: asked ONCE PER DOCUMENT, with that document's DocumentId, after its transaction has
+    /// committed and before its group assimilates -- the one moment THAT DOCUMENT's net effect is fully
+    /// known and its group can still be renamed. Keyed by document (independent review): a run-wide
+    /// tally stamped on every document's entry told a scratch document's Undo menu about walls that live
+    /// in the model. Null (the function or its answer) leaves the name the group was created with.
+    /// </param>
+    public ManagedDocumentCommitResult CommitAll(Func<string, string?>? undoLabel = null)
     {
         // Three tiers now, not two (independent PR review finding) -- CreatedThisRun (safest: unsaved,
         // in-memory) first, AdoptedExisting (may be a real, saved model OpenForWriting adopted) next,
@@ -962,7 +986,7 @@ internal sealed class ManagedDocumentTransactions
             .Concat(_entries.Where(e => e.Origin == DocumentOrigin.Ambient))
             .ToList();
 
-        var result = CommitInOrder(order, _settledFailures);
+        var result = CommitInOrder(order, _settledFailures, undoLabel, _undoLabelFailures);
 
         // CLEARED HERE, AFTER the work, and DELIBERATELY NOT IN A `finally` (independent PR review
         // finding). Reaching this line means every document above was closed one way or another, so the
@@ -996,7 +1020,7 @@ internal sealed class ManagedDocumentTransactions
     /// documents committed. All three now route through SafeDescribe, which is what makes the
     /// "never throws" contract on <see cref="CommitAll"/> actually true rather than merely intended.
     /// </summary>
-    private static ManagedDocumentCommitResult CommitInOrder(List<Entry> order, List<FailureSummary> settledFailures)
+    private static ManagedDocumentCommitResult CommitInOrder(List<Entry> order, List<FailureSummary> settledFailures, Func<string, string?>? undoLabel, List<string> undoLabelFailures)
     {
         // SEEDED with what settled documents accumulated before they left the set -- they are gone from
         // `order`, so this is the only way their Failures-API results reach notices[].
@@ -1016,7 +1040,7 @@ internal sealed class ManagedDocumentTransactions
         for (; index < order.Count; index++)
         {
             var entry = order[index];
-            var attempt = AttemptCommit(entry, failures);
+            var attempt = AttemptCommit(entry, failures, undoLabel, undoLabelFailures);
             if (attempt.Succeeded)
             {
                 committed.Add(SafeDescribe(entry));
@@ -1096,7 +1120,7 @@ internal sealed class ManagedDocumentTransactions
     /// including the <c>CommitFailures</c> reads, which are ordinary property getters on an adapter and so
     /// can fail exactly like any other call into Revit.
     /// </summary>
-    private static CommitAttempt AttemptCommit(Entry entry, List<FailureSummary> failures)
+    private static CommitAttempt AttemptCommit(Entry entry, List<FailureSummary> failures, Func<string, string?>? undoLabel, List<string> undoLabelFailures)
     {
         // Everything this document's own commits already raised, whether or not a transaction is still
         // open (issue #132) -- accumulated per commit rather than read once at the end, because
@@ -1111,6 +1135,7 @@ internal sealed class ManagedDocumentTransactions
             // step a committed transaction reaches below.
             try
             {
+                SafeSetUndoLabel(entry, undoLabel, undoLabelFailures);
                 entry.Group.Assimilate();
             }
             catch (Exception ex)
@@ -1148,6 +1173,7 @@ internal sealed class ManagedDocumentTransactions
 
         try
         {
+            SafeSetUndoLabel(entry, undoLabel, undoLabelFailures);
             entry.Group.Assimilate();
         }
         catch (Exception ex)
@@ -1160,6 +1186,40 @@ internal sealed class ManagedDocumentTransactions
 
         return CommitAttempt.Committed();
     }
+
+    /// <summary>
+    /// Renames the group for the Undo history, best-effort (#146 Phase 2b). A name is cosmetic; a failure
+    /// to set one must never fail a commit whose writes are already permanent, so both the label function
+    /// and the adapter call are guarded and the group keeps the name it was created with. NOT SILENT,
+    /// though (independent review, PRD §01): the rename exists only as a human-visible signal, so a
+    /// failure to apply it is recorded in <paramref name="undoLabelFailures"/> and reaches notices[] --
+    /// otherwise a Revit version that rejects SetName at this point would be undetectable forever.
+    /// </summary>
+    private static void SafeSetUndoLabel(Entry entry, Func<string, string?>? undoLabel, List<string> undoLabelFailures)
+    {
+        if (undoLabel is null)
+        {
+            return;
+        }
+
+        try
+        {
+            var name = undoLabel(entry.Document.DocumentId);
+            if (!string.IsNullOrEmpty(name))
+            {
+                entry.Group.SetName(name);
+            }
+        }
+        catch (Exception ex)
+        {
+            undoLabelFailures.Add($"{SafeDescribe(entry)}: {ex.Message}");
+        }
+    }
+
+    private readonly List<string> _undoLabelFailures = new();
+
+    /// <summary>Each document whose Undo-entry rename failed, with Revit's reason (#146 Phase 2b) -- surfaced as a notice by the executor.</summary>
+    public IReadOnlyList<string> UndoLabelFailures => _undoLabelFailures;
 
     /// <summary>
     /// Appends this document's Failures-API summaries (PRD §07), never throwing. A getter that fails is

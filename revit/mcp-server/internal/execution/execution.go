@@ -90,7 +90,31 @@ type Result struct {
 	ReturnValue string        `json:"return_value,omitempty"`
 	Notices     []diag.Record `json:"notices,omitempty"`
 	Files       []FileRecord  `json:"files,omitempty"`
-	ErrorDetail *diag.Record  `json:"error,omitempty"`
+	// Mutations is the add-in's net report of what a SUCCESSFUL run changed
+	// (#146 Phase 2). A pointer so "the add-in sent none" (a read-only run,
+	// an older add-in) stays distinguishable from an all-zero report and is
+	// omitted on the tool result rather than zeroed.
+	Mutations   *MutationReport `json:"mutations,omitempty"`
+	ErrorDetail *diag.Record    `json:"error,omitempty"`
+}
+
+// MutationReport mirrors the add-in's MutationReport (#146 Phase 2): net
+// created/modified/deleted counts across the run's committed transactions,
+// with per-category created/modified tallies. Truncated means category
+// resolution hit the add-in's cap, so by_category undercounts while the
+// totals stay exact. Keep in step with MCPBridge.Core.Execution.MutationReport.
+type MutationReport struct {
+	Created    int                      `json:"created"`
+	Modified   int                      `json:"modified"`
+	Deleted    int                      `json:"deleted"`
+	ByCategory map[string]CategoryTally `json:"by_category"`
+	Truncated  bool                     `json:"truncated"`
+}
+
+// CategoryTally is one by_category entry of a MutationReport.
+type CategoryTally struct {
+	Created  int `json:"created"`
+	Modified int `json:"modified"`
 }
 
 // FileRecord mirrors the add-in's per-published-file report (PRD §09):
@@ -339,6 +363,11 @@ type ScriptOptions struct {
 	// the ambient transaction's rollback boundary (PRD §14). Without it the
 	// add-in refuses such a script before running it.
 	ConfirmLifecycleActions bool
+
+	// Label, when non-empty, names this run's entry in Revit's Undo history
+	// (#146 Phase 2b) -- the add-in prefixes it "MCP: ". Sent only when set,
+	// so an older add-in sees the params it always did.
+	Label string
 }
 
 // ExecuteScript forwards a script to instanceID's add-in connection. See
@@ -389,6 +418,9 @@ func (m *Manager) ExecuteScript(ctx context.Context, instanceID, documentID, scr
 		// complete statement of what this request asked for rather than
 		// something a reader has to reconstruct from absence.
 		"confirm_lifecycle_actions": opts.ConfirmLifecycleActions,
+	}
+	if opts.Label != "" {
+		params["label"] = opts.Label
 	}
 	res, drec := m.callWire(ctx, conn, "execute_script", executionID, timeoutMs, params)
 	if drec != nil {

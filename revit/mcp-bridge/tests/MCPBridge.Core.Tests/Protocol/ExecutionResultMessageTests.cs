@@ -27,6 +27,27 @@ public class ExecutionResultMessageTests
     }
 
     [Fact]
+    public void FromRecord_Completed_CarriesMutationsInSnakeCase_AndOmitsThemWhenAbsent()
+    {
+        // #146 Phase 2. The Go side's execution.Result reads exactly these names; keep the two in step.
+        var record = ExecutionRecord.CreatePending("exec-1", "1+1", 600_000, Now);
+        record.MarkRunning(Now);
+        record.MarkCompleted(Now, "ok", null, Array.Empty<DiagnosticRecord>(), mutations: new MutationReport(
+            created: 2, modified: 1, deleted: 0,
+            byCategory: new Dictionary<string, CategoryTally> { ["Walls"] = new CategoryTally(2, 0), ["Levels"] = new CategoryTally(0, 1) },
+            truncated: false));
+
+        var json = ExecutionResultMessage.FromRecord(Id, record);
+
+        Assert.Contains("\"mutations\":{\"created\":2,\"modified\":1,\"deleted\":0,\"by_category\":{\"Walls\":{\"created\":2,\"modified\":0},\"Levels\":{\"created\":0,\"modified\":1}},\"truncated\":false}", json);
+
+        var readOnly = ExecutionRecord.CreatePending("exec-2", "1+1", 600_000, Now);
+        readOnly.MarkRunning(Now);
+        readOnly.MarkCompleted(Now, "ok", null, Array.Empty<DiagnosticRecord>());
+        Assert.DoesNotContain("mutations", ExecutionResultMessage.FromRecord(Id, readOnly));
+    }
+
+    [Fact]
     public void FromRecord_Running_HasRunningStatus()
     {
         var record = ExecutionRecord.CreatePending("exec-1", "1+1", 600_000, Now);

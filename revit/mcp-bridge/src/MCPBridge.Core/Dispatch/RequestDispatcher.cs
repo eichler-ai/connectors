@@ -196,6 +196,7 @@ public sealed class RequestDispatcher
         long timeoutMs;
         bool overwriteOutputFiles;
         bool confirmLifecycleActions;
+        string? label;
         try
         {
             executionId = request.GetRequiredString("execution_id");
@@ -215,6 +216,11 @@ public sealed class RequestDispatcher
             // cache. Defaults to false -- an agent that never heard of the flag cannot trip these members
             // by accident, which is the entire point of gating them.
             confirmLifecycleActions = request.GetOptionalBool("confirm_lifecycle_actions", false);
+
+            // #146 Phase 2b: optional, agent-supplied name for this run's Undo entry. Read per request
+            // like the flags above -- it is about THIS run, not the script text -- and after the required
+            // params, so a request missing one is told about that first.
+            label = request.GetOptionalString("label");
 
             // document_id now ROUTES (v1 integrated review; this closed the long-standing
             // accepted-but-ignored gap CONVENTIONS.md's advertised-but-unimplemented clause was written
@@ -295,7 +301,7 @@ public sealed class RequestDispatcher
             }
         }
 
-        var workTask = RunScriptWorkItemAsync(executionId, script, documentId, overwriteOutputFiles, confirmLifecycleActions);
+        var workTask = RunScriptWorkItemAsync(executionId, script, documentId, overwriteOutputFiles, confirmLifecycleActions, label);
 
         // PRD §06: a script finishing inside timeout_ms returns the completed result inline; one that
         // doesn't returns the current {status, execution_id} instead of hanging the call. The timeout
@@ -564,11 +570,11 @@ public sealed class RequestDispatcher
             remedy: new[] { "None -- the dialog was informational and has been dismissed automatically." });
     }
 
-    private Task RunScriptWorkItemAsync(string executionId, string scriptText, string requestedDocumentId, bool overwriteOutputFiles, bool confirmLifecycleActions)
+    private Task RunScriptWorkItemAsync(string executionId, string scriptText, string requestedDocumentId, bool overwriteOutputFiles, bool confirmLifecycleActions, string? label)
     {
         var runTask = _bridge.RunAsync(
             executionId,
-            uiApplication => RunScriptWorkItem(executionId, scriptText, requestedDocumentId, overwriteOutputFiles, confirmLifecycleActions, uiApplication));
+            uiApplication => RunScriptWorkItem(executionId, scriptText, requestedDocumentId, overwriteOutputFiles, confirmLifecycleActions, label, uiApplication));
 
         // Hard requirement 2: ANY fault on this Task -- including ExternalEventRaiseDeniedException, which
         // RunScriptWorkItem below never gets a chance to observe or react to since it never even ran --
@@ -601,6 +607,7 @@ public sealed class RequestDispatcher
         string requestedDocumentId,
         bool overwriteOutputFiles,
         bool confirmLifecycleActions,
+        string? label,
         IUiApplicationAdapter uiApplication)
     {
         // Hard requirement 1: check cancellation before touching the model at all -- a still-Pending
@@ -712,7 +719,8 @@ public sealed class RequestDispatcher
                 exportsDirectoryPath: workspacePaths.Exports,
                 importsDirectoryPath: workspacePaths.Imports,
                 overwriteOutputFiles: overwriteOutputFiles,
-                confirmLifecycleActions: confirmLifecycleActions)
+                confirmLifecycleActions: confirmLifecycleActions,
+                label: label)
             .GetAwaiter().GetResult();
 
         if (outcome.WasCancelled)
@@ -721,7 +729,7 @@ public sealed class RequestDispatcher
         }
         else if (outcome.Success)
         {
-            _executionManager.CompleteSuccess(executionId, _now(), SafeFormatReturnValue(outcome.ReturnValue), outcome.StdOut, outcome.Notices, outcome.Files);
+            _executionManager.CompleteSuccess(executionId, _now(), SafeFormatReturnValue(outcome.ReturnValue), outcome.StdOut, outcome.Notices, outcome.Files, outcome.Mutations);
         }
         else
         {

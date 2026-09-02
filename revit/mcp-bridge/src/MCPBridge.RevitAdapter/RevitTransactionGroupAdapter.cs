@@ -40,4 +40,6 @@ internal sealed class RevitTransactionGroupAdapter : ITransactionGroupAdapter
     public void Assimilate() => _group.Assimilate();
 
     public void RollBack() => _group.RollBack();
+
+    public void SetName(string name) => _group.SetName(name);
 }

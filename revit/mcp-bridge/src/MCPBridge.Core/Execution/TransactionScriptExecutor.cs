@@ -44,7 +44,7 @@ namespace MCPBridge.Core.Execution;
 /// </summary>
 internal sealed class TransactionScriptExecutor
 {
-    private const string TransactionName = "MCP Bridge Script";
+    private const string TransactionName = UndoLabel.Default;
 
     private readonly RoslynScriptRunner _runner;
 
@@ -78,19 +78,32 @@ internal sealed class TransactionScriptExecutor
         string? exportsDirectoryPath = null,
         string? importsDirectoryPath = null,
         bool overwriteOutputFiles = false,
-        bool confirmLifecycleActions = false)
+        bool confirmLifecycleActions = false,
+        string? label = null)
     {
+        // #146 Phase 2b: an agent-supplied label names every transaction and group of this run from the
+        // start, so it is what the Undo history shows even if the run has no mutation report to derive
+        // one from. Without a label the derived name is applied at commit time (see CommitAll's
+        // undoLabel), when the net effect is known.
+        var agentLabel = UndoLabel.FromAgentLabel(label);
         // Issue #24: N documents, not one. The ambient (active) document is opened here, before the
         // script runs, exactly as before; any document the script goes on to create through
         // ScriptGlobals.CreateProjectDocument/CreateFamilyDocument is opened lazily into this same set
         // as it is created. Commit/rollback/notices then all loop over every document.
-        var transactions = new ManagedDocumentTransactions(TransactionName, uiApplication);
+        var transactions = new ManagedDocumentTransactions(agentLabel ?? TransactionName, uiApplication);
         transactions.Open(document, isAmbient: true);
 
         var globals = new ScriptGlobals(
             document, uiApplication, uiDocument, cancellationToken,
             exportsDirectoryPath, importsDirectoryPath, overwriteOutputFiles, transactions);
         ActiveDialogContext.SetActive(globals.DialogResultOverrides);
+
+        // #146 Phase 2: listen for DocumentChanged for exactly this run. A capability, so a fake without
+        // it simply yields no report. Subscribed BEFORE the script runs and disposed in the finally, so
+        // the commits CommitAll performs after the script finishes are still observed, and nothing keeps
+        // listening once the run is over.
+        var mutations = new MutationTracker();
+        var changeSubscription = (uiApplication as IDocumentChangeSource)?.Subscribe(mutations.Record);
 
         try
         {
@@ -140,7 +153,10 @@ internal sealed class TransactionScriptExecutor
             // _settlements at all -- so the ordering is not load-bearing, and the claim would have sent a
             // future reader chasing a hazard that does not exist.
             var settlements = transactions.Settlements;
-            var commit = transactions.CommitAll();
+            var commit = transactions.CommitAll(
+                undoLabel: agentLabel is not null
+                    ? null
+                    : documentId => UndoLabel.FromReport(mutations.BuildForDocument(documentId)));
             var notices = CombinedNotices(commit.CommitFailures);
             notices.AddRange(settlements.Select(SettleNotice));
             // #122: report created documents on the success path too -- they remain open and unsaved, and a
@@ -161,10 +177,30 @@ internal sealed class TransactionScriptExecutor
                 return ScriptExecutionOutcome.Failed(commit.Failure!, outcome.StdOut, notices, globals.PublishedFiles);
             }
 
-            return ScriptExecutionOutcome.Completed(outcome.ReturnValue, outcome.StdOut, notices, globals.PublishedFiles);
+            // Documents settled with keep: false had their group rolled back mid-run. Whether Revit raises a
+            // DocumentChanged for that rollback is not something this code should have to know (the live
+            // harness records it); the tracker drops them by name either way. Named by DESCRIPTION rather
+            // than id in SettlementRecord, so match on the ids the transaction set tracked for them.
+            // #146 Phase 2b: a rename that Revit refused is reported, not hidden -- the label is the human's
+            // signal, and the only way to learn the premise (SetName legal here, group name shown) has
+            // broken is to say so.
+            foreach (var failure in transactions.UndoLabelFailures)
+            {
+                notices.Add(DiagnosticRecord.Create(
+                    DiagnosticSeverity.Info,
+                    "undo-label-not-applied",
+                    DiagnosticSource.Execution,
+                    $"The run's Undo entry could not be renamed for {failure}; it keeps its default name. The writes themselves are unaffected.",
+                    detail: null,
+                    remedy: null));
+            }
+
+            var report = BuildMutationReport(mutations, transactions);
+            return ScriptExecutionOutcome.Completed(outcome.ReturnValue, outcome.StdOut, notices, globals.PublishedFiles, report);
         }
         finally
         {
+            changeSubscription?.Dispose();
             // Safety net, not the normal path: every branch above has already committed or rolled back,
             // and ManagedDocumentTransactions drops its entries when it does, so this is a no-op then.
             // It matters when the runner throws instead of returning a failed outcome -- without it,
@@ -174,6 +210,14 @@ internal sealed class TransactionScriptExecutor
             ActiveDialogContext.ClearActive();
         }
     }
+
+    /// <summary>
+    /// The one place the tracker and the transaction set meet (#146 Phase 2): documents this run settled
+    /// with keep: false leave the report. Split out so the WIRING is tier-1 testable -- a tracker test
+    /// covers Build's argument, this covers that the executor passes the right one.
+    /// </summary>
+    internal static MutationReport? BuildMutationReport(MutationTracker mutations, ManagedDocumentTransactions transactions) =>
+        mutations.Build(transactions.DiscardedDocumentIds);
 
     private static List<DiagnosticRecord> CombinedNotices(IReadOnlyList<FailureSummary> commitFailures)
     {

@@ -152,8 +152,8 @@ public sealed class ExecutionManager
     /// object retained for the ring buffer's window pins collectible script ALCs and Revit wrappers).
     /// The parameter type is string, not object, precisely so that can't regress silently.
     /// </summary>
-    public DiagnosticRecord? CompleteSuccess(string executionId, DateTimeOffset now, string? result, string? stdOut, IReadOnlyList<DiagnosticRecord> notices, IReadOnlyList<PublishedFileRecord>? files = null) =>
-        Transition(executionId, "complete-success", record => record.MarkCompleted(now, result, stdOut, notices, files), clearActive: true);
+    public DiagnosticRecord? CompleteSuccess(string executionId, DateTimeOffset now, string? result, string? stdOut, IReadOnlyList<DiagnosticRecord> notices, IReadOnlyList<PublishedFileRecord>? files = null, MutationReport? mutations = null) =>
+        Transition(executionId, "complete-success", record => record.MarkCompleted(now, result, stdOut, notices, files, mutations), clearActive: true);
 
     /// <summary>See <see cref="Transition"/> for why this never throws on a terminal race.</summary>
     public DiagnosticRecord? CompleteError(string executionId, DateTimeOffset now, DiagnosticRecord error, string? stdOut, IReadOnlyList<DiagnosticRecord>? notices = null, IReadOnlyList<PublishedFileRecord>? files = null) =>
