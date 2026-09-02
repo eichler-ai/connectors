@@ -195,8 +195,12 @@ public sealed class RequestDispatcher
         long timeoutMs;
         bool overwriteOutputFiles;
         bool confirmLifecycleActions;
+        string? label;
         try
         {
+            // #146 Phase 2b: optional, agent-supplied name for this run's Undo entry. Read per request
+            // like the flags below -- it is about THIS run, not the script text.
+            label = request.GetOptionalString("label");
             executionId = request.GetRequiredString("execution_id");
             script = request.GetRequiredString("script");
             documentId = request.GetOptionalString("document_id") ?? "";
@@ -294,7 +298,7 @@ public sealed class RequestDispatcher
             }
         }
 
-        var workTask = RunScriptWorkItemAsync(executionId, script, documentId, overwriteOutputFiles, confirmLifecycleActions);
+        var workTask = RunScriptWorkItemAsync(executionId, script, documentId, overwriteOutputFiles, confirmLifecycleActions, label);
 
         // PRD §06: a script finishing inside timeout_ms returns the completed result inline; one that
         // doesn't returns the current {status, execution_id} instead of hanging the call. The timeout
@@ -563,11 +567,11 @@ public sealed class RequestDispatcher
             remedy: new[] { "None -- the dialog was informational and has been dismissed automatically." });
     }
 
-    private Task RunScriptWorkItemAsync(string executionId, string scriptText, string requestedDocumentId, bool overwriteOutputFiles, bool confirmLifecycleActions)
+    private Task RunScriptWorkItemAsync(string executionId, string scriptText, string requestedDocumentId, bool overwriteOutputFiles, bool confirmLifecycleActions, string? label)
     {
         var runTask = _bridge.RunAsync(
             executionId,
-            uiApplication => RunScriptWorkItem(executionId, scriptText, requestedDocumentId, overwriteOutputFiles, confirmLifecycleActions, uiApplication));
+            uiApplication => RunScriptWorkItem(executionId, scriptText, requestedDocumentId, overwriteOutputFiles, confirmLifecycleActions, label, uiApplication));
 
         // Hard requirement 2: ANY fault on this Task -- including ExternalEventRaiseDeniedException, which
         // RunScriptWorkItem below never gets a chance to observe or react to since it never even ran --
@@ -600,6 +604,7 @@ public sealed class RequestDispatcher
         string requestedDocumentId,
         bool overwriteOutputFiles,
         bool confirmLifecycleActions,
+        string? label,
         IUiApplicationAdapter uiApplication)
     {
         // Hard requirement 1: check cancellation before touching the model at all -- a still-Pending
@@ -711,7 +716,8 @@ public sealed class RequestDispatcher
                 exportsDirectoryPath: workspacePaths.Exports,
                 importsDirectoryPath: workspacePaths.Imports,
                 overwriteOutputFiles: overwriteOutputFiles,
-                confirmLifecycleActions: confirmLifecycleActions)
+                confirmLifecycleActions: confirmLifecycleActions,
+                label: label)
             .GetAwaiter().GetResult();
 
         if (outcome.WasCancelled)

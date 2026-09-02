@@ -19,6 +19,14 @@ internal sealed class FakeTransactionGroupAdapter : ITransactionGroupAdapter
 
     public void RollBack() => Calls.Add("RollBack");
 
+    public string? LastName { get; private set; }
+
+    public void SetName(string name)
+    {
+        Calls.Add("SetName");
+        LastName = name;
+    }
+
     /// <summary>See FakeTransactionAdapter.ThrowOnDispose.</summary>
     public bool ThrowOnDispose { get; set; }
 

@@ -82,7 +82,8 @@ one. `return` a value and it comes back as `return_value` — strings verbatim, 
 anonymous types as JSON, anything else as a self-explaining `<...>` marker. `output` is stdout,
 Revit's own writes too. A successful run that changed anything also carries **`mutations`** (net
 `created`/`modified`/`deleted` across every document it touched, plus `by_category`), so skip the
-read-after-write check.
+read-after-write check. A short **`label`** ("create L1 walls") names the run's entry in Revit's Undo
+history, the person's backstop if you got it wrong; omitted, one is derived from what changed.
 
 ```csharp
 return Document.Title;
@@ -117,12 +118,11 @@ var doc = Connector.CreateProjectDocument();     // blank, writable, from Revit'
 Autodesk.Revit.DB.Level.Create(doc, 10.0);       // just write to it — no transaction of your own
 ```
 
-**What you get is headless**: in memory, no window, no open view, never the active document — writable
-by *script*, not visible to the person, who sees nothing appear. Making it visible takes **two calls**:
+**What you get is headless**: in memory, no window, never the active document — writable by *script*,
+invisible to the person. Making it visible takes **two calls**:
 `UIApplication.OpenAndActivateDocument` needs a path, so `Connector.Settle(doc, true)` then `SaveAs` in
-the creating run, then activate from a second call routed at any document **other than the currently
-active one** — activation is refused only while the *active* document is modifiable, and your call's own
-target always is.
+the creating run, then activate from a second call routed at any document **other than the active one**
+(activation is refused while the *active* document is modifiable, and your call's target always is).
 
 **The raw `UIApplication.Application.NewProjectDocument`/`NewFamilyDocument` still work but return a
 document nothing has opened for writing** — writing to it throws

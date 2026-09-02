@@ -964,7 +964,12 @@ internal sealed class ManagedDocumentTransactions
     /// does NOT empty the set is an exception escaping it anyway -- see the clearing comment below, which
     /// is where that deliberate asymmetry lives.
     /// </summary>
-    public ManagedDocumentCommitResult CommitAll()
+    /// <param name="undoLabel">
+    /// #146 Phase 2b: asked ONCE PER DOCUMENT, after that document's transaction has committed and before
+    /// its group assimilates -- the one moment the run's net effect is known and the group can still be
+    /// renamed. Null (the function or its answer) leaves the name the group was created with.
+    /// </param>
+    public ManagedDocumentCommitResult CommitAll(Func<string?>? undoLabel = null)
     {
         // Three tiers now, not two (independent PR review finding) -- CreatedThisRun (safest: unsaved,
         // in-memory) first, AdoptedExisting (may be a real, saved model OpenForWriting adopted) next,
@@ -976,7 +981,7 @@ internal sealed class ManagedDocumentTransactions
             .Concat(_entries.Where(e => e.Origin == DocumentOrigin.Ambient))
             .ToList();
 
-        var result = CommitInOrder(order, _settledFailures);
+        var result = CommitInOrder(order, _settledFailures, undoLabel);
 
         // CLEARED HERE, AFTER the work, and DELIBERATELY NOT IN A `finally` (independent PR review
         // finding). Reaching this line means every document above was closed one way or another, so the
@@ -1010,7 +1015,7 @@ internal sealed class ManagedDocumentTransactions
     /// documents committed. All three now route through SafeDescribe, which is what makes the
     /// "never throws" contract on <see cref="CommitAll"/> actually true rather than merely intended.
     /// </summary>
-    private static ManagedDocumentCommitResult CommitInOrder(List<Entry> order, List<FailureSummary> settledFailures)
+    private static ManagedDocumentCommitResult CommitInOrder(List<Entry> order, List<FailureSummary> settledFailures, Func<string?>? undoLabel)
     {
         // SEEDED with what settled documents accumulated before they left the set -- they are gone from
         // `order`, so this is the only way their Failures-API results reach notices[].
@@ -1030,7 +1035,7 @@ internal sealed class ManagedDocumentTransactions
         for (; index < order.Count; index++)
         {
             var entry = order[index];
-            var attempt = AttemptCommit(entry, failures);
+            var attempt = AttemptCommit(entry, failures, undoLabel);
             if (attempt.Succeeded)
             {
                 committed.Add(SafeDescribe(entry));
@@ -1110,7 +1115,7 @@ internal sealed class ManagedDocumentTransactions
     /// including the <c>CommitFailures</c> reads, which are ordinary property getters on an adapter and so
     /// can fail exactly like any other call into Revit.
     /// </summary>
-    private static CommitAttempt AttemptCommit(Entry entry, List<FailureSummary> failures)
+    private static CommitAttempt AttemptCommit(Entry entry, List<FailureSummary> failures, Func<string?>? undoLabel)
     {
         // Everything this document's own commits already raised, whether or not a transaction is still
         // open (issue #132) -- accumulated per commit rather than read once at the end, because
@@ -1125,6 +1130,7 @@ internal sealed class ManagedDocumentTransactions
             // step a committed transaction reaches below.
             try
             {
+                SafeSetUndoLabel(entry, undoLabel);
                 entry.Group.Assimilate();
             }
             catch (Exception ex)
@@ -1162,6 +1168,7 @@ internal sealed class ManagedDocumentTransactions
 
         try
         {
+            SafeSetUndoLabel(entry, undoLabel);
             entry.Group.Assimilate();
         }
         catch (Exception ex)
@@ -1173,6 +1180,32 @@ internal sealed class ManagedDocumentTransactions
         }
 
         return CommitAttempt.Committed();
+    }
+
+    /// <summary>
+    /// Renames the group for the Undo history, best-effort (#146 Phase 2b). A name is cosmetic; a failure
+    /// to set one must never fail a commit whose writes are already permanent, so both the label function
+    /// and the adapter call are guarded and the group keeps the name it was created with.
+    /// </summary>
+    private static void SafeSetUndoLabel(Entry entry, Func<string?>? undoLabel)
+    {
+        if (undoLabel is null)
+        {
+            return;
+        }
+
+        try
+        {
+            var name = undoLabel();
+            if (!string.IsNullOrEmpty(name))
+            {
+                entry.Group.SetName(name);
+            }
+        }
+        catch
+        {
+            // Cosmetic by contract -- see the doc comment.
+        }
     }
 
     /// <summary>

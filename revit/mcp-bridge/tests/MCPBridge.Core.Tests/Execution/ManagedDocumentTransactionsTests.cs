@@ -125,6 +125,8 @@ public class ManagedDocumentTransactionsTests
 
             public void Start() => _owner.Record("group.Start");
 
+            public void SetName(string name) => _owner.Record("group.SetName:" + name);
+
             public void Assimilate()
             {
                 _owner.Record("group.Assimilate");
@@ -906,6 +908,8 @@ public class ManagedDocumentTransactionsTests
 
             public void Start() => _owner.Record("group.Start");
 
+            public void SetName(string name) => _owner.Record("group.SetName:" + name);
+
             public void Assimilate() => _owner.Record("group.Assimilate");
 
             public void Dispose() => _owner.Record("group.Dispose");
@@ -993,6 +997,8 @@ public class ManagedDocumentTransactionsTests
             public void Dispose() => _owner.Record("group.Dispose");
 
             public void Start() => _owner.Record("group.Start");
+
+            public void SetName(string name) => _owner.Record("group.SetName:" + name);
 
             public void Assimilate() => _owner.Record("group.Assimilate");
 
@@ -1653,6 +1659,71 @@ public class ManagedDocumentTransactionsTests
         // and both re-acquisition points now route through this one rule.
         Assert.Equal(ManagedDocumentTransactions.DocumentOrigin.Ambient, set.OriginForTesting(ambient.DocumentId));
         Assert.Equal(ManagedDocumentTransactions.DocumentOrigin.AdoptedExisting, set.OriginForTesting("tmp-never-seen"));
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // #146 Phase 2b: the undo label is applied per document, after commit, before assimilate
+    // ------------------------------------------------------------------------------------------
+
+    [Fact]
+    public void CommitAll_SetsTheUndoLabel_AfterCommitAndBeforeAssimilate_OnEveryDocument()
+    {
+        // The ORDER is the point: the label is derived from the run's net effect, which is only known
+        // once the document's transaction has committed (that raises the last DocumentChanged), and the
+        // group can only be renamed before it assimilates.
+        var journal = new List<string>();
+        var set = NewSet();
+        var created = new JournalingDocumentAdapter("created", journal);
+        var ambient = new JournalingDocumentAdapter("ambient", journal);
+        set.Open(ambient, isAmbient: true);
+        set.Open(created);
+        journal.Clear();
+
+        var asked = 0;
+        var result = set.CommitAll(undoLabel: () => { asked++; return "MCP: 2 Walls created"; });
+
+        Assert.True(result.Success);
+        Assert.Equal(2, asked);
+        Assert.Equal(
+            new[]
+            {
+                "created:tx.Commit", "created:group.SetName:MCP: 2 Walls created", "created:group.Assimilate", "created:tx.Dispose", "created:group.Dispose",
+                "ambient:tx.Commit", "ambient:group.SetName:MCP: 2 Walls created", "ambient:group.Assimilate", "ambient:tx.Dispose", "ambient:group.Dispose",
+            },
+            journal);
+    }
+
+    [Fact]
+    public void CommitAll_LeavesTheGroupsNameAlone_WhenNoLabelFunctionOrANullLabelIsGiven()
+    {
+        var journal = new List<string>();
+        var set = NewSet();
+        var ambient = new JournalingDocumentAdapter("ambient", journal);
+        set.Open(ambient, isAmbient: true);
+
+        set.CommitAll();
+        Assert.DoesNotContain(journal, j => j.Contains("group.SetName"));
+
+        var again = NewSet();
+        var other = new JournalingDocumentAdapter("other", journal);
+        again.Open(other, isAmbient: true);
+        again.CommitAll(undoLabel: () => null);
+        Assert.DoesNotContain(journal, j => j.Contains("group.SetName"));
+    }
+
+    [Fact]
+    public void CommitAll_AThrowingLabelFunction_NeverFailsTheCommit()
+    {
+        // The name is cosmetic; the writes it would label are already permanent by the time it is asked.
+        var journal = new List<string>();
+        var set = NewSet();
+        var ambient = new JournalingDocumentAdapter("ambient", journal);
+        set.Open(ambient, isAmbient: true);
+
+        var result = set.CommitAll(undoLabel: () => throw new InvalidOperationException("label blew up"));
+
+        Assert.True(result.Success);
+        Assert.Contains("ambient:group.Assimilate", journal);
     }
 
     // ------------------------------------------------------------------------------------------

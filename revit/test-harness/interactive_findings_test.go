@@ -1386,3 +1386,47 @@ return "discarded";
 		}
 	})
 }
+
+// TestUndoLabelIsAcceptedByRevit is the live half of #146 Phase 2b. Revit's
+// Undo history is not API-inspectable, so what a person SEES ("MCP: create
+// L1 walls" instead of "MCP Bridge Script") is a visual check, recorded on
+// the epic. What CAN be pinned live is that both label paths run to
+// completion against real Revit: an agent label names the transaction and
+// group from creation (Revit must accept the sanitised string as a
+// transaction name), and the derived path calls TransactionGroup.SetName
+// between the ambient commit and Assimilate -- a call whose legality at that
+// moment only Revit can confirm. SetName failures are swallowed by design,
+// so this test also asserts the write itself landed, which a rejected
+// rename could not have undone but a thrown-and-unswallowed one would.
+func TestUndoLabelIsAcceptedByRevit(t *testing.T) {
+	c, instanceID, documentID := targetDocument(t)
+	fixtureTitle := createBlankFixtureDocument(t, c, instanceID, documentID)
+
+	t.Run("AgentLabel", func(t *testing.T) {
+		out := decodeToolResult[executeScriptOut](t, callExecuteScriptWith(t, c, instanceID, documentID,
+			fixtureWritePreamble(fixtureTitle)+`
+Autodesk.Revit.DB.Level.Create(doc, 90.1);
+return "labelled";
+`, map[string]any{"label": "harness: label\nwith newline and a very long tail " + strings.Repeat("x", 200)}))
+		if out.Status != "success" {
+			t.Fatalf("a labelled run must succeed -- if Revit rejected the sanitised name as a transaction name, this is where it shows; got %q (%s)", out.Status, out.diag())
+		}
+		if out.Mutations == nil || out.Mutations.Created != 1 {
+			t.Errorf("the labelled run's write must land like any other: %+v", out.Mutations)
+		}
+	})
+
+	t.Run("DerivedLabel", func(t *testing.T) {
+		out := runScript(t, c, instanceID, documentID, fixtureWritePreamble(fixtureTitle)+`
+Autodesk.Revit.DB.Level.Create(doc, 91.1);
+Autodesk.Revit.DB.Level.Create(doc, 92.1);
+return "derived";
+`)
+		if out.Status != "success" {
+			t.Fatalf("expected status=success, got %q (%s)", out.Status, out.diag())
+		}
+		if out.Mutations == nil || out.Mutations.Created != 2 {
+			t.Errorf("want created:2 so the derived label would read 'MCP: 2 Levels created': %+v", out.Mutations)
+		}
+	})
+}

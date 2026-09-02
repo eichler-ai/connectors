@@ -39,6 +39,7 @@ Design rationale for all of it: [`PRD.md`](PRD.md) §06 (execution), §07 (dialo
 | `instance_id` | required | target Revit instance, from `list_instances` |
 | `document_id` | required | **see routing caveat below** |
 | `script` | required | C# script body; `return` a value to get it back as `return_value` |
+| `label` | optional | Short name for what the script does, shown as this run's entry in Revit's Undo history as `MCP: <label>`. Omitted, the connector derives one from what changed (`MCP: 12 Walls created`), falling back to `MCP Bridge Script`. |
 | `timeout_ms` | 30000 | how long the call waits before returning a non-terminal `pending`/`running` status with an `execution_id` to poll |
 | `max_duration_ms` | 600000 | hard runtime ceiling; on lapse the broker auto-issues cancellation |
 | `overwrite_output_files` | `false` | whether `Connector.Publish` may replace an existing file in `exports/` (per-file failure otherwise) |
