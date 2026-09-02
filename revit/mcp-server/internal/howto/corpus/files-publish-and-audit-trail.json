@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "id": "files-publish-and-audit-trail",
+  "rev": 1,
+  "kind": "howto",
+  "title": "Publish an output file to the user with Connector.Publish and find the run's script and log in the audit trail",
+  "task": "Get a file the script wrote (a report, an export) into the user's hands: write it, call Connector.Publish(path, name), read the per-file status in the response's files[]; an existing name fails that file unless execute_script overwrite_output_files is true. Every run also leaves its script under scripts/ and an NDJSON log under logs/ beside Connector.ExportsDirectory.",
+  "members": [
+    "Eichler.Connectors.Revit.Connector.Publish",
+    "Eichler.Connectors.Revit.Connector.ExportsDirectory",
+    "Eichler.Connectors.Revit.Connector.ImportsDirectory",
+    "System.IO.File.WriteAllText",
+    "System.IO.Path.GetTempPath",
+    "System.IO.Directory.GetFiles"
+  ],
+  "script_language": "csharp-script",
+  "script": "var doc = Document;\n// Goal: hand the user a report file and know where the run itself was recorded.\n// Files exchange lives in a per-document workspace on the machine running Revit\n// (skill.md \"Exchanging files\"): Connector.ExportsDirectory (published outputs),\n// Connector.ImportsDirectory (files the user gave you), and beside them scripts/\n// and logs/ -- the audit trail of every run.\n\n// 1. Write the file anywhere writable (temp is fine), with a name that says what it is.\nvar name = \"howto-files-report.txt\";\nvar src = System.IO.Path.Combine(System.IO.Path.GetTempPath(), name);\nint levels = new Autodesk.Revit.DB.FilteredElementCollector(doc)\n    .OfClass(typeof(Autodesk.Revit.DB.Level)).GetElementCount();\nSystem.IO.File.WriteAllText(src, \"document: \" + doc.Title + \"\\nlevels: \" + levels + \"\\n\");\n\n// 2. Publish it. The connector copies it into ExportsDirectory and reports one\n//    entry in the response's files[]: {name, path, status: published|failed, message}.\n//    A name that already exists there FAILS THAT FILE (status failed, message naming\n//    overwrite_output_files) without failing the run; pass execute_script\n//    { \"overwrite_output_files\": true } to replace it. This how-to is run with the\n//    flag so re-runs overwrite the same report.\nConnector.Publish(src, name);\ntry { System.IO.File.Delete(src); } catch { }   // the copy in exports/ is the deliverable\n\n// 3. A file written DIRECTLY into ExportsDirectory and then published is registered\n//    in place: no copy, no collision gate, `published` even if the name existed.\nvar direct = System.IO.Path.Combine(Connector.ExportsDirectory, \"howto-files-inplace.txt\");\nSystem.IO.File.WriteAllText(direct, \"written in place\\n\");\nConnector.Publish(direct);\n\n// 4. The audit trail: logs/ and scripts/ are siblings of exports/. Each run leaves\n//    <timestamp>-<execution_id>.cs (the exact script) and .ndjson (the log, with the\n//    run's status) before its response is sent -- so the previous run's pair is\n//    already there. Useful when a user asks \"what did you run yesterday?\".\nvar root = System.IO.Path.GetDirectoryName(Connector.ExportsDirectory);\nvar logsDir = System.IO.Path.Combine(root, \"logs\");\nvar scriptsDir = System.IO.Path.Combine(root, \"scripts\");\nint logCount = System.IO.Directory.Exists(logsDir) ? System.IO.Directory.GetFiles(logsDir, \"*.ndjson\").Length : 0;\nint scriptCount = System.IO.Directory.Exists(scriptsDir) ? System.IO.Directory.GetFiles(scriptsDir, \"*.cs\").Length : 0;\n\n// 5. Verify: both files sit in exports/. Publishing changes nothing in the model, so\n//    the run carries no `mutations` report. Tell the user the path from files[], not\n//    a path you typed.\nreturn new {\n  published = System.IO.File.Exists(System.IO.Path.Combine(Connector.ExportsDirectory, name)),\n  inPlace = System.IO.File.Exists(direct),\n  exportsDirectory = Connector.ExportsDirectory,\n  importsDirectory = Connector.ImportsDirectory,\n  auditLogs = logCount,\n  auditScripts = scriptCount\n};\n",
+  "pitfalls": [
+    {
+      "symptom": "files[] shows status failed with a message naming overwrite_output_files; the run itself succeeded.",
+      "cause": "Publish's copy path refuses to overwrite an existing name in exports/ by default; per-file failures never abort the run.",
+      "fix": "Use a new name, or pass overwrite_output_files: true when replacing is intended.",
+      "members": [
+        "Eichler.Connectors.Revit.Connector.Publish"
+      ]
+    },
+    {
+      "symptom": "Publish reported published although the name existed and no flag was passed.",
+      "cause": "The file was written directly into ExportsDirectory, so Publish registered it in place (no copy, no gate).",
+      "fix": "Expected; the gate governs Publish's own copy only.",
+      "members": [
+        "Eichler.Connectors.Revit.Connector.Publish",
+        "Eichler.Connectors.Revit.Connector.ExportsDirectory"
+      ]
+    },
+    {
+      "symptom": "The published path is not visible from the agent's machine.",
+      "cause": "The workspace is on the machine running Revit; in remote mode that is not the agent's host, and there is no file-transfer tool: files move through the filesystem (skill.md \"Exchanging files\").",
+      "fix": "Report the path from files[] to the user; in remote mode they reach it through the shared folder the workspace sits on.",
+      "members": [
+        "Eichler.Connectors.Revit.Connector.ExportsDirectory"
+      ]
+    }
+  ],
+  "tags": [
+    "connector",
+    "files",
+    "publish",
+    "audit-trail"
+  ],
+  "provenance": {
+    "kind": "harness",
+    "ref": "revit/test-harness/file_exchange_test.go TestPublishFileExchange, TestExecutionAuditTrail"
+  },
+  "verify": {
+    "execute": {
+      "overwrite_output_files": true
+    }
+  },
+  "created_at": "2026-09-02T00:00:00Z",
+  "updated_at": "2026-09-02T00:00:00Z"
+}

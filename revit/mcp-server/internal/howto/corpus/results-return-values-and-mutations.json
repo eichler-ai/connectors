@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "id": "results-return-values-and-mutations",
+  "rev": 1,
+  "kind": "howto",
+  "title": "Return a projection from the script, keep console output separate, and read the mutations report to prove the change",
+  "task": "Report what a run found and prove what it changed: return a plain projection (anonymous objects, lists, numbers) that serialises to JSON in return_value, never a Revit Element; Console.WriteLine goes to output; the response's mutations block (net_created, net_modified, net_deleted, by_category) is the net change the run committed.",
+  "members": [
+    "Autodesk.Revit.DB.FilteredElementCollector.OfClass",
+    "Autodesk.Revit.DB.Level.Create",
+    "Autodesk.Revit.DB.Element.Name",
+    "Autodesk.Revit.DB.Element.Id",
+    "Autodesk.Revit.DB.Level.Elevation",
+    "System.Console.WriteLine",
+    "Eichler.Connectors.Revit.Connector.WithTransaction"
+  ],
+  "script_language": "csharp-script",
+  "script": "var doc = Document;\n// Goal: tell the user what the run found and prove what it changed.\n// execute_script answers with three separate things: return_value (what the script\n// returned, serialised), output (everything written to the console, including\n// Revit's own chatter), and mutations (the NET change the run committed).\n\n// 1. Return DATA, not elements. Project each element to the fields the answer\n//    needs; a List of anonymous objects comes back as a JSON array. A returned\n//    Element renders as a marker, \"<Autodesk.Revit.DB.Level: no display form -- this\n//    type neither overrides ToString() nor is one the connector serializes. ...>\",\n//    because the formatter only serialises JSON-shaped values and types with a\n//    ToString of their own.\nvar levelsBefore = new System.Collections.Generic.List<object>();\nforeach (var e in new Autodesk.Revit.DB.FilteredElementCollector(doc).OfClass(typeof(Autodesk.Revit.DB.Level))) {\n  var lvl = (Autodesk.Revit.DB.Level)e;\n  levelsBefore.Add(new { id = lvl.Id.Value, name = lvl.Name, elevation = lvl.Elevation });\n}\n\n// 2. Console output is a separate channel: progress notes and markers go here and\n//    never mix into return_value.\nSystem.Console.WriteLine(\"levels before: \" + levelsBefore.Count);\n\n// 3. Make one change. The mutations report is NET per element: a created-then-edited\n//    element counts once as created; a created-then-deleted one counts as nothing;\n//    an edit to a pre-existing element counts as modified; a block that threw and was\n//    rolled back contributes nothing; a Settle(keep:false) document is left out.\nvar created = Connector.WithTransaction(doc, () => {\n  var lvl = Autodesk.Revit.DB.Level.Create(doc, 33.0);\n  lvl.Name = \"How-to L33 \" + System.DateTime.UtcNow.Ticks;  // unique name; still one \"created\", not created + modified\n  var scratch = Autodesk.Revit.DB.Level.Create(doc, 34.0);\n  doc.Delete(scratch.Id);            // nets to nothing\n  return new { id = lvl.Id.Value, name = lvl.Name };\n});\n\n// 4. Read the report in the RESPONSE, not from the script: expect\n//    mutations.net_created == 1, net_deleted == 0, by_category.Levels.net_created == 1\n//    (regeneration may add net_modified on dependents). Categories are named at event\n//    time; elements without a category land in \"(uncategorized)\"; `truncated` flags\n//    a run too large to itemise. A read-only run carries no mutations block at all.\n//    Use the report as the check that the run did what it says.\n\n// 5. Return the projection: ids and names the user can act on, plus what to expect\n//    in the report so the two can be compared.\nreturn new {\n  levelsBefore,\n  created,\n  expectedMutations = new { net_created = 1, net_deleted = 0, category = \"Levels\" }\n};\n",
+  "pitfalls": [
+    {
+      "symptom": "return_value reads '<Autodesk.Revit.DB.Level: no display form -- this type neither overrides ToString() nor is one the connector serializes. ...>' or a bare CLR type name.",
+      "cause": "The script returned a Revit Element (or another object with no JSON form and no ToString of its own); the formatter serialises JSON-shaped values only.",
+      "fix": "Return a projection: new { id = e.Id.Value, name = e.Name, ... }, or a List of them.",
+      "members": [
+        "Autodesk.Revit.DB.Element.Id",
+        "Autodesk.Revit.DB.Element.Name"
+      ]
+    },
+    {
+      "symptom": "Revit's own console messages appear in output.",
+      "cause": "output is everything written to the process console during the run, by the script or by Revit.",
+      "fix": "Expected; read the answer from return_value and use output only for markers and progress.",
+      "members": [
+        "System.Console.WriteLine"
+      ]
+    },
+    {
+      "symptom": "mutations.net_created is lower than the number of Create calls.",
+      "cause": "The report is net: created-then-deleted elements vanish, rolled-back blocks and discarded documents contribute nothing.",
+      "fix": "Compare against what should EXIST after the run, not against calls made.",
+      "members": [
+        "Eichler.Connectors.Revit.Connector.WithTransaction"
+      ]
+    },
+    {
+      "symptom": "No mutations block in the response.",
+      "cause": "The run changed nothing (read-only, or every write was rolled back or discarded).",
+      "fix": "Expected for reads; for writes, check the block committed (no throw) and the document was not settled with keep:false.",
+      "members": [
+        "Eichler.Connectors.Revit.Connector.WithTransaction"
+      ]
+    }
+  ],
+  "tags": [
+    "connector",
+    "results",
+    "return-value",
+    "mutations"
+  ],
+  "provenance": {
+    "kind": "harness",
+    "ref": "revit/test-harness/return_value_test.go TestReturnValueSerialization; interactive_findings_test.go TestMutationReportDescribesWhatTheRunChanged"
+  },
+  "verify": {
+    "mutations": {
+      "net_created": 1,
+      "net_deleted": 0,
+      "by_category": {
+        "Levels": {
+          "net_created": 1
+        }
+      }
+    }
+  },
+  "created_at": "2026-09-02T00:00:00Z",
+  "updated_at": "2026-09-02T00:00:00Z"
+}

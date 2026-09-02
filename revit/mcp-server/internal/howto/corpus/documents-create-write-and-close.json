@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "id": "documents-create-write-and-close",
+  "rev": 1,
+  "kind": "howto",
+  "title": "Create a scratch project document, write into it, route later runs at it by document_id, and close it",
+  "task": "Build something in a fresh scratch project instead of the user's model: Connector.CreateProjectDocument creates a headless document (no window, active:false, UIDocument null), Connector.WithTransaction writes into it in the same run, list_instances gives its document_id for later runs, and closing it needs Connector.Settle then Document.Close from a run routed elsewhere with confirm_lifecycle_actions.",
+  "members": [
+    "Eichler.Connectors.Revit.Connector.CreateProjectDocument",
+    "Eichler.Connectors.Revit.Connector.WithTransaction",
+    "Eichler.Connectors.Revit.Connector.Settle",
+    "Autodesk.Revit.DB.Document.Close",
+    "Autodesk.Revit.DB.Document.Title",
+    "Autodesk.Revit.DB.Document.PathName",
+    "Autodesk.Revit.ApplicationServices.Application.Documents",
+    "Autodesk.Revit.DB.Level.Create"
+  ],
+  "script_language": "csharp-script",
+  "script": "var doc = Document;\n// Goal: build in a fresh scratch project, then tidy up -- never in the user's model.\n// Needs execute_script { \"confirm_lifecycle_actions\": true } for the Close in step 6.\n\n// 1. Create the document from Revit's default project template. It is HEADLESS: no\n//    window, list_instances shows it with active:false, and UIDocument is null when a\n//    run is routed at it. It outlives this run until something closes it.\nvar scratch = Connector.CreateProjectDocument();\n// Keep the title: it is how a later run finds and closes the document if this one\n// stops early. (The \"cleanup-title=\" line is the repo sweep's convention for closing\n// scratch documents; an agent should return the title instead -- see step 6.)\nSystem.Console.WriteLine(\"cleanup-title=\" + scratch.Title + \";\");\n\n// 2. Write into it in the SAME run: WithTransaction works on any open document,\n//    not only the routed one. The block is committed when it ends.\nvar levelId = Connector.WithTransaction(scratch, () => {\n  var lvl = Autodesk.Revit.DB.Level.Create(scratch, 12.0);\n  lvl.Name = \"Scratch L1\";\n  return lvl.Id.Value;\n});\n\n// 3. Read it back (no block needed) to prove the commit; the write also survives\n//    into later runs -- that is what makes the document useful.\nint scratchLevels = new Autodesk.Revit.DB.FilteredElementCollector(scratch)\n    .OfClass(typeof(Autodesk.Revit.DB.Level)).GetElementCount();\n\n// 4. On a LATER run, address it directly: call list_instances, find the document by\n//    title, and pass its document_id to execute_script. There `Document` is this\n//    scratch document and UIDocument is null. An id that matches no open document\n//    fails with document-not-found plus an open_documents candidate list.\n//    Finding it by title from any run also works:\nAutodesk.Revit.DB.Document byTitle = null; int matches = 0;\nforeach (Autodesk.Revit.DB.Document d in UIApplication.Application.Documents) {\n  if (d.Title == scratch.Title) { byTitle = d; matches++; }\n}\n\n// 5. Closing: a document the run wrote to has the run's group open, so Close is\n//    refused until Connector.Settle(doc, keep) ends the group in the stated\n//    direction. Close(false) on an unsaved document discards it either way; to keep\n//    the work, SaveAs first (lifecycle-settle-save-close). Close must be called from a\n//    run routed at ANOTHER document -- routed at the scratch document itself, Close\n//    fails for that call only (`Document.Close` on the routed document is refused).\n//    Read anything you still need BEFORE closing: after Close the wrapper is dead and\n//    every member throws \"The referenced object is not valid\".\nstring scratchTitle = scratch.Title;\nbool createdUnsaved = string.IsNullOrEmpty(scratch.PathName);\nConnector.Settle(scratch, false);\nscratch.Close(false);\n\n// 6. Verify it is gone from Application.Documents (by the remembered title).\nint stillOpen = 0;\nforeach (Autodesk.Revit.DB.Document d in UIApplication.Application.Documents) {\n  if (d.Title == scratchTitle) stillOpen++;\n}\nreturn new {\n  scratchTitle,\n  createdUnsaved,\n  levelId,\n  scratchLevels,           // template levels + 1\n  foundByTitle = matches,  // 1\n  stillOpen                // 0\n};\n",
+  "pitfalls": [
+    {
+      "symptom": "Document.Close on the scratch document throws InvalidOperationException when the run is routed at that document (document_id points at it).",
+      "cause": "The routed document has the run's transaction group open; a document cannot close itself from inside its own run.",
+      "fix": "Route the closing run at another document (omit document_id), find the scratch document by Title in Application.Documents, Settle it, then Close. The failure is per call, not permanent.",
+      "members": [
+        "Autodesk.Revit.DB.Document.Close",
+        "Eichler.Connectors.Revit.Connector.Settle"
+      ]
+    },
+    {
+      "symptom": "`script-lifecycle-confirmation-required`: the script is refused before it runs because it calls Close/Save/SaveAs.",
+      "cause": "Lifecycle calls act outside the transaction that rolls a failed script back.",
+      "fix": "Pass confirm_lifecycle_actions: true to execute_script after the user agrees.",
+      "members": [
+        "Autodesk.Revit.DB.Document.Close"
+      ]
+    },
+    {
+      "symptom": "Close/SaveAs refused with a transaction or group still open on the document.",
+      "cause": "Revit refuses lifecycle calls while any transaction or group is open; the run's group is open on every document it wrote to.",
+      "fix": "Connector.Settle(doc, keep: true|false) first; a document-settled-kept/discarded notice reports it.",
+      "members": [
+        "Eichler.Connectors.Revit.Connector.Settle"
+      ]
+    },
+    {
+      "symptom": "UIDocument is null; UIDocument.ActiveView throws NullReferenceException.",
+      "cause": "A created (or background) document has no window.",
+      "fix": "Use Document and collectors; do UI work (RequestViewChange) routed at the active document.",
+      "members": [
+        "Eichler.Connectors.Revit.Connector.CreateProjectDocument"
+      ]
+    },
+    {
+      "symptom": "Documents pile up in the session after several runs.",
+      "cause": "Created documents stay open until closed; a throw before cleanup leaves them open (their writes are rolled back, their existence is not).",
+      "fix": "Return each created document's title, close in the same run when the work is done, or on the next run by title with confirm_lifecycle_actions: true.",
+      "members": [
+        "Autodesk.Revit.DB.Document.Close"
+      ]
+    },
+    {
+      "symptom": "After doc.Close() every member of that Document throws 'The referenced object is not valid, possibly because it has been deleted from the database'.",
+      "cause": "Close disposes the document; the managed wrapper outlives it but nothing behind it does.",
+      "fix": "Copy Title, PathName and any ids you still need into locals before Close, and verify closure by the remembered title.",
+      "members": [
+        "Autodesk.Revit.DB.Document.Close"
+      ]
+    }
+  ],
+  "tags": [
+    "connector",
+    "documents",
+    "lifecycle",
+    "routing"
+  ],
+  "provenance": {
+    "kind": "harness",
+    "ref": "revit/test-harness/harness_test.go TestCreatedDocumentIsWritable; interactive_findings_test.go TestCreatedProjectDocumentHasNoWindow, TestCreatedDocumentCloseRequiresRoutingAwayFromIt, TestSettleMakesLifecycleActionsReachableInTheSameRun; document_routing_test.go TestDocumentIdRouting"
+  },
+  "verify": {
+    "creates_documents": true,
+    "execute": {
+      "confirm_lifecycle_actions": true
+    }
+  },
+  "created_at": "2026-09-02T00:00:00Z",
+  "updated_at": "2026-09-02T00:00:00Z"
+}

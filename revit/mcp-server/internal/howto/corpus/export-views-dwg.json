@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "id": "export-views-dwg",
+  "rev": 1,
+  "kind": "howto",
+  "title": "Export a floor plan to DWG and hand the file to the user",
+  "task": "Give a consultant a DWG of a plan: find an existing ViewPlan (or build one inside a block), then between blocks call Document.Export(folder, name, viewIds, DWGExportOptions) into Connector.ExportsDirectory and Connector.Publish the file so the user can fetch it.",
+  "queries": {
+    "hit": [
+      {
+        "text": "export view to dwg",
+        "tool": "search_functions",
+        "rank": 6
+      }
+    ]
+  },
+  "members": [
+    "Autodesk.Revit.DB.DWGExportOptions",
+    "Autodesk.Revit.DB.Document.Export",
+    "Autodesk.Revit.DB.View.ViewType",
+    "Autodesk.Revit.DB.ViewPlan.Create",
+    "Eichler.Connectors.Revit.Connector.ExportsDirectory",
+    "Eichler.Connectors.Revit.Connector.Publish"
+  ],
+  "script_language": "csharp-script",
+  "script": "var doc = Document;\n// Goal: a DWG of a floor plan, exported into the connector's exports directory and published.\n\n// 1. The view to export: an existing floor plan if the document has one (a read, no block),\n//    else one created INSIDE a block. Anything that writes belongs in a block; the export does not.\nAutodesk.Revit.DB.ElementId viewId = null;\nforeach (Autodesk.Revit.DB.ViewPlan v in new Autodesk.Revit.DB.FilteredElementCollector(doc).OfClass(typeof(Autodesk.Revit.DB.ViewPlan))) {\n  if (!v.IsTemplate && v.ViewType == Autodesk.Revit.DB.ViewType.FloorPlan) { viewId = v.Id; break; }\n}\nbool createdView = viewId == null;\nif (viewId == null) {\n  viewId = Connector.WithTransaction(doc, () => {\n    var level = Autodesk.Revit.DB.Level.Create(doc, 0.5);\n    Autodesk.Revit.DB.ElementId vftId = null;\n    foreach (Autodesk.Revit.DB.ViewFamilyType vft in new Autodesk.Revit.DB.FilteredElementCollector(doc).OfClass(typeof(Autodesk.Revit.DB.ViewFamilyType))) {\n      if (vft.ViewFamily == Autodesk.Revit.DB.ViewFamily.FloorPlan) { vftId = vft.Id; break; }\n    }\n    var plan = Autodesk.Revit.DB.ViewPlan.Create(doc, vftId, level.Id);\n    plan.Name = \"Export plan \" + System.Guid.NewGuid().ToString(\"N\").Substring(0, 6);\n    doc.Regenerate();\n    return plan.Id;\n  });\n}\n\n// 2. Export BETWEEN blocks, at top level. Document.Export manages its own transaction and needs\n//    the document not modifiable; inside Connector.WithTransaction it fails with\n//    script-target-must-not-be-modifiable. A default DWGExportOptions is used here; set its\n//    properties (FileVersion, LayerMapping, ...) when the consultant specifies them.\nvar options = new Autodesk.Revit.DB.DWGExportOptions();\nvar views = new System.Collections.Generic.List<Autodesk.Revit.DB.ElementId> { viewId };\nvar exportName = \"plan-\" + System.Guid.NewGuid().ToString(\"N\").Substring(0, 8);\nvar folder = Connector.ExportsDirectory;\nvar exported = doc.Export(folder, exportName, views, options);\n\n// 3. For a single view Revit writes <name>.dwg (observed here); when several views are exported\n//    it derives per-view names, so check what landed rather than assuming.\nvar dwgPath = System.IO.Path.Combine(folder, exportName + \".dwg\");\nvar exists = System.IO.File.Exists(dwgPath);\nlong size = exists ? new System.IO.FileInfo(dwgPath).Length : 0;\n\n// 4. Publish so the file appears in the run's files[] for the user to fetch (files-publish-and-audit-trail).\nif (exists) { Connector.Publish(dwgPath); }\n\n// 5. Verify: Export returned true and the file exists with non-zero size.\nreturn new { exported, dwgName = exportName + \".dwg\", dwgExists = exists, dwgBytes = size, viewId = viewId.Value, createdView };\n",
+  "pitfalls": [
+    {
+      "symptom": "script-target-must-not-be-modifiable when Document.Export is called inside Connector.WithTransaction.",
+      "cause": "Export commits its own transaction and refuses a document that is modifiable (has a transaction open).",
+      "fix": "Call Export at top level between blocks (step 2); create or edit the view in a block before it.",
+      "members": [
+        "Autodesk.Revit.DB.Document.Export"
+      ]
+    },
+    {
+      "symptom": "Export returns true but the expected file is not there.",
+      "cause": "Revit derives the file name from the view when several views are exported, or the folder is not writable.",
+      "fix": "Export one view per call into Connector.ExportsDirectory and check the actual file name (step 3).",
+      "members": [
+        "Autodesk.Revit.DB.Document.Export"
+      ]
+    }
+  ],
+  "tags": [
+    "export",
+    "dwg",
+    "views",
+    "files",
+    "connector"
+  ],
+  "provenance": {
+    "kind": "validation-corpus",
+    "ref": "revit/test-harness/validation_corpus_test.go TestValidationCorpus_ExportViewToDwg (validation-corpus case #1)"
+  },
+  "verify": {
+    "mutations": {
+      "net_created": 0,
+      "net_deleted": 0
+    }
+  },
+  "created_at": "2026-09-02T00:00:00Z",
+  "updated_at": "2026-09-02T00:00:00Z"
+}

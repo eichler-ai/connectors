@@ -200,7 +200,7 @@ var documentKnownFields = map[string]bool{
 	"schema_version": true, "id": true, "rev": true, "kind": true, "title": true, "task": true,
 	"queries": true, "members": true, "script": true, "script_language": true, "pitfalls": true,
 	"tags": true, "api_since": true, "api_until": true, "contributors": true, "absorbs": true,
-	"provenance": true, "created_at": true, "updated_at": true,
+	"provenance": true, "verify": true, "created_at": true, "updated_at": true,
 }
 
 // extraFields keeps top-level fields this package does not know (a newer

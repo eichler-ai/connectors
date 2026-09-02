@@ -61,6 +61,7 @@ type Document struct {
 	Contributors  []Contributor  `json:"contributors,omitempty"`
 	Absorbs       []string       `json:"absorbs,omitempty"`
 	Provenance    Provenance     `json:"provenance"`
+	Verify        *Verify        `json:"verify,omitempty"`
 	CreatedAt     time.Time      `json:"created_at"`
 	UpdatedAt     time.Time      `json:"updated_at"`
 	Extra         map[string]any `json:"-"`
@@ -88,6 +89,31 @@ type Pitfall struct {
 	Cause   string   `json:"cause"`
 	Fix     string   `json:"fix"`
 	Members []string `json:"members,omitempty"`
+}
+
+// Verify is what the tier-2 sweep asserts beyond "the script ran"
+// (schema: verify). Maintainer-facing, like Provenance.
+type Verify struct {
+	Mutations        *ExpectedMutations `json:"mutations,omitempty"`
+	Execute          map[string]any     `json:"execute,omitempty"`
+	CreatesDocuments bool               `json:"creates_documents,omitempty"`
+}
+
+// ExpectedMutations is the net change report a how-to's run must produce.
+// A nil counter is not asserted; NetModifiedMin replaces NetModified where
+// the exact count is version-dependent.
+type ExpectedMutations struct {
+	NetCreated     *int                        `json:"net_created,omitempty"`
+	NetModified    *int                        `json:"net_modified,omitempty"`
+	NetDeleted     *int                        `json:"net_deleted,omitempty"`
+	NetModifiedMin *int                        `json:"net_modified_min,omitempty"`
+	ByCategory     map[string]ExpectedCategory `json:"by_category,omitempty"`
+}
+
+// ExpectedCategory is one by_category entry.
+type ExpectedCategory struct {
+	NetCreated  *int `json:"net_created,omitempty"`
+	NetModified *int `json:"net_modified,omitempty"`
 }
 
 // Contributor is one opt-in credit entry.

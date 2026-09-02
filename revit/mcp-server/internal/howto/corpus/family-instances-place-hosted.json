@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "id": "family-instances-place-hosted",
+  "rev": 1,
+  "kind": "howto",
+  "title": "Place a door of a given type into an existing wall",
+  "task": "Place a hosted FamilyInstance (a door) in a wall: find the FamilySymbol by category and name, call FamilySymbol.Activate() before use, then Document.Create.NewFamilyInstance(point, symbol, hostWall, level, StructuralType.NonStructural) at a point on the wall's location line; verify FamilyInstance.Host. The script creates one scratch host wall.",
+  "members": [
+    "Autodesk.Revit.Creation.Document.NewFamilyInstance",
+    "Autodesk.Revit.DB.FamilySymbol.Activate",
+    "Autodesk.Revit.DB.FamilySymbol.IsActive",
+    "Autodesk.Revit.DB.FamilySymbol.FamilyName",
+    "Autodesk.Revit.DB.FamilyInstance.Host",
+    "Autodesk.Revit.DB.Curve.Evaluate",
+    "Autodesk.Revit.DB.Structure.StructuralType",
+    "Autodesk.Revit.DB.FilteredElementCollector.OfCategory"
+  ],
+  "script_language": "csharp-script",
+  "script": "var doc = Document;\n// Goal: put a door of a given type into an existing wall. Reads at top level; the host wall and the\n// door are created inside one block.\n// A blank project has levels already; take the lowest one rather than creating another.\nAutodesk.Revit.DB.Level level = null;\nforeach (Autodesk.Revit.DB.Level l in new Autodesk.Revit.DB.FilteredElementCollector(doc).OfClass(typeof(Autodesk.Revit.DB.Level))) {\n  if (level == null || l.Elevation < level.Elevation) level = l;\n}\n\n// 1. Find the door type (FamilySymbol) by family and type name, from the Doors category. Names are\n//    template-dependent, so fall back to the first loaded door symbol; if the project has none, the\n//    family must be loaded first (Document.LoadFamily, which runs between transaction blocks).\nstring wantedFamily = \"Single-Flush\";\nAutodesk.Revit.DB.FamilySymbol doorSymbol = null;\nAutodesk.Revit.DB.FamilySymbol firstDoor = null;\nforeach (Autodesk.Revit.DB.FamilySymbol fs in new Autodesk.Revit.DB.FilteredElementCollector(doc)\n    .OfCategory(Autodesk.Revit.DB.BuiltInCategory.OST_Doors).OfClass(typeof(Autodesk.Revit.DB.FamilySymbol))) {\n  if (firstDoor == null) firstDoor = fs;\n  if (fs.FamilyName == wantedFamily) { doorSymbol = fs; break; }\n}\nbool usedFallback = doorSymbol == null;\nif (doorSymbol == null) doorSymbol = firstDoor;\nif (doorSymbol == null) throw new System.Exception(\"no door family loaded; load one with Document.LoadFamily first\");\n\nreturn Connector.WithTransaction(doc, () => {\n  // 2. The host: a wall on the level (a real task starts with an existing wall).\n  double z = level.Elevation;\n  var hostWall = Autodesk.Revit.DB.Wall.Create(doc,\n      Autodesk.Revit.DB.Line.CreateBound(new Autodesk.Revit.DB.XYZ(0, 0, z), new Autodesk.Revit.DB.XYZ(20, 0, z)), level.Id, false);\n  doc.Regenerate();\n\n  // 3. Activate the symbol. A FamilySymbol that has never been placed is inactive and\n  //    NewFamilyInstance throws on it; Activate() is a write, so it belongs inside the block.\n  bool wasActive = doorSymbol.IsActive;\n  if (!doorSymbol.IsActive) { doorSymbol.Activate(); doc.Regenerate(); }\n\n  // 4. Place the instance at a point ON the host's location line (here its midpoint). The hosted\n  //    overload takes the host and the level; StructuralType.NonStructural for a door.\n  var midpoint = (hostWall.Location as Autodesk.Revit.DB.LocationCurve).Curve.Evaluate(0.5, true);\n  var door = doc.Create.NewFamilyInstance(midpoint, doorSymbol, hostWall, level,\n      Autodesk.Revit.DB.Structure.StructuralType.NonStructural);\n  doc.Regenerate();\n\n  // 5. Verify: the door's Host is the wall, its level matches, and it sits in the Doors category.\n  return new {\n    doorId = door.Id.Value, family = doorSymbol.FamilyName, type = doorSymbol.Name, usedFallbackType = usedFallback,\n    symbolWasAlreadyActive = wasActive,\n    hostedByWall = door.Host != null && door.Host.Id == hostWall.Id,\n    onLevel = door.LevelId == level.Id,\n    category = door.Category == null ? null : door.Category.Name,\n    hostWallId = hostWall.Id.Value\n  };\n});\n",
+  "pitfalls": [
+    {
+      "symptom": "NewFamilyInstance throws for a symbol that exists in the project.",
+      "cause": "The FamilySymbol is not active (never placed).",
+      "fix": "Call symbol.Activate() inside the transaction block before NewFamilyInstance (step 3).",
+      "members": [
+        "Autodesk.Revit.DB.FamilySymbol.Activate"
+      ]
+    },
+    {
+      "symptom": "The door is created but not hosted, or lands away from the wall.",
+      "cause": "The insertion point is not on the host wall's location line.",
+      "fix": "Evaluate a point on (hostWall.Location as LocationCurve).Curve (step 4).",
+      "members": [
+        "Autodesk.Revit.DB.Curve.Evaluate"
+      ]
+    },
+    {
+      "symptom": "No door FamilySymbol is found.",
+      "cause": "The project template has no door family loaded.",
+      "fix": "Load one with Document.LoadFamily between transaction blocks, then place inside one.",
+      "members": [
+        "Autodesk.Revit.DB.Document.LoadFamily"
+      ]
+    }
+  ],
+  "tags": [
+    "doors",
+    "family-instances",
+    "hosted",
+    "walls"
+  ],
+  "provenance": {
+    "kind": "harness",
+    "ref": "revit/test-harness/phase_b_test.go TestPhaseBAnnotationAndScheduling/PlaceDoorInWall"
+  },
+  "verify": {
+    "mutations": {
+      "by_category": {
+        "Doors": {
+          "net_created": 1
+        },
+        "Walls": {
+          "net_created": 1
+        }
+      }
+    }
+  },
+  "created_at": "2026-09-02T00:00:00Z",
+  "updated_at": "2026-09-02T00:00:00Z"
+}

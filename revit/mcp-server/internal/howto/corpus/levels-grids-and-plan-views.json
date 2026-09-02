@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "id": "levels-grids-and-plan-views",
+  "rev": 1,
+  "kind": "howto",
+  "title": "Add a level with its own floor plan view and a structural grid",
+  "task": "Create a Level with Level.Create, then the floor plan it does not get automatically: find the FloorPlan ViewFamilyType and call ViewPlan.Create(doc, viewTypeId, levelId); look a plan up by ViewPlan.GenLevel; add a Grid with Grid.Create from a Line. A GenLevel lookup on a script-created level finds nothing until the plan exists.",
+  "members": [
+    "Autodesk.Revit.DB.Level.Create",
+    "Autodesk.Revit.DB.Level.Name",
+    "Autodesk.Revit.DB.ViewPlan.Create",
+    "Autodesk.Revit.DB.ViewFamilyType.ViewFamily",
+    "Autodesk.Revit.DB.ViewPlan.GenLevel",
+    "Autodesk.Revit.DB.Grid.Create",
+    "Autodesk.Revit.DB.Grid.Name",
+    "Autodesk.Revit.DB.Line.CreateBound"
+  ],
+  "script_language": "csharp-script",
+  "script": "var doc = Document;\n// Goal: add a new storey with its own floor plan and a structural grid line so later work has\n// somewhere to draw. Reads at top level, writes in one block.\n\n// 1. Find the highest existing level; the new one goes 12' above it.\nAutodesk.Revit.DB.Level top = null;\nforeach (Autodesk.Revit.DB.Level l in new Autodesk.Revit.DB.FilteredElementCollector(doc).OfClass(typeof(Autodesk.Revit.DB.Level))) {\n  if (top == null || l.Elevation > top.Elevation) top = l;\n}\ndouble elevation = (top == null ? 0.0 : top.Elevation) + 12.0;\n\n// 2. The view type for floor plans. ViewPlan.Create needs a ViewFamilyType whose ViewFamily is\n//    FloorPlan (CeilingPlan and StructuralPlan are the other plan families).\nAutodesk.Revit.DB.ViewFamilyType floorPlanType = null;\nforeach (Autodesk.Revit.DB.ViewFamilyType vft in new Autodesk.Revit.DB.FilteredElementCollector(doc).OfClass(typeof(Autodesk.Revit.DB.ViewFamilyType))) {\n  if (vft.ViewFamily == Autodesk.Revit.DB.ViewFamily.FloorPlan) { floorPlanType = vft; break; }\n}\nif (floorPlanType == null) throw new System.Exception(\"no FloorPlan ViewFamilyType in this document\");\n\nreturn Connector.WithTransaction(doc, () => {\n  // 3. Create the level. Level.Create takes the elevation in feet; the name is generated\n  //    (\"Level 3\") and can be set through Name, which must be unique among levels.\n  var level = Autodesk.Revit.DB.Level.Create(doc, elevation);\n  level.Name = \"Level \" + System.Guid.NewGuid().ToString(\"N\").Substring(0, 6);\n\n  // 4. Create its floor plan. Unlike the Level tool in the UI (with \"Make Plan View\" on),\n  //    Level.Create does NOT create a plan view. A later \"find the plan for this level\" lookup\n  //    (step 5) then finds nothing, and passing that null view to NewRoomTag/NewDimension fails\n  //    deep inside Revit with an ArgumentNullException. Annotation calls accept any non-template\n  //    plan, not only one scoped to the element's level; a plan of this level is simply the one\n  //    the drawings want.\n  var plan = Autodesk.Revit.DB.ViewPlan.Create(doc, floorPlanType.Id, level.Id);\n  plan.Name = level.Name + \" plan\";\n\n  // 5. Look a plan up by its level later: ViewPlan.GenLevel is the level a plan is generated for\n  //    (null for drafting-style plans), so filter on GenLevel.Id, skipping view templates.\n  Autodesk.Revit.DB.ViewPlan found = null;\n  foreach (Autodesk.Revit.DB.ViewPlan v in new Autodesk.Revit.DB.FilteredElementCollector(doc).OfClass(typeof(Autodesk.Revit.DB.ViewPlan))) {\n    if (!v.IsTemplate && v.GenLevel != null && v.GenLevel.Id == level.Id) { found = v; break; }\n  }\n\n  // 6. A grid line. Grid.Create takes a bound Line (or an Arc); grids are datum elements that span\n  //    all levels, so no level argument. Name it as the drawings will label it.\n  var grid = Autodesk.Revit.DB.Grid.Create(doc, Autodesk.Revit.DB.Line.CreateBound(\n      new Autodesk.Revit.DB.XYZ(-10, -10, elevation), new Autodesk.Revit.DB.XYZ(-10, 50, elevation)));\n  grid.Name = \"G\" + System.Guid.NewGuid().ToString(\"N\").Substring(0, 4);\n  doc.Regenerate();\n\n  // 7. Verify: the plan found by GenLevel is the one created, and the grid is visible in it.\n  int gridsInPlan = new Autodesk.Revit.DB.FilteredElementCollector(doc, plan.Id)\n      .OfCategory(Autodesk.Revit.DB.BuiltInCategory.OST_Grids).WhereElementIsNotElementType().GetElementCount();\n  return new {\n    levelId = level.Id.Value, levelName = level.Name, elevationFeet = level.Elevation,\n    planId = plan.Id.Value, planFoundByGenLevel = found != null && found.Id == plan.Id,\n    gridId = grid.Id.Value, gridName = grid.Name, gridVisibleInPlan = gridsInPlan >= 1\n  };\n});\n",
+  "pitfalls": [
+    {
+      "symptom": "NewRoomTag or NewDimension throws an ArgumentNullException deep inside Revit after creating a level with Level.Create.",
+      "cause": "The view argument was null: the plan lookup by ViewPlan.GenLevel found nothing because Level.Create does not create a floor plan view. The calls do not require the view to look at the element's level.",
+      "fix": "Create the plan with ViewPlan.Create(doc, floorPlanViewFamilyTypeId, level.Id) (step 4) and pass it, or pass any existing non-template plan.",
+      "members": [
+        "Autodesk.Revit.DB.ViewPlan.Create",
+        "Autodesk.Revit.DB.ViewPlan.GenLevel"
+      ]
+    },
+    {
+      "symptom": "Setting Level.Name throws: the name is already in use.",
+      "cause": "Level names must be unique.",
+      "fix": "Check existing names first or use a distinct suffix.",
+      "members": [
+        "Autodesk.Revit.DB.Level.Name"
+      ]
+    },
+    {
+      "symptom": "Filtering plans by GenLevel throws a NullReferenceException.",
+      "cause": "Some ViewPlan elements (templates, plans without a level) have a null GenLevel.",
+      "fix": "Skip IsTemplate views and null GenLevel before comparing ids (step 5).",
+      "members": [
+        "Autodesk.Revit.DB.ViewPlan.GenLevel"
+      ]
+    }
+  ],
+  "tags": [
+    "levels",
+    "grids",
+    "views",
+    "datum",
+    "creation"
+  ],
+  "provenance": {
+    "kind": "harness",
+    "ref": "revit/test-harness/harness_test.go TestCreateLevel; phase_b_test.go CreateRoomAndTagIt (the plan-view finding); phase_c_test.go CreateGrid"
+  },
+  "verify": {
+    "mutations": {
+      "by_category": {
+        "Levels": {
+          "net_created": 1
+        },
+        "Grids": {
+          "net_created": 1
+        }
+      }
+    }
+  },
+  "created_at": "2026-09-02T00:00:00Z",
+  "updated_at": "2026-09-02T00:00:00Z"
+}

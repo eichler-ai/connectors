@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "id": "undo-redo-and-run-labels",
+  "rev": 1,
+  "kind": "howto",
+  "title": "Label a run for Revit's Undo history and revert or restore it with the undo and redo tools",
+  "task": "Try a change, look at it, and take it back without touching the person's own work: pass execute_script label so the run appears in Revit's Undo history as 'MCP: <label>', then call the undo tool with confirm: true (redo to restore). The tool reports what it reverted: undo-reverted-connector-work names the labelled run; undo-reverted-other-work means a person's action was undone instead.",
+  "members": [
+    "Eichler.Connectors.Revit.Connector.WithTransaction",
+    "Autodesk.Revit.DB.Level.Create",
+    "Autodesk.Revit.DB.FilteredElementCollector.OfClass"
+  ],
+  "script_language": "csharp-script",
+  "script": "var doc = Document;\n// Goal: make a change the user can inspect, then take it back cleanly.\n// The script side is small; the undo/redo side is two TOOL calls, described in\n// steps 3-5. Revit's undo stack is global to the session and the tools act on the\n// ACTIVE document, so run this routed at the active document (omit document_id).\n\n// 1. Run with a label: execute_script { \"label\": \"how-to undo probe\" }. Every block\n//    the run commits is grouped into ONE undo step named \"MCP: how-to undo probe\".\n//    Without a label the connector derives one from the report, e.g.\n//    \"MCP: 1 Levels created\" (an undo-label-not-applied notice means Revit refused\n//    the rename; the work is still one step).\nvar id = Connector.WithTransaction(doc, () => {\n  var lvl = Autodesk.Revit.DB.Level.Create(doc, 44.0);\n  lvl.Name = \"How-to undo probe \" + System.DateTime.UtcNow.Ticks;  // unique name\n  return lvl.Id.Value;\n});\n\n// 2. Verify the write landed: one level at 44.0; the response's mutations block\n//    says net_created 1.\nint at44 = 0;\nforeach (var e in new Autodesk.Revit.DB.FilteredElementCollector(doc).OfClass(typeof(Autodesk.Revit.DB.Level))) {\n  var lvl = e as Autodesk.Revit.DB.Level;\n  if (lvl != null && System.Math.Abs(lvl.Elevation - 44.0) < 0.01) at44++;\n}\n\n// 3. To take it back: call the `undo` tool with { \"instance_id\": ..., \"confirm\": true }.\n//    Without confirm it is refused (undo-confirmation-required) because the stack is\n//    global to the session: if the person acted after this run, undo reverts THEIR\n//    step. The response carries mutations (net_deleted 1 here) and a notice:\n//    undo-reverted-connector-work naming \"MCP: how-to undo probe\", or\n//    undo-reverted-other-work if it was not this run -- stop and tell the user.\n//    Pass document_id if you expect a particular document to be active; a different\n//    active document is refused (undo-wrong-active-document).\n// 4. `redo` with confirm: true restores it (mutations net_created 1).\n// 5. A second `undo` leaves the model as found. A read-only run in between (like a\n//    collector count) does not push an undo step, so the sequence stays intact.\nreturn new { levelId = id, levelsAt44 = at44, undoLabel = \"MCP: how-to undo probe\" };\n",
+  "pitfalls": [
+    {
+      "symptom": "undo refused with undo-confirmation-required.",
+      "cause": "Undo acts on Revit's global stack; the most recent action may be a person's.",
+      "fix": "Ask the user, then call undo with confirm: true; the response says how long ago the connector last ran here.",
+      "members": []
+    },
+    {
+      "symptom": "Notice undo-reverted-other-work after calling undo.",
+      "cause": "Someone acted in Revit after the labelled run, so their step was reverted instead.",
+      "fix": "Call redo immediately to restore it, tell the user, and do not retry blindly.",
+      "members": []
+    },
+    {
+      "symptom": "Undo removes more than the one element the script created.",
+      "cause": "All blocks of one run are one undo step; a run that made several blocks is reverted whole.",
+      "fix": "Expected; split independent tasks into separate runs if they must be undoable separately.",
+      "members": [
+        "Eichler.Connectors.Revit.Connector.WithTransaction"
+      ]
+    },
+    {
+      "symptom": "undo-wrong-active-document, or the undo reverted a different document's step.",
+      "cause": "The stack is global to the session and the tools act on whichever document is active.",
+      "fix": "Pass document_id of the document you expect to be active (a mismatch is refused); route labelled runs at the active document.",
+      "members": []
+    }
+  ],
+  "tags": [
+    "connector",
+    "undo",
+    "redo",
+    "labels"
+  ],
+  "provenance": {
+    "kind": "harness",
+    "ref": "revit/test-harness/interactive_findings_test.go TestUndoLabelIsAcceptedByRevit, TestUndoAndRedoToolsRevertAndRestoreTheLastRun"
+  },
+  "verify": {
+    "execute": {
+      "label": "how-to undo probe"
+    },
+    "mutations": {
+      "net_created": 1,
+      "net_deleted": 0,
+      "by_category": {
+        "Levels": {
+          "net_created": 1
+        }
+      }
+    }
+  },
+  "created_at": "2026-09-02T00:00:00Z",
+  "updated_at": "2026-09-02T00:00:00Z"
+}

@@ -29,7 +29,7 @@ Per issue, in this order:
 3. **Decide the outcome before running anything.** Three outcomes, and the second is the one to
    reach for first:
    - **Fold into an existing how-to.** Search the corpus (`search_howto` once it exists; until
-     then, a `members`-set and `tags` match over `revit/howto/corpus.jsonl`) for a document that
+     then, a `members`-set and `tags` match over the files in `revit/mcp-server/internal/howto/corpus/`) for a document that
      teaches the same concept. The default is to fold: a good pitfall, a better step, or a version
      note joins that document as its next revision. Each document teaches one Revit feature or
      connector mechanism at moderate depth — a broader usage concept with numbered steps, not a
@@ -62,13 +62,14 @@ Per issue, in this order:
    existing document the same way (append pitfalls and queries, replace the script only if the
    new one is better and passed).
 
-6. **Write and stamp.** Put the document into `revit/howto/corpus.jsonl` — a new line, or the
-   lineage's existing line replaced by `rev + 1` (one line per lineage; git history is the audit
-   trail) — with `provenance.kind: "submission"`, `ref` = the issue URL, `reviewed_by` = your
+6. **Write and stamp.** Write the document to `revit/mcp-server/internal/howto/corpus/<id>.json` — a new
+   file for a new lineage, or the lineage's existing file rewritten at `rev + 1` (one file per
+   lineage, named for its id; git history is the audit trail) — with `provenance.kind: "submission"`, `ref` = the issue URL, `reviewed_by` = your
    GitHub login; keep the submitter's `contributors` entry, renumber its `rev` to the accepted one,
-   and add yourself as `reviewer` only if you want the credit. Append the run's stamp to
-   `revit/howto/verified.jsonl` (`by: harness`) and drop any stamp whose script hash no longer
-   matches. For a fold, record the merged-away submission id in the survivor's `absorbs` only if it
+   and add yourself as `reviewer` only if you want the credit. Stamp it by running the sweep for that id
+   (`cd revit/test-harness && go test -tags harness -run TestHowToSweep -howto-only <id> -howto-stamps …`,
+   which writes `revit/mcp-server/internal/howto/corpus/verified.jsonl` and drops that id's stale
+   stamps; the broker's unit test fails CI on a stale stamp). For a fold, record the merged-away submission id in the survivor's `absorbs` only if it
    had already been a lineage; a never-accepted submission has nothing to absorb.
 
 7. **One PR per triage run.** Title names the issues; body lists each outcome (folded into `<id>`

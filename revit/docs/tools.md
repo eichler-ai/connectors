@@ -34,6 +34,12 @@ Design rationale for all of it: [`PRD.md`](PRD.md) §06 (execution), §07 (dialo
 > misattributes it for a build made inside a git worktree, so only builds that stamp it
 > explicitly (`install-mac.sh`, `redeploy-and-verify.sh`) offer a revision comparison.
 
+> The `build` block also carries `howto_corpus` — the shared how-to corpus compiled into this
+> broker: `documents`, a 12-hex content `hash`, and `verified_on` (the Revit versions at least one
+> document is verified on) — and the guide's footer repeats it in one sentence; `mcp-server -version`
+> prints the same line. Design: [`howto-corpus-design.md`](howto-corpus-design.md); the corpus lives
+> at `revit/mcp-server/internal/howto/corpus/`.
+
 ### `execute_script`
 
 | Parameter | Default | Meaning |

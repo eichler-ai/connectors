@@ -1,0 +1,84 @@
+{
+  "schema_version": 1,
+  "id": "rooms-create-tag-area",
+  "rev": 1,
+  "kind": "howto",
+  "title": "Turn an enclosed wall footprint into a room with a tag and a reported area",
+  "task": "Create a Room in an enclosed footprint with Document.Create.NewRoom(level, UV), tag it with NewRoomTag(new LinkElementId(room.Id), UV, viewId) in a floor plan, and read Room.Area; the script builds the scratch level, plan and four walls it needs. On a level the script created, set LEVEL_ROOM_COMPUTATION_HEIGHT first or the room may report zero area; NewRoomTag takes a LinkElementId, not an ElementId.",
+  "members": [
+    "Autodesk.Revit.Creation.Document.NewRoom",
+    "Autodesk.Revit.Creation.Document.NewRoomTag",
+    "Autodesk.Revit.DB.LinkElementId",
+    "Autodesk.Revit.DB.Architecture.Room.Area",
+    "Autodesk.Revit.DB.Architecture.Room.Name",
+    "Autodesk.Revit.DB.SpatialElement.GetBoundarySegments",
+    "Autodesk.Revit.DB.BuiltInParameter.LEVEL_ROOM_COMPUTATION_HEIGHT",
+    "Autodesk.Revit.DB.ViewPlan.Create",
+    "Autodesk.Revit.DB.Wall.Create"
+  ],
+  "script_language": "csharp-script",
+  "script": "var doc = Document;\n// Goal: turn an enclosed footprint into a named room with a tag and a reported area. This script\n// builds the level, plan and walls it needs first (steps 1-2); a real task starts at step 3 with\n// walls that exist.\nAutodesk.Revit.DB.Level top = null;\nforeach (Autodesk.Revit.DB.Level l in new Autodesk.Revit.DB.FilteredElementCollector(doc).OfClass(typeof(Autodesk.Revit.DB.Level))) {\n  if (top == null || l.Elevation > top.Elevation) top = l;\n}\ndouble elevation = (top == null ? 0.0 : top.Elevation) + 10.0;\nAutodesk.Revit.DB.ViewFamilyType floorPlanType = null;\nforeach (Autodesk.Revit.DB.ViewFamilyType vft in new Autodesk.Revit.DB.FilteredElementCollector(doc).OfClass(typeof(Autodesk.Revit.DB.ViewFamilyType))) {\n  if (vft.ViewFamily == Autodesk.Revit.DB.ViewFamily.FloorPlan) { floorPlanType = vft; break; }\n}\n\nreturn Connector.WithTransaction(doc, () => {\n  // 1. A level of the script's own, with its floor plan (Level.Create makes no plan view). A room\n  //    on a script-created level can report zero area and no boundary until the level's room\n  //    computation height is set, so set it now: 4' above the level, inside the wall height.\n  var level = Autodesk.Revit.DB.Level.Create(doc, elevation);\n  level.get_Parameter(Autodesk.Revit.DB.BuiltInParameter.LEVEL_ROOM_COMPUTATION_HEIGHT).Set(4.0);\n  var plan = Autodesk.Revit.DB.ViewPlan.Create(doc, floorPlanType.Id, level.Id);\n\n  // 2. An enclosed 20' x 20' footprint of walls on that level. Walls are room-bounding by default.\n  var pts = new[] { new Autodesk.Revit.DB.XYZ(0, 0, elevation), new Autodesk.Revit.DB.XYZ(20, 0, elevation),\n                    new Autodesk.Revit.DB.XYZ(20, 20, elevation), new Autodesk.Revit.DB.XYZ(0, 20, elevation) };\n  for (int i = 0; i < 4; i++) {\n    Autodesk.Revit.DB.Wall.Create(doc, Autodesk.Revit.DB.Line.CreateBound(pts[i], pts[(i + 1) % 4]), level.Id, false);\n  }\n  doc.Regenerate();\n\n  // 3. Place the room: NewRoom(level, UV) puts a room at that plan point on the level; Revit finds\n  //    the enclosing boundary. A point outside any enclosure yields a room with no area.\n  var room = doc.Create.NewRoom(level, new Autodesk.Revit.DB.UV(10, 10));\n  room.Name = \"Meeting \" + System.DateTime.UtcNow.Ticks;  // unique, so a rerun cannot collide\n  doc.Regenerate();\n\n  // 4. Tag it in the level's plan. NewRoomTag's first argument is a LinkElementId (rooms can live\n  //    in linked models); for a room in this document wrap its id. Any non-template plan is\n  //    accepted as the view (it need not look at the room's level), but it must not be null:\n  //    a GenLevel lookup on a level without a plan returns nothing, and a null view fails deep\n  //    inside Revit with an ArgumentNullException.\n  var tag = doc.Create.NewRoomTag(new Autodesk.Revit.DB.LinkElementId(room.Id), new Autodesk.Revit.DB.UV(10, 10), plan.Id);\n\n  // 5. Verify: a non-zero area, one boundary loop, and the tag points at the room.\n  int loops = room.GetBoundarySegments(new Autodesk.Revit.DB.SpatialElementBoundaryOptions()).Count;\n  double areaSqFt = room.Area;\n  return new {\n    roomId = room.Id.Value, roomName = room.Name, areaSqFt, enclosed = loops > 0 && areaSqFt > 0,\n    boundaryLoops = loops, tagId = tag.Id.Value, tagPointsAtRoom = tag.Room != null && tag.Room.Id == room.Id,\n    levelId = level.Id.Value, planId = plan.Id.Value\n  };\n});\n",
+  "pitfalls": [
+    {
+      "symptom": "Room.Area is 0 and GetBoundarySegments is empty although walls enclose the point (issue #118).",
+      "cause": "On a script-created level the room computation height can sit outside the walls' extent.",
+      "fix": "Set the level's LEVEL_ROOM_COMPUTATION_HEIGHT (e.g. 4.0 feet) before placing the room (step 1).",
+      "members": [
+        "Autodesk.Revit.DB.BuiltInParameter.LEVEL_ROOM_COMPUTATION_HEIGHT"
+      ]
+    },
+    {
+      "symptom": "NewRoomTag does not accept the room's ElementId.",
+      "cause": "Its first parameter is a LinkElementId, because the room may be in a linked model.",
+      "fix": "Pass new LinkElementId(room.Id) (step 4).",
+      "members": [
+        "Autodesk.Revit.DB.LinkElementId",
+        "Autodesk.Revit.Creation.Document.NewRoomTag"
+      ]
+    },
+    {
+      "symptom": "NewRoomTag throws an ArgumentNullException deep inside Revit.",
+      "cause": "The view passed was null: a plan lookup by GenLevel found nothing because Level.Create makes no plan. NewRoomTag does not require the view to look at the room's level.",
+      "fix": "Create the plan with ViewPlan.Create (step 1) or pass any existing non-template ViewPlan.",
+      "members": [
+        "Autodesk.Revit.DB.ViewPlan.Create",
+        "Autodesk.Revit.DB.ViewPlan.GenLevel"
+      ]
+    },
+    {
+      "symptom": "FilteredElementCollector.OfClass(typeof(Room)) throws.",
+      "cause": "Room has no native class to filter on.",
+      "fix": "Collect rooms with OfCategory(BuiltInCategory.OST_Rooms).",
+      "members": [
+        "Autodesk.Revit.DB.FilteredElementCollector.OfClass"
+      ]
+    }
+  ],
+  "tags": [
+    "rooms",
+    "tags",
+    "annotation",
+    "levels"
+  ],
+  "provenance": {
+    "kind": "harness",
+    "ref": "revit/test-harness/phase_b_test.go TestPhaseBAnnotationAndScheduling/CreateRoomAndTagIt; interactive_findings_test.go TestRoomOnScriptCreatedLevelNeedsComputationHeight"
+  },
+  "verify": {
+    "mutations": {
+      "by_category": {
+        "Rooms": {
+          "net_created": 1
+        },
+        "Walls": {
+          "net_created": 4
+        },
+        "Levels": {
+          "net_created": 1
+        }
+      }
+    }
+  },
+  "created_at": "2026-09-02T00:00:00Z",
+  "updated_at": "2026-09-02T00:00:00Z"
+}

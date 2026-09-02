@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "id": "transactions-write-inside-blocks",
+  "rev": 1,
+  "kind": "howto",
+  "title": "Write inside Connector.WithTransaction blocks: rollback on throw, returned values, SubTransaction savepoints",
+  "task": "Make a change to a Revit document safely with the connector: read at top level, write inside Connector.WithTransaction(doc, () => {...}), get a value back from the block, rely on a throwing body being rolled back even when the script catches, and use a native SubTransaction as a savepoint inside a block. Connector transaction model; error codes script-write-outside-transaction and script-subtransaction-needs-transaction.",
+  "members": [
+    "Eichler.Connectors.Revit.Connector.WithTransaction",
+    "Autodesk.Revit.DB.Level.Create",
+    "Autodesk.Revit.DB.SubTransaction.Start",
+    "Autodesk.Revit.DB.SubTransaction.Commit",
+    "Autodesk.Revit.DB.SubTransaction.RollBack",
+    "Autodesk.Revit.DB.Document.IsModifiable",
+    "Autodesk.Revit.DB.FilteredElementCollector.OfClass"
+  ],
+  "script_language": "csharp-script",
+  "script": "var doc = Document;\n// Goal: change the model so a mistake rolls back and a success is one undo step.\n// The connector holds a transaction GROUP open for the whole run and NO transaction:\n// the document is readable at top level but not modifiable until a\n// Connector.WithTransaction block opens one (skill.md \"Writing to a document\").\n\n// 1. Reads need no block. IsModifiable is false here: a write at this point throws\n//    Autodesk.Revit.Exceptions.ModificationOutsideTransactionException, which the\n//    connector reports as `script-write-outside-transaction` (not demonstrated: the\n//    run would fail). Everything that writes goes inside a block.\nbool modifiableAtTopLevel = doc.IsModifiable;\nint levelsBefore = new Autodesk.Revit.DB.FilteredElementCollector(doc)\n    .OfClass(typeof(Autodesk.Revit.DB.Level)).GetElementCount();\n\n// 2. The value-returning form: WithTransaction<T>(doc, Func<T>) hands the body's\n//    result back. Batch related writes in ONE block; each block is one commit and\n//    one undo step. Inside the block IsModifiable is true.\nvar kept = Connector.WithTransaction(doc, () => {\n  var lvl = Autodesk.Revit.DB.Level.Create(doc, 101.0);\n  lvl.Name = \"How-to L101\";\n  return new { id = lvl.Id.Value, modifiableInside = doc.IsModifiable };\n});\n\n// 3. A body that throws is ROLLED BACK even when the script catches the exception:\n//    the level at 102.0 never exists after this, and the document stays usable\n//    for the next block. This is the ordinary \"try an API, fall back\" shape.\nbool caught = false;\ntry {\n  Connector.WithTransaction(doc, () => {\n    Autodesk.Revit.DB.Level.Create(doc, 102.0);\n    throw new System.InvalidOperationException(\"deliberate: abandon this batch\");\n  });\n} catch (System.InvalidOperationException) {\n  caught = true;\n}\n\n// 4. A savepoint INSIDE a block: a native SubTransaction, always in a `using`.\n//    RollBack discards exactly its own slice; Commit keeps it; writes outside the\n//    savepoint are untouched either way. Started with no block open it is refused\n//    with `script-subtransaction-needs-transaction`. Dispose alone (no Commit) rolls\n//    back -- never leave one un-disposed.\nvar savepoint = Connector.WithTransaction(doc, () => {\n  Autodesk.Revit.DB.Level.Create(doc, 103.0);\n  using (var st = new Autodesk.Revit.DB.SubTransaction(doc)) {\n    st.Start();\n    Autodesk.Revit.DB.Level.Create(doc, 104.0);   // discarded below\n    st.RollBack();\n  }\n  using (var st = new Autodesk.Revit.DB.SubTransaction(doc)) {\n    st.Start();\n    Autodesk.Revit.DB.Level.Create(doc, 105.0);   // kept\n    st.Commit();\n  }\n  return \"savepoint-demo\";\n});\n\n// 5. Verify at top level: count what survived by elevation. Expected: 101, 103 and\n//    105 exist; 102 (thrown block) and 104 (rolled-back savepoint) do not. The run's\n//    `mutations` report says the same: net_created 3 under Levels.\nvar survivors = new System.Collections.Generic.Dictionary<string, int>();\nforeach (var e in new Autodesk.Revit.DB.FilteredElementCollector(doc).OfClass(typeof(Autodesk.Revit.DB.Level))) {\n  var lvl = e as Autodesk.Revit.DB.Level;\n  if (lvl == null) continue;\n  foreach (var probe in new[] { 101.0, 102.0, 103.0, 104.0, 105.0 }) {\n    if (System.Math.Abs(lvl.Elevation - probe) < 0.01) survivors[probe.ToString()] = survivors.TryGetValue(probe.ToString(), out var n) ? n + 1 : 1;\n  }\n}\n// 6. Return a projection, never an Element (see results-return-values-and-mutations).\nreturn new {\n  modifiableAtTopLevel,            // false\n  keptLevelId = kept.id,\n  modifiableInsideBlock = kept.modifiableInside, // true\n  throwWasCaught = caught,         // true, and its level is gone\n  savepoint,\n  levelsAtStart = levelsBefore,\n  survivors                        // {\"101\":1,\"103\":1,\"105\":1}\n};\n",
+  "pitfalls": [
+    {
+      "symptom": "`script-write-outside-transaction` (Attempt to modify the model outside of transaction) on a Level.Create, parameter Set or Delete at the top of the script.",
+      "cause": "Since #146 the connector opens no transaction by default; the document is readable but not modifiable outside a Connector.WithTransaction block.",
+      "fix": "Wrap the write in Connector.WithTransaction(doc, () => { ... }); reads stay outside. One block per batch of related writes.",
+      "members": [
+        "Eichler.Connectors.Revit.Connector.WithTransaction"
+      ]
+    },
+    {
+      "symptom": "Work from a block whose body threw is missing even though the script caught the exception and continued.",
+      "cause": "WithTransaction rolls the block back on any exception before rethrowing; catching it does not restore the writes.",
+      "fix": "Expected. Put the fallback writes in a NEW block after the catch; the document stays fully writable.",
+      "members": [
+        "Eichler.Connectors.Revit.Connector.WithTransaction"
+      ]
+    },
+    {
+      "symptom": "`script-subtransaction-needs-transaction` from SubTransaction.Start.",
+      "cause": "A SubTransaction needs an open transaction, and none is open outside a WithTransaction block.",
+      "fix": "Start the SubTransaction inside a WithTransaction block, always in a `using`; Dispose without Commit rolls its slice back.",
+      "members": [
+        "Autodesk.Revit.DB.SubTransaction.Start"
+      ]
+    },
+    {
+      "symptom": "`script-api-denied`: constructing Transaction, TransactionGroup, or a SubTransaction outside a `using`.",
+      "cause": "Own transactions break the one-open-transaction-per-document invariant the connector relies on; a non-`using` SubTransaction left open at block end destabilised Revit (crash observed).",
+      "fix": "Never construct Transaction/TransactionGroup; SubTransaction only as `using (var st = new SubTransaction(doc))`.",
+      "members": [
+        "Autodesk.Revit.DB.SubTransaction.Dispose"
+      ]
+    }
+  ],
+  "tags": [
+    "connector",
+    "transactions",
+    "rollback",
+    "subtransaction"
+  ],
+  "provenance": {
+    "kind": "harness",
+    "ref": "revit/test-harness/interactive_findings_test.go TestDocumentsAreNotModifiableUntilABlockOpens, TestWithTransactionReturnsTheBodysValue, TestWithTransactionRecoversWhenItsBodyThrowsAndTheScriptCatches, TestSubTransactionIsASavepointInsideTheConnectorsTransaction"
+  },
+  "verify": {
+    "mutations": {
+      "net_created": 3,
+      "net_deleted": 0,
+      "by_category": {
+        "Levels": {
+          "net_created": 3
+        }
+      }
+    }
+  },
+  "created_at": "2026-09-02T00:00:00Z",
+  "updated_at": "2026-09-02T00:00:00Z"
+}

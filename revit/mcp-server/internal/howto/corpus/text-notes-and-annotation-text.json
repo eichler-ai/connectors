@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "id": "text-notes-and-annotation-text",
+  "rev": 1,
+  "kind": "howto",
+  "title": "Add a text note to a view and read notes back for review",
+  "task": "Place annotation text in a view with TextNote.Create(document, viewId, position, text, textNoteTypeId) using a TextNoteType from the document, then collect the view's notes and read TextNote.Text back, trimming the trailing carriage return Revit appends.",
+  "members": [
+    "Autodesk.Revit.DB.TextNote.Create",
+    "Autodesk.Revit.DB.TextNoteType",
+    "Autodesk.Revit.DB.TextNote.Text",
+    "Autodesk.Revit.DB.FilteredElementCollector.OwnedByView",
+    "Autodesk.Revit.DB.View.Id"
+  ],
+  "script_language": "csharp-script",
+  "script": "var doc = Document;\n// Goal: a review note on the lowest level's floor plan, and the notes in that view read back.\n\n// 1. The view to annotate and a text type. Text notes are view-specific; the type controls font\n//    and size (the first TextNoteType is the template's default).\nAutodesk.Revit.DB.Level level = null;\nforeach (Autodesk.Revit.DB.Level l in new Autodesk.Revit.DB.FilteredElementCollector(doc).OfClass(typeof(Autodesk.Revit.DB.Level))) { if (level == null || l.Elevation < level.Elevation) level = l; }\nAutodesk.Revit.DB.ViewPlan view = null;\nforeach (Autodesk.Revit.DB.ViewPlan v in new Autodesk.Revit.DB.FilteredElementCollector(doc).OfClass(typeof(Autodesk.Revit.DB.ViewPlan))) {\n  if (!v.IsTemplate && v.GenLevel != null && v.GenLevel.Id == level.Id) { view = v; break; }\n}\nAutodesk.Revit.DB.ElementId typeId = null;\nforeach (Autodesk.Revit.DB.TextNoteType t in new Autodesk.Revit.DB.FilteredElementCollector(doc).OfClass(typeof(Autodesk.Revit.DB.TextNoteType))) { typeId = t.Id; break; }\n\nreturn Connector.WithTransaction(doc, () => {\n  // 2. Create. The position is in the view's model coordinates (feet); this overload makes an\n  //    unwrapped single line. TextNote.Create(doc, viewId, position, width, text, options) wraps at a width.\n  string text = \"REVIEW: confirm door swing at corridor\";\n  var note = Autodesk.Revit.DB.TextNote.Create(doc, view.Id, new Autodesk.Revit.DB.XYZ(10, 10, 0), text, typeId);\n  doc.Regenerate();\n\n  // 3. Read back. TextNote.Text returns the text with a trailing \"\\r\" appended (undocumented);\n  //    trim it before comparing or reporting.\n  var notesInView = new System.Collections.Generic.List<object>();\n  foreach (Autodesk.Revit.DB.TextNote n in new Autodesk.Revit.DB.FilteredElementCollector(doc).OwnedByView(view.Id).OfClass(typeof(Autodesk.Revit.DB.TextNote))) {\n    notesInView.Add(new { id = n.Id.Value, text = n.Text.TrimEnd('\\r'), rawLength = n.Text.Length });\n  }\n\n  // 4. Verify: the note exists in the view and its trimmed text equals what was written.\n  return new { noteId = note.Id.Value, viewName = view.Name, textMatches = note.Text.TrimEnd('\\r') == text, rawEndsWithCR = note.Text.EndsWith(\"\\r\"), notesInView };\n});\n",
+  "pitfalls": [
+    {
+      "symptom": "A note's Text never equals the string that was written; string comparisons and JSON output show a stray character.",
+      "cause": "TextNote.Text comes back with a trailing '\\r' appended, even for single-line input; Autodesk's XML doc does not mention it.",
+      "fix": "Trim with Text.TrimEnd('\\r') before comparing or reporting (step 3).",
+      "members": [
+        "Autodesk.Revit.DB.TextNote.Text"
+      ]
+    },
+    {
+      "symptom": "TextNote.Create throws for the type id.",
+      "cause": "An ElementId that is not a TextNoteType (e.g. a text style from a different family) was passed.",
+      "fix": "Collect OfClass(typeof(TextNoteType)) and use one of those ids (step 1).",
+      "members": [
+        "Autodesk.Revit.DB.TextNoteType"
+      ]
+    }
+  ],
+  "tags": [
+    "text-notes",
+    "annotation",
+    "views",
+    "pitfall"
+  ],
+  "provenance": {
+    "kind": "harness",
+    "ref": "revit/test-harness/phase_c_test.go TestPhaseCFloorsGridsSheetsAndText/CreateTextNote"
+  },
+  "verify": {
+    "mutations": {
+      "net_created": 1,
+      "by_category": {
+        "Text Notes": {
+          "net_created": 1
+        }
+      }
+    }
+  },
+  "created_at": "2026-09-02T00:00:00Z",
+  "updated_at": "2026-09-02T00:00:00Z"
+}

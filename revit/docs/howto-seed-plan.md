@@ -23,7 +23,7 @@ What "bundled" means concretely:
   (`skills_tool.go`) gain a `howto_corpus` version — the corpus's monotonic `corpus_version`, stamped
   at build — beside the source revision, so "which how-tos is this broker serving" is answerable the
   same way "which skill.md" already is (issue #116).
-- **The corpus is embedded in the broker** (`go:embed` of `revit/howto/corpus.jsonl` and the
+- **The corpus is embedded in the broker** (`go:embed` of `revit/mcp-server/internal/howto/corpus/<id>.json` and the
   verification sidecar), like `skill.md`. There is **no separate corpus payload** in the release zip:
   a corpus change is a broker change, and the `server` component's hash changes with it. Single
   binary stays true; no runtime fetch, no cache, no offline case.
@@ -90,11 +90,22 @@ The seed is extracted from the harness, and only from tests that opt in. Mechani
 4. **Dialect is current.** #146 Phase 3 (#160) rewrote the harness to the `WithTransaction` dialect,
    so extracted scripts are already in the shipped dialect; the design note's warning that seed
    scripts would fail the sweep no longer applies to a seed extracted after #160.
-5. **Extractor is a build step**, `go run ./cmd/howto-extract`, committed output at
-   `revit/howto/corpus.jsonl` (one line per lineage, latest revision only); CI fails if the committed
-   file is stale against the tests. The sidecar `revit/howto/verified.jsonl` is written only by the
-   tier-2 sweep and committed with it; a stamp whose script hash no longer matches its document is
-   pruned by the same step.
+5. **The corpus is a directory of files inside the broker module, not a generated JSONL** [revised at
+   step 3]. Feature-level documents are authored (from the harness scripts, not extracted from them:
+   one document composes several tests' bodies into numbered steps) as one JSON file per lineage at
+   `revit/mcp-server/internal/howto/corpus/<id>.json`, embedded with `go:embed`; a file per document
+   is what makes a 6 KB script reviewable as a diff at triage. The broker joins the files into the
+   one-line-per-lineage form at load, so the JSONL loader and its checks are unchanged. The unit test
+   `TestEmbeddedCorpusIsValidAndStampsAreCurrent` fails CI on a schema problem, a file not named
+   for its id, or a sidecar stamp whose script hash no longer matches. The sidecar
+   `corpus/verified.jsonl` is written only by the tier-2 sweep `TestHowToSweep` (`-howto-stamps`;
+   `-howto-only <ids>` to iterate), which runs every document's script byte-for-byte at a fresh blank
+   fixture routed by `document_id`, requires `status: success`, and checks the document's `verify`
+   block: the **net** `mutations` the run must produce (`net_created`/`net_modified`/`net_deleted`,
+   `by_category`; `net_modified_min` where the exact count is version-dependent), extra
+   `execute_script` arguments the run needs, and `creates_documents` for scripts that print
+   `cleanup-title=` markers. The corpus version (document count, content hash, Revit versions
+   verified on) is printed by `-version` and carried in `get_skills` `build.howto_corpus`.
 6. **Then the ranking corpus.** Every recorded `queries.miss` becomes a candidate row for the how-to
    equivalent of `ranking-corpus.tsv`, once `search_howto` exists to grade it.
 
@@ -373,14 +384,15 @@ choose issues itself, and loads `revit-connector-development` for the harness ru
 5. **Edit.** The maintainer edits `task`, `title`, `pitfalls` wording and `tags` in place — this is
    where prose quality is enforced, and it is a human edit, not the agent's. `queries.miss` is kept
    verbatim: it is evidence, not prose.
-6. **Write and stamp.** Add the document to `revit/howto/corpus.jsonl` — a new line for a new
-   lineage, or **replacing** the lineage's existing line for an edit (same `id`, `rev + 1`; the old
-   revision lives on in git history only) — with `provenance.kind: "submission"`, `ref` = the issue
+6. **Write and stamp.** Write the document to `revit/mcp-server/internal/howto/corpus/<id>.json` — a new
+   file for a new lineage, or the lineage's existing file **rewritten** for an edit (same `id`,
+   `rev + 1`; the old revision lives on in git history only) — with `provenance.kind: "submission"`, `ref` = the issue
    URL, `reviewed_by` = the maintainer's login; keep the submitter's `contributors` entry as submitted
    and optionally append the maintainer as `reviewer`; drop sidecar stamps whose `script_sha256` no
    longer matches the current script (a changed script is unverified until the sweep runs again),
    and CI fails the PR if any stamp's hash is absent from the corpus;
-   append the harness stamp from step 3 to `revit/howto/verified.jsonl`; open one PR per triage run
+   the sweep (`-howto-only <id> -howto-stamps`) writes the stamp from step 3 into
+   `revit/mcp-server/internal/howto/corpus/verified.jsonl`; open one PR per triage run
    listing the issues it closes (`Closes #171`), CI validates both files.
 7. **Report.** Issues closed, documents added, revised and merged, and — the same net-count
    discipline `/triage-issues` uses — the queue size before and after.
@@ -464,8 +476,9 @@ Nothing is annotated or extracted until this table is settled.
    Issue Form template and the three labels, and the fixture-run helper; then
    `/triage-howto-submission` as a command file. The queue can start filling from real sessions while
    the seed is audited.
-3. Harness extractor + the audited seed (`revit/howto/corpus.jsonl`), the tier-2 sweep writing the
-   sidecar, and the corpus embedded in the broker with its version in `-version` / `get_skills`.
+3. The 23-document seed (`howto-seed-list.md`) authored under `internal/howto/corpus/`, the tier-2
+   sweep `TestHowToSweep` writing the sidecar, the corpus embedded in the broker with its version in
+   `-version` / `get_skills`. **Done:** every document verified on Revit 2025 and 2027 (2026-09-02).
 4. Generalised index + `search_howto` / `describe_howto`; local corpus indexed alongside.
 5. Release manifest + install.ps1 per-component skip + broker stage-and-swap and reconnect
    messaging (the full scope is in §1); release-notes diff of the corpus. Prerequisite for frequent

@@ -218,3 +218,22 @@ admits. Those counts were then written into a code comment and a filed issue as 
 from the code, and everything downstream inherited the error. **A number describing this system's
 behaviour has to have been produced by running this system** — if it came from a model, a port, or
 another agent's harness, say so where it is recorded, or measure it again before relying on it.
+
+## Harness runs come back `cancelled`, then the instance is `instance-unrecoverable`
+
+**Symptom:** parallel harness sessions against one Revit: runs return `status: cancelled` that nobody
+cancelled, `ensureInstanceIdle` logs "instance busy with stale execution … resolving", and after a
+few rounds the broker reports `instance-unrecoverable` ("didn't respond to cancellation within its
+grace period"); every later case SKIPs until Revit is relaunched.
+
+**Cause:** the harness's stale-execution recovery (`ensureInstanceIdle`, also inside `targetDocument`)
+cancels whatever execution it finds in flight. That is right for one session's own leftover and
+destructive for a peer's live run. Three forks sweeping the how-to corpus concurrently (2026-09-02)
+cancelled each other until Revit's cancellation grace expired.
+
+**Fix:** one live harness session per Revit at a time. Parallelise authoring, serialise verification.
+`TestHowToSweep` no longer calls `ensureInstanceIdle` per document for this reason. Recover with
+`revit/dev-tooling/redeploy-and-verify.sh --skip-copy --doc-source … --doc-dest …` (a relaunch with no
+`--doc-dest` opens no document, and every case then skips with "connected instance has no open
+document").
+
