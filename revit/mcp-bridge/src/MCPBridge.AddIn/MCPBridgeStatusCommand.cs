@@ -86,7 +86,7 @@ public sealed class MCPBridgeStatusCommand : IExternalCommand
             var since = host.ConnectedSince is { } connectedSince
                 ? connectedSince.ToLocalTime().ToString("HH:mm:ss")
                 : "unknown time";
-            connectionLine = $"Connected to broker at {host.BrokerAddress} since {since}.";
+            connectionLine = $"Connected to the MCP Server at {host.BrokerAddress} since {since}.";
         }
         else
         {
@@ -97,7 +97,7 @@ public sealed class MCPBridgeStatusCommand : IExternalCommand
 
         return
             $"Instance ID: {MCPBridgeApplication.InstanceId}\n" +
-            $"Broker mode: {DescribeMode(host?.DiscoveryOptions)}\n" +
+            $"MCP Server: {DescribeMode(host?.DiscoveryOptions)}\n" +
             $"Status: {connectionLine}\n\n" +
             $"Build: {buildTimestamp}\n" +
             $"Commit: {gitCommit}";
@@ -106,7 +106,8 @@ public sealed class MCPBridgeStatusCommand : IExternalCommand
     /// <summary>
     /// "Local" or a deliberately loud "REMOTE", each with the broker.json path actually being read --
     /// the one fact that settles "which broker is this Revit registered with" (issue #185's symptom
-    /// was a healthy-looking Revit registered with a broker nobody was querying).
+    /// was a healthy-looking Revit registered with a broker nobody was querying). User-facing text
+    /// says "MCP Server", never "broker" (CONVENTIONS.md; the user's own request on #187).
     /// </summary>
     internal static string DescribeMode(BrokerDiscoveryOptions? options)
     {
@@ -117,8 +118,8 @@ public sealed class MCPBridgeStatusCommand : IExternalCommand
 
         var brokerJson = Path.Combine(options.ConnectorRoot, "broker.json");
         return options.Mode == BrokerTopologyMode.Remote
-            ? $"REMOTE (shared drive) -- {brokerJson}"
-            : $"Local -- {brokerJson}";
+            ? $"REMOTE, on another machine (found via {brokerJson})"
+            : $"Local, on this machine (found via {brokerJson})";
     }
 
     /// <summary>

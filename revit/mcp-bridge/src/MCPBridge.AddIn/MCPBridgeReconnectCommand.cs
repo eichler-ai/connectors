@@ -33,8 +33,7 @@ public sealed class MCPBridgeReconnectCommand : IExternalCommand
         MCPBridgeStatusWindow.ShowOrActivate(
             ownerHandle,
             MCPBridgeStatusCommand.BuildStatusContent(host) +
-            "\n\nReconnect requested: the connection is being dropped and broker.json re-read now. " +
-            "Click Status in a few seconds to see the new connection.");
+            "\n\nReconnecting to the MCP Server now. Click Status in a few seconds to see the new connection.");
 
         return Result.Succeeded;
     }

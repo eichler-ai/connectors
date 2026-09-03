@@ -80,7 +80,7 @@ public sealed class MCPBridgeBrokerModeCommand : IExternalCommand
                 // Same UNC rule the startup path enforces (PRD §09); here it can be explained to the
                 // person who typed it rather than logged and silently fallen back from. Owned, so it
                 // cannot land behind Revit's main window (UpdateTrigger's own reasoning).
-                UpdateTrigger.ShowOwnedMessageBox(ownerHandle, ex.Message, "MCP Bridge - Broker mode", MessageBoxImage.Warning);
+                UpdateTrigger.ShowOwnedMessageBox(ownerHandle, ex.Message, "MCP Bridge - MCP Server", MessageBoxImage.Warning);
                 return Result.Cancelled;
             }
 
@@ -108,9 +108,9 @@ public sealed class MCPBridgeBrokerModeCommand : IExternalCommand
         MCPBridgeStatusWindow.ShowOrActivate(
             ownerHandle,
             MCPBridgeStatusCommand.BuildStatusContent(host) +
-            $"\n\nSwitched to {MCPBridgeStatusCommand.DescribeMode(target)}. The connection to the previous broker is being dropped and the new one dialed now; " +
+            $"\n\nSwitched to MCP Server: {MCPBridgeStatusCommand.DescribeMode(target)}. Connecting to it now; " +
             "click Status in a few seconds to see the new connection." +
-            (persistNote ?? $"\nSaved to {configPath} (overrides MCPBRIDGE_BROKER_MODE from now on)."));
+            (persistNote ?? $"\nSaved to {configPath} (this choice now overrides the MCPBRIDGE_BROKER_MODE environment variable)."));
 
         return Result.Succeeded;
     }
@@ -138,16 +138,16 @@ public sealed class MCPBridgeBrokerModeCommand : IExternalCommand
         panel.Children.Add(new TextBlock
         {
             TextWrapping = TextWrapping.Wrap,
-            Text = "Shared drive root for the REMOTE broker, as a UNC path (\\\\host\\share). " +
-                   "The add-in will read <root>\\Connectors\\Revit\\broker.json from there instead of this machine's local app-data. " +
-                   "In this project's Mac+Parallels dev setup that is the Mac-side broker started by install-mac.sh / redeploy-and-verify.sh.",
+            Text = "Shared drive root for the REMOTE MCP Server, as a UNC path (\\\\host\\share). " +
+                   "The add-in will find the MCP Server through <root>\\Connectors\\Revit\\broker.json instead of this machine's local app-data. " +
+                   "In this project's Mac+Parallels dev setup that is the Mac-side MCP Server started by install-mac.sh / redeploy-and-verify.sh.",
         });
         panel.Children.Add(textBox);
         panel.Children.Add(buttons);
 
         var window = new Window
         {
-            Title = "MCP Bridge - Switch to REMOTE broker",
+            Title = "MCP Bridge - Switch to a REMOTE MCP Server",
             Content = panel,
             SizeToContent = SizeToContent.WidthAndHeight,
             ResizeMode = ResizeMode.NoResize,
