@@ -234,3 +234,39 @@ Describe 'Get-DesktopConfigPath' {
         Get-DesktopConfigPath | Should -Be (Join-Path $env:APPDATA 'Claude\claude_desktop_config.json')
     }
 }
+
+Describe 'Register-McpServer' {
+    BeforeEach {
+        $script:dir = Join-Path $TestDrive "reg-$([guid]::NewGuid())"
+        New-Item -ItemType Directory -Force -Path $dir | Out-Null
+        $script:cfg = Join-Path $dir 'claude_desktop_config.json'
+        $script:fakeExe = Join-Path $dir 'mcp-server.exe'
+        New-Item -ItemType File -Force -Path $fakeExe | Out-Null
+        # Isolate from the real machine: the Desktop config path is our TestDrive file, and the CLI half
+        # is treated as absent (no `claude` on PATH) so no real client is touched.
+        Mock Get-DesktopConfigPath { $script:cfg }
+        Mock Get-Command { $null } -ParameterFilter { $Name -eq 'claude' }
+    }
+    It 'registers the Desktop server when none is configured' {
+        Register-McpServer $fakeExe 6>$null
+        $j = Get-Content $cfg -Raw | ConvertFrom-Json
+        $j.mcpServers.revit.command | Should -Be $fakeExe
+    }
+    It 'with -OnlyIfMissing leaves an already-registered Desktop entry untouched' {
+        @{ mcpServers = @{ revit = @{ type = 'stdio'; command = 'OLD.exe'; args = @('--mode', 'local') } } } | ConvertTo-Json -Depth 6 | Set-Content $cfg
+        Register-McpServer $fakeExe -OnlyIfMissing 6>$null
+        $j = Get-Content $cfg -Raw | ConvertFrom-Json
+        $j.mcpServers.revit.command | Should -Be 'OLD.exe'
+    }
+    It 'with -OnlyIfMissing adds the Desktop entry when it is absent (repairs lost wiring)' {
+        '{"mcpServers":{"other":{"command":"o.exe"}}}' | Set-Content $cfg
+        Register-McpServer $fakeExe -OnlyIfMissing 6>$null
+        $j = Get-Content $cfg -Raw | ConvertFrom-Json
+        $j.mcpServers.revit.command | Should -Be $fakeExe
+        $j.mcpServers.other.command | Should -Be 'o.exe'
+    }
+    It 'is a no-op when the server exe is absent' {
+        Register-McpServer (Join-Path $dir 'no-such\mcp-server.exe') 6>$null
+        Test-Path $cfg | Should -BeFalse
+    }
+}
