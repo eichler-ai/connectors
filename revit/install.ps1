@@ -353,9 +353,17 @@ function Complete-PendingBrokerSwap([string]$AppDir) {
 # the merge preserves other servers and the removal takes only ours.
 
 function Get-DesktopConfigPath {
-    # Claude Desktop / Cowork on Windows. The Store/MSIX build keeps a virtualized copy under LocalCache
-    # rather than %APPDATA% (a known issue); this returns the standard path and callers warn about MSIX.
-    Join-Path $env:APPDATA 'Claude\claude_desktop_config.json'
+    # Claude Desktop / Cowork on Windows. The standard .exe build reads %APPDATA%\Claude; the Microsoft
+    # Store / MSIX build virtualizes that path, so a write to %APPDATA%\Claude is SILENTLY IGNORED there
+    # and the real config lives under the package's LocalCache (confirmed live: this project's own VM has
+    # the Store build, at Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\Claude). Prefer the MSIX
+    # location when a Claude package is present (its Roaming\Claude directory exists), else the standard
+    # path.
+    $pkg = Get-ChildItem (Join-Path $env:LOCALAPPDATA 'Packages') -Filter 'Claude*' -Directory -ErrorAction SilentlyContinue |
+        Where-Object { Test-Path (Join-Path $_.FullName 'LocalCache\Roaming\Claude') } |
+        Select-Object -First 1
+    if ($pkg) { return (Join-Path $pkg.FullName 'LocalCache\Roaming\Claude\claude_desktop_config.json') }
+    return (Join-Path $env:APPDATA 'Claude\claude_desktop_config.json')
 }
 
 function Add-DesktopMcpServer([string]$ConfigPath, [string]$Name, [string]$Command, [string[]]$Arguments) {
@@ -910,7 +918,7 @@ if (Test-Path $serverExe) {
 
     if ($registered.Count -gt 0) { Write-Host "Connected the revit MCP server to: $($registered -join '; ')." }
     foreach ($t in $todo) { Write-Host "To finish connecting it -- $t" }
-    Write-Host "(It runs as: `"$serverExe`" --mode local. The Microsoft Store build of Claude Desktop keeps its config under a virtualized AppData path, not %APPDATA%; the standard .exe build avoids that.)"
+    Write-Host "(It runs as: `"$serverExe`" --mode local. Restart any client that was open when this ran, so it reloads its MCP config.)"
 }
 
 # --- Confirm the broker carries the search-ranking embedding models --------------------------------
