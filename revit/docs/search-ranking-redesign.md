@@ -93,6 +93,49 @@ it reads as quasi-held-out.
 - Hybrid > either alone: RRF recovers exact name/path matches vector drops.
 - The **cross-encoder reranker is the single biggest lever** (+4 rank-1 over fused).
 
+> **Measured after shipping (issue #188, 2026-09-03).** Two changes to the shipped pipeline, measured on the
+> same 43 labels against the real 2027 corpus (76,600 members, the add-in's own namespace and core flags)
+> with the shipped models and pool 20: (1) the indexed side of the keyword pass also carries each
+> adjacent pair of identifier parts joined, so `NewFootPrintRoof` indexes `footprint` as well as `foot`,
+> `print` (Revit spells the compound both ways and people write it as one word); (2) the reranker text
+> carries a callable's parameter list, since a task description names what a call takes and the summary
+> alone gave the reranker nothing to match.
+>
+> | shipped pipeline | recall@1 | @3 | @10 | issue query |
+> |---|---|---|---|---|
+> | before (#154 as shipped) | 24/43 | 29 | 34 | absent |
+> | + compound bridge | 25 | 31 | 35 | 11 |
+> | + bridge + parameter types only (tried, rejected) | 24 | 32 | 35 | 1 |
+> | + bridge + full parameter list (ships) | **25** | **33** | **35** | **1** |
+>
+> Per query, ten deep, every labelled query whose rank moved (0 = not returned):
+>
+> | query | shipped | + bridge | + bridge + full list |
+> |---|---|---|---|
+> | create a footprint roof from a curve array on a level with a roof type | 0 | 11 | 1 |
+> | export the view to dwg | 14 | 1 | 1 |
+> | get an element by its id | 6 | 2 | 1 |
+> | create a section view | 4 | 4 | 2 |
+> | create a sheet | 17 | 18 | 15 |
+> | load a family from a file | 5 | 5 | 3 |
+> | tag a door | 46 | 39 | 39 |
+> | place a family instance in the model | 36 | 32 | 32 |
+> | place a view on a sheet | 114 | 113 | 113 |
+> | create a 3d view | 5 | 5 | 9 |
+> | move an element | 1 | 1 | 2 |
+> | prompt the user to pick an element | 5 | 5 | 6 |
+> | create a direct shape from geometry | 18 | 18 | 20 |
+> | intersect two solids | 44 | 45 | 45 |
+>
+> So the bridge moved nothing on the first page down; the parameter list costs "move an element" 1→2,
+> "create a 3d view" 5→9 and "prompt the user to pick an element" 5→6, and wins "get an element by its
+> id" 2→1, "create a section view" 4→2, "load a family from a file" 5→3 and the issue's own query 11→1.
+> Parameter *types only* was measured as a middle ground and lost to the full list at recall@1 and @3, tied at @10.
+> The 43 labels and the corpus dump live outside the repo (POC scratch). `TestRealCorpusRecall`
+> reproduces the aggregate rows from a `members.json` that carries `signature`, `namespace` and `core`
+> (a discovery-cache dump does; the original POC dump does not, and then measures the pre-#188
+> reranker text with prefix-derived core flags).
+
 ### 3.3 Recall ceiling — recall is buried, not lost **[measured]**
 The correct member is present in *either* retriever's candidate pool for **40/43 (93%)** at top-200
 (38/43 at top-50, 39/43 at top-100). So the surfacing problem dominates the coverage problem: widening
