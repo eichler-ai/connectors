@@ -346,6 +346,58 @@ function Complete-PendingBrokerSwap([string]$AppDir) {
     }
 }
 
+# --- Claude client MCP registration -----------------------------------------------------------------
+# The broker is a local stdio MCP server; the Claude clients need a config entry pointing at it. Claude
+# Code CLI has its own `claude mcp add`; Claude Desktop (and Cowork, which reads the same file) has no
+# CLI, so its JSON config is edited directly here. These are functions so install.tests.ps1 can prove
+# the merge preserves other servers and the removal takes only ours.
+
+function Get-DesktopConfigPath {
+    # Claude Desktop / Cowork on Windows. The standard .exe build reads %APPDATA%\Claude; the Microsoft
+    # Store / MSIX build virtualizes that path, so a write to %APPDATA%\Claude is SILENTLY IGNORED there
+    # and the real config lives under the package's LocalCache (confirmed live: this project's own VM has
+    # the Store build, at Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\Claude). Prefer the MSIX
+    # location when a Claude package is present (its Roaming\Claude directory exists), else the standard
+    # path.
+    $pkg = Get-ChildItem (Join-Path $env:LOCALAPPDATA 'Packages') -Filter 'Claude*' -Directory -ErrorAction SilentlyContinue |
+        Where-Object { Test-Path (Join-Path $_.FullName 'LocalCache\Roaming\Claude') -ErrorAction SilentlyContinue } |
+        Select-Object -First 1
+    if ($pkg) { return (Join-Path $pkg.FullName 'LocalCache\Roaming\Claude\claude_desktop_config.json') }
+    return (Join-Path $env:APPDATA 'Claude\claude_desktop_config.json')
+}
+
+function Add-DesktopMcpServer([string]$ConfigPath, [string]$Name, [string]$Command, [string[]]$Arguments) {
+    # Merge one stdio server into Claude Desktop's config WITHOUT disturbing any other server or
+    # top-level key. $false (a no-op) when Claude Desktop is not installed for this user (its config
+    # directory is absent). Backs the file up first. Writes UTF-8 with NO BOM -- a leading BOM breaks
+    # some JSON parsers and the file is strict JSON.
+    $dir = Split-Path $ConfigPath
+    if (-not (Test-Path $dir)) { return $false }
+    $cfg = if (Test-Path $ConfigPath) { (Get-Content $ConfigPath -Raw) | ConvertFrom-Json } else { [pscustomobject]@{} }
+    # Create mcpServers when it is absent OR present-but-null (a config with `"mcpServers": null` would
+    # otherwise pass the property check and then throw on the Add-Member below).
+    if (-not $cfg.PSObject.Properties['mcpServers'] -or $null -eq $cfg.mcpServers) {
+        $cfg | Add-Member -NotePropertyName 'mcpServers' -NotePropertyValue ([pscustomobject]@{}) -Force
+    }
+    $entry = [pscustomobject][ordered]@{ type = 'stdio'; command = $Command; args = @($Arguments) }
+    $cfg.mcpServers | Add-Member -NotePropertyName $Name -NotePropertyValue $entry -Force
+    # Back up only once, so a re-install never overwrites the pristine pre-install backup.
+    if ((Test-Path $ConfigPath) -and -not (Test-Path "$ConfigPath.mcpbridge.bak")) { Copy-Item $ConfigPath "$ConfigPath.mcpbridge.bak" -Force }
+    [System.IO.File]::WriteAllText($ConfigPath, ($cfg | ConvertTo-Json -Depth 20), (New-Object System.Text.UTF8Encoding($false)))
+    return $true
+}
+
+function Remove-DesktopMcpServer([string]$ConfigPath, [string]$Name) {
+    # Remove one server from Claude Desktop's config, leaving every other server and key intact. No-op
+    # (and $false) when the file, the mcpServers key, or the named entry is absent.
+    if (-not (Test-Path $ConfigPath)) { return $false }
+    $cfg = (Get-Content $ConfigPath -Raw) | ConvertFrom-Json
+    if (-not $cfg.PSObject.Properties['mcpServers'] -or -not $cfg.mcpServers.PSObject.Properties[$Name]) { return $false }
+    $cfg.mcpServers.PSObject.Properties.Remove($Name)
+    [System.IO.File]::WriteAllText($ConfigPath, ($cfg | ConvertTo-Json -Depth 20), (New-Object System.Text.UTF8Encoding($false)))
+    return $true
+}
+
 if ($LoadFunctionsOnly) { return }
 
 try {
@@ -474,8 +526,46 @@ if ($Uninstall) {
             }
         }
         $dir = Get-AddinsDir $version $Scope
-        Remove-Item "$dir\MCPBridge.*" -Force -ErrorAction SilentlyContinue
-        Remove-Item "$dir\Microsoft.CodeAnalysis*.dll" -Force -ErrorAction SilentlyContinue
+        # Install deploys a self-contained payload STRAIGHT into Addins\<version> (Copy-Item
+        # "$payloadDir\*"): the .addin manifest, MCPBridge.* and Roslyn, plus Eichler.Connectors.Revit.*,
+        # the SQLite stack, System.Data.Common, the localization satellite folders and runtimes\. A
+        # self-contained payload OWNS the folder, so remove the whole folder -- but only when every entry
+        # in it is demonstrably ours. A bare "our .addin is the only manifest here" test is NOT sufficient:
+        # a third-party add-in whose manifest lives in the all-users Addins location can still drop its
+        # DLLs into this per-user folder, leaving no foreign *.addin here, and whole-folder removal would
+        # then delete their files. So require that EVERY top-level entry matches our payload before
+        # removing the folder; otherwise remove only our own members (satellite resource DLLs and
+        # runtimes\ included) and leave anything foreign untouched.
+        $ownedPatterns = @('MCPBridge.*', 'Eichler.Connectors.Revit.*', 'Microsoft.CodeAnalysis*',
+                           'Microsoft.Data.Sqlite.dll', 'e_sqlite3.dll', 'SQLitePCLRaw.*',
+                           'System.Data.Common.dll', 'runtimes')
+        if (Test-Path (Join-Path $dir 'MCPBridge.addin')) {
+            $oursOnly = $true
+            foreach ($e in @(Get-ChildItem $dir -ErrorAction SilentlyContinue)) {
+                $matched = $false
+                foreach ($p in $ownedPatterns) { if ($e.Name -like $p) { $matched = $true; break } }
+                # A locale satellite dir (de\, pt-BR\, zh-Hans\, ...) holding only *.resources.dll is ours
+                # (Roslyn's localized resources), so it doesn't disqualify the folder.
+                if (-not $matched -and $e.PSIsContainer -and $e.Name -match '^[A-Za-z]{2}(-[A-Za-z]+)?$') {
+                    $inner = @(Get-ChildItem $e.FullName -File -ErrorAction SilentlyContinue)
+                    if ($inner.Count -gt 0 -and -not ($inner | Where-Object { $_.Name -notlike '*.resources.dll' })) { $matched = $true }
+                }
+                if (-not $matched) { $oursOnly = $false; break }
+            }
+            if ($oursOnly) {
+                Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue
+            } else {
+                foreach ($pat in $ownedPatterns) { Remove-Item (Join-Path $dir $pat) -Force -Recurse -ErrorAction SilentlyContinue }
+                # Roslyn's localized resource DLLs sit inside locale subfolders; remove just those (and any
+                # locale folder they leave empty), so a third party's resources in the same folder survive.
+                foreach ($sub in @(Get-ChildItem $dir -Directory -ErrorAction SilentlyContinue)) {
+                    Remove-Item (Join-Path $sub.FullName 'Microsoft.CodeAnalysis*.resources.dll') -Force -ErrorAction SilentlyContinue
+                    if (-not @(Get-ChildItem $sub.FullName -Force -ErrorAction SilentlyContinue)) { Remove-Item $sub.FullName -Force -ErrorAction SilentlyContinue }
+                }
+            }
+        }
+        # A DLL surviving removal means a running Revit held it locked -- the "close it and re-run" case
+        # below. Revit doesn't hold the .addin manifest open, so the loaded DLL is the reliable signal.
         if (Test-Path (Join-Path $dir 'MCPBridge.AddIn.dll')) { $leftoverVersions += $version }
     }
     Unregister-ScheduledTask -TaskName (Get-PendingUpdateTaskName $Scope) -Confirm:$false -ErrorAction SilentlyContinue
@@ -502,9 +592,12 @@ if ($Uninstall) {
         Remove-Item "$env:LocalAppData\Connectors\Revit\models" -Recurse -Force -ErrorAction SilentlyContinue
     }
     Remove-Item $uninstallKeyPath -Recurse -Force -ErrorAction SilentlyContinue
+    # Deregister from the Claude clients install registered it with -- CLI at the same user scope, and
+    # Claude Desktop's config (Cowork reads the same file), leaving any other MCP servers there intact.
     if (Get-Command claude -ErrorAction SilentlyContinue) {
-        & claude mcp remove revit 2>$null | Out-Null
+        & claude mcp remove revit --scope user 2>$null | Out-Null
     }
+    try { Remove-DesktopMcpServer (Get-DesktopConfigPath) 'revit' | Out-Null } catch { }
     if ($leftoverVersions.Count -gt 0) {
         Write-Host "Revit MCP Bridge uninstalled. Revit $($leftoverVersions -join ', ') still has some files locked -- close it and re-run this uninstaller to finish cleaning up."
     } else {
@@ -811,18 +904,79 @@ if (-not $accounted) {
     return
 }
 
-# --- Register the MCP Server with Claude ------------------------------------------------------------
-# Local-mode (this machine runs both Revit and Claude Code) only -- the Mac+Parallels remote-mode
-# case is a separate, shorter macOS/bash counterpart script that runs on the Mac host and points
-# -mode remote at the VM's shared folder (PRD §12 "Mac + Parallels"), not this script's job.
-if ((Test-Path $serverExe) -and (Get-Command claude -ErrorAction SilentlyContinue)) {
-    # Remove-then-add rather than checking for an existing entry first: idempotent by construction
-    # (matches this whole script's own design principle) without needing to parse `claude mcp list`
-    # output or assume a particular error shape from a re-add of an existing name.
-    & claude mcp remove revit 2>$null | Out-Null
-    & claude mcp add revit -- $serverExe --mode local
-} elseif (Test-Path $serverExe) {
-    Write-Host "Claude Code CLI not found on PATH -- skipping MCP registration. Add it manually: $serverExe --mode local"
+# --- Register the MCP Server with the user's Claude clients -----------------------------------------
+# The broker is a local stdio MCP server (mcp-server.exe --mode local, PRD §05). Connect it to the
+# clients this user has -- Claude Code CLI, and Claude Desktop (which is also what Cowork reads) -- and
+# print exact instructions for whatever couldn't be done automatically. (The Mac+Parallels remote-mode
+# dev topology registers on the Mac side via install-mac.sh, not here.)
+if (Test-Path $serverExe) {
+    $registered = @()
+    $todo = @()
+
+    # Claude Code CLI: `claude mcp add` at USER scope, so it is available in EVERY project (the default
+    # `local` scope binds it to the current project only). Remove-then-add is idempotent by construction,
+    # no need to parse `claude mcp list`.
+    if (Get-Command claude -ErrorAction SilentlyContinue) {
+        & claude mcp remove revit --scope user 2>$null | Out-Null
+        # A native exe's non-zero exit does NOT throw under $ErrorActionPreference='Stop' (it only sets
+        # $LASTEXITCODE), so an old/broken `claude` would otherwise be reported as success while its raw
+        # error spews. Capture its output and gate the "connected" claim on the exit code.
+        $addOut = & claude mcp add --scope user revit -- $serverExe --mode local 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            $registered += 'Claude Code CLI (user scope, every project)'
+        } else {
+            $addTail = ($addOut | Select-Object -Last 1)
+            $todo += "Claude Code CLI: automatic registration failed ($addTail). Update the claude CLI, then run: claude mcp add --scope user revit -- `"$serverExe`" --mode local"
+        }
+    } else {
+        $todo += "Claude Code CLI (when its CLI is on PATH): claude mcp add --scope user revit -- `"$serverExe`" --mode local"
+    }
+
+    # Claude Desktop + Cowork: merge the entry into claude_desktop_config.json (no CLI edits it). Both
+    # the path probe and the merge run inside one try/catch so an unreadable Packages\ dir or a
+    # hand-corrupted config falls to printed instructions instead of aborting a nearly-done install.
+    $desktopCfg = $null
+    $desktopOk = $false
+    $desktopErr = $null
+    try {
+        $desktopCfg = Get-DesktopConfigPath
+        $desktopOk = Add-DesktopMcpServer $desktopCfg 'revit' $serverExe @('--mode', 'local')
+    } catch { $desktopOk = $false; $desktopErr = $_.Exception.Message }
+    if ($desktopOk) {
+        $registered += 'Claude Desktop / Cowork (restart Claude Desktop to load it)'
+    } else {
+        $cfgHint = if ($desktopCfg) { $desktopCfg } else { '%APPDATA%\Claude\claude_desktop_config.json (or your Claude Desktop config)' }
+        $jsonExe = $serverExe.Replace('\', '\\')
+        $jsonNote = if ($desktopErr -and $desktopErr -match 'JSON|Convert|parse|token') { "your existing config at $cfgHint isn't valid JSON ($desktopErr) -- fix that first, then " } else { '' }
+        $todo += "Claude Desktop / Cowork: ${jsonNote}add this under `"mcpServers`" in $cfgHint, then restart Claude Desktop:`n      `"revit`": { `"type`": `"stdio`", `"command`": `"$jsonExe`", `"args`": [`"--mode`", `"local`"] }"
+    }
+
+    if ($registered.Count -gt 0) { Write-Host "Connected the revit MCP server to: $($registered -join '; ')." }
+    foreach ($t in $todo) { Write-Host "To finish connecting it -- $t" }
+    Write-Host "(It runs as: `"$serverExe`" --mode local. Restart any client that was open when this ran, so it reloads its MCP config.)"
+}
+
+# --- Confirm the broker carries the search-ranking embedding models --------------------------------
+# A release built by release.yml always fetches the models before building, so a normal install has
+# them; only a hand-built -LocalPackagePath zip made without the fetch-models step would not -- and
+# then search_functions/search_howtos would silently rank LEXICAL-ONLY. `-search-models` prints one
+# line and exits, so this is a cheap probe; it exits non-zero when the models are missing, which under
+# $ErrorActionPreference='Stop' does NOT throw for a native exe (only $LASTEXITCODE is set), so guard
+# on the printed text rather than the exit code. Warn, don't fail: a lexical-only broker still works.
+if (Test-Path $serverExe) {
+    # This is a courtesy probe at the very end of an otherwise-successful install, so it must never be
+    # able to abort it: run the broker in a job with a timeout (a corrupt or wrong-arch exe could throw
+    # on launch; a wedged one could hang forever) and warn only on a definitive "not bundled" answer.
+    # If the probe can't run or times out, stay silent -- the install already succeeded.
+    $modelsLine = $null
+    try {
+        $probe = Start-Job -ScriptBlock { param($exe) & $exe -search-models 2>&1 | Select-Object -First 1 } -ArgumentList $serverExe
+        if (Wait-Job $probe -Timeout 20) { $modelsLine = (Receive-Job $probe | Select-Object -First 1) } else { Stop-Job $probe -ErrorAction SilentlyContinue }
+        Remove-Job $probe -Force -ErrorAction SilentlyContinue
+    } catch { $modelsLine = $null }
+    if ($modelsLine -and "$modelsLine" -notmatch 'bundled') {
+        Write-Host "WARNING: the installed broker has NO search-ranking models bundled -- search_functions/search_howtos will rank keyword-only. Expected only for a -LocalPackagePath build made without fetch-models; a real release always includes them. ($modelsLine)"
+    }
 }
 
 # --- Programs & Features entry ------------------------------------------------------------------------
@@ -855,6 +1009,26 @@ switch ($brokerOutcome) {
 }
 Write-Host $summary
 
+} catch {
+    # Turn any terminating error into a clear, actionable message instead of a raw PowerShell error
+    # record surfacing through `irm | iex`. The crafted `throw`s above already carry a friendly
+    # sentence; anything else (a dropped connection, a rate-limited GitHub API, a corrupt download, a
+    # locked or ACL-blocked file) arrives here as its raw exception, so map the common shapes to a hint.
+    $msg = $_.Exception.Message
+    $hint = switch -Regex ($_.Exception.GetType().FullName + ' ' + $msg) {
+        'remote name|could not be resolved|Unable to connect|HttpRequest|WebException|SocketException' {
+            "`n  Check your internet connection and re-run. If it persists, GitHub may be rate-limiting this network -- wait a few minutes." }
+        '\(403\)|rate limit' {
+            "`n  GitHub is rate-limiting anonymous downloads from this network. Wait a few minutes and re-run." }
+        'Central Directory|Expand-Archive|corrupt|Zip' {
+            "`n  The downloaded package looks corrupt -- re-run to download it again." }
+        'Access to the path|UnauthorizedAccess|used by another process|is denied' {
+            "`n  A file is locked or access was denied. Close Revit and any running MCP client, then re-run (or try again as Administrator with -Scope AllUsers)." }
+        default { '' }
+    }
+    Write-Host ''
+    Write-Host "Revit MCP Bridge install did not complete: $msg$hint"
+    exit 1
 } finally {
     if ($BootstrapCreated -and (Test-Path $ScriptPath)) { Remove-Item $ScriptPath -Force -ErrorAction SilentlyContinue }
 }

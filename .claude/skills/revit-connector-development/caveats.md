@@ -25,8 +25,8 @@ out — work down, don't guess.
 | 5 | Deployed to the *other* Revit version's folder | Per-version Addins folders drift independently — grep every one |
 | 6 | An env var change didn't reach the process | The launcher agent holds a stale environment snapshot; restart the agent, not just Revit |
 | 7 | A shadow copy in Revit's install directory is winning | Log every loaded assembly's `.Location` early in `OnStartup` |
-| 8 | You deployed from the wrong checkout | `redeploy-and-verify.sh --share-name`; its identity guard refuses rather than reporting PASS |
-| 9 | The change was **broker-side** and only the add-in was redeployed | Ask the running broker, not the repo: `get_skills`' `build` field, or `<broker> -version`, names the revision compiled in. `skill.md`, every tool schema and every tool description live in the mcp-server binary; no add-in redeploy can move them, and `redeploy-and-verify.ps1` never builds Go at all (issue #116) |
+| 8 | You deployed from the wrong checkout | `deploy-and-verify.sh --share-name`; its identity guard refuses rather than reporting PASS |
+| 9 | The change was **broker-side** and only the add-in was redeployed | Ask the running broker, not the repo: `get_skills`' `build` field, or `<broker> -version`, names the revision compiled in. `skill.md`, every tool schema and every tool description live in the mcp-server binary; no add-in redeploy can move them, and `deploy-and-verify.ps1` never builds Go at all (issue #116) |
 
 **Check for the log's startup line before reasoning about anything after it, in `connection.log`
 *and* `connection.log.old`.** A session opens with `RunConnectionLoop starting. Mode=... ConnectorRoot=...`
@@ -55,7 +55,7 @@ reports zero.
 | The client's deadline is shorter than the server's | Compare them. A client giving up early is indistinguishable from a hung script from the outside |
 | A modal dialog has stopped the idle loop | Screenshot. `list_instances` still answers, `execute_script` doesn't |
 | Genuinely long work | Revit slows as a session accumulates documents; creating documents is slow |
-| The run started seconds after a Revit **restart**, so the first `execute_script` raced Roslyn's cold start (measured: **~6.9s**) | Mostly fixed at source — the add-in logs `script pipeline warm: … execute_script is ready` and `redeploy-and-verify` now waits for it before reporting `PASS`. If you still see this, you either launched Revit outside that script or it printed the `WARNING: no 'script pipeline warm' line` fallback. Re-run the failing case warm: passing unchanged means cold start, not a regression |
+| The run started seconds after a Revit **restart**, so the first `execute_script` raced Roslyn's cold start (measured: **~6.9s**) | Mostly fixed at source — the add-in logs `script pipeline warm: … execute_script is ready` and `deploy-and-verify` now waits for it before reporting `PASS`. If you still see this, you either launched Revit outside that script or it printed the `WARNING: no 'script pipeline warm' line` fallback. Re-run the failing case warm: passing unchanged means cold start, not a regression |
 | `wire-call-failed / context deadline exceeded` on the START (or a poll) of a long-runner, intermittently, worse after a suite's worth of work — the §07 window-inventory diagnostic blocked the pending response past the broker's `timeout_ms + 5s` budget (issue #136) | `connection.log`'s `[#136]` lines show the inventory pass's elapsed. Fixed in #138 — the inventory is now capped to the wire-budget slice it can spare and dropped otherwise; since #149 the drop is stated on the wire as a `window-inventory-skipped` notice (`detail.reason` `ui-thread-busy` or `wire-budget-too-small`), so a pending answer is never silent about dialogs. If you see it again, the cap regressed or a *different* thing is delaying the timeout-branch response; the inventory is only one occupant of that path |
 
 **The reusable trap under #136: `SendMessageTimeout(WM_GETTEXT, …, uTimeout)` does NOT bound a single
@@ -150,6 +150,22 @@ still exists — here, against the XML rather than the rendered string.
 
 **And prefer the shape that cannot drift.** A guard that reflects, parses, or derives from the real artifact stays true; one that restates a rule in a second language goes stale the first time the rule moves. That is the whole argument behind issue #91: five hand-maintained lists, three already wrong.
 
+## Symptom: `search_functions` / `search_howtos` ranks keyword-only
+
+The response's `ranker` field says `lexical` (and the guidance says "the embedding models were not
+bundled"). Search still returns results, but the semantic + cross-encoder pipeline (#154) is absent,
+so recall on task-style phrasings drops — this is not a ranking bug to chase in the ranker code.
+
+| Cause | Definitive check |
+|---|---|
+| The **broker** serving your session was built without the embedded models (`fetch-models` not run before `go build`) | Ask the binary, not the ranking: `<broker> -search-models` prints `bundled` or `not usable`. It is broker-side, so no add-in redeploy changes it — same family as symptom #9 above |
+
+`deploy-and-verify.sh` and the release pipeline (`release.yml`) both run `fetch-models` before the
+`go build`, so a broker from either is fine. The lexical-only broker comes from a bare `go build` for
+a quick local binary, or a `-LocalPackagePath` install zip built without the fetch step (`install.ps1`
+warns when it detects one). The models are `go:embed`ed at build time, so the fix is a rebuild with
+the fetch, not a config toggle or a restart.
+
 ## Symptom: a live run stalls with no error
 
 Screenshot first (`dev-environment.md` → When something looks wrong). A modal can hide *behind*
@@ -196,7 +212,7 @@ and belongs in git, not here.
 | Looked like | Actually was | What settled it |
 |---|---|---|
 | Thread-pool starvation stalling the reconnect loop | An unbounded synchronous `broker.json` read wedged by host I/O contention | Reading the code: nothing in the call was async or pool-scheduled, so the proposed mechanism could not exist |
-| Broken document tracking (`documents: []`) in a suspect PR; later, a freshly deployed add-in answering `unknown-method` for a method its DLL demonstrably contained (marker check passed) | A `*.launch` signal consumed before its payload was written. Second time: `redeploy-and-verify --revit-exe` without `--doc-dest` wrote a ONE-line signal, which the agent reads as a document path — so the default 2027 launched with the 2025 exe path as its document, and that instance's old add-in registered as if the deploy had worked | Revit's journal and process command line had no document path — so Revit was never asked. Second time: Revit's loaded modules (`Get-Process Revit \| % Modules`) pointed at `Addins\2027` and `C:\dev\launcher-agent.log` read `1 line(s); exe=…2027…; doc=…Revit 2025\Revit.exe`. The marker check reads the DLL on disk, not the one loaded; the script now refuses exe-only |
+| Broken document tracking (`documents: []`) in a suspect PR; later, a freshly deployed add-in answering `unknown-method` for a method its DLL demonstrably contained (marker check passed) | A `*.launch` signal consumed before its payload was written. Second time: `deploy-and-verify --revit-exe` without `--doc-dest` wrote a ONE-line signal, which the agent reads as a document path — so the default 2027 launched with the 2025 exe path as its document, and that instance's old add-in registered as if the deploy had worked | Revit's journal and process command line had no document path — so Revit was never asked. Second time: Revit's loaded modules (`Get-Process Revit \| % Modules`) pointed at `Addins\2027` and `C:\dev\launcher-agent.log` read `1 line(s); exe=…2027…; doc=…Revit 2025\Revit.exe`. The marker check reads the DLL on disk, not the one loaded; the script now refuses exe-only |
 | A wedged Revit rejecting calls as `busy` | The harness's own 20s client deadline against a 30s server default | A clean restart reproduced it one subtest later, which ruled out accumulated state |
 | A stale add-in defeating an env var fix | `prlctl exec` answering the env query as SYSTEM, not the interactive user | The add-in's own log said `Mode=Local` while the query said `remote` — two accounts, read as one |
 | Types failing to load because they were new/malformed | An orphaned DLL in Revit's install directory shadowing every redeploy | Logging loaded assemblies' `.Location` |
@@ -233,7 +249,7 @@ cancelled each other until Revit's cancellation grace expired.
 
 **Fix:** one live harness session per Revit at a time. Parallelise authoring, serialise verification.
 `TestHowToSweep` no longer calls `ensureInstanceIdle` per document for this reason. Recover with
-`revit/dev-tooling/redeploy-and-verify.sh --skip-copy --doc-source … --doc-dest …` (a relaunch with no
+`revit/dev-tooling/deploy-and-verify.sh --skip-copy --doc-source … --doc-dest …` (a relaunch with no
 `--doc-dest` opens no document, and every case then skips with "connected instance has no open
 document").
 

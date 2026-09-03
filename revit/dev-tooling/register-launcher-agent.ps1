@@ -1,6 +1,6 @@
 # The VM's interactive user the agent should run as. This script is run BY that user in their
 # own session (the task it registers is Interactive/AtLogOn for them), so $env:USERNAME is the
-# right default -- unlike redeploy-and-verify.ps1, which runs via `prlctl exec` as SYSTEM and
+# right default -- unlike deploy-and-verify.ps1, which runs via `prlctl exec` as SYSTEM and
 # must detect the console user instead.
 param(
     [string]$InteractiveUser = $env:USERNAME

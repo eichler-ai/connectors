@@ -122,7 +122,7 @@ fi
 # repository by walking up for a `.git` DIRECTORY, so a build made inside a git worktree gets the
 # ENCLOSING checkout's revision, or none at all. Declaring it here means the binary reports the tree
 # it was actually built from, which is what makes `get_skills`' own "compare this against
-# `git rev-parse HEAD`" advice safe to give. Same shape in dev-tooling/redeploy-and-verify.sh.
+# `git rev-parse HEAD`" advice safe to give. Same shape in dev-tooling/deploy-and-verify.sh.
 #
 # "Modified" here counts uncommitted changes to TRACKED files only -- `git status --porcelain` would
 # also flip on any stray untracked scratch file, and a warning that is permanently on stops being

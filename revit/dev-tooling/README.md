@@ -17,6 +17,6 @@ included, and there are many — lives in the `revit-connector-development` skil
 |---|---|---|
 | `launcher-agent.ps1` | VM (deployed to `C:\dev\`, runs at logon) | watches a signal directory to start/stop Revit and the broker inside the interactive user's session — `prlctl exec` runs as SYSTEM and can't |
 | `register-launcher-agent.ps1` | VM (run once, as the interactive user) | registers the launcher agent's AtLogOn scheduled task |
-| `redeploy-and-verify.sh` | Mac (entry point) | one-command build → close → redeploy → relaunch → verify cycle; reacts to stale-registration markers by restarting the Mac-side broker |
-| `redeploy-and-verify.ps1` | VM (invoked by the `.sh` via `prlctl exec`) | the VM-side half of that cycle |
+| `deploy-and-verify.sh` | Mac (entry point) | one-command build → close → redeploy → relaunch → verify cycle; reacts to stale-registration markers by restarting the Mac-side broker |
+| `deploy-and-verify.ps1` | VM (invoked by the `.sh` via `prlctl exec`) | the VM-side half of that cycle |
 | `launch-revit-discovery.bat` | VM | minimal manual launcher: sets remote-mode env vars and starts Revit |

@@ -138,12 +138,12 @@ can't land in the wrong order.
 
 Both **Revit 2025 and 2027 are installed** on this VM, and the add-in multi-targets for both
 (`net8.0-windows` / `net10.0-windows`). Tier 1 runs both legs. **The live harness had never once run
-against 2025**, and the reason was tooling, not choice: `redeploy-and-verify.ps1` always wrote an empty
+against 2025**, and the reason was tooling, not choice: `deploy-and-verify.ps1` always wrote an empty
 line 1 into its `*.launch` signal — the alternate-exe slot the launcher agent has always honoured — so
 it could only ever relaunch 2027. `--revit-exe` now exposes it:
 
 ```sh
-revit/dev-tooling/redeploy-and-verify.sh --build \
+revit/dev-tooling/deploy-and-verify.sh --build \
   --revit-exe 'C:\Program Files\Autodesk\Revit 2025\Revit.exe' \
   --tfm net8.0-windows --revit-version 2025 --doc-dest '<a 2025-saved .rvt>'
 ```
@@ -276,7 +276,7 @@ re-resolve rather than hardcoding either. `robocopy` from `cmd /c` mangles a `\\
   leave one TFM leg with no output while the other reports clean. `Test-Path` the per-TFM test DLL.
 - To use a worktree for Bridge work, share it in, then tell the deploy script which share to use:
   `prlctl set <vm> --shf-host-add <name> --path <worktree-path>`, then
-  `redeploy-and-verify.sh --share-name <name>`. Without the flag it resolves the *main* checkout's
+  `deploy-and-verify.sh --share-name <name>`. Without the flag it resolves the *main* checkout's
   share and deploys that, which the script now refuses rather than reporting a PASS for a tree you
   did not change.
 - **A share name containing a backslash-escape sequence corrupts an inline `-Command`** — a share
@@ -340,7 +340,7 @@ re-resolve rather than hardcoding either. `robocopy` from `cmd /c` mangles a `\\
 - **The running broker is only as current as the last time something BUILT it.** `install-mac.sh` is
   a one-time setup step, so the binary `claude mcp add` registered can predate the repo by weeks
   while serving compiled-in content — `skill.md`, the tool schemas, the descriptions — as if it were
-  current (issue #116). `redeploy-and-verify.sh` now rebuilds and restarts it each run; ask a broker
+  current (issue #116). `deploy-and-verify.sh` now rebuilds and restarts it each run; ask a broker
   which source it is, with `mcp-server -version` or `get_skills`' `build` field, rather than assuming
   it matches the checkout you are reading.
 - **`go build` stamps the source revision automatically — and gets it WRONG in a git worktree.** The
@@ -363,7 +363,7 @@ re-resolve rather than hardcoding either. `robocopy` from `cmd /c` mangles a `\\
 
 ## Scripts
 
-- **`revit/dev-tooling/redeploy-and-verify.sh`** (Mac entry point) + **`.ps1`** (VM side): the
+- **`revit/dev-tooling/deploy-and-verify.sh`** (Mac entry point) + **`.ps1`** (VM side): the
   consolidated build → close → deploy → relaunch → verify cycle. Resolves the share alias fresh,
   ensures a healthy Mac broker, optionally byte-grep-verifies the deploy (`--marker`), and waits for a
   fresh `connected: auth+register` line with the expected document count.

@@ -34,7 +34,7 @@ Design rationale for all of it: [`PRD.md`](PRD.md) §06 (execution), §07 (dialo
 > revit/mcp-server/internal/mcpserver/skill.md` printing anything else means the broker is
 > not your checkout. The revision is a weaker signal — the Go toolchain infers it, and
 > misattributes it for a build made inside a git worktree, so only builds that stamp it
-> explicitly (`install-mac.sh`, `redeploy-and-verify.sh`) offer a revision comparison.
+> explicitly (`install-mac.sh`, `deploy-and-verify.sh`) offer a revision comparison.
 
 > The `build` block also carries `howto_corpus` — the shared how-to corpus compiled into this
 > broker: `documents`, a 12-hex content `hash`, and `verified_on` (the Revit versions at least one
