@@ -58,9 +58,13 @@ public sealed class MCPBridgeStatusCommand : IExternalCommand
             var installedTag = UpdateTrigger.TryReadInstalledVersion();
             if (installedTag is not null && string.Equals(UpdateAvailability.DisplayTag(installedTag), latestTag, StringComparison.OrdinalIgnoreCase))
             {
+                // "Quit fully": found live -- closing Claude Desktop's window left its server process
+                // (and therefore the old image) running; only a real quit, or reconnecting the revit
+                // server inside the client, starts the new exe.
                 content +=
-                    $"\n\n{latestTag} is installed. The MCP Server you are connected to is still {runningTag}: " +
-                    "restart your MCP client (Claude Desktop, Claude Code) or reconnect its revit server to load the new one.";
+                    $"\n\n{latestTag} is installed. The MCP Server you are connected to is still {runningTag}. " +
+                    "To load the new one, reconnect the revit server in your MCP client, or quit the client fully " +
+                    "(closing its window may leave the old server running) and start it again.";
                 MCPBridgeStatusWindow.ShowOrActivate(ownerHandle, content);
                 return Result.Succeeded;
             }
