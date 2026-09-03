@@ -121,6 +121,22 @@ Describe 'Install-BrokerStaged' {
         Get-Content (Join-Path $app 'mcp-server.exe') -Raw | Should -Be 'old-exe'
         Get-Content (Join-Path $app 'mcp-server.exe.new') -Raw | Should -Be 'new-exe'
     }
+    It 'reports staged, not pending, when the exe already is the new image and the old one still runs from a locked .old (issue #192 live test)' {
+        New-Payload $app @{ 'mcp-server.exe' = 'new-exe'; 'mcp-server.exe.old' = 'old-exe' }
+        Mock Get-BrokerProcess { @([pscustomobject]@{ Id = 4242 }) }
+        # A locked .old: the move onto it fails (a real Remove-Item on it is non-terminating and silent).
+        Mock Move-Item { throw 'locked' } -ParameterFilter { $Destination -like '*.old' }
+        Install-BrokerStaged $payload $app | Should -Be 'staged'
+        Should -Invoke Move-Item -Times 0 -Exactly
+        Get-Content (Join-Path $app 'mcp-server.exe') -Raw | Should -Be 'new-exe'
+        Test-Path (Join-Path $app 'mcp-server.exe.new') | Should -BeFalse
+    }
+    It 'reports swapped and clears .old when the exe already is the new image and nothing is running' {
+        New-Payload $app @{ 'mcp-server.exe' = 'new-exe'; 'mcp-server.exe.old' = 'old-exe' }
+        Install-BrokerStaged $payload $app | Should -Be 'swapped'
+        Test-Path (Join-Path $app 'mcp-server.exe.new') | Should -BeFalse
+        Test-Path (Join-Path $app 'mcp-server.exe.old') | Should -BeFalse
+    }
     It 'Complete-PendingBrokerSwap recovers the moved-aside state (no exe, .old and .new present)' {
         New-Payload $app @{ 'mcp-server.exe.old' = 'old-exe'; 'mcp-server.exe.new' = 'new-exe' }
         Complete-PendingBrokerSwap $app | Should -BeTrue
@@ -306,5 +322,59 @@ Describe 'Register-McpServer -- Claude Code CLI wiring' {
         Mock Invoke-ClaudeMcp { @{ ExitCode = 0; Output = @() } } -ParameterFilter { $CliArgs[0] -eq 'list' }
         Mock Invoke-ClaudeMcp { @{ ExitCode = 1; Output = @('some CLI error') } } -ParameterFilter { $CliArgs[0] -eq 'add' }
         { Register-McpServer $fakeExe 6>$null } | Should -Not -Throw
+    }
+}
+
+Describe 'Self-copy source (issue #192): the installed install.ps1 must be the full script, never the irm|iex stub' {
+    BeforeAll {
+        $script:fullScript = Get-Content (Join-Path $PSScriptRoot 'install.ps1') -Raw
+        $script:stub = 'irm https://raw.githubusercontent.com/eichler-ai/connectors/main/revit/install.ps1 | iex'
+    }
+    It 'recognises the real script and rejects the one-liner stub, empty text, and a truncated script' {
+        Test-IsFullInstallerScript $fullScript | Should -BeTrue
+        Test-IsFullInstallerScript $stub | Should -BeFalse
+        Test-IsFullInstallerScript '' | Should -BeFalse
+        Test-IsFullInstallerScript $fullScript.Substring(0, 5000) | Should -BeFalse
+    }
+    It 'rejects a download truncated PAST both markers (review of #193: markers alone let 73% missing through)' {
+        # Both markers live in the first ~6 KB; a cut anywhere after them must still fail, at any length.
+        foreach ($len in 20000, 40000, ($fullScript.Length - 200)) {
+            Test-IsFullInstallerScript $fullScript.Substring(0, $len) | Should -BeFalse -Because "a $len-byte prefix is not the installer"
+        }
+    }
+    It 'rejects a script with an intact tail but a corrupted middle (the sentinel alone cannot see that)' {
+        # Anchored on a code line, not a byte offset: an offset can land inside a comment, where any
+        # text is legal and the parser rightly sees nothing wrong.
+        $at = $fullScript.IndexOf("`nfunction Copy-SelfIfNeeded(") + 1  # the definition line, not the string literal naming it
+        $corrupt = $fullScript.Substring(0, $at) + "{{{`n" + $fullScript.Substring($at)
+        Test-IsFullInstallerScript $corrupt | Should -BeFalse
+    }
+    It 'uses the invocation definition when it is the full script, without touching the network' {
+        Mock Invoke-WebRequest { throw 'network must not be used' }
+        Get-InstallerSourceForBootstrap $fullScript 'https://example.invalid/install.ps1' | Should -Be $fullScript
+        Should -Invoke Invoke-WebRequest -Times 0 -Exactly
+    }
+    It 'fetches the canonical script when the definition is the piped one-liner (what iex actually yields)' {
+        Mock Invoke-WebRequest { [pscustomobject]@{ Content = $fullScript } }
+        Get-InstallerSourceForBootstrap $stub 'https://example.invalid/install.ps1' | Should -Be $fullScript
+        Should -Invoke Invoke-WebRequest -Times 1 -Exactly
+    }
+    It 'throws rather than bootstrap from a download that is not the installer' {
+        Mock Invoke-WebRequest { [pscustomobject]@{ Content = $stub } }
+        { Get-InstallerSourceForBootstrap $stub 'https://example.invalid/install.ps1' } | Should -Throw '*did not look like the installer*'
+    }
+    It 'Copy-SelfIfNeeded refuses to install a stub as the self-copy and leaves the destination untouched' {
+        $src = Join-Path $TestDrive 'stub.ps1'; $dst = Join-Path $TestDrive 'app\install.ps1'
+        New-Item -ItemType Directory -Force (Split-Path $dst) | Out-Null
+        Set-Content $src $stub
+        { Copy-SelfIfNeeded $src $dst } | Should -Throw '*not the full install.ps1*'
+        Test-Path $dst | Should -BeFalse
+    }
+    It 'Copy-SelfIfNeeded copies the full script' {
+        $src = Join-Path $TestDrive 'full.ps1'; $dst = Join-Path $TestDrive 'app2\install.ps1'
+        New-Item -ItemType Directory -Force (Split-Path $dst) | Out-Null
+        Set-Content $src $fullScript -NoNewline
+        Copy-SelfIfNeeded $src $dst
+        (Get-Content $dst -Raw) | Should -Be $fullScript
     }
 }
