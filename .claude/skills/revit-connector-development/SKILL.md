@@ -333,8 +333,10 @@ Three constraints that are not obvious, each found by violating it:
 Deploying it needs the **`.xml` sidecar beside the `.dll`**, and this is load-bearing rather than
 tidy: `DiscoveryReflector` treats a *missing* sidecar as "everything is documented", so a DLL-only
 deploy yields discovery with empty summaries — which looks like working discovery. `install.ps1`
-copies the whole build output and is fine; `deploy-and-verify.ps1` copies files **by name** and has
-to be extended when a project is added.
+copies the whole build output and is fine, as does `deploy-and-verify.ps1`'s **fresh-install** path
+(no manifest in the Addins dir → it copies the whole payload). Its **DLL-refresh** path copies files
+**by name** and has to be extended when a project is added — so the sidecar gap only reappears on a
+refresh of an already-installed add-in.
 
 **Verify the rendered text live, not the source.** Reading `describe_function`'s actual output is what
 caught two defects a source review would have passed: paragraphs concatenating without a separator,
