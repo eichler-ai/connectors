@@ -45,10 +45,7 @@ public sealed class MCPBridgeStatusCommand : IExternalCommand
         var content = BuildStatusContent(host);
         if (updateAvailable)
         {
-            // broker.json carries the release tag as published ("v0.1.2"); don't add a second "v"
-            // (rendered "vv0.1.1" on the first live update prompt). Tolerate either form.
-            var shown = latestAvailableVersion!.StartsWith("v", StringComparison.OrdinalIgnoreCase) ? latestAvailableVersion : "v" + latestAvailableVersion;
-            content += $"\n\nUpdate available ({shown})";
+            content += $"\n\nUpdate available ({UpdateAvailability.DisplayTag(latestAvailableVersion!)})";
         }
 
         var ownerHandle = commandData.Application.MainWindowHandle;
@@ -61,6 +58,7 @@ public sealed class MCPBridgeStatusCommand : IExternalCommand
                 actionLabel: "Update Now",
                 onAction: () => UpdateTrigger.TriggerUpdate(
                     ownerHandle,
+                    UpdateAvailability.DisplayTag(latestAvailableVersion!),
                     statusText => MCPBridgeStatusWindow.ShowOrActivate(ownerHandle, statusText)));
         }
         else

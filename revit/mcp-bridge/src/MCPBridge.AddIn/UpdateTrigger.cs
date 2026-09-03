@@ -46,7 +46,7 @@ internal static class UpdateTrigger
     /// look hung with no visible dialog (exactly the failure mode <see cref="MCPBridgeStatusWindow"/>'s
     /// own class doc comment describes going non-modal to avoid).
     /// </summary>
-    public static void TriggerUpdate(IntPtr ownerHandle, Action<string> onStarted)
+    public static void TriggerUpdate(IntPtr ownerHandle, string targetVersionTag, Action<string> onStarted)
     {
         // Independent review finding: picking whichever of the User/AllUsers install.ps1 paths
         // happens to exist first (existence-based inference) can invoke a stale copy from an old
@@ -87,18 +87,23 @@ internal static class UpdateTrigger
         // never force-kills -- it asks each Revit to close (Revit's own save prompt appears) and
         // defers any instance still running -- but "click, and Revit starts closing" with no warning
         // is still a surprise when unsaved work is open in several windows.
+        // Presentation (the user's feedback on the first version, a paragraph of caveats ending in
+        // "Yes/No"): the question names the version, the consequences are a short list, and the
+        // buttons are OK/Cancel with Cancel as the default so Enter backs out.
         var proceed = ShowOwnedMessageBox(
             ownerHandle,
-            "Update the Revit MCP Bridge now?\n\n" +
-            "If the add-in changed, every open Revit window -- of every installed Revit version -- will be asked to close. " +
-            "Revit will prompt you to save unsaved work first; if you cancel, that Revit keeps running and is " +
-            "updated automatically the next time you close it. Reopen Revit yourself afterwards.\n\n" +
+            $"Update Revit MCP Bridge to {targetVersionTag}?\n\n" +
+            "Revit will close to install the update:\n" +
+            "  •  You will be asked to save any unsaved work first.\n" +
+            "  •  This applies to every open Revit window, of every installed Revit version.\n" +
+            "  •  A Revit you keep open is updated the next time you close it.\n" +
+            "  •  Reopen Revit yourself when the update has finished.\n\n" +
             "If only the MCP Server changed, Revit stays open.",
-            "MCP Bridge - Update Now",
+            $"MCP Bridge - Update to {targetVersionTag}",
             MessageBoxImage.Question,
-            MessageBoxButton.YesNo,
-            MessageBoxResult.No); // Enter backs out; proceeding is the deliberate click.
-        if (proceed != MessageBoxResult.Yes)
+            MessageBoxButton.OKCancel,
+            MessageBoxResult.Cancel);
+        if (proceed != MessageBoxResult.OK)
         {
             return;
         }

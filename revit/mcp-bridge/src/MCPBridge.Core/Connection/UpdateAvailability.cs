@@ -12,6 +12,18 @@ namespace MCPBridge.Core.Connection;
 public static class UpdateAvailability
 {
     /// <summary>
+    /// The tag as shown to a person: exactly one leading "v". broker.json carries the release tag as
+    /// GitHub publishes it ("v0.1.2"), and the status window used to prepend another -- "vv0.1.1" on
+    /// the first live update prompt. Lives here, not in the ribbon command, so a broker that ever
+    /// starts writing bare "0.1.2" is caught by the tests rather than by a screenshot.
+    /// </summary>
+    public static string DisplayTag(string latestAvailableVersion)
+    {
+        var tag = (latestAvailableVersion ?? string.Empty).Trim();
+        return tag.StartsWith("v", StringComparison.OrdinalIgnoreCase) ? "v" + tag.Substring(1) : "v" + tag;
+    }
+
+    /// <summary>
     /// True when both <paramref name="runningVersion"/> and <paramref name="latestAvailableVersion"/>
     /// are non-null/non-empty (whitespace-only counts as empty) and differ by plain ordinal string
     /// comparison. Either missing/unknown means "no update shown" -- never a false positive from
