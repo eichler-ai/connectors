@@ -400,18 +400,34 @@ function Install-BrokerStaged([string]$ServerPayloadDir, [string]$AppDir) {
     if ((Get-FileHash $exe -Algorithm SHA256).Hash -eq (Get-FileHash $new -Algorithm SHA256).Hash) {
         Remove-Item $new -Force -ErrorAction SilentlyContinue
         if ($running.Count -gt 0) { return 'staged' }
-        Remove-Item $old -Force -ErrorAction SilentlyContinue
+        Remove-StaleBrokerImages $AppDir
         return 'swapped'
     }
+    # The move-aside name is not fixed (second live update, v0.1.1 -> v0.1.2): with an older broker
+    # still running from .old, that name is locked and the move onto it fails, so the whole swap was
+    # 'pending' until EVERY older broker exited -- a v0.1.2 parked as .new while clients kept starting
+    # the on-disk v0.1.1, and the ribbon kept saying "update available" after the update. When .old is
+    # still there after the delete above, it is in use: park the current image under a unique name
+    # instead. Remove-StaleBrokerImages sweeps every .old* once its process has gone.
+    $aside = $old
+    if (Test-Path $old) { $aside = "$exe.old-$([guid]::NewGuid().ToString('N').Substring(0, 8))" }
     try {
-        Move-Item $exe $old -Force
+        Move-Item $exe $aside -Force
         Move-Item $new $exe -Force
     } catch {
         return 'pending'
     }
     if ($running.Count -gt 0) { return 'staged' }
-    Remove-Item $old -Force -ErrorAction SilentlyContinue
+    Remove-StaleBrokerImages $AppDir
     return 'swapped'
+}
+
+# Deletes every parked previous broker image (mcp-server.exe.old, .old-xxxxxxxx) that no process
+# holds any more; the ones still running stay, silently, until the next run. Never throws.
+function Remove-StaleBrokerImages([string]$AppDir) {
+    Get-ChildItem $AppDir -Filter 'mcp-server.exe.old*' -File -ErrorAction SilentlyContinue | ForEach-Object {
+        try { Remove-Item $_.FullName -Force -ErrorAction Stop } catch { }
+    }
 }
 
 function Complete-PendingBrokerSwap([string]$AppDir) {
@@ -422,13 +438,13 @@ function Complete-PendingBrokerSwap([string]$AppDir) {
     # happened.
     $exe = Join-Path $AppDir 'mcp-server.exe'
     $new = "$exe.new"
-    Remove-Item "$exe.old" -Force -ErrorAction SilentlyContinue
+    Remove-StaleBrokerImages $AppDir
     if (-not (Test-Path $new)) { return $false }
     if (Get-BrokerProcess $AppDir) { return $false }
     try {
         if (Test-Path $exe) { Move-Item $exe "$exe.old" -Force }
         Move-Item $new $exe -Force
-        Remove-Item "$exe.old" -Force -ErrorAction SilentlyContinue
+        Remove-StaleBrokerImages $AppDir
         return $true
     } catch {
         return $false

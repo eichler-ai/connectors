@@ -137,6 +137,33 @@ Describe 'Install-BrokerStaged' {
         Test-Path (Join-Path $app 'mcp-server.exe.new') | Should -BeFalse
         Test-Path (Join-Path $app 'mcp-server.exe.old') | Should -BeFalse
     }
+    It 'stages a DIFFERENT new image even while an older broker still holds .old, parking the current exe under a unique name (v0.1.1 -> v0.1.2 live)' {
+        New-Payload $app @{ 'mcp-server.exe' = 'current-exe'; 'mcp-server.exe.old' = 'older-still-running' }
+        Mock Get-BrokerProcess { @([pscustomobject]@{ Id = 4242 }) }
+        # .old is mapped by a running process: deleting it is refused (silently, as the real cmdlet does).
+        Mock Remove-Item { } -ParameterFilter { $Path -like '*mcp-server.exe.old' }
+        Install-BrokerStaged $payload $app | Should -Be 'staged'
+        Get-Content (Join-Path $app 'mcp-server.exe') -Raw | Should -Be 'new-exe'
+        Get-Content (Join-Path $app 'mcp-server.exe.old') -Raw | Should -Be 'older-still-running'
+        $parked = Get-ChildItem $app -Filter 'mcp-server.exe.old-*'
+        $parked.Count | Should -Be 1
+        Get-Content $parked[0].FullName -Raw | Should -Be 'current-exe'
+        Test-Path (Join-Path $app 'mcp-server.exe.new') | Should -BeFalse
+    }
+    It 'Remove-StaleBrokerImages sweeps every parked image (.old and .old-xxxxxxxx) and nothing else' {
+        New-Payload $app @{ 'mcp-server.exe' = 'exe'; 'mcp-server.exe.old' = 'a'; 'mcp-server.exe.old-1a2b3c4d' = 'b'; 'mcp-server.exe.new' = 'keep' }
+        Remove-StaleBrokerImages $app
+        Test-Path (Join-Path $app 'mcp-server.exe.old') | Should -BeFalse
+        Test-Path (Join-Path $app 'mcp-server.exe.old-1a2b3c4d') | Should -BeFalse
+        Test-Path (Join-Path $app 'mcp-server.exe.new') | Should -BeTrue
+        Get-Content (Join-Path $app 'mcp-server.exe') -Raw | Should -Be 'exe'
+    }
+    It 'Remove-StaleBrokerImages never throws when an image is still held' {
+        New-Payload $app @{ 'mcp-server.exe.old' = 'held' }
+        Mock Remove-Item { throw 'The process cannot access the file' }
+        { Remove-StaleBrokerImages $app } | Should -Not -Throw
+        Test-Path (Join-Path $app 'mcp-server.exe.old') | Should -BeTrue
+    }
     It 'Complete-PendingBrokerSwap recovers the moved-aside state (no exe, .old and .new present)' {
         New-Payload $app @{ 'mcp-server.exe.old' = 'old-exe'; 'mcp-server.exe.new' = 'new-exe' }
         Complete-PendingBrokerSwap $app | Should -BeTrue
