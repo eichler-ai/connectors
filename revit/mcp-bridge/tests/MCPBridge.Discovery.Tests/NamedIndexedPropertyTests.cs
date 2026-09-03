@@ -6,8 +6,8 @@ using Xunit;
 namespace MCPBridge.Discovery.Tests;
 
 /// <summary>
-/// Issue #186: named indexed properties. RevitAPI.dll (C++/CLI) declares 55 per version -- Element.Parameter,
-/// Element.Geometry, FamilyInstance.Room, FootPrintRoof.SlopeAngle, ... -- and C# can reach them ONLY
+/// Issue #186: named indexed properties. RevitAPI.dll (C++/CLI) declares 95 per version -- Element.Parameter,
+/// Element.Geometry, FamilyInstance.Room, FootPrintRoof.SlopeAngle, ModelCurveArray.Item, ... -- and C# can reach them ONLY
 /// through their get_/set_ accessor methods, because `obj[...]` binds to the declaring type's DefaultMember
 /// alone. Discovery used to render every indexed property as `T this[...]` (a form that does not compile
 /// for these) and, having skipped the accessors as special-name methods, answered member-not-found for the
@@ -81,6 +81,8 @@ public class NamedIndexedPropertyTests
     // A plain property: C# reaches it as `obj.Plain`, and `obj.get_Plain()` is a compile error (CS0571),
     // so aliasing it would advertise a spelling that does not work -- exactly the defect being fixed.
     [InlineData("get_Plain")]
+    // A read-only named indexed property has no setter, so `set_Overhang(...)` does not compile either.
+    [InlineData("set_Overhang")]
     // Nothing named this at all.
     [InlineData("set_Nope")]
     public void DescribeFunction_AccessorName_DoesNotAliasNonIndexedOrMissingMembers(string accessor)
@@ -88,6 +90,20 @@ public class NamedIndexedPropertyTests
         var service = NewService();
 
         Assert.Throws<DiscoveryMemberNotFoundException>(() => service.DescribeFunction($"{Fixture}.{accessor}", memberId: null));
+    }
+
+    [Fact]
+    public void CSharpIndexerWithACustomIndexerName_IsStillTheDefaultMember()
+    {
+        // Gadget's indexer is [IndexerName("Slot")]: the check must follow DefaultMemberAttribute's value,
+        // not assume the literal "Item", or every renamed C# indexer would be misrendered as accessors.
+        var cache = new DiscoveryCache(":memory:");
+        cache.Sync(new[] { ("core", typeof(Fixtures.Gadget).Assembly) });
+        var service = new DiscoveryService(cache);
+
+        var result = service.DescribeFunction("MCPBridge.Discovery.Tests.Fixtures.Gadget.Slot", memberId: null);
+
+        Assert.Equal("int this[int index] { get;set; }", result.Single!.Signature);
     }
 
     [Fact]

@@ -165,8 +165,9 @@ carries the `revit_version` that answered.
   from a `search_functions` result) is the reliable way to pick exactly one overload, and can be
   passed on its own.
   A property whose signature reads `T get_X(...); void set_X(..., T value)` is a *named indexed
-  property* — the C++/CLI shape `Element.Parameter`, `Element.Geometry`, `FamilyInstance.Room` and
-  `FootPrintRoof.SlopeAngle` all have (55 in RevitAPI.dll per version). C# has no `obj[...]` syntax
+  property* — the C++/CLI shape `Element.Parameter`, `Element.Geometry`, `FamilyInstance.Room`,
+  `FootPrintRoof.SlopeAngle` and every `XxxArray.Item` have (95 of RevitAPI.dll's 104 indexed
+  properties per version; only the 9 `default` ones are true indexers). C# has no `obj[...]` syntax
   for those; the accessor call is the only spelling, so that is what discovery shows. `member` may
   name either spelling (`FootPrintRoof.SlopeAngle` or `FootPrintRoof.set_SlopeAngle`); `list_functions`
   lists the property name only. A type's genuine default indexer still renders as `T this[...]`.

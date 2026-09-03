@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System.Linq;
+using System.Security.Cryptography;
 using MCPBridge.Core.Discovery;
 using MCPBridge.Discovery.Tests.Fixtures;
 using Xunit;
@@ -77,6 +78,29 @@ public class DiscoveryCacheTests
 
         cache.SetStoredHashForTesting(typeof(Widget).Assembly.Location, "deliberately-stale-hash");
         Assert.NotEqual(first, cache.CorpusFingerprint());
+    }
+
+    /// <summary>
+    /// Issue #186's independent review: RevitAPI.dll's bytes do not change when the add-in is upgraded, so a
+    /// cache keyed by file hash alone would keep serving the previous reflector's rows forever. The stored
+    /// hash therefore carries DiscoveryReflector.ReflectorVersion, and a row written by an older reflector
+    /// (a bare file hash, the pre-#186 form) must re-reflect on the next sync.
+    /// </summary>
+    [Fact]
+    public void Sync_RowWrittenByAnOlderReflector_IsReReflectedEvenThoughTheFileIsUnchanged()
+    {
+        using var cache = NewCache();
+        var location = typeof(Widget).Assembly.Location;
+        cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+
+        using var stream = File.OpenRead(location);
+        var bareFileHash = Convert.ToHexString(SHA256.HashData(stream));
+        cache.SetStoredHashForTesting(location, bareFileHash);
+
+        var result = cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+
+        Assert.Equal(1, result.Updated);
+        Assert.Equal(0, result.Unchanged);
     }
 
     [Fact]

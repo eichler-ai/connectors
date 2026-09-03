@@ -44,9 +44,12 @@ internal static class SignatureFormatter
         // A NAMED indexed property (issue #186). C# has no syntax for one: `obj[...]` binds only to the
         // declaring type's DefaultMember, so rendering this as `this[...]` advertises a form that does not
         // compile, while the accessor methods -- the only C# spelling -- are the very `IsSpecialName`
-        // methods DiscoveryReflector skips. RevitAPI.dll (C++/CLI) has 55 of these per version, including
-        // Element.Parameter, Element.Geometry, Element.BoundingBox, FamilyInstance.Room and
-        // FootPrintRoof.SlopeAngle, so this is the shape an agent actually has to type.
+        // methods DiscoveryReflector skips. RevitAPI.dll (C++/CLI) has 95 of these per version out of 104
+        // indexed properties: 55 with their own names (Element.Parameter, Element.Geometry,
+        // Element.BoundingBox, FamilyInstance.Room, FootPrintRoof.SlopeAngle, ...) and 40 called `Item`
+        // that still carry no DefaultMemberAttribute (ModelCurveArray, PhaseArray, ParameterMap, ...), which
+        // is why Revit C# code has always written `curves.get_Item(i)`. Only the 9 C++/CLI `default`
+        // properties are true indexers. So this is the shape an agent actually has to type.
         var parts = new List<string>(2);
         if (pi.CanRead)
         {
@@ -71,22 +74,21 @@ internal static class SignatureFormatter
     /// </summary>
     internal static bool IsDefaultMember(PropertyInfo pi)
     {
-        var declaringType = pi.DeclaringType;
-        if (declaringType is null)
+        // Walk the base chain: DefaultMemberAttribute is declared on the type that introduced the indexer,
+        // and an override in a derived type need not re-declare it -- C# still binds `obj[...]` there.
+        for (var type = pi.DeclaringType; type is not null; type = type.BaseType)
         {
-            return false;
-        }
-
-        foreach (var attribute in declaringType.GetCustomAttributesData())
-        {
-            if (attribute.AttributeType.FullName != "System.Reflection.DefaultMemberAttribute")
+            foreach (var attribute in type.GetCustomAttributesData())
             {
-                continue;
-            }
+                if (attribute.AttributeType.FullName != "System.Reflection.DefaultMemberAttribute")
+                {
+                    continue;
+                }
 
-            if (attribute.ConstructorArguments.Count == 1 && attribute.ConstructorArguments[0].Value is string name)
-            {
-                return string.Equals(name, pi.Name, StringComparison.Ordinal);
+                if (attribute.ConstructorArguments.Count == 1 && attribute.ConstructorArguments[0].Value is string name)
+                {
+                    return string.Equals(name, pi.Name, StringComparison.Ordinal);
+                }
             }
         }
 

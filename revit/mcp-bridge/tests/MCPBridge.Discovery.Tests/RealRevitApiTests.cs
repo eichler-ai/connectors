@@ -86,8 +86,9 @@ public class RealRevitApiTests
     /// <summary>
     /// Issue #186 against the corpus it was reported on. NamedIndexedPropertyTests pins the mechanism
     /// portably on a VB fixture; this pins the three real members the fix exists for -- the reported
-    /// FootPrintRoof.SlopeAngle, the most-called named indexed property in the API (Element.Parameter), and
-    /// a C++/CLI DEFAULT indexed property (UV's) that must keep the `this[...]` form.
+    /// FootPrintRoof.SlopeAngle, the most-called named indexed property in the API (Element.Parameter), an
+    /// `Item` property that is named rather than default (ModelCurveArray), and a C++/CLI DEFAULT indexed
+    /// property (UV's) that must keep the `this[...]` form.
     /// </summary>
     [Fact]
     public void NamedIndexedProperties_AgainstRealRevitApiDll_RenderAndResolveAsAccessors()
@@ -116,9 +117,19 @@ public class RealRevitApiTests
         Assert.Equal(3, parameter.Overloads!.Overloads.Count);
         Assert.All(parameter.Overloads.Overloads, o => Assert.StartsWith("Parameter get_Parameter(", o.Signature));
 
+        // UV declares a C++/CLI `default` indexed property, the one shape that carries DefaultMemberAttribute
+        // and so keeps the `this[...]` form.
         var uvIndexer = cache.GetMembersIncludingInheritedByFullName("Autodesk.Revit.DB.UV")
             .Single(m => m.Kind == "Property" && m.Parameters.Count > 0);
         Assert.Contains("this[", uvIndexer.Signature);
+
+        // The 40 `Item(...)` properties (ModelCurveArray, PhaseArray, ParameterMap, ...) are NOT default members:
+        // no DefaultMemberAttribute, so C# reaches them as `get_Item(i)` -- the spelling Revit C# code has
+        // always had to use. Measured here rather than assumed: the first cut of this test expected `this[`
+        // for ModelCurveArray and the real DLL said otherwise.
+        var itemIndexer = cache.GetMembersIncludingInheritedByFullName("Autodesk.Revit.DB.ModelCurveArray")
+            .Single(m => m.Kind == "Property" && m.Parameters.Count > 0);
+        Assert.StartsWith("ModelCurve get_Item(int ", itemIndexer.Signature);
     }
 
     /// <summary>

@@ -281,9 +281,19 @@ public sealed class DiscoveryService
             // store as members. An agent that has just typed `fpr.set_SlopeAngle(mc, 0.5)` and asks about
             // that name deserves the property's record, not member-not-found. Reflection stores the index
             // parameters on the property row, so "indexed" is Parameters.Count > 0.
-            candidates = AccessorTarget(memberName) is { } propertyName
-                ? allMembers.Where(m => m.Kind == "Property" && m.Parameters.Count > 0 && string.Equals(m.Name, propertyName, StringComparison.Ordinal)).ToList()
-                : candidates;
+            // Only the accessor that actually exists: `set_Overhang` on a read-only indexed property must stay
+            // not-found, or describe_function is back to advertising a spelling that does not compile. The row
+            // carries no CanRead/CanWrite, but SignatureFormatter renders exactly the accessors present, so the
+            // signature is the record of which ones there are.
+            if (AccessorTarget(memberName) is { } propertyName)
+            {
+                var accessorCall = memberName[..4] + propertyName + "(";
+                candidates = allMembers
+                    .Where(m => m.Kind == "Property" && m.Parameters.Count > 0
+                        && string.Equals(m.Name, propertyName, StringComparison.Ordinal)
+                        && m.Signature.Contains(accessorCall, StringComparison.Ordinal))
+                    .ToList();
+            }
         }
 
         if (candidates.Count == 0)
@@ -339,6 +349,12 @@ public sealed class DiscoveryService
         return DescribeFunctionResult.FromSingle(single);
     }
 
+    /// <summary>"get_SlopeAngle" / "set_SlopeAngle" -> "SlopeAngle"; null for any other shape.</summary>
+    private static string? AccessorTarget(string memberName) =>
+        memberName.Length > 4 && (memberName.StartsWith("get_", StringComparison.Ordinal) || memberName.StartsWith("set_", StringComparison.Ordinal))
+            ? memberName[4..]
+            : null;
+
     /// <summary>
     /// Derives (typeName, memberName) from a member_id alone, for the member-optional path (issue #64).
     /// XML-doc ids look like <c>M:Namespace.Type.Member</c>, <c>M:Namespace.Type.#ctor</c>,
@@ -347,12 +363,6 @@ public sealed class DiscoveryService
     /// the FIRST '(' onward -- XML-doc ids use '{}' for generic arguments, never '()', so '(' is an
     /// unambiguous boundary here -- then the remainder is split on the LAST '.' into type and member.
     /// </summary>
-    /// <summary>"get_SlopeAngle" / "set_SlopeAngle" -> "SlopeAngle"; null for any other shape.</summary>
-    private static string? AccessorTarget(string memberName) =>
-        memberName.Length > 4 && (memberName.StartsWith("get_", StringComparison.Ordinal) || memberName.StartsWith("set_", StringComparison.Ordinal))
-            ? memberName[4..]
-            : null;
-
     private static (string TypeName, string MemberName) ParseMemberId(string memberId)
     {
         var body = memberId;

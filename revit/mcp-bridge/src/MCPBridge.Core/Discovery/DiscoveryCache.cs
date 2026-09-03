@@ -253,7 +253,10 @@ public sealed class DiscoveryCache : IDisposable
             string hash;
             try
             {
-                hash = ComputeFileHash(assembly.Location);
+                // Reflector version first, so a reflector change re-reflects an unchanged file (see
+                // DiscoveryReflector.ReflectorVersion). A pre-#186 row holds the bare hex hash, which
+                // can never equal a prefixed value, so the upgrade path is the ordinary "updated" branch.
+                hash = DiscoveryReflector.ReflectorVersion + ":" + ComputeFileHash(assembly.Location);
             }
             catch
             {
