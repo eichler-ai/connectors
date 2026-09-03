@@ -191,4 +191,46 @@ Describe 'Add-DesktopMcpServer / Remove-DesktopMcpServer' {
         '{"mcpServers":{}}' | Set-Content $cfg
         Remove-DesktopMcpServer $cfg 'revit' | Should -BeFalse
     }
+    It 'merges into a config whose mcpServers is null (does not throw)' {
+        '{"mcpServers":null}' | Set-Content $cfg
+        Add-DesktopMcpServer $cfg 'revit' 'C:\x\mcp-server.exe' @('--mode', 'local') | Should -BeTrue
+        $j = Get-Content $cfg -Raw | ConvertFrom-Json
+        $j.mcpServers.revit.command | Should -Be 'C:\x\mcp-server.exe'
+    }
+    It 'backs up only once, preserving the pristine pre-install backup across re-installs' {
+        '{"mcpServers":{"orig":true}}' | Set-Content $cfg
+        Add-DesktopMcpServer $cfg 'revit' 'C:\x\mcp-server.exe' @('--mode', 'local') | Should -BeTrue
+        (Get-Content "$cfg.mcpbridge.bak" -Raw) | Should -Match 'orig'
+        Add-DesktopMcpServer $cfg 'revit' 'C:\y\mcp-server.exe' @('--mode', 'local') | Should -BeTrue
+        # The backup still holds the ORIGINAL config, not the first install's rewrite.
+        (Get-Content "$cfg.mcpbridge.bak" -Raw) | Should -Match 'orig'
+        (Get-Content "$cfg.mcpbridge.bak" -Raw) | Should -Not -Match 'revit'
+    }
+    It 'throws on a malformed config so the installer falls back to printed instructions' {
+        'this is not json {' | Set-Content $cfg
+        { Add-DesktopMcpServer $cfg 'revit' 'C:\x\mcp-server.exe' @('--mode', 'local') } | Should -Throw
+    }
+}
+
+Describe 'Get-DesktopConfigPath' {
+    BeforeEach {
+        $script:savedLocal = $env:LOCALAPPDATA
+        $script:savedApp = $env:APPDATA
+        $script:root = Join-Path $TestDrive "env-$([guid]::NewGuid())"
+        $env:LOCALAPPDATA = Join-Path $root 'Local'
+        $env:APPDATA = Join-Path $root 'Roaming'
+        New-Item -ItemType Directory -Force -Path $env:LOCALAPPDATA, $env:APPDATA | Out-Null
+    }
+    AfterEach {
+        $env:LOCALAPPDATA = $savedLocal
+        $env:APPDATA = $savedApp
+    }
+    It 'prefers the MSIX package config when a Claude package is present' {
+        $pkg = Join-Path $env:LOCALAPPDATA 'Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\Claude'
+        New-Item -ItemType Directory -Force -Path $pkg | Out-Null
+        Get-DesktopConfigPath | Should -Be (Join-Path $pkg 'claude_desktop_config.json')
+    }
+    It 'falls back to the standard %APPDATA% path when no Claude package exists' {
+        Get-DesktopConfigPath | Should -Be (Join-Path $env:APPDATA 'Claude\claude_desktop_config.json')
+    }
 }
