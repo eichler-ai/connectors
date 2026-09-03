@@ -326,4 +326,16 @@ public class BridgeConfigTests : IDisposable
         Assert.Contains("\"brokerMode\": \"local\"", json);
         Assert.DoesNotContain("sharedRoot", json);
     }
+
+    [Fact]
+    public void Save_WritesOnlyTheTwoSettings_NotDerivedFlags()
+    {
+        // Seen live on the first ribbon switch: IsRemote/IsLocal serialized as isRemote/isLocal.
+        new BridgeConfig { BrokerMode = "remote", SharedRoot = @"\\Mac\connectors" }.Save(ConfigPath);
+
+        using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(ConfigPath));
+        var names = doc.RootElement.EnumerateObject().Select(p => p.Name).OrderBy(n => n).ToArray();
+
+        Assert.Equal(new[] { "brokerMode", "sharedRoot" }, names);
+    }
 }

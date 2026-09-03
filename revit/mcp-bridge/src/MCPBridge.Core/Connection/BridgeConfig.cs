@@ -48,11 +48,15 @@ internal sealed class BridgeConfig
     /// it again as the default.</summary>
     public string? SharedRoot { get; set; }
 
-    /// <summary>Does this file say "remote"? Case-insensitive and trimmed -- a hand-edited value.</summary>
+    /// <summary>Does this file say "remote"? Case-insensitive and trimmed -- a hand-edited value.
+    /// JsonIgnore, or the serializer writes these derived flags into the file too (seen live on the
+    /// first ribbon switch: a user-facing settings file with `isRemote: true` beside `brokerMode`).</summary>
+    [JsonIgnore]
     public bool IsRemote => string.Equals(BrokerMode?.Trim(), RemoteMode, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Does this file say "local"? Anything that is neither this nor <see cref="IsRemote"/>
     /// is not a decision -- see <see cref="BrokerModeResolver"/>.</summary>
+    [JsonIgnore]
     public bool IsLocal => string.Equals(BrokerMode?.Trim(), LocalMode, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>The one production location, beside broker.json's LOCAL-mode home.</summary>
