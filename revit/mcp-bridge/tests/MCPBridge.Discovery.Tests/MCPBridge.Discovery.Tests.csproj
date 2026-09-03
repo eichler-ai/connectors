@@ -39,6 +39,8 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\MCPBridge.Core\MCPBridge.Core.csproj" />
     <ProjectReference Include="..\..\src\MCPBridge.RevitAdapter\MCPBridge.RevitAdapter.csproj" />
+    <!-- Named-indexed-property fixture (issue #186); VB because C# cannot declare the shape; see the vbproj. -->
+    <ProjectReference Include="..\MCPBridge.Discovery.Fixtures.VB\MCPBridge.Discovery.Fixtures.VB.vbproj" />
   </ItemGroup>
 
   <ItemGroup>

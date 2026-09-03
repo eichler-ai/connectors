@@ -323,7 +323,9 @@ functions too**, indexed like any add-in's and ranked below Revit's: anything un
   types; pass `namespace` + `type_name` for that type's members.
 - **`describe_function`** — full signature, parameters and docs for one member
   (`{"member": "Autodesk.Revit.DB.Wall.Create"}`). Overloaded? You get an overload list back —
-  re-call with just its `member_id` (or one from `search_functions`).
+  re-call with just its `member_id` (or one from `search_functions`). A property shown as
+  `T get_X(...); void set_X(..., T value)` (`Element.Parameter`, `FootPrintRoof.SlopeAngle`) is a
+  named indexed property: C# has no `obj[...]` for it, so call the accessor exactly as shown.
 
 `list_functions` and `search_functions` paginate: pass the `cursor` from the previous response.
 

@@ -49,6 +49,19 @@ func TestRealCorpusRecall(t *testing.T) {
 		MName   string `json:"mname"`
 		Kind    string `json:"kind"`
 		Summary string `json:"summary"`
+		// Optional: the POC dump has no signatures, a dump taken from the
+		// add-in's discovery cache does. RerankText reads a callable's
+		// parameter list from it (issue #188), so the #188 measurement
+		// needs a dump that carries them; without the field the reranker
+		// sees Type.Member and summary only, as it did before #188.
+		Signature string `json:"signature"`
+		// Optional too, for the same reason: a discovery-cache dump knows the
+		// add-in's own namespace (nested types) and core flag (RevitAPI /
+		// RevitAPIUI only); the POC dump has neither, and the prefix rule
+		// below marks Autodesk add-ins as core, which changes tie-breaks
+		// inside the rerank pool.
+		Namespace string `json:"namespace"`
+		Core      *bool  `json:"core"`
 	}
 	if err := json.Unmarshal(raw, &rows); err != nil {
 		t.Fatal(err)
@@ -56,7 +69,15 @@ func TestRealCorpusRecall(t *testing.T) {
 	docs := make([]semsearch.Doc, len(rows))
 	for i, r := range rows {
 		ns := strings.TrimSuffix(r.Full, "."+r.TName+"."+r.MName)
-		docs[i] = semsearch.Doc{MemberID: r.Full, Kind: r.Kind, Namespace: ns, DeclaringType: r.TName, Name: r.MName, Summary: r.Summary, Core: strings.HasPrefix(ns, "Autodesk.")}
+		declaring := ns + "." + r.TName
+		if r.Namespace != "" {
+			ns = r.Namespace
+		}
+		core := strings.HasPrefix(ns, "Autodesk.")
+		if r.Core != nil {
+			core = *r.Core
+		}
+		docs[i] = semsearch.Doc{MemberID: r.Full, Kind: r.Kind, Namespace: ns, DeclaringType: declaring, Name: r.MName, Signature: r.Signature, Summary: r.Summary, Core: core}
 	}
 	labelsRaw, err := os.ReadFile(filepath.Join(poc, "labels_big.json"))
 	if err != nil {

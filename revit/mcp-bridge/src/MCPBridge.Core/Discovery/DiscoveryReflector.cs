@@ -83,6 +83,17 @@ public static class DiscoveryReflector
     /// </summary>
     public const int MaxSummaryLength = 300;
 
+    /// <summary>
+    /// Bump whenever reflection's OUTPUT for an unchanged assembly changes -- a new signature rendering, a
+    /// member kind newly included or excluded, a doc-join fix. <see cref="DiscoveryCache"/> persists
+    /// reflected rows keyed by the assembly file's hash, and RevitAPI.dll's bytes do not change when the
+    /// add-in is upgraded, so without this stamp an upgrade keeps serving whatever the previous reflector
+    /// wrote (independent review of #186: the accessor rendering would never have reached an existing
+    /// install's cache). The stamp is folded into the stored hash, so a mismatch re-reflects on first sync.
+    /// History: 1 = every version before #186; 2 = #186's named-indexed-property rendering.
+    /// </summary>
+    public const string ReflectorVersion = "2";
+
     /// <summary>Reflects every publicly-visible type (and its declared members) out of one assembly.</summary>
     public static IReadOnlyList<ReflectedType> Reflect(Assembly assembly)
     {

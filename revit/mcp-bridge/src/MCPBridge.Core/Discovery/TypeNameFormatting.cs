@@ -20,26 +20,34 @@ internal static class TypeNameFormatting
         return idx < 0 ? name : name[..idx];
     }
 
-    /// <summary>C# alias names for the common BCL types this feature is expected to render read­ably (PRD §08 signature example: "int" not "Int32").</summary>
-    private static readonly Dictionary<Type, string> Aliases = new()
+    /// <summary>
+    /// C# alias names for the common BCL types this feature is expected to render readably (PRD §08 signature
+    /// example: "int" not "Int32"). Keyed by full name rather than <see cref="Type"/> identity so the same
+    /// rendering holds for a type reflected through a <c>MetadataLoadContext</c> (the only way the tests can
+    /// reach the real RevitAPI.dll), whose <c>System.Double</c> is a different <see cref="Type"/> object from the
+    /// runtime's and used to fall through to "Double" -- so RealRevitApiTests could never assert the signature
+    /// an agent actually sees.
+    /// </summary>
+    private static readonly Dictionary<string, string> Aliases = new(StringComparer.Ordinal)
     {
-        [typeof(void)] = "void",
-        [typeof(object)] = "object",
-        [typeof(string)] = "string",
-        [typeof(bool)] = "bool",
-        [typeof(byte)] = "byte",
-        [typeof(sbyte)] = "sbyte",
-        [typeof(char)] = "char",
-        [typeof(decimal)] = "decimal",
-        [typeof(double)] = "double",
-        [typeof(float)] = "float",
-        [typeof(int)] = "int",
-        [typeof(uint)] = "uint",
-        [typeof(long)] = "long",
-        [typeof(ulong)] = "ulong",
-        [typeof(short)] = "short",
-        [typeof(ushort)] = "ushort",
+        ["System.Void"] = "void",
+        ["System.Object"] = "object",
+        ["System.String"] = "string",
+        ["System.Boolean"] = "bool",
+        ["System.Byte"] = "byte",
+        ["System.SByte"] = "sbyte",
+        ["System.Char"] = "char",
+        ["System.Decimal"] = "decimal",
+        ["System.Double"] = "double",
+        ["System.Single"] = "float",
+        ["System.Int32"] = "int",
+        ["System.UInt32"] = "uint",
+        ["System.Int64"] = "long",
+        ["System.UInt64"] = "ulong",
+        ["System.Int16"] = "short",
+        ["System.UInt16"] = "ushort",
     };
 
-    public static string TryGetAlias(Type type) => Aliases.TryGetValue(type, out var alias) ? alias : type.Name;
+    public static string TryGetAlias(Type type) =>
+        type.FullName is { } fullName && Aliases.TryGetValue(fullName, out var alias) ? alias : type.Name;
 }

@@ -212,7 +212,7 @@ func BuildWith[T any](schema Schema[T], docs []T) *IndexOf[T] {
 	for f := range fields {
 		fields[f] = make([][]string, len(kept))
 		for i, d := range kept {
-			fields[f][i] = Tokenize(schema.Fields[f].Text(d))
+			fields[f][i] = tokenizeField(schema.Fields[f].Text(d))
 		}
 	}
 	ix.lex = newLexicalIndex(fields)
@@ -345,13 +345,48 @@ func (ix *IndexOf[T]) mask(accept func(T) bool) []bool {
 }
 
 // RerankText is what the cross-encoder reads for an API candidate: the
-// Type.Member identifier and its summary, matching the POC's pair format.
+// Type.Member identifier, a callable's parameter list, and its summary. The
+// POC's pair format had no parameter list; issue #188 added it because a
+// task description names what a call takes ("from a curve array on a level
+// with a roof type" is NewFootPrintRoof's parameter list, word for word)
+// and the summary alone ("Creates a new FootPrintRoof element.") gave the
+// reranker nothing to match, so it placed the method 11th even once the
+// keyword bridge had fused it in. Measured on the 43-query label set (full
+// pipeline, with tokenizeField's bridge, one corpus construction): no
+// parameter list 25/31/35 (recall@1/@3/@10), parameter types only 24/32/35,
+// the full list with names 25/33/35 -- so the full list ships. Per query it
+// costs "move an element" 1 -> 2, "create a 3d view" 5 -> 9 and "prompt the
+// user to pick an element" 5 -> 6, and wins "get an element by its id"
+// 2 -> 1, "create a section view" 4 -> 2, "load a family from a file"
+// 5 -> 3, "create a sheet" 18 -> 15 and the issue's query 11 -> 1.
+// The cross-encoder's tokenizer cuts input from the tail at 512 wordpieces;
+// the longest Revit signatures (~10 parameters) plus a summary stay well
+// inside that.
 func RerankText(d Doc) string {
 	s := d.ShortType() + "." + d.Name
+	s += paramList(d.Signature)
 	if d.Summary != "" {
 		s += " — " + d.Summary
 	}
 	return s
+}
+
+// paramList is a signature's first parenthesised parameter list, parentheses
+// included, or "" for a property, field or event. Only the FIRST list: a
+// writable named indexed property renders two accessor calls
+// ("T get_X(A a); void set_X(A a, T value)", #186) and the setter's is not the
+// callable shape the reranker should read. Parentheses never occur inside a
+// parameter list (generics use angle brackets), so the first ')' ends it.
+func paramList(signature string) string {
+	i := strings.IndexByte(signature, '(')
+	if i < 0 {
+		return ""
+	}
+	j := strings.IndexByte(signature[i:], ')')
+	if j < 0 {
+		return signature[i:]
+	}
+	return signature[i : i+j+1]
 }
 
 // --- junk --------------------------------------------------------------------
@@ -435,6 +470,39 @@ func Tokenize(text string) []string {
 			continue
 		}
 		out = append(out, SplitIdentifier(piece)...)
+	}
+	return out
+}
+
+// tokenizeField is Tokenize for INDEXED text: it also emits each adjacent
+// pair of identifier parts joined, so "FootPrintRoof" indexes as foot, print,
+// roof, footprint, printroof. Revit camel-cases compounds inconsistently
+// (NewFootPrintRoof next to RoofByFootprint), and people write them as one
+// word, so without the bridge "footprint" reached the second and never the
+// first (issue #188: Creation.Document.NewFootPrintRoof sat outside the
+// keyword pass's top 200 for a query that named it). The query side is
+// unchanged: "foot print" in a query already matches the split parts.
+// Measured on the 43-query POC label set (full pipeline): recall@1 24 -> 25,
+// @3 29 -> 31, @10 34 -> 35; per query, nothing on the first page moved
+// down (the bridge-alone table is in docs/search-ranking-redesign.md).
+// Unexported on purpose: only BuildWith may widen, the query side stays
+// Tokenize. Stated trade-off: the bridged tokens count towards BM25 document
+// length, so an n-part name is 2n-1 tokens long where a one-part name stays
+// 1; the recall numbers above include that effect. Digits and backtick arity
+// bridge too ("List`1" -> list, 1, list1), harmless noise.
+func tokenizeField(text string) []string {
+	var out []string
+	for _, piece := range strings.FieldsFunc(text, func(c rune) bool {
+		return !(isLower(c) || isUpper(c) || isDigit(c) || c == '_' || c == '`')
+	}) {
+		if len([]rune(piece)) < 2 {
+			continue
+		}
+		parts := SplitIdentifier(piece)
+		out = append(out, parts...)
+		for j := 0; j+1 < len(parts); j++ {
+			out = append(out, parts[j]+parts[j+1])
+		}
 	}
 	return out
 }

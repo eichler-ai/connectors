@@ -469,3 +469,80 @@ func TestPreferPartitionsTheHeadOnlyAndNeverFilters(t *testing.T) {
 		t.Errorf("without Prefer the ranked order stands, got %q first", plain[0].Doc.Title)
 	}
 }
+
+// --- issue #188: compound bridging + parameter list for the reranker --------
+
+func TestTokenizeFieldBridgesAdjacentIdentifierParts(t *testing.T) {
+	// Revit spells the same compound two ways (NewFootPrintRoof, RoofByFootprint);
+	// a query says "footprint". The indexed side carries both the parts and each
+	// adjacent pair joined, so either spelling reaches either name. Free text
+	// between identifiers is unaffected.
+	got := tokenizeField("Document NewFootPrintRoof")
+	want := []string{"document", "new", "foot", "print", "roof", "newfoot", "footprint", "printroof"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("tokenizeField = %v, want %v", got, want)
+	}
+	// The query side stays plain: bridging is an index-time widening, not a
+	// change to what a query means.
+	if q := Tokenize("NewFootPrintRoof"); len(q) != 4 {
+		t.Errorf("Tokenize(query) = %v, want the four parts only", q)
+	}
+}
+
+func TestLexicalSearchReachesACamelCasedCompoundWrittenAsOneWord(t *testing.T) {
+	docs := []Doc{
+		{MemberID: "M:Autodesk.Revit.Creation.Document.NewFootPrintRoof", Kind: "Method", Namespace: "Autodesk.Revit.Creation", DeclaringType: "Autodesk.Revit.Creation.Document", Name: "NewFootPrintRoof", Signature: "FootPrintRoof NewFootPrintRoof(CurveArray footPrint, Level level, RoofType roofType)", Summary: "Creates a new FootPrintRoof element.", Core: true},
+		{MemberID: "F:Autodesk.Revit.DB.ElementTypeGroup.RoofType", Kind: "Field", Namespace: "Autodesk.Revit.DB", DeclaringType: "Autodesk.Revit.DB.ElementTypeGroup", Name: "RoofType", Signature: "ElementTypeGroup RoofType", Summary: "The roof type.", Core: true},
+		{MemberID: "P:Autodesk.Revit.DB.RoofBase.RoofType", Kind: "Property", Namespace: "Autodesk.Revit.DB", DeclaringType: "Autodesk.Revit.DB.RoofBase", Name: "RoofType", Signature: "RoofType RoofType { get;set; }", Summary: "Retrieve or set the Type.", Core: true},
+		{MemberID: "M:Autodesk.Revit.DB.CurveArray.Append", Kind: "Method", Namespace: "Autodesk.Revit.DB", DeclaringType: "Autodesk.Revit.DB.CurveArray", Name: "Append", Signature: "void Append(Curve item)", Summary: "Add the curve to the end of the array.", Core: true},
+	}
+	ix := Build(docs)
+	hits, err := ix.Search(context.Background(), Query{Text: "create a footprint roof"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) == 0 || hits[0].Doc.Name != "NewFootPrintRoof" {
+		t.Fatalf("top hit = %+v, want NewFootPrintRoof (the word 'footprint' must reach 'FootPrint')", hits)
+	}
+}
+
+func TestParamList(t *testing.T) {
+	cases := map[string]string{
+		"FootPrintRoof NewFootPrintRoof(CurveArray footPrint, Level level, RoofType roofType)": "(CurveArray footPrint, Level level, RoofType roofType)",
+		"void Export(string folder, IDictionary<string, int> map, ElementId[] ids)":            "(string folder, IDictionary<string, int> map, ElementId[] ids)",
+		// A writable named indexed property renders two accessor calls (#186);
+		// only the first list is the callable shape the reranker should see.
+		"Parameter get_Parameter(BuiltInParameter paramId); void set_Parameter(BuiltInParameter paramId, Parameter value)": "(BuiltInParameter paramId)",
+		"void Clear()":                    "()",
+		"RoofType RoofType { get;set; }":  "",
+		"event EventHandler<Args> Closed": "",
+		// No closing paren at all (defensive): the rest of the string.
+		"void Odd(CurveArray footPrint": "(CurveArray footPrint",
+	}
+	for in, want := range cases {
+		if got := paramList(in); got != want {
+			t.Errorf("paramList(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestRerankTextCarriesTheParameterListForCallables(t *testing.T) {
+	// A task description names what a call takes ("from a curve array on a
+	// level with a roof type"); the summary alone does not, and the reranker
+	// buried the method for exactly that reason (#188).
+	d := Doc{DeclaringType: "Autodesk.Revit.Creation.Document", Name: "NewFootPrintRoof", Signature: "FootPrintRoof NewFootPrintRoof(CurveArray footPrint, Level level, RoofType roofType)", Summary: "Creates a new FootPrintRoof element."}
+	if got, want := RerankText(d), "Document.NewFootPrintRoof(CurveArray footPrint, Level level, RoofType roofType) — Creates a new FootPrintRoof element."; got != want {
+		t.Errorf("RerankText = %q, want %q", got, want)
+	}
+	// A named indexed property (#186) shows its getter's list only, not the
+	// setter's accessor call that follows it in the signature.
+	n := Doc{DeclaringType: "Autodesk.Revit.DB.Element", Name: "Parameter", Signature: "Parameter get_Parameter(BuiltInParameter paramId); void set_Parameter(BuiltInParameter paramId, Parameter value)", Summary: "Retrieves a parameter."}
+	if got, want := RerankText(n), "Element.Parameter(BuiltInParameter paramId) — Retrieves a parameter."; got != want {
+		t.Errorf("RerankText(named indexed property) = %q, want %q", got, want)
+	}
+	// A property or field has no parameter list, so nothing is appended.
+	p := Doc{DeclaringType: "Autodesk.Revit.DB.RoofBase", Name: "RoofType", Signature: "RoofType RoofType { get;set; }", Summary: "Retrieve or set the Type."}
+	if got := RerankText(p); strings.Contains(got, "(") {
+		t.Errorf("RerankText(property) = %q, want no parameter list", got)
+	}
+}
