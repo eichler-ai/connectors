@@ -62,8 +62,15 @@ func ToolSchemaFingerprint() (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("mcpserver: inferring input schema for %q: %w", t.name, err)
 		}
-		// json.Marshal sorts object keys, so the encoding is canonical for a
-		// given schema regardless of field declaration order.
+		// Deterministic across runs, builds and Go versions: jsonschema.Schema's
+		// MarshalJSON emits properties in the schema's PropertyOrder, which
+		// jsonschema.For sets to the input struct's field-declaration order, so
+		// the same struct always encodes the same bytes. (It is NOT that
+		// json.Marshal sorts keys -- it does not, for this custom marshaler.)
+		// One consequence: reordering a tool's input fields, a no-op for
+		// validation, does change the fingerprint. That is a rare, benign false
+		// positive -- it costs one broker restart, never a missed
+		// incompatibility -- and not worth canonicalizing the schema to avoid.
 		b, err := json.Marshal(s)
 		if err != nil {
 			return "", fmt.Errorf("mcpserver: encoding input schema for %q: %w", t.name, err)

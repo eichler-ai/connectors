@@ -683,9 +683,11 @@ func runPrimary(ctx context.Context, bindAddr string, port int, rendezvousRoot, 
 
 // errSchemaMismatch marks a secondary's refusal to proxy through a primary
 // whose tool contract differs from this build's (#197). It is terminal: the
-// re-election loop must NOT retry it, since retrying just re-reads the same
-// broker.json and refuses again in a tight loop, and the fix is a human
-// restarting the older broker, not this process waiting.
+// re-election loop must NOT retry it. Retrying would re-read the same
+// broker.json and refuse again on a 500ms poll -- not a tight loop, but a
+// silently-hanging stdio client, which is worse UX than one legible failure.
+// The recovery is a human restarting the older broker (the log names its
+// pid), so surface that once and exit rather than poll for it.
 var errSchemaMismatch = errors.New("broker tool-schema mismatch")
 
 // schemaMismatch decides whether this secondary may proxy through the primary
@@ -707,11 +709,11 @@ func schemaMismatch(info singleton.BrokerInfo, logger *log.Logger) error {
 	self := version + " (" + buildinfo.Read().Summary() + ")"
 	primary := info.Version
 	if info.Revision != "" {
-		primary += " (revision " + shortRev(info.Revision) + ")"
+		primary += " (revision " + buildinfo.Info{Revision: info.Revision}.ShortRevision() + ")"
 	}
 	var why string
 	if info.SchemaFingerprint == "" {
-		why = "the primary broker predates the tool-schema compatibility check"
+		why = "the primary broker predates the tool-schema compatibility check, or could not compute its own fingerprint"
 	} else {
 		why = "the primary broker advertises a different tool schema than this build"
 	}
@@ -721,15 +723,6 @@ func schemaMismatch(info singleton.BrokerInfo, logger *log.Logger) error {
 		why, info.PID, primary, self, info.PID)
 	return fmt.Errorf("%w: primary pid %d is %s, this build is %s; restart the primary broker (stop pid %d) and reconnect",
 		errSchemaMismatch, info.PID, primary, self, info.PID)
-}
-
-// shortRev truncates a VCS revision for log lines, matching buildinfo's own
-// short form without exporting its constant.
-func shortRev(rev string) string {
-	if len(rev) > 12 {
-		return rev[:12]
-	}
-	return rev
 }
 
 func runSecondary(ctx context.Context, rendezvousRoot string, logger *log.Logger, stdin io.Reader, stop chan struct{}, wg *sync.WaitGroup) error {
