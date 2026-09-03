@@ -67,11 +67,42 @@ $RepoSlug = 'eichler-ai/connectors'
 # review finding: a fixed, never-cleaned-up bootstrap filename both accumulates in %TEMP% forever and
 # risks two concurrent piped invocations clobbering each other mid-read; GUID-suffixed avoids the
 # second, the top-level try/finally below (wrapping everything after this point) avoids the first.
+#
+# Issue #192: the paragraph above was wrong about $MyInvocation.MyCommand.Definition. Under
+# `<text> | iex` it holds the CALLER's command line -- for the documented one-liner, literally
+# "irm https://.../install.ps1 | iex" -- not the script text (reproduced with pwsh; see the issue).
+# So every piped install wrote a 93-byte stub as its self-copy, and everything that later ran that
+# copy with arguments (the ribbon's Update Now with -Update -Silent, the deferred-update watcher with
+# -ApplyPendingUpdate, Apps & Features' -Uninstall) lost them: Update Now ran an interactive install in a
+# hidden window and hung on Read-Host. Found live on the first Update Now against a real release.
+# Get-InstallerSourceForBootstrap now uses the definition only if it IS the full script, and otherwise
+# fetches the canonical script from the raw URL (what the stub did anyway, minus the argument loss),
+# validating either way; Copy-SelfIfNeeded refuses to install anything but the full script.
+$InstallerRawUrl = "https://raw.githubusercontent.com/$RepoSlug/main/revit/install.ps1"
+
+# The one-liner stub is ~90 bytes with no param block; the real script declares -LoadFunctionsOnly and
+# defines Copy-SelfIfNeeded. Both markers plus a size floor, so a truncated download fails too.
+function Test-IsFullInstallerScript([string]$Text) {
+    if (-not $Text) { return $false }
+    return ($Text.Length -gt 10000) -and
+        ($Text -match '(?m)^\s*\[switch\]\$LoadFunctionsOnly') -and
+        ($Text -match 'function Copy-SelfIfNeeded')
+}
+
+function Get-InstallerSourceForBootstrap([string]$InvocationDefinition, [string]$Url) {
+    if (Test-IsFullInstallerScript $InvocationDefinition) { return $InvocationDefinition }
+    $text = (Invoke-WebRequest -Uri $Url -UseBasicParsing).Content
+    if (-not (Test-IsFullInstallerScript $text)) {
+        throw "Could not obtain install.ps1's own source for the installed copy: the download from $Url did not look like the installer (length $($text.Length)). Re-run from a saved copy of install.ps1 instead of the piped one-liner."
+    }
+    return $text
+}
+
 $ScriptPath = $PSCommandPath
 $BootstrapCreated = $false
-if (-not $ScriptPath) {
+if (-not $ScriptPath -and -not $LoadFunctionsOnly) {
     $ScriptPath = Join-Path $env:TEMP "mcpbridge-install-bootstrap-$([guid]::NewGuid()).ps1"
-    $MyInvocation.MyCommand.Definition | Out-File $ScriptPath -Encoding utf8 -Force
+    Get-InstallerSourceForBootstrap $MyInvocation.MyCommand.Definition $InstallerRawUrl | Out-File $ScriptPath -Encoding utf8 -Force
     $BootstrapCreated = $true
 }
 
@@ -207,7 +238,15 @@ function Register-PendingUpdateWatcher([string]$InstallScope, [string]$SelfPath,
 # file, and Copy-Item onto itself is a terminating error under $ErrorActionPreference = 'Stop',
 # silently aborting everything after it (MCP re-registration, the registry version bump, relaunching
 # Revit) while still having already deployed the new files and written the version marker.
+#
+# Issue #192: refuses a source that is not the full installer. The self-copy is what Update Now, the
+# deferred-update watcher and Apps & Features all run WITH ARGUMENTS, so a stub here (the one-liner,
+# which is what a piped run's $MyInvocation.MyCommand.Definition actually is) breaks all three at once
+# and silently. Guarding at the point of the write means no invocation path can regress this again.
 function Copy-SelfIfNeeded([string]$Source, [string]$Destination) {
+    if (-not (Test-IsFullInstallerScript (Get-Content $Source -Raw))) {
+        throw "Refusing to install '$Source' as the installer's own copy at '$Destination': it is not the full install.ps1 (issue #192). Update Now, deferred updates and uninstall would all lose their arguments."
+    }
     $resolvedSource = (Resolve-Path $Source).Path
     $resolvedDest = if (Test-Path $Destination) { (Resolve-Path $Destination).Path } else { $null }
     if ($resolvedSource -ne $resolvedDest) {

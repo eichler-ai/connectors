@@ -308,3 +308,44 @@ Describe 'Register-McpServer -- Claude Code CLI wiring' {
         { Register-McpServer $fakeExe 6>$null } | Should -Not -Throw
     }
 }
+
+Describe 'Self-copy source (issue #192): the installed install.ps1 must be the full script, never the irm|iex stub' {
+    BeforeAll {
+        $script:fullScript = Get-Content (Join-Path $PSScriptRoot 'install.ps1') -Raw
+        $script:stub = 'irm https://raw.githubusercontent.com/eichler-ai/connectors/main/revit/install.ps1 | iex'
+    }
+    It 'recognises the real script and rejects the one-liner stub, empty text, and a truncated script' {
+        Test-IsFullInstallerScript $fullScript | Should -BeTrue
+        Test-IsFullInstallerScript $stub | Should -BeFalse
+        Test-IsFullInstallerScript '' | Should -BeFalse
+        Test-IsFullInstallerScript $fullScript.Substring(0, 5000) | Should -BeFalse
+    }
+    It 'uses the invocation definition when it is the full script, without touching the network' {
+        Mock Invoke-WebRequest { throw 'network must not be used' }
+        Get-InstallerSourceForBootstrap $fullScript 'https://example.invalid/install.ps1' | Should -Be $fullScript
+        Should -Invoke Invoke-WebRequest -Times 0 -Exactly
+    }
+    It 'fetches the canonical script when the definition is the piped one-liner (what iex actually yields)' {
+        Mock Invoke-WebRequest { [pscustomobject]@{ Content = $fullScript } }
+        Get-InstallerSourceForBootstrap $stub 'https://example.invalid/install.ps1' | Should -Be $fullScript
+        Should -Invoke Invoke-WebRequest -Times 1 -Exactly
+    }
+    It 'throws rather than bootstrap from a download that is not the installer' {
+        Mock Invoke-WebRequest { [pscustomobject]@{ Content = $stub } }
+        { Get-InstallerSourceForBootstrap $stub 'https://example.invalid/install.ps1' } | Should -Throw '*did not look like the installer*'
+    }
+    It 'Copy-SelfIfNeeded refuses to install a stub as the self-copy and leaves the destination untouched' {
+        $src = Join-Path $TestDrive 'stub.ps1'; $dst = Join-Path $TestDrive 'app\install.ps1'
+        New-Item -ItemType Directory -Force (Split-Path $dst) | Out-Null
+        Set-Content $src $stub
+        { Copy-SelfIfNeeded $src $dst } | Should -Throw '*not the full install.ps1*'
+        Test-Path $dst | Should -BeFalse
+    }
+    It 'Copy-SelfIfNeeded copies the full script' {
+        $src = Join-Path $TestDrive 'full.ps1'; $dst = Join-Path $TestDrive 'app2\install.ps1'
+        New-Item -ItemType Directory -Force (Split-Path $dst) | Out-Null
+        Set-Content $src $fullScript -NoNewline
+        Copy-SelfIfNeeded $src $dst
+        (Get-Content $dst -Raw) | Should -Be $fullScript
+    }
+}
