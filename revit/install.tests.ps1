@@ -121,6 +121,22 @@ Describe 'Install-BrokerStaged' {
         Get-Content (Join-Path $app 'mcp-server.exe') -Raw | Should -Be 'old-exe'
         Get-Content (Join-Path $app 'mcp-server.exe.new') -Raw | Should -Be 'new-exe'
     }
+    It 'reports staged, not pending, when the exe already is the new image and the old one still runs from a locked .old (issue #192 live test)' {
+        New-Payload $app @{ 'mcp-server.exe' = 'new-exe'; 'mcp-server.exe.old' = 'old-exe' }
+        Mock Get-BrokerProcess { @([pscustomobject]@{ Id = 4242 }) }
+        # A locked .old: the move onto it fails (a real Remove-Item on it is non-terminating and silent).
+        Mock Move-Item { throw 'locked' } -ParameterFilter { $Destination -like '*.old' }
+        Install-BrokerStaged $payload $app | Should -Be 'staged'
+        Should -Invoke Move-Item -Times 0 -Exactly
+        Get-Content (Join-Path $app 'mcp-server.exe') -Raw | Should -Be 'new-exe'
+        Test-Path (Join-Path $app 'mcp-server.exe.new') | Should -BeFalse
+    }
+    It 'reports swapped and clears .old when the exe already is the new image and nothing is running' {
+        New-Payload $app @{ 'mcp-server.exe' = 'new-exe'; 'mcp-server.exe.old' = 'old-exe' }
+        Install-BrokerStaged $payload $app | Should -Be 'swapped'
+        Test-Path (Join-Path $app 'mcp-server.exe.new') | Should -BeFalse
+        Test-Path (Join-Path $app 'mcp-server.exe.old') | Should -BeFalse
+    }
     It 'Complete-PendingBrokerSwap recovers the moved-aside state (no exe, .old and .new present)' {
         New-Payload $app @{ 'mcp-server.exe.old' = 'old-exe'; 'mcp-server.exe.new' = 'new-exe' }
         Complete-PendingBrokerSwap $app | Should -BeTrue
@@ -327,7 +343,10 @@ Describe 'Self-copy source (issue #192): the installed install.ps1 must be the f
         }
     }
     It 'rejects a script with an intact tail but a corrupted middle (the sentinel alone cannot see that)' {
-        $corrupt = $fullScript.Substring(0, 30000) + "`n{{{ not powershell`n" + $fullScript.Substring(30000)
+        # Anchored on a code line, not a byte offset: an offset can land inside a comment, where any
+        # text is legal and the parser rightly sees nothing wrong.
+        $at = $fullScript.IndexOf('function Copy-SelfIfNeeded')
+        $corrupt = $fullScript.Substring(0, $at) + "{{{`n" + $fullScript.Substring($at)
         Test-IsFullInstallerScript $corrupt | Should -BeFalse
     }
     It 'uses the invocation definition when it is the full script, without touching the network' {

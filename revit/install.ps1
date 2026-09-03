@@ -260,6 +260,21 @@ function Register-PendingUpdateWatcher([string]$InstallScope, [string]$SelfPath,
 # deferred-update watcher and Apps & Features all run WITH ARGUMENTS, so a stub here (the one-liner,
 # which is what a piped run's $MyInvocation.MyCommand.Definition actually is) breaks all three at once
 # and silently. Guarding at the point of the write means no invocation path can regress this again.
+# Deletes install scratch (the extracted payload, the downloaded zip) without ever throwing: a few
+# short retries for a transient lock (antivirus scanning a just-written exe), then give up quietly.
+# See the deploy block's finally for the failure this replaced.
+function Remove-ScratchBestEffort([string]$Path, [switch]$Recurse) {
+    if (-not $Path -or -not (Test-Path $Path)) { return }
+    for ($i = 1; $i -le 4; $i++) {
+        try {
+            Remove-Item $Path -Recurse:$Recurse -Force -ErrorAction Stop
+            return
+        } catch {
+            if ($i -lt 4) { Start-Sleep -Milliseconds (300 * $i) }
+        }
+    }
+}
+
 function Copy-SelfIfNeeded([string]$Source, [string]$Destination) {
     if (-not (Test-IsFullInstallerScript (Get-Content $Source -Raw))) {
         throw "Refusing to install '$Source' as the installer's own copy at '$Destination': it is not the full install.ps1 (issue #192). Update Now, deferred updates and uninstall would all lose their arguments."
@@ -376,6 +391,18 @@ function Install-BrokerStaged([string]$ServerPayloadDir, [string]$AppDir) {
         return 'swapped'
     }
     $running = @(Get-BrokerProcess $AppDir)
+    # Already swapped (issue #192's live test): a previous run moved the old image to .old and the new
+    # one into place, but the old brokers kept running FROM .old, so that .old stays locked and every
+    # later run's `exe -> .old` move below fails -- reported as 'pending' forever, with the version
+    # marker never recording the new server hash and the summary asking for a re-run that can never
+    # succeed. If the exe on disk already IS the payload, there is nothing to move: drop the staging
+    # copy and report what is true.
+    if ((Get-FileHash $exe -Algorithm SHA256).Hash -eq (Get-FileHash $new -Algorithm SHA256).Hash) {
+        Remove-Item $new -Force -ErrorAction SilentlyContinue
+        if ($running.Count -gt 0) { return 'staged' }
+        Remove-Item $old -Force -ErrorAction SilentlyContinue
+        return 'swapped'
+    }
     try {
         Move-Item $exe $old -Force
         Move-Item $new $exe -Force
@@ -1064,8 +1091,15 @@ try {
         Register-PendingUpdateWatcher $Scope $selfCopyPath $deferredProcessIds
     }
 } finally {
-    if ($extractDir -and (Test-Path $extractDir)) { Remove-Item $extractDir -Recurse -Force -ErrorAction SilentlyContinue }
-    if ($zipDownloaded -and (Test-Path $zipPath)) { Remove-Item $zipPath -Force -ErrorAction SilentlyContinue }
+    # Best-effort for real (issue #192's live test): Remove-Item -Recurse on a directory whose file is
+    # still open -- here, the freshly extracted 86 MB mcp-server.exe under an antivirus scan -- throws a
+    # TERMINATING "Access is denied" that -ErrorAction SilentlyContinue does not suppress. Thrown from
+    # this finally, it replaced the deploy's normal completion and jumped to the top-level catch, so a
+    # run that had already installed everything reported "did not complete" with exit 1 and never
+    # reached MCP re-registration, the uninstall key, or the summary. Scratch that cannot be deleted
+    # right now is a leak of a few files in %TEMP%, never a reason to fail the install.
+    Remove-ScratchBestEffort $extractDir -Recurse
+    if ($zipDownloaded) { Remove-ScratchBestEffort $zipPath }
 }
 
 if (-not $accounted) {
@@ -1149,8 +1183,19 @@ Write-Host $summary
             "`n  Access was denied to a file. If it happened while downloading, your %TEMP% may be full or locked (an antivirus scan of a leftover download) -- clear it and re-run. Otherwise a Revit add-in file is in use: close Revit and any running MCP client, then re-run (or try again as Administrator with -Scope AllUsers)." }
         default { '' }
     }
+    # WHERE it failed, not only what (found chasing a -Silent Update Now that reported "Access is
+    # denied" and nothing else): the failing statement and line, and a copy of the whole message in
+    # the add-in's log directory -- the one place a person can look after a silent run whose hidden
+    # console has already closed. Best-effort: a logging failure must not mask the real one.
+    $where = try { $_.InvocationInfo.PositionMessage } catch { '' }
     Write-Host ''
     Write-Host "Revit MCP Bridge install did not complete: $msg$hint"
+    if ($where) { Write-Host "  Failed at:$where" }
+    try {
+        $errorLog = Join-Path $env:LocalAppData 'Connectors\Revit\install-errors.log'
+        New-Item -ItemType Directory -Force -Path (Split-Path $errorLog) | Out-Null
+        Add-Content -Path $errorLog -Value ("{0} install did not complete (args: {1}): {2}`n  at:{3}`n  stack: {4}" -f (Get-Date -Format o), ($PSBoundParameters.Keys -join ','), $msg, $where, $_.ScriptStackTrace)
+    } catch { }
     exit 1
 } finally {
     if ($BootstrapCreated -and (Test-Path $ScriptPath)) { Remove-Item $ScriptPath -Force -ErrorAction SilentlyContinue }
