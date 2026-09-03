@@ -75,7 +75,7 @@ public class XmlDocIdTests
     public void Indexer_IncludesIndexParameterTypes()
     {
         var indexer = typeof(Gadget).GetProperties().Single(p => p.GetIndexParameters().Length > 0);
-        Assert.Equal("P:MCPBridge.Discovery.Tests.Fixtures.Gadget.Item(System.Int32)", XmlDocId.GetDocId(indexer));
+        Assert.Equal("P:MCPBridge.Discovery.Tests.Fixtures.Gadget.Slot(System.Int32)", XmlDocId.GetDocId(indexer));
     }
 
     [Fact]

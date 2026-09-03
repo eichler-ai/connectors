@@ -276,6 +276,28 @@ public sealed class DiscoveryService
             .ToList();
         if (candidates.Count == 0)
         {
+            // Issue #186: a named indexed property (FootPrintRoof.SlopeAngle, Element.Parameter, ...) is
+            // only callable from C# through its get_/set_ accessor methods, which the reflector does not
+            // store as members. An agent that has just typed `fpr.set_SlopeAngle(mc, 0.5)` and asks about
+            // that name deserves the property's record, not member-not-found. Reflection stores the index
+            // parameters on the property row, so "indexed" is Parameters.Count > 0.
+            // Only the accessor that actually exists: `set_Overhang` on a read-only indexed property must stay
+            // not-found, or describe_function is back to advertising a spelling that does not compile. The row
+            // carries no CanRead/CanWrite, but SignatureFormatter renders exactly the accessors present, so the
+            // signature is the record of which ones there are.
+            if (AccessorTarget(memberName) is { } propertyName)
+            {
+                var accessorCall = memberName[..4] + propertyName + "(";
+                candidates = allMembers
+                    .Where(m => m.Kind == "Property" && m.Parameters.Count > 0
+                        && string.Equals(m.Name, propertyName, StringComparison.Ordinal)
+                        && m.Signature.Contains(accessorCall, StringComparison.Ordinal))
+                    .ToList();
+            }
+        }
+
+        if (candidates.Count == 0)
+        {
             throw new DiscoveryMemberNotFoundException($"no public member named '{memberName}' found on type '{typeName}'.");
         }
 
@@ -326,6 +348,12 @@ public sealed class DiscoveryService
 
         return DescribeFunctionResult.FromSingle(single);
     }
+
+    /// <summary>"get_SlopeAngle" / "set_SlopeAngle" -> "SlopeAngle"; null for any other shape.</summary>
+    private static string? AccessorTarget(string memberName) =>
+        memberName.Length > 4 && (memberName.StartsWith("get_", StringComparison.Ordinal) || memberName.StartsWith("set_", StringComparison.Ordinal))
+            ? memberName[4..]
+            : null;
 
     /// <summary>
     /// Derives (typeName, memberName) from a member_id alone, for the member-optional path (issue #64).
