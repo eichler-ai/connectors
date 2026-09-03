@@ -270,3 +270,41 @@ Describe 'Register-McpServer' {
         Test-Path $cfg | Should -BeFalse
     }
 }
+
+Describe 'Register-McpServer -- Claude Code CLI wiring' {
+    BeforeEach {
+        $script:dir = Join-Path $TestDrive "cli-$([guid]::NewGuid())"
+        New-Item -ItemType Directory -Force -Path $dir | Out-Null
+        $script:fakeExe = Join-Path $dir 'mcp-server.exe'
+        New-Item -ItemType File -Force -Path $fakeExe | Out-Null
+        # Desktop half is inert here (its own dir is absent -> Add returns $false); the CLI is "present".
+        Mock Get-DesktopConfigPath { Join-Path $dir 'no-desktop\claude_desktop_config.json' }
+        Mock Get-Command { [pscustomobject]@{ Name = 'claude' } } -ParameterFilter { $Name -eq 'claude' }
+        # Default: `add`/`remove` succeed; `list` is overridden per-test to say present/absent.
+        Mock Invoke-ClaudeMcp { @{ ExitCode = 0; Output = @('Added') } } -ParameterFilter { $CliArgs[0] -eq 'add' }
+        Mock Invoke-ClaudeMcp { @{ ExitCode = 0; Output = @() } } -ParameterFilter { $CliArgs[0] -eq 'remove' }
+    }
+    It 'does NOT call `remove` when revit is absent (the fresh-install crash regression)' {
+        Mock Invoke-ClaudeMcp { @{ ExitCode = 0; Output = @() } } -ParameterFilter { $CliArgs[0] -eq 'list' }
+        Register-McpServer $fakeExe 6>$null
+        Should -Invoke Invoke-ClaudeMcp -Times 0 -Exactly -ParameterFilter { $CliArgs[0] -eq 'remove' }
+        Should -Invoke Invoke-ClaudeMcp -Times 1 -Exactly -ParameterFilter { $CliArgs[0] -eq 'add' }
+    }
+    It 'removes then re-adds when revit is already present (a normal update)' {
+        Mock Invoke-ClaudeMcp { @{ ExitCode = 0; Output = @('revit: C:\old\mcp-server.exe --mode local') } } -ParameterFilter { $CliArgs[0] -eq 'list' }
+        Register-McpServer $fakeExe 6>$null
+        Should -Invoke Invoke-ClaudeMcp -Times 1 -Exactly -ParameterFilter { $CliArgs[0] -eq 'remove' }
+        Should -Invoke Invoke-ClaudeMcp -Times 1 -Exactly -ParameterFilter { $CliArgs[0] -eq 'add' }
+    }
+    It 'with -OnlyIfMissing leaves an already-present CLI registration completely untouched' {
+        Mock Invoke-ClaudeMcp { @{ ExitCode = 0; Output = @('revit: C:\x\mcp-server.exe --mode local') } } -ParameterFilter { $CliArgs[0] -eq 'list' }
+        Register-McpServer $fakeExe -OnlyIfMissing 6>$null
+        Should -Invoke Invoke-ClaudeMcp -Times 0 -Exactly -ParameterFilter { $CliArgs[0] -eq 'remove' }
+        Should -Invoke Invoke-ClaudeMcp -Times 0 -Exactly -ParameterFilter { $CliArgs[0] -eq 'add' }
+    }
+    It 'reports a manual step (does not throw) when `add` fails' {
+        Mock Invoke-ClaudeMcp { @{ ExitCode = 0; Output = @() } } -ParameterFilter { $CliArgs[0] -eq 'list' }
+        Mock Invoke-ClaudeMcp { @{ ExitCode = 1; Output = @('some CLI error') } } -ParameterFilter { $CliArgs[0] -eq 'add' }
+        { Register-McpServer $fakeExe 6>$null } | Should -Not -Throw
+    }
+}
