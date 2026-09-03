@@ -118,11 +118,22 @@ public sealed class MCPBridgeStatusCommand : IExternalCommand
 
         var (buildTimestamp, gitCommit, addInVersion) = ReadBuildIdentity();
 
+        // Both components state their version (the user's request after the v0.1.2 update): the
+        // add-in's from its embedded release tag, the server's as it reports itself in broker.json
+        // (re-read on every click, so it reflects the server currently running -- or, when nothing
+        // is connected yet, the one broker.json last described).
+        var brokerVersion = host?.BrokerVersion;
+        var serverVersion = string.IsNullOrWhiteSpace(brokerVersion) ? "version unknown"
+            : brokerVersion == "dev" ? "dev build"
+            : UpdateAvailability.DisplayTag(brokerVersion);
+
         return
             $"Instance ID: {MCPBridgeApplication.InstanceId}\n" +
-            $"MCP Server: {DescribeMode(host?.DiscoveryOptions)}\n" +
             $"Status: {connectionLine}\n\n" +
-            $"Add-in: {addInVersion} (build {buildTimestamp}, commit {gitCommit})";
+            $"MCP Bridge (add-in): {addInVersion}\n" +
+            $"  build {buildTimestamp}, commit {gitCommit}\n" +
+            $"MCP Server: {serverVersion}\n" +
+            $"  {DescribeMode(host?.DiscoveryOptions)}";
     }
 
     /// <summary>
