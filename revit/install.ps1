@@ -404,6 +404,24 @@ function Remove-DesktopMcpServer([string]$ConfigPath, [string]$Name) {
     return $true
 }
 
+function Invoke-ClaudeMcp([string[]]$CliArgs) {
+    # Thin, mockable wrapper around `claude mcp ...`. Returns @{ ExitCode; Output } and NEVER throws:
+    # under $ErrorActionPreference='Stop' a native non-zero exit OR a line on stderr (even with a
+    # redirect) can surface as a terminating error -- notably `claude mcp remove revit` when nothing is
+    # registered prints "No MCP server named 'revit' in user scope" and exits non-zero. Neutralize EAP
+    # locally and report the exit code so callers drive off it instead of being aborted.
+    $savedEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $out = & claude mcp @CliArgs 2>&1
+        return @{ ExitCode = $LASTEXITCODE; Output = $out }
+    } catch {
+        return @{ ExitCode = -1; Output = $_.Exception.Message }
+    } finally {
+        $ErrorActionPreference = $savedEap
+    }
+}
+
 function Register-McpServer([string]$ServerExe, [switch]$OnlyIfMissing) {
     # Connect the broker (a local stdio MCP server, mcp-server.exe --mode local -- PRD §05) to this
     # user's Claude clients: Claude Code CLI, and Claude Desktop (which is also what Cowork reads).
@@ -418,22 +436,19 @@ function Register-McpServer([string]$ServerExe, [switch]$OnlyIfMissing) {
     $didWork = $false
 
     # Claude Code CLI: `claude mcp add` at USER scope, so it is available in EVERY project (the default
-    # `local` scope binds it to the current project only). Remove-then-add is idempotent by construction.
+    # `local` scope binds it to the current project only). Only `remove` when the entry is actually
+    # present -- removing an absent server errors, and (see Invoke-ClaudeMcp) that error would otherwise
+    # abort the whole install on a fresh machine.
     if (Get-Command claude -ErrorAction SilentlyContinue) {
-        $cliPresent = $false
-        if ($OnlyIfMissing) {
-            try { $cliPresent = (((& claude mcp list 2>$null) -join "`n") -match '(?im)^\s*revit[\s:]') } catch { $cliPresent = $false }
-        }
+        $listRes = Invoke-ClaudeMcp @('list')
+        $cliPresent = (($listRes.Output -join "`n") -match '(?im)^\s*revit[\s:]')
         if (-not ($OnlyIfMissing -and $cliPresent)) {
-            & claude mcp remove revit --scope user 2>$null | Out-Null
-            # A native exe's non-zero exit does NOT throw under $ErrorActionPreference='Stop' (it only
-            # sets $LASTEXITCODE), so an old/broken `claude` would otherwise be reported as success while
-            # its raw error spews. Capture its output and gate the "connected" claim on the exit code.
-            $addOut = & claude mcp add --scope user revit -- $ServerExe --mode local 2>&1
-            if ($LASTEXITCODE -eq 0) {
+            if ($cliPresent) { Invoke-ClaudeMcp @('remove', 'revit', '--scope', 'user') | Out-Null }
+            $addRes = Invoke-ClaudeMcp @('add', '--scope', 'user', 'revit', '--', $ServerExe, '--mode', 'local')
+            if ($addRes.ExitCode -eq 0) {
                 $registered += 'Claude Code CLI (user scope, every project)'; $didWork = $true
             } else {
-                $addTail = ($addOut | Select-Object -Last 1)
+                $addTail = ($addRes.Output | Select-Object -Last 1)
                 $todo += "Claude Code CLI: automatic registration failed ($addTail). Update the claude CLI, then run: claude mcp add --scope user revit -- `"$ServerExe`" --mode local"
             }
         }
@@ -768,8 +783,10 @@ if (-not $LocalPackagePath -and $installed -eq $releaseTag -and $allDllsPresent)
     if (-not $Silent) { Write-Host "Revit MCP Bridge is already up to date ($installed)." }
     # The add-in is current, but a prior run may have deployed it without ever reaching MCP
     # registration (interrupted, or an older installer that didn't register). Ensure the wiring is
-    # present before returning -- idempotent, and -OnlyIfMissing keeps a healthy re-run silent.
-    Register-McpServer (Join-Path (Get-AppDir $Scope) 'mcp-server.exe') -OnlyIfMissing
+    # present before returning -- idempotent, and -OnlyIfMissing keeps a healthy re-run silent. Best
+    # effort: the add-in is already up to date, so a hiccup wiring a client must not fail the whole run.
+    try { Register-McpServer (Join-Path (Get-AppDir $Scope) 'mcp-server.exe') -OnlyIfMissing }
+    catch { Write-Host "Note: could not auto-register the MCP server ($($_.Exception.Message)). Run: claude mcp add --scope user revit -- `"$(Join-Path (Get-AppDir $Scope) 'mcp-server.exe')`" --mode local" }
     return
 }
 if ($installed -eq $releaseTag -and -not $allDllsPresent -and -not $LocalPackagePath) {
