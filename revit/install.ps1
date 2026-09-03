@@ -346,6 +346,47 @@ function Complete-PendingBrokerSwap([string]$AppDir) {
     }
 }
 
+# --- Claude client MCP registration -----------------------------------------------------------------
+# The broker is a local stdio MCP server; the Claude clients need a config entry pointing at it. Claude
+# Code CLI has its own `claude mcp add`; Claude Desktop (and Cowork, which reads the same file) has no
+# CLI, so its JSON config is edited directly here. These are functions so install.tests.ps1 can prove
+# the merge preserves other servers and the removal takes only ours.
+
+function Get-DesktopConfigPath {
+    # Claude Desktop / Cowork on Windows. The Store/MSIX build keeps a virtualized copy under LocalCache
+    # rather than %APPDATA% (a known issue); this returns the standard path and callers warn about MSIX.
+    Join-Path $env:APPDATA 'Claude\claude_desktop_config.json'
+}
+
+function Add-DesktopMcpServer([string]$ConfigPath, [string]$Name, [string]$Command, [string[]]$Arguments) {
+    # Merge one stdio server into Claude Desktop's config WITHOUT disturbing any other server or
+    # top-level key. $false (a no-op) when Claude Desktop is not installed for this user (its config
+    # directory is absent). Backs the file up first. Writes UTF-8 with NO BOM -- a leading BOM breaks
+    # some JSON parsers and the file is strict JSON.
+    $dir = Split-Path $ConfigPath
+    if (-not (Test-Path $dir)) { return $false }
+    $cfg = if (Test-Path $ConfigPath) { (Get-Content $ConfigPath -Raw) | ConvertFrom-Json } else { [pscustomobject]@{} }
+    if (-not $cfg.PSObject.Properties['mcpServers']) {
+        $cfg | Add-Member -NotePropertyName 'mcpServers' -NotePropertyValue ([pscustomobject]@{}) -Force
+    }
+    $entry = [pscustomobject][ordered]@{ type = 'stdio'; command = $Command; args = @($Arguments) }
+    $cfg.mcpServers | Add-Member -NotePropertyName $Name -NotePropertyValue $entry -Force
+    if (Test-Path $ConfigPath) { Copy-Item $ConfigPath "$ConfigPath.mcpbridge.bak" -Force }
+    [System.IO.File]::WriteAllText($ConfigPath, ($cfg | ConvertTo-Json -Depth 20), (New-Object System.Text.UTF8Encoding($false)))
+    return $true
+}
+
+function Remove-DesktopMcpServer([string]$ConfigPath, [string]$Name) {
+    # Remove one server from Claude Desktop's config, leaving every other server and key intact. No-op
+    # (and $false) when the file, the mcpServers key, or the named entry is absent.
+    if (-not (Test-Path $ConfigPath)) { return $false }
+    $cfg = (Get-Content $ConfigPath -Raw) | ConvertFrom-Json
+    if (-not $cfg.PSObject.Properties['mcpServers'] -or -not $cfg.mcpServers.PSObject.Properties[$Name]) { return $false }
+    $cfg.mcpServers.PSObject.Properties.Remove($Name)
+    [System.IO.File]::WriteAllText($ConfigPath, ($cfg | ConvertTo-Json -Depth 20), (New-Object System.Text.UTF8Encoding($false)))
+    return $true
+}
+
 if ($LoadFunctionsOnly) { return }
 
 try {
@@ -523,9 +564,12 @@ if ($Uninstall) {
         Remove-Item "$env:LocalAppData\Connectors\Revit\models" -Recurse -Force -ErrorAction SilentlyContinue
     }
     Remove-Item $uninstallKeyPath -Recurse -Force -ErrorAction SilentlyContinue
+    # Deregister from the Claude clients install registered it with -- CLI at the same user scope, and
+    # Claude Desktop's config (Cowork reads the same file), leaving any other MCP servers there intact.
     if (Get-Command claude -ErrorAction SilentlyContinue) {
-        & claude mcp remove revit 2>$null | Out-Null
+        & claude mcp remove revit --scope user 2>$null | Out-Null
     }
+    try { Remove-DesktopMcpServer (Get-DesktopConfigPath) 'revit' | Out-Null } catch { }
     if ($leftoverVersions.Count -gt 0) {
         Write-Host "Revit MCP Bridge uninstalled. Revit $($leftoverVersions -join ', ') still has some files locked -- close it and re-run this uninstaller to finish cleaning up."
     } else {
@@ -832,18 +876,41 @@ if (-not $accounted) {
     return
 }
 
-# --- Register the MCP Server with Claude ------------------------------------------------------------
-# Local-mode (this machine runs both Revit and Claude Code) only -- the Mac+Parallels remote-mode
-# case is a separate, shorter macOS/bash counterpart script that runs on the Mac host and points
-# -mode remote at the VM's shared folder (PRD §12 "Mac + Parallels"), not this script's job.
-if ((Test-Path $serverExe) -and (Get-Command claude -ErrorAction SilentlyContinue)) {
-    # Remove-then-add rather than checking for an existing entry first: idempotent by construction
-    # (matches this whole script's own design principle) without needing to parse `claude mcp list`
-    # output or assume a particular error shape from a re-add of an existing name.
-    & claude mcp remove revit 2>$null | Out-Null
-    & claude mcp add revit -- $serverExe --mode local
-} elseif (Test-Path $serverExe) {
-    Write-Host "Claude Code CLI not found on PATH -- skipping MCP registration. Add it manually: $serverExe --mode local"
+# --- Register the MCP Server with the user's Claude clients -----------------------------------------
+# The broker is a local stdio MCP server (mcp-server.exe --mode local, PRD §05). Connect it to the
+# clients this user has -- Claude Code CLI, and Claude Desktop (which is also what Cowork reads) -- and
+# print exact instructions for whatever couldn't be done automatically. (The Mac+Parallels remote-mode
+# dev topology registers on the Mac side via install-mac.sh, not here.)
+if (Test-Path $serverExe) {
+    $registered = @()
+    $todo = @()
+
+    # Claude Code CLI: `claude mcp add` at USER scope, so it is available in EVERY project (the default
+    # `local` scope binds it to the current project only). Remove-then-add is idempotent by construction,
+    # no need to parse `claude mcp list`.
+    if (Get-Command claude -ErrorAction SilentlyContinue) {
+        & claude mcp remove revit --scope user 2>$null | Out-Null
+        & claude mcp add --scope user revit -- $serverExe --mode local
+        $registered += 'Claude Code CLI (user scope, every project)'
+    } else {
+        $todo += "Claude Code CLI (when its CLI is on PATH): claude mcp add --scope user revit -- `"$serverExe`" --mode local"
+    }
+
+    # Claude Desktop + Cowork: merge the entry into %APPDATA%\Claude\claude_desktop_config.json (no CLI
+    # edits it). Skips cleanly if Claude Desktop is not installed, then falls to printed instructions.
+    $desktopCfg = Get-DesktopConfigPath
+    $desktopOk = $false
+    try { $desktopOk = Add-DesktopMcpServer $desktopCfg 'revit' $serverExe @('--mode', 'local') } catch { $desktopOk = $false }
+    if ($desktopOk) {
+        $registered += 'Claude Desktop / Cowork (restart Claude Desktop to load it)'
+    } else {
+        $jsonExe = $serverExe.Replace('\', '\\')
+        $todo += "Claude Desktop / Cowork: add this under `"mcpServers`" in $desktopCfg, then restart Claude Desktop:`n      `"revit`": { `"type`": `"stdio`", `"command`": `"$jsonExe`", `"args`": [`"--mode`", `"local`"] }"
+    }
+
+    if ($registered.Count -gt 0) { Write-Host "Connected the revit MCP server to: $($registered -join '; ')." }
+    foreach ($t in $todo) { Write-Host "To finish connecting it -- $t" }
+    Write-Host "(It runs as: `"$serverExe`" --mode local. The Microsoft Store build of Claude Desktop keeps its config under a virtualized AppData path, not %APPDATA%; the standard .exe build avoids that.)"
 }
 
 # --- Confirm the broker carries the search-ranking embedding models --------------------------------

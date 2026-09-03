@@ -145,3 +145,50 @@ Describe 'Install-BrokerStaged' {
         Get-Content (Join-Path $app 'mcp-server.exe') -Raw | Should -Be 'exe'
     }
 }
+
+Describe 'Add-DesktopMcpServer / Remove-DesktopMcpServer' {
+    BeforeEach {
+        $script:cfgDir = Join-Path $TestDrive "claude-$([guid]::NewGuid())"
+        New-Item -ItemType Directory -Force -Path $cfgDir | Out-Null
+        $script:cfg = Join-Path $cfgDir 'claude_desktop_config.json'
+    }
+    It 'creates the config and adds a stdio server when none exists' {
+        Add-DesktopMcpServer $cfg 'revit' 'C:\x\mcp-server.exe' @('--mode', 'local') | Should -BeTrue
+        $j = Get-Content $cfg -Raw | ConvertFrom-Json
+        $j.mcpServers.revit.type | Should -Be 'stdio'
+        $j.mcpServers.revit.command | Should -Be 'C:\x\mcp-server.exe'
+        @($j.mcpServers.revit.args) | Should -Be @('--mode', 'local')
+    }
+    It 'merges without disturbing another server or a top-level key' {
+        @{ theme = 'dark'; mcpServers = @{ other = @{ command = 'other.exe' } } } | ConvertTo-Json -Depth 5 | Set-Content $cfg
+        Add-DesktopMcpServer $cfg 'revit' 'C:\x\mcp-server.exe' @('--mode', 'local') | Should -BeTrue
+        $j = Get-Content $cfg -Raw | ConvertFrom-Json
+        $j.mcpServers.other.command | Should -Be 'other.exe'
+        $j.mcpServers.revit.command | Should -Be 'C:\x\mcp-server.exe'
+        $j.theme | Should -Be 'dark'
+    }
+    It 'backs up an existing config and writes UTF-8 with no BOM' {
+        '{"mcpServers":{}}' | Set-Content $cfg
+        Add-DesktopMcpServer $cfg 'revit' 'C:\x\mcp-server.exe' @('--mode', 'local') | Should -BeTrue
+        Test-Path "$cfg.mcpbridge.bak" | Should -BeTrue
+        $bytes = [System.IO.File]::ReadAllBytes($cfg)
+        ($bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) | Should -BeFalse
+    }
+    It 'is a no-op (returns false) when Claude Desktop is not installed (config dir absent)' {
+        $absent = Join-Path $TestDrive 'no-such-dir\claude_desktop_config.json'
+        Add-DesktopMcpServer $absent 'revit' 'C:\x\mcp-server.exe' @('--mode', 'local') | Should -BeFalse
+        Test-Path $absent | Should -BeFalse
+    }
+    It 'Remove takes only our entry, leaving other servers intact' {
+        @{ mcpServers = @{ other = @{ command = 'other.exe' }; revit = @{ command = 'r.exe' } } } | ConvertTo-Json -Depth 5 | Set-Content $cfg
+        Remove-DesktopMcpServer $cfg 'revit' | Should -BeTrue
+        $j = Get-Content $cfg -Raw | ConvertFrom-Json
+        $j.mcpServers.PSObject.Properties['revit'] | Should -BeNullOrEmpty
+        $j.mcpServers.other.command | Should -Be 'other.exe'
+    }
+    It 'Remove is a no-op when the file, or the entry, is absent' {
+        Remove-DesktopMcpServer $cfg 'revit' | Should -BeFalse
+        '{"mcpServers":{}}' | Set-Content $cfg
+        Remove-DesktopMcpServer $cfg 'revit' | Should -BeFalse
+    }
+}
