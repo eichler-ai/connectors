@@ -11,7 +11,7 @@
 # API call and a version-string comparison, nothing else. Three outcomes, not two -- see the
 # version-check block below for why "the marker says current" alone is not enough to skip work.
 #
-# Primary invocation is piped (irm .../install.ps1 | iex, PRD §12) -- $PSCommandPath is empty in that
+# Primary invocation is piped (irm https://raw.githubusercontent.com/eichler-ai/connectors/main/revit/install.ps1 | iex, PRD §12) -- $PSCommandPath is empty in that
 # mode (no file on disk), so this script never references it directly; see $ScriptPath below.
 
 param(
@@ -52,7 +52,7 @@ $ErrorActionPreference = 'Stop'
 $RepoSlug = 'eichler-ai/connectors'
 
 # Review finding: $PSCommandPath is empty/null under the script's own PRIMARY documented invocation
-# (irm .../install.ps1 | iex, PRD §12) -- there's no file on disk to point at. Every downstream use
+# (irm https://raw.githubusercontent.com/eichler-ai/connectors/main/revit/install.ps1 | iex, PRD §12) -- there's no file on disk to point at. Every downstream use
 # of "this script's own path" (elevation re-invoke, the self-copy used for the uninstall string and
 # for the deferred-update watcher task) goes through $ScriptPath instead, which is always a real
 # file: materialize our own source to one when piped, since $MyInvocation.MyCommand.Definition inside
