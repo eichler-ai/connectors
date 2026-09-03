@@ -236,6 +236,7 @@ public sealed class MCPBridgeApplication : IExternalApplication
             {
                 ToolTip = "Show the MCP Bridge connection status, which MCP Server it uses (local or remote), and build info.",
                 AvailabilityClassName = availability,
+                LargeImage = RibbonIcons.Status(),
             });
             panel.AddItem(new PushButtonData(
                 "MCPBridgeReconnect",
@@ -245,6 +246,7 @@ public sealed class MCPBridgeApplication : IExternalApplication
             {
                 ToolTip = "Reconnect to the MCP Server now (e.g. after it was restarted), instead of waiting for the automatic retry.",
                 AvailabilityClassName = availability,
+                LargeImage = RibbonIcons.Reconnect(),
             });
             // Label/tooltip are placeholders here; UpdateBrokerModeButton writes the real ones once the
             // resolved options are known (OnStartup) and after every switch.
@@ -255,6 +257,7 @@ public sealed class MCPBridgeApplication : IExternalApplication
                 typeof(MCPBridgeBrokerModeCommand).FullName)
             {
                 AvailabilityClassName = availability,
+                LargeImage = RibbonIcons.ServerLocal(),
             }) as PushButton;
         }
         catch (Exception ex)
@@ -288,11 +291,13 @@ public sealed class MCPBridgeApplication : IExternalApplication
             if (options.Mode == BrokerTopologyMode.Remote)
             {
                 button.ItemText = "MCP Server:\nREMOTE";
+                button.LargeImage = RibbonIcons.ServerRemote();
                 button.ToolTip = $"Using a REMOTE MCP Server on another machine, found via the shared drive at {options.ConnectorRoot} (this project's Mac+Parallels dev setup). Click to switch back to the MCP Server on this machine.";
             }
             else
             {
                 button.ItemText = "MCP Server:\nLocal";
+                button.LargeImage = RibbonIcons.ServerLocal();
                 button.ToolTip = $"Using the MCP Server on this machine (the default), found via {options.ConnectorRoot}. Click to switch to a REMOTE MCP Server on another machine, via a shared drive.";
             }
         }

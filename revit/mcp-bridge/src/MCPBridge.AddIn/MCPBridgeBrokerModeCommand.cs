@@ -127,29 +127,38 @@ public sealed class MCPBridgeBrokerModeCommand : IExternalCommand
     /// </summary>
     private static string? PromptForSharedRoot(IntPtr ownerHandle, string suggestion)
     {
-        var textBox = new TextBox { Text = suggestion, Margin = new Thickness(0, 6, 0, 12), MinWidth = 380 };
+        var textBox = new TextBox { Text = suggestion, Margin = new Thickness(0, 8, 0, 16), Padding = new Thickness(4, 3, 4, 3) };
         var ok = new Button { Content = "Switch to REMOTE", IsDefault = true, Padding = new Thickness(12, 4, 12, 4), Margin = new Thickness(0, 0, 8, 0) };
         var cancel = new Button { Content = "Cancel", IsCancel = true, Padding = new Thickness(12, 4, 12, 4) };
         var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
         buttons.Children.Add(ok);
         buttons.Children.Add(cancel);
 
-        var panel = new StackPanel { Margin = new Thickness(12) };
+        var panel = new StackPanel { Margin = new Thickness(16) };
         panel.Children.Add(new TextBlock
         {
             TextWrapping = TextWrapping.Wrap,
-            Text = "Shared drive root for the REMOTE MCP Server, as a UNC path (\\\\host\\share). " +
-                   "The add-in will find the MCP Server through <root>\\Connectors\\Revit\\broker.json instead of this machine's local app-data. " +
-                   "In this project's Mac+Parallels dev setup that is the Mac-side MCP Server started by install-mac.sh / redeploy-and-verify.sh.",
+            Text = "Shared drive that the REMOTE MCP Server publishes its address to, as a UNC path (\\\\host\\share).",
         });
         panel.Children.Add(textBox);
+        panel.Children.Add(new TextBlock
+        {
+            TextWrapping = TextWrapping.Wrap,
+            Opacity = 0.7,
+            Margin = new Thickness(0, 0, 0, 12),
+            Text = "The MCP Bridge will look for <root>\\Connectors\\Revit\\broker.json there instead of this machine's own app-data. " +
+                   "Use this when the MCP Server runs on another computer, e.g. a Mac host with Revit in a Parallels VM.",
+        });
         panel.Children.Add(buttons);
 
+        // Fixed width, height to content: a SizeToContent=WidthAndHeight window sizes itself to the
+        // longest unwrapped line, which made this prompt span most of the screen (user feedback, #187).
         var window = new Window
         {
             Title = "MCP Bridge - Switch to a REMOTE MCP Server",
             Content = panel,
-            SizeToContent = SizeToContent.WidthAndHeight,
+            Width = 480,
+            SizeToContent = SizeToContent.Height,
             ResizeMode = ResizeMode.NoResize,
             WindowStartupLocation = WindowStartupLocation.CenterOwner,
             ShowInTaskbar = false,
