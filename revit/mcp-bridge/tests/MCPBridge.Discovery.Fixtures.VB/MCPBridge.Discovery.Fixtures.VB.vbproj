@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    A Visual Basic fixture, deliberately (issue #186). Discovery has to render and resolve NAMED indexed
+    properties, the C++/CLI shape RevitAPI.dll uses 55 times per version (Element.Parameter,
+    FootPrintRoof.SlopeAngle, ...), and C# cannot declare one: a C# indexer is always the type's
+    DefaultMember, whatever [IndexerName] calls it, so no C# fixture can produce the non-default case
+    the fix is about. VB declares them natively (`Property SlopeAngle(curve As Integer) As Double`) and
+    the SDK builds it with the same toolchain, so this stays a portable tier-1 fixture instead of
+    depending on a Revit install. Test-only; never shipped.
+  -->
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <RootNamespace>MCPBridge.Discovery.Fixtures.VB</RootNamespace>
+    <IsPackable>false</IsPackable>
+    <!-- Same convention as the C# fixtures: a real XML-doc sidecar next to the DLL, which
+         DiscoveryReflector finds via Path.ChangeExtension(assembly.Location, ".xml"). -->
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);BC42312;BC42314</NoWarn>
+  </PropertyGroup>
+
+</Project>

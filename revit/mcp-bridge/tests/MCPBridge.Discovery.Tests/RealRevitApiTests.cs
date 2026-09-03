@@ -84,6 +84,44 @@ public class RealRevitApiTests
     }
 
     /// <summary>
+    /// Issue #186 against the corpus it was reported on. NamedIndexedPropertyTests pins the mechanism
+    /// portably on a VB fixture; this pins the three real members the fix exists for -- the reported
+    /// FootPrintRoof.SlopeAngle, the most-called named indexed property in the API (Element.Parameter), and
+    /// a C++/CLI DEFAULT indexed property (UV's) that must keep the `this[...]` form.
+    /// </summary>
+    [Fact]
+    public void NamedIndexedProperties_AgainstRealRevitApiDll_RenderAndResolveAsAccessors()
+    {
+        var loaded = RealRevitApiLoader.TryLoad();
+        if (loaded is null)
+        {
+            return; // Not configured in this environment -- skip rather than fail.
+        }
+
+        using var context = loaded.Value.Context;
+        using var cache = new DiscoveryCache(":memory:");
+        cache.Sync(new[] { ("core", loaded.Value.Assembly) });
+        var service = new DiscoveryService(cache);
+
+        var slope = service.DescribeFunction("Autodesk.Revit.DB.FootPrintRoof.SlopeAngle", memberId: null);
+        Assert.Equal(
+            "double get_SlopeAngle(ModelCurve pCurve); void set_SlopeAngle(ModelCurve pCurve, double value)",
+            slope.Single!.Signature);
+
+        var setter = service.DescribeFunction("Autodesk.Revit.DB.FootPrintRoof.set_SlopeAngle", memberId: null);
+        Assert.Equal(slope.Single.MemberId, setter.Single!.MemberId);
+
+        var parameter = service.DescribeFunction("Autodesk.Revit.DB.Element.Parameter", memberId: null);
+        Assert.NotNull(parameter.Overloads);
+        Assert.Equal(3, parameter.Overloads!.Overloads.Count);
+        Assert.All(parameter.Overloads.Overloads, o => Assert.StartsWith("Parameter get_Parameter(", o.Signature));
+
+        var uvIndexer = cache.GetMembersIncludingInheritedByFullName("Autodesk.Revit.DB.UV")
+            .Single(m => m.Kind == "Property" && m.Parameters.Count > 0);
+        Assert.Contains("this[", uvIndexer.Signature);
+    }
+
+    /// <summary>
     /// A conversationally-phrased task, carrying several English function words no API name contains.
     ///
     /// <para>Asserts CONTENTION, not rank 1, and the distinction is deliberate. "create a wall on a level"
