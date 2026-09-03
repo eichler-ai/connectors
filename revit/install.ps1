@@ -404,6 +404,74 @@ function Remove-DesktopMcpServer([string]$ConfigPath, [string]$Name) {
     return $true
 }
 
+function Register-McpServer([string]$ServerExe, [switch]$OnlyIfMissing) {
+    # Connect the broker (a local stdio MCP server, mcp-server.exe --mode local -- PRD §05) to this
+    # user's Claude clients: Claude Code CLI, and Claude Desktop (which is also what Cowork reads).
+    # Prints exact manual instructions for whatever couldn't be done automatically. Called on BOTH the
+    # fresh/update path AND the "already up to date" short-circuit -- the add-in being current does not
+    # imply the MCP wiring is present (a prior run may have deployed the DLL but never reached
+    # registration), so re-running must be able to repair just the wiring. With -OnlyIfMissing it leaves
+    # an already-registered client untouched and silent, so a healthy up-to-date re-run says nothing.
+    if (-not (Test-Path $ServerExe)) { return }
+    $registered = @()
+    $todo = @()
+    $didWork = $false
+
+    # Claude Code CLI: `claude mcp add` at USER scope, so it is available in EVERY project (the default
+    # `local` scope binds it to the current project only). Remove-then-add is idempotent by construction.
+    if (Get-Command claude -ErrorAction SilentlyContinue) {
+        $cliPresent = $false
+        if ($OnlyIfMissing) {
+            try { $cliPresent = (((& claude mcp list 2>$null) -join "`n") -match '(?im)^\s*revit[\s:]') } catch { $cliPresent = $false }
+        }
+        if (-not ($OnlyIfMissing -and $cliPresent)) {
+            & claude mcp remove revit --scope user 2>$null | Out-Null
+            # A native exe's non-zero exit does NOT throw under $ErrorActionPreference='Stop' (it only
+            # sets $LASTEXITCODE), so an old/broken `claude` would otherwise be reported as success while
+            # its raw error spews. Capture its output and gate the "connected" claim on the exit code.
+            $addOut = & claude mcp add --scope user revit -- $ServerExe --mode local 2>&1
+            if ($LASTEXITCODE -eq 0) {
+                $registered += 'Claude Code CLI (user scope, every project)'; $didWork = $true
+            } else {
+                $addTail = ($addOut | Select-Object -Last 1)
+                $todo += "Claude Code CLI: automatic registration failed ($addTail). Update the claude CLI, then run: claude mcp add --scope user revit -- `"$ServerExe`" --mode local"
+            }
+        }
+    } elseif (-not $OnlyIfMissing) {
+        $todo += "Claude Code CLI (when its CLI is on PATH): claude mcp add --scope user revit -- `"$ServerExe`" --mode local"
+    }
+
+    # Claude Desktop + Cowork: merge the entry into claude_desktop_config.json (no CLI edits it). Both
+    # the path probe and the merge run inside one try/catch so an unreadable Packages\ dir or a
+    # hand-corrupted config falls to printed instructions instead of aborting.
+    $desktopCfg = $null
+    $desktopOk = $false
+    $desktopErr = $null
+    $desktopPresent = $false
+    try {
+        $desktopCfg = Get-DesktopConfigPath
+        if ($OnlyIfMissing -and (Test-Path $desktopCfg)) {
+            $existing = (Get-Content $desktopCfg -Raw) | ConvertFrom-Json
+            $desktopPresent = ($existing.PSObject.Properties['mcpServers'] -and $existing.mcpServers -and $existing.mcpServers.PSObject.Properties['revit'])
+        }
+        if (-not ($OnlyIfMissing -and $desktopPresent)) {
+            $desktopOk = Add-DesktopMcpServer $desktopCfg 'revit' $ServerExe @('--mode', 'local')
+        }
+    } catch { $desktopOk = $false; $desktopErr = $_.Exception.Message }
+    if ($desktopOk) {
+        $registered += 'Claude Desktop / Cowork (restart Claude Desktop to load it)'; $didWork = $true
+    } elseif (-not ($OnlyIfMissing -and $desktopPresent)) {
+        $cfgHint = if ($desktopCfg) { $desktopCfg } else { '%APPDATA%\Claude\claude_desktop_config.json (or your Claude Desktop config)' }
+        $jsonExe = $ServerExe.Replace('\', '\\')
+        $jsonNote = if ($desktopErr -and $desktopErr -match 'JSON|Convert|parse|token') { "your existing config at $cfgHint isn't valid JSON ($desktopErr) -- fix that first, then " } else { '' }
+        $todo += "Claude Desktop / Cowork: ${jsonNote}add this under `"mcpServers`" in $cfgHint, then restart Claude Desktop:`n      `"revit`": { `"type`": `"stdio`", `"command`": `"$jsonExe`", `"args`": [`"--mode`", `"local`"] }"
+    }
+
+    if ($registered.Count -gt 0) { Write-Host "Connected the revit MCP server to: $($registered -join '; ')." }
+    foreach ($t in $todo) { Write-Host "To finish connecting it -- $t" }
+    if ($didWork -or $todo.Count -gt 0) { Write-Host "(It runs as: `"$ServerExe`" --mode local. Restart any client that was open when this ran, so it reloads its MCP config.)" }
+}
+
 if ($LoadFunctionsOnly) { return }
 
 try {
@@ -698,6 +766,10 @@ $allDllsPresent =
 
 if (-not $LocalPackagePath -and $installed -eq $releaseTag -and $allDllsPresent) {
     if (-not $Silent) { Write-Host "Revit MCP Bridge is already up to date ($installed)." }
+    # The add-in is current, but a prior run may have deployed it without ever reaching MCP
+    # registration (interrupted, or an older installer that didn't register). Ensure the wiring is
+    # present before returning -- idempotent, and -OnlyIfMissing keeps a healthy re-run silent.
+    Register-McpServer (Join-Path (Get-AppDir $Scope) 'mcp-server.exe') -OnlyIfMissing
     return
 }
 if ($installed -eq $releaseTag -and -not $allDllsPresent -and -not $LocalPackagePath) {
@@ -716,7 +788,12 @@ try {
     if (-not $LocalPackagePath) {
         $asset = $release.assets | Where-Object name -eq 'mcpbridge-release.zip'
         if (-not $asset) { throw "The latest release ($releaseTag) is missing its installer package. This is a release-publishing problem, not something on your machine -- please contact support or try again later." }
-        $zipPath = Join-Path $env:TEMP $asset.name
+        # Download to a UNIQUE per-run path. A fixed %TEMP%\<asset>.zip name meant a leftover from an
+        # interrupted run (Ctrl+C leaves the partial file, and AV may still hold it open) blocked every
+        # retry with "Access is denied" on the -OutFile write. A GUID name can never collide, and the
+        # finally block below removes this run's file; any orphaned partials are named uniquely and get
+        # swept by Windows' normal %TEMP% cleanup.
+        $zipPath = Join-Path $env:TEMP ("mcpbridge-release-$([guid]::NewGuid()).zip")
         Invoke-WebRequest $asset.browser_download_url -OutFile $zipPath
         $zipDownloaded = $true
 
@@ -911,56 +988,9 @@ if (-not $accounted) {
 }
 
 # --- Register the MCP Server with the user's Claude clients -----------------------------------------
-# The broker is a local stdio MCP server (mcp-server.exe --mode local, PRD §05). Connect it to the
-# clients this user has -- Claude Code CLI, and Claude Desktop (which is also what Cowork reads) -- and
-# print exact instructions for whatever couldn't be done automatically. (The Mac+Parallels remote-mode
-# dev topology registers on the Mac side via install-mac.sh, not here.)
-if (Test-Path $serverExe) {
-    $registered = @()
-    $todo = @()
-
-    # Claude Code CLI: `claude mcp add` at USER scope, so it is available in EVERY project (the default
-    # `local` scope binds it to the current project only). Remove-then-add is idempotent by construction,
-    # no need to parse `claude mcp list`.
-    if (Get-Command claude -ErrorAction SilentlyContinue) {
-        & claude mcp remove revit --scope user 2>$null | Out-Null
-        # A native exe's non-zero exit does NOT throw under $ErrorActionPreference='Stop' (it only sets
-        # $LASTEXITCODE), so an old/broken `claude` would otherwise be reported as success while its raw
-        # error spews. Capture its output and gate the "connected" claim on the exit code.
-        $addOut = & claude mcp add --scope user revit -- $serverExe --mode local 2>&1
-        if ($LASTEXITCODE -eq 0) {
-            $registered += 'Claude Code CLI (user scope, every project)'
-        } else {
-            $addTail = ($addOut | Select-Object -Last 1)
-            $todo += "Claude Code CLI: automatic registration failed ($addTail). Update the claude CLI, then run: claude mcp add --scope user revit -- `"$serverExe`" --mode local"
-        }
-    } else {
-        $todo += "Claude Code CLI (when its CLI is on PATH): claude mcp add --scope user revit -- `"$serverExe`" --mode local"
-    }
-
-    # Claude Desktop + Cowork: merge the entry into claude_desktop_config.json (no CLI edits it). Both
-    # the path probe and the merge run inside one try/catch so an unreadable Packages\ dir or a
-    # hand-corrupted config falls to printed instructions instead of aborting a nearly-done install.
-    $desktopCfg = $null
-    $desktopOk = $false
-    $desktopErr = $null
-    try {
-        $desktopCfg = Get-DesktopConfigPath
-        $desktopOk = Add-DesktopMcpServer $desktopCfg 'revit' $serverExe @('--mode', 'local')
-    } catch { $desktopOk = $false; $desktopErr = $_.Exception.Message }
-    if ($desktopOk) {
-        $registered += 'Claude Desktop / Cowork (restart Claude Desktop to load it)'
-    } else {
-        $cfgHint = if ($desktopCfg) { $desktopCfg } else { '%APPDATA%\Claude\claude_desktop_config.json (or your Claude Desktop config)' }
-        $jsonExe = $serverExe.Replace('\', '\\')
-        $jsonNote = if ($desktopErr -and $desktopErr -match 'JSON|Convert|parse|token') { "your existing config at $cfgHint isn't valid JSON ($desktopErr) -- fix that first, then " } else { '' }
-        $todo += "Claude Desktop / Cowork: ${jsonNote}add this under `"mcpServers`" in $cfgHint, then restart Claude Desktop:`n      `"revit`": { `"type`": `"stdio`", `"command`": `"$jsonExe`", `"args`": [`"--mode`", `"local`"] }"
-    }
-
-    if ($registered.Count -gt 0) { Write-Host "Connected the revit MCP server to: $($registered -join '; ')." }
-    foreach ($t in $todo) { Write-Host "To finish connecting it -- $t" }
-    Write-Host "(It runs as: `"$serverExe`" --mode local. Restart any client that was open when this ran, so it reloads its MCP config.)"
-}
+# Connect the freshly deployed broker to Claude Code CLI + Claude Desktop/Cowork (see Register-McpServer).
+# (The Mac+Parallels remote-mode dev topology registers on the Mac side via install-mac.sh, not here.)
+Register-McpServer $serverExe
 
 # --- Confirm the broker carries the search-ranking embedding models --------------------------------
 # A release built by release.yml always fetches the models before building, so a normal install has
@@ -1029,7 +1059,7 @@ Write-Host $summary
         'Central Directory|Expand-Archive|corrupt|Zip' {
             "`n  The downloaded package looks corrupt -- re-run to download it again." }
         'Access to the path|UnauthorizedAccess|used by another process|is denied' {
-            "`n  A file is locked or access was denied. Close Revit and any running MCP client, then re-run (or try again as Administrator with -Scope AllUsers)." }
+            "`n  Access was denied to a file. If it happened while downloading, your %TEMP% may be full or locked (an antivirus scan of a leftover download) -- clear it and re-run. Otherwise a Revit add-in file is in use: close Revit and any running MCP client, then re-run (or try again as Administrator with -Scope AllUsers)." }
         default { '' }
     }
     Write-Host ''
