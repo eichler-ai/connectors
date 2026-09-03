@@ -337,6 +337,17 @@ re-resolve rather than hardcoding either. `robocopy` from `cmd /c` mangles a `\\
   your worktree's share, restart the launcher agent so it re-reads the environment, relaunch Revit —
   and put the share back afterwards. Confirm which broker you actually reached before trusting a
   harness result: `get_skills`' `build` field names the revision.
+- **`bridge-config.json` outranks `MCPBRIDGE_*` (issue #185).** The ribbon's **MCP Server: Local / REMOTE**
+  toggle writes `%LOCALAPPDATA%\Connectors\Revit\bridge-config.json`, and once that file states a
+  valid `brokerMode` the `MCPBRIDGE_BROKER_MODE` variable is ignored (`MCPBRIDGE_SHARED_ROOT` still
+  serves as the remote root when the file has no `sharedRoot`) — so a launcher-agent env change that
+  "doesn't take" may be a saved config pinning the mode, not the stale-environment-snapshot problem
+  above. Two consequences: to move Revit between brokers, click the toggle (it reconnects at once, no
+  relaunch) rather than editing the environment; and `startup-errors.log`'s
+  `broker mode decided by Config|Environment|Default` line says which source won. The **Reconnect**
+  button re-reads `broker.json` immediately — use it after restarting a broker instead of waiting
+  out the backoff or restarting Revit. The Status window's `MCP Server:` line names the exact
+  `broker.json` being read.
 - **The running broker is only as current as the last time something BUILT it.** `install-mac.sh` is
   a one-time setup step, so the binary `claude mcp add` registered can predate the repo by weeks
   while serving compiled-in content — `skill.md`, the tool schemas, the descriptions — as if it were

@@ -22,7 +22,7 @@ This split is the general pattern for any host app with the same constraints (si
 
 There is no umbrella product name distinct from the connector itself. Refer to the whole system as "the `<App>` connector" or "this connector" — never as "MCP Bridge" alone, which stays reserved for the add-in specifically.
 
-"The broker" and "the add-in" are acceptable internal/engineering shorthand for the MCP Server and MCP Bridge respectively, used freely in code comments and design docs once the full names are established — they refer to the same components, not sub-parts of them.
+"The broker" and "the add-in" are acceptable internal/engineering shorthand for the MCP Server and MCP Bridge respectively, used freely in code comments and design docs once the full names are established — they refer to the same components, not sub-parts of them. **User-facing text never uses the shorthand**: ribbon labels, tooltips, dialogs, status windows, and installer output say "MCP Server" and "MCP Bridge" — a Revit user has no idea what "the broker" is (PR #187's ribbon toggle was renamed from "Broker: Local" to "MCP Server: Local" for exactly this reason). Log lines and diagnostics read by developers may keep the shorthand.
 
 ## App-data layout
 

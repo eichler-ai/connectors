@@ -26,25 +26,6 @@ public sealed class MCPBridgeStatusCommand : IExternalCommand
     {
         var host = MCPBridgeApplication.CurrentHost;
 
-        string connectionLine;
-        if (host is null)
-        {
-            connectionLine = "Not started (BridgeHost unavailable).";
-        }
-        else if (host.IsConnected)
-        {
-            var since = host.ConnectedSince is { } connectedSince
-                ? connectedSince.ToLocalTime().ToString("HH:mm:ss")
-                : "unknown time";
-            connectionLine = $"Connected to broker at {host.BrokerAddress} since {since}.";
-        }
-        else
-        {
-            connectionLine = "Not connected -- reconnecting in the background.";
-        }
-
-        var (buildTimestamp, gitCommit) = ReadBuildIdentity();
-
         // Independent review finding: BridgeHost's version fields were previously only ever written
         // once per TCP connection, so a Revit session that stayed connected for days would never see
         // a release published mid-session until the connection happened to drop and reconnect. Force
@@ -57,17 +38,11 @@ public sealed class MCPBridgeStatusCommand : IExternalCommand
         // Stage 2's periodic GitHub check) reached here via BridgeHost's existing volatile status
         // fields -- the same reconnect-loop poll path already used for IsConnected/BrokerAddress, no
         // new RPC. UpdateAvailability.IsAvailable is entirely broker-sourced; it deliberately does NOT
-        // factor in gitCommit/buildTimestamp above (a different, build-identity purpose).
-        var brokerVersion = host?.BrokerVersion;
+        // factor in gitCommit/buildTimestamp (a different, build-identity purpose).
         var latestAvailableVersion = host?.LatestAvailableVersion;
-        var updateAvailable = UpdateAvailability.IsAvailable(brokerVersion, latestAvailableVersion);
+        var updateAvailable = UpdateAvailability.IsAvailable(host?.BrokerVersion, latestAvailableVersion);
 
-        var content =
-            $"Instance ID: {MCPBridgeApplication.InstanceId}\n" +
-            $"Status: {connectionLine}\n\n" +
-            $"Build: {buildTimestamp}\n" +
-            $"Commit: {gitCommit}";
-
+        var content = BuildStatusContent(host);
         if (updateAvailable)
         {
             content += $"\n\nUpdate available (v{latestAvailableVersion})";
@@ -91,6 +66,60 @@ public sealed class MCPBridgeStatusCommand : IExternalCommand
         }
 
         return Result.Succeeded;
+    }
+
+    /// <summary>
+    /// The status text proper -- instance, broker mode, connection state, build identity. Shared with
+    /// the Reconnect and Broker-mode commands (issue #185) so every window this panel opens reads the
+    /// same way, and so a switch's confirmation shows the mode it just switched to in the same words
+    /// Status will use afterwards.
+    /// </summary>
+    internal static string BuildStatusContent(BridgeHost? host)
+    {
+        string connectionLine;
+        if (host is null)
+        {
+            connectionLine = "Not started (BridgeHost unavailable).";
+        }
+        else if (host.IsConnected)
+        {
+            var since = host.ConnectedSince is { } connectedSince
+                ? connectedSince.ToLocalTime().ToString("HH:mm:ss")
+                : "unknown time";
+            connectionLine = $"Connected to the MCP Server at {host.BrokerAddress} since {since}.";
+        }
+        else
+        {
+            connectionLine = "Not connected -- reconnecting in the background.";
+        }
+
+        var (buildTimestamp, gitCommit) = ReadBuildIdentity();
+
+        return
+            $"Instance ID: {MCPBridgeApplication.InstanceId}\n" +
+            $"MCP Server: {DescribeMode(host?.DiscoveryOptions)}\n" +
+            $"Status: {connectionLine}\n\n" +
+            $"Build: {buildTimestamp}\n" +
+            $"Commit: {gitCommit}";
+    }
+
+    /// <summary>
+    /// "Local" or a deliberately loud "REMOTE", each with the broker.json path actually being read --
+    /// the one fact that settles "which broker is this Revit registered with" (issue #185's symptom
+    /// was a healthy-looking Revit registered with a broker nobody was querying). User-facing text
+    /// says "MCP Server", never "broker" (CONVENTIONS.md; the user's own request on #187).
+    /// </summary>
+    internal static string DescribeMode(BrokerDiscoveryOptions? options)
+    {
+        if (options is null)
+        {
+            return "unknown";
+        }
+
+        var brokerJson = Path.Combine(options.ConnectorRoot, "broker.json");
+        return options.Mode == BrokerTopologyMode.Remote
+            ? $"REMOTE, on another machine (found via {brokerJson})"
+            : $"Local, on this machine (found via {brokerJson})";
     }
 
     /// <summary>

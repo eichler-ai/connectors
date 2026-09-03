@@ -40,7 +40,20 @@ internal sealed class BridgeHost
     private readonly ExecutionManager _executionManager;
     private readonly ReconnectBackoffPolicy _backoffPolicy;
     private readonly string _revitVersion;
-    private readonly BrokerDiscoveryOptions _discoveryOptions;
+
+    // Not readonly since issue #185: SwitchTo() replaces it at runtime (ribbon Local <-> Remote), and
+    // RunConnectionLoop re-reads it at the top of EVERY iteration rather than capturing it once, so
+    // the very next attempt after a switch already dials the new topology. Volatile because it is
+    // written from Revit's UI thread (the ribbon command) and read from the connection thread.
+    private volatile BrokerDiscoveryOptions _discoveryOptions;
+
+    // Issue #185's reconnect path. Reconnect() sets both and closes the live socket; the connection
+    // thread's Backoff() wait returns early on the signal instead of sleeping out the remaining
+    // backoff, and it starts the schedule over (a deliberate request is not a failed attempt). The
+    // flag covers the window where Reconnect() fires between two waits, so a request is never lost
+    // just because nobody happened to be waiting when it arrived.
+    private readonly ManualResetEventSlim _wakeSignal = new(initialState: false);
+    private volatile bool _reconnectRequested;
 
     private readonly object _writeLock = new();
     private CancellationTokenSource? _stopCts;
@@ -74,6 +87,11 @@ internal sealed class BridgeHost
 
     /// <summary>True once auth+register has succeeded on the current connection; false while disconnected/reconnecting.</summary>
     public bool IsConnected => _isConnected;
+
+    /// <summary>The topology currently being dialed (Local vs Remote, and where broker.json is read from).
+    /// Changes only via <see cref="SwitchTo"/>; the ribbon reads it to label the mode switch and the
+    /// status window.</summary>
+    public BrokerDiscoveryOptions DiscoveryOptions => _discoveryOptions;
 
     /// <summary>The broker's "host:port" for the current (or most recent) connection, if one has ever succeeded.</summary>
     public string? BrokerAddress => _brokerAddress;
@@ -380,6 +398,54 @@ internal sealed class BridgeHost
         }
     }
 
+    /// <summary>
+    /// Issue #185's reconnect tool: drop the current connection (if any) and re-run discovery NOW --
+    /// a fresh broker.json read against <see cref="DiscoveryOptions"/> -- instead of waiting out
+    /// whatever backoff the loop is currently in. The user-facing case is a broker that was restarted
+    /// or re-elected while Revit stayed up; the loop's own retry would get there, but not promptly,
+    /// and until now there was no way to nudge it short of restarting Revit.
+    ///
+    /// <para>Safe from any thread and at any point in the connection lifecycle: closing
+    /// <see cref="_activeTcpClient"/> makes the read loop's blocking <c>stream.Read</c> return (the same
+    /// unwind Stop() relies on), RunConnectionLoop's finally clears the connected state, and the
+    /// following Backoff() sees the wake signal and returns at once with a fresh backoff schedule. If
+    /// nothing is connected (mid-discovery-failure backoff, say), only the wake matters. Never throws:
+    /// a ribbon click must not become a UI-thread exception.</para>
+    ///
+    /// <para><see cref="_instanceId"/> is deliberately kept across a reconnect AND across a mode switch
+    /// (PRD §05: minted once per Revit process, stable for its lifetime). The same process re-registering
+    /// with the same id is exactly what every reconnect has always done; on a switch the two brokers are
+    /// separate registries, so there is nothing to collide with -- and the id also keys the §09 audit
+    /// trail's tmp/ scratch and RequestDispatcher's instance_id, which Start() fixed for the process.</para>
+    /// </summary>
+    public void Reconnect(string reason)
+    {
+        LogConnectionDiagnostic($"reconnect requested ({reason}): dropping the current connection and re-running discovery against Mode={_discoveryOptions.Mode} ConnectorRoot={_discoveryOptions.ConnectorRoot}");
+        _reconnectRequested = true;
+        _wakeSignal.Set();
+        try
+        {
+            _activeTcpClient?.Close();
+        }
+        catch
+        {
+            // Best-effort, same as Stop(): the socket may already be closed/faulted.
+        }
+    }
+
+    /// <summary>
+    /// Issue #185's Local <-> Remote switch: dial <paramref name="options"/> from now on, without a
+    /// Revit restart. Takes effect via <see cref="Reconnect"/> -- the connection loop picks the new
+    /// options up at the top of its next iteration, which the reconnect makes immediate. Persisting the
+    /// choice (bridge-config.json) is the caller's job; this only changes what the running loop dials.
+    /// </summary>
+    public void SwitchTo(BrokerDiscoveryOptions options)
+    {
+        var previous = _discoveryOptions;
+        _discoveryOptions = options;
+        Reconnect($"mode switch {previous.Mode} -> {options.Mode}");
+    }
+
     public void Stop()
     {
         _stopCts?.Cancel();
@@ -537,12 +603,17 @@ internal sealed class BridgeHost
     private void RunConnectionLoop(RequestDispatcher dispatcher, DocumentSnapshotHandler documentSnapshotHandler, ExternalEvent documentSnapshotEvent, CancellationToken stopToken)
     {
         LogConnectionDiagnostic($"RunConnectionLoop starting. Mode={_discoveryOptions.Mode} ConnectorRoot={_discoveryOptions.ConnectorRoot}");
-        var discovery = new BrokerDiscovery(_discoveryOptions);
         var reconnectController = new ReconnectLoopController(_backoffPolicy);
 
         while (!stopToken.IsCancellationRequested)
         {
-            LogConnectionDiagnostic("loop iteration: about to TryDiscover");
+            // Re-read per iteration, not captured once outside the loop (issue #185): SwitchTo() may
+            // have replaced the options while the previous connection was up or mid-backoff, and the
+            // very next attempt must dial the new topology. BrokerDiscovery is a path holder, not a
+            // resource -- constructing one per attempt costs nothing.
+            var discoveryOptions = _discoveryOptions;
+            var discovery = new BrokerDiscovery(discoveryOptions);
+            LogConnectionDiagnostic($"loop iteration: about to TryDiscover (Mode={discoveryOptions.Mode} ConnectorRoot={discoveryOptions.ConnectorRoot})");
 
             // Discovery gets its own guard (v1 integrated review): it used to run bare, outside the
             // try that protects RunOneConnection below, so anything TryDiscover threw beyond the two
@@ -568,7 +639,7 @@ internal sealed class BridgeHost
                 // Includes an OCE that ISN'T Stop()'s (the when-filter above): a cancellation nobody
                 // requested is an anomaly to log and retry past, not a reason to end the loop.
                 LogConnectionDiagnostic($"broker discovery attempt threw unexpectedly: {ex}");
-                Backoff(reconnectController, stopToken);
+                Backoff(ref reconnectController, stopToken);
                 continue;
             }
 
@@ -587,7 +658,7 @@ internal sealed class BridgeHost
                 // checked out fine and the real cause turned out to be reachable only from inside this
                 // loop's own exception handling.
                 LogConnectionDiagnostic($"broker discovery failed: {discoveryResult.Diagnostic?.Message ?? "(broker.json not found)"}");
-                Backoff(reconnectController, stopToken);
+                Backoff(ref reconnectController, stopToken);
                 continue;
             }
 
@@ -605,7 +676,7 @@ internal sealed class BridgeHost
             try
             {
                 RunOneConnection(discoveryResult.BrokerJson, discoveryResult.Address, dispatcher, documentSnapshotHandler, documentSnapshotEvent, reconnectController, stopToken);
-                LogConnectionDiagnostic($"connection to {discoveryResult.Address.Host}:{discoveryResult.Address.Port} ended (broker closed it, or Stop() was called); will reconnect");
+                LogConnectionDiagnostic($"connection to {discoveryResult.Address.Host}:{discoveryResult.Address.Port} ended (broker closed it, Stop() was called, or a reconnect/mode switch was requested); will reconnect");
             }
             catch (Exception ex)
             {
@@ -626,7 +697,7 @@ internal sealed class BridgeHost
 
             if (!stopToken.IsCancellationRequested)
             {
-                Backoff(reconnectController, stopToken);
+                Backoff(ref reconnectController, stopToken);
             }
         }
     }
@@ -723,12 +794,26 @@ internal sealed class BridgeHost
         return JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InternalError, message, diagnostic);
     }
 
-    private static void Backoff(ReconnectLoopController reconnectController, CancellationToken stopToken)
+    /// <summary>
+    /// Waits out the next backoff delay -- unless <see cref="Reconnect"/> has asked (or asks during the
+    /// wait) for an immediate attempt, in which case it returns at once and hands the caller a FRESH
+    /// controller (<paramref name="reconnectController"/> is by-ref for exactly that): a deliberate
+    /// reconnect request starts the schedule over from the policy's first delay rather than inheriting
+    /// however far the previous failures had already stretched it. The signal is reset here, on the
+    /// consuming side, so a request that lands while nothing is waiting is honoured by the next wait.
+    /// </summary>
+    private void Backoff(ref ReconnectLoopController reconnectController, CancellationToken stopToken)
     {
         var delay = reconnectController.OnConnectFailed();
         try
         {
-            Task.Delay(delay, stopToken).GetAwaiter().GetResult();
+            if (_reconnectRequested || _wakeSignal.Wait(delay, stopToken))
+            {
+                _wakeSignal.Reset();
+                _reconnectRequested = false;
+                reconnectController = new ReconnectLoopController(_backoffPolicy);
+                LogConnectionDiagnostic("backoff skipped: reconnect was requested; retrying immediately with a fresh backoff schedule");
+            }
         }
         catch (OperationCanceledException)
         {
@@ -748,6 +833,30 @@ internal sealed class BridgeHost
     {
         using var tcpClient = new TcpClient();
         _activeTcpClient = tcpClient;
+
+        // Independent PR review finding (#187): Reconnect()/SwitchTo() closes _activeTcpClient, but
+        // between the previous connection's finally (which nulls it) and the assignment just above
+        // there is nothing to close -- and a request landing in that window (the loop is inside
+        // TryDiscoverWithTimeout, up to 5s on a stalled read) would otherwise be honoured by nothing:
+        // this method would connect with the OPTIONS CAPTURED BEFORE THE SWITCH, succeed, and never
+        // reach Backoff(), where the flag is consumed. The ribbon, the saved config, and the
+        // confirmation text would all say REMOTE while the process sat registered with the local
+        // broker until that connection happened to drop -- the exact #185 symptom, reachable from the
+        // button meant to cure it. Reconnect() sets the flag BEFORE it calls Close(), so checking the
+        // flag after publishing the client covers both orderings: a request that came earlier is seen
+        // here, a request that comes later finds a client to close. The full fence between the two is
+        // what makes that true (second independent review, #187): volatile gives a store followed by a
+        // load no ordering guarantee on x64, so without it this thread could read a stale
+        // _reconnectRequested while the UI thread, having just set it, reads a stale null
+        // _activeTcpClient -- both sides missing each other. Returning (not throwing) routes through
+        // the same "connection ended" path a broker-side close takes, and Backoff() then sees the flag
+        // and retries at once with the options as they are NOW.
+        Interlocked.MemoryBarrier();
+        if (_reconnectRequested)
+        {
+            LogConnectionDiagnostic($"reconnect was requested while this attempt was being prepared; abandoning the dial to {address.Host}:{address.Port} so the next attempt re-reads the current options");
+            return;
+        }
 
         if (!tcpClient.ConnectAsync(address.Host, address.Port).Wait(TimeSpan.FromSeconds(5)))
         {
