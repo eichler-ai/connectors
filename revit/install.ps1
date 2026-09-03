@@ -422,6 +422,27 @@ function Install-BrokerStaged([string]$ServerPayloadDir, [string]$AppDir) {
     return 'swapped'
 }
 
+# After a pending swap has completed: moves the server hash the deferring run left in
+# mcp-server.exe.new.sha256 into the version marker's components, so the marker describes what is on
+# disk (review of #196). No sidecar, no marker -> nothing to do. Never throws: bookkeeping must not
+# fail an install whose files are already right.
+function Complete-PendingServerMarker([string]$AppDir, [string]$MarkerPath) {
+    $sidecar = Join-Path $AppDir 'mcp-server.exe.new.sha256'
+    try {
+        if (-not (Test-Path $sidecar)) { return }
+        $hash = (Get-Content $sidecar -Raw).Trim()
+        if ($hash -and (Test-Path $MarkerPath)) {
+            $marker = Get-Content $MarkerPath -Raw | ConvertFrom-Json
+            if (-not $marker.PSObject.Properties['components'] -or -not $marker.components) {
+                $marker | Add-Member -NotePropertyName components -NotePropertyValue ([pscustomobject]@{}) -Force
+            }
+            $marker.components | Add-Member -NotePropertyName server -NotePropertyValue $hash -Force
+            $marker | ConvertTo-Json -Depth 5 | Out-File $MarkerPath -Encoding utf8
+        }
+        Remove-Item $sidecar -Force -ErrorAction SilentlyContinue
+    } catch { }
+}
+
 # Deletes every parked previous broker image (mcp-server.exe.old, .old-xxxxxxxx) that no process
 # holds any more; the ones still running stay, silently, until the next run. Never throws.
 function Remove-StaleBrokerImages([string]$AppDir) {
@@ -658,6 +679,7 @@ if ($ApplyPendingUpdate) {
     }
     $manifest = Get-Content $manifestPath | ConvertFrom-Json
     $brokerSwapped = Complete-PendingBrokerSwap $appDir
+    if ($brokerSwapped) { Complete-PendingServerMarker $appDir $versionMarkerPath }
     $serverStillPending = $manifest.PSObject.Properties['components'] -and $manifest.components -and
         $manifest.components.PSObject.Properties['server'] -and -not $brokerSwapped -and
         (Test-Path (Join-Path $appDir 'mcp-server.exe.new'))
@@ -854,6 +876,7 @@ $installed = if ($marker) { $marker.version } else { $null }
 # .new until the NEXT release, while the summary told the user to re-run. The marker recorded the
 # new server hash only once the swap actually happened, so this is the one step still owed.
 $completedEarly = Complete-PendingBrokerSwap $appDir
+if ($completedEarly) { Complete-PendingServerMarker $appDir $versionMarkerPath }
 if ($completedEarly -and -not $Silent) {
     if ($completedEarly -eq 'staged') {
         Write-Host "Installed the broker update that was waiting. A running broker still serves the previous version until your MCP client restarts it (reconnect the revit MCP server, or restart the client)."
@@ -1078,7 +1101,17 @@ try {
             $brokerOutcome = Install-BrokerStaged $serverPayloadDir $appDir
             $h = Get-ManifestComponentHash $packageManifest 'server'
             if ($h) {
-                if ($brokerOutcome -eq 'pending') { $pendingComponents['server'] = $h } else { $installedComponents['server'] = $h }
+                if ($brokerOutcome -eq 'pending') {
+                    $pendingComponents['server'] = $h
+                    # Remembered beside the parked image so the run that finally completes the swap
+                    # (possibly the "already up to date" short-circuit of a later run, which never
+                    # reaches this block) can record the hash in the marker -- review of #196: without
+                    # this the marker kept the previous server hash until the NEXT release.
+                    Set-Content -Path "$serverExe.new.sha256" -Value $h -NoNewline
+                } else {
+                    $installedComponents['server'] = $h
+                    Remove-Item "$serverExe.new.sha256" -Force -ErrorAction SilentlyContinue
+                }
             }
         }
     }

@@ -164,6 +164,25 @@ Describe 'Install-BrokerStaged' {
         { Remove-StaleBrokerImages $app } | Should -Not -Throw
         Test-Path (Join-Path $app 'mcp-server.exe.old') | Should -BeTrue
     }
+    It 'Complete-PendingServerMarker moves the deferred server hash from the sidecar into the marker and removes the sidecar' {
+        New-Payload $app @{ 'mcp-server.exe.new.sha256' = 'newhash' }
+        $markerPath = Join-Path $app 'installed-version.json'
+        @{ version = 'v0.1.2'; components = @{ server = 'oldhash'; 'addin-2027' = 'a27' } } | ConvertTo-Json | Set-Content $markerPath
+        Complete-PendingServerMarker $app $markerPath
+        $m = Get-Content $markerPath -Raw | ConvertFrom-Json
+        $m.components.server | Should -Be 'newhash'
+        $m.components.'addin-2027' | Should -Be 'a27'
+        $m.version | Should -Be 'v0.1.2'
+        Test-Path (Join-Path $app 'mcp-server.exe.new.sha256') | Should -BeFalse
+    }
+    It 'Complete-PendingServerMarker is a no-op without a sidecar and never throws on a bad marker' {
+        $markerPath = Join-Path $app 'installed-version.json'
+        New-Payload $app @{ 'installed-version.json' = '{ "version": "v1", "components": { "server": "keep" } }' }
+        Complete-PendingServerMarker $app $markerPath
+        (Get-Content $markerPath -Raw | ConvertFrom-Json).components.server | Should -Be 'keep'
+        New-Payload $app @{ 'mcp-server.exe.new.sha256' = 'x'; 'installed-version.json' = '{not json' }
+        { Complete-PendingServerMarker $app $markerPath } | Should -Not -Throw
+    }
     It 'Complete-PendingBrokerSwap recovers the moved-aside state (no exe, .old and .new present)' {
         New-Payload $app @{ 'mcp-server.exe.old' = 'old-exe'; 'mcp-server.exe.new' = 'new-exe' }
         Complete-PendingBrokerSwap $app | Should -BeTrue
