@@ -469,3 +469,68 @@ func TestPreferPartitionsTheHeadOnlyAndNeverFilters(t *testing.T) {
 		t.Errorf("without Prefer the ranked order stands, got %q first", plain[0].Doc.Title)
 	}
 }
+
+// --- issue #188: compound bridging + parameter types for the reranker -------
+
+func TestTokenizeFieldBridgesAdjacentIdentifierParts(t *testing.T) {
+	// Revit spells the same compound two ways (NewFootPrintRoof, RoofByFootprint);
+	// a query says "footprint". The indexed side carries both the parts and each
+	// adjacent pair joined, so either spelling reaches either name. Free text
+	// between identifiers is unaffected.
+	got := tokenizeField("Document NewFootPrintRoof")
+	want := []string{"document", "new", "foot", "print", "roof", "newfoot", "footprint", "printroof"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("tokenizeField = %v, want %v", got, want)
+	}
+	// The query side stays plain: bridging is an index-time widening, not a
+	// change to what a query means.
+	if q := Tokenize("NewFootPrintRoof"); len(q) != 4 {
+		t.Errorf("Tokenize(query) = %v, want the four parts only", q)
+	}
+}
+
+func TestLexicalSearchReachesACamelCasedCompoundWrittenAsOneWord(t *testing.T) {
+	docs := []Doc{
+		{MemberID: "M:Autodesk.Revit.Creation.Document.NewFootPrintRoof", Kind: "Method", Namespace: "Autodesk.Revit.Creation", DeclaringType: "Autodesk.Revit.Creation.Document", Name: "NewFootPrintRoof", Signature: "FootPrintRoof NewFootPrintRoof(CurveArray footPrint, Level level, RoofType roofType)", Summary: "Creates a new FootPrintRoof element.", Core: true},
+		{MemberID: "F:Autodesk.Revit.DB.ElementTypeGroup.RoofType", Kind: "Field", Namespace: "Autodesk.Revit.DB", DeclaringType: "Autodesk.Revit.DB.ElementTypeGroup", Name: "RoofType", Signature: "ElementTypeGroup RoofType", Summary: "The roof type.", Core: true},
+		{MemberID: "P:Autodesk.Revit.DB.RoofBase.RoofType", Kind: "Property", Namespace: "Autodesk.Revit.DB", DeclaringType: "Autodesk.Revit.DB.RoofBase", Name: "RoofType", Signature: "RoofType RoofType { get;set; }", Summary: "Retrieve or set the Type.", Core: true},
+		{MemberID: "M:Autodesk.Revit.DB.CurveArray.Append", Kind: "Method", Namespace: "Autodesk.Revit.DB", DeclaringType: "Autodesk.Revit.DB.CurveArray", Name: "Append", Signature: "void Append(Curve item)", Summary: "Add the curve to the end of the array.", Core: true},
+	}
+	ix := Build(docs)
+	hits, err := ix.Search(context.Background(), Query{Text: "create a footprint roof"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) == 0 || hits[0].Doc.Name != "NewFootPrintRoof" {
+		t.Fatalf("top hit = %+v, want NewFootPrintRoof (the word 'footprint' must reach 'FootPrint')", hits)
+	}
+}
+
+func TestParamTypes(t *testing.T) {
+	cases := map[string]string{
+		"CurveArray footPrint, Level level, RoofType roofType, ModelCurveArray footPrintToModelCurvesMapping)": "CurveArray, Level, RoofType, ModelCurveArray",
+		"IList<ElementId> ids, XYZ translation)": "IList<ElementId>, XYZ",
+		")":                                      "",
+	}
+	for in, want := range cases {
+		if got := paramTypes(in); got != want {
+			t.Errorf("paramTypes(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestRerankTextCarriesParameterTypesForCallables(t *testing.T) {
+	// A task description names what a call takes ("from a curve array on a
+	// level with a roof type"); the summary alone does not, and the reranker
+	// buried the method for exactly that reason (#188). Types only -- parameter
+	// names are noise the reranker was measured to misread.
+	d := Doc{DeclaringType: "Autodesk.Revit.Creation.Document", Name: "NewFootPrintRoof", Signature: "FootPrintRoof NewFootPrintRoof(CurveArray footPrint, Level level, RoofType roofType)", Summary: "Creates a new FootPrintRoof element."}
+	if got, want := RerankText(d), "Document.NewFootPrintRoof(CurveArray, Level, RoofType) — Creates a new FootPrintRoof element."; got != want {
+		t.Errorf("RerankText = %q, want %q", got, want)
+	}
+	// A property or field has no parameter list, so nothing is appended.
+	p := Doc{DeclaringType: "Autodesk.Revit.DB.RoofBase", Name: "RoofType", Signature: "RoofType RoofType { get;set; }", Summary: "Retrieve or set the Type."}
+	if got := RerankText(p); strings.Contains(got, "(") {
+		t.Errorf("RerankText(property) = %q, want no parameter list", got)
+	}
+}

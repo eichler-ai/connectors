@@ -93,6 +93,26 @@ it reads as quasi-held-out.
 - Hybrid > either alone: RRF recovers exact name/path matches vector drops.
 - The **cross-encoder reranker is the single biggest lever** (+4 rank-1 over fused).
 
+> **Measured after shipping (issue #188, 2026-09-03).** Two changes to the shipped pipeline, measured on the
+> same 43 labels against the real 2027 corpus (76,600 members) with the shipped models and pool 20:
+> (1) the indexed side of the keyword pass also carries each adjacent pair of identifier parts joined, so
+> `NewFootPrintRoof` indexes `footprint` as well as `foot`, `print` (Revit spells the compound both ways
+> and people write it as one word); (2) the reranker text carries a callable's parameter *types*, since a
+> task description names what a call takes and the summary alone gave the reranker nothing to match.
+>
+> | shipped pipeline | recall@1 | @3 | @10 |
+> |---|---|---|---|
+> | before (#154 as shipped) | 24/43 | 29 | 34 |
+> | + compound bridge | 25 | 31 | 35 |
+> | + bridge + parameter types | **25** | **33** | **35** |
+>
+> Per query, ten deep: the bridge moved nothing on the first page down; the parameter types cost
+> "move an element" and "make an array of copies" rank 1→2 and "create a 3d view" 5→6, and won
+> "get an element by its id" 6→1, "export the view to dwg" 14→1, "create a section view" 4→2 and the
+> issue's own query from absent to 1. Parameter *names* in the reranker text were tried and rejected
+> ("create a 3d view" 9th). The 43 labels and the corpus dump live outside the repo (POC scratch); the
+> probe that produced these rows is described in #188.
+
 ### 3.3 Recall ceiling — recall is buried, not lost **[measured]**
 The correct member is present in *either* retriever's candidate pool for **40/43 (93%)** at top-200
 (38/43 at top-50, 39/43 at top-100). So the surfacing problem dominates the coverage problem: widening

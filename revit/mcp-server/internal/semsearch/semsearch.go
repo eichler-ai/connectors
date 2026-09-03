@@ -212,7 +212,7 @@ func BuildWith[T any](schema Schema[T], docs []T) *IndexOf[T] {
 	for f := range fields {
 		fields[f] = make([][]string, len(kept))
 		for i, d := range kept {
-			fields[f][i] = Tokenize(schema.Fields[f].Text(d))
+			fields[f][i] = tokenizeField(schema.Fields[f].Text(d))
 		}
 	}
 	ix.lex = newLexicalIndex(fields)
@@ -345,9 +345,24 @@ func (ix *IndexOf[T]) mask(accept func(T) bool) []bool {
 }
 
 // RerankText is what the cross-encoder reads for an API candidate: the
-// Type.Member identifier and its summary, matching the POC's pair format.
+// Type.Member identifier, its parameter types for a method or constructor,
+// and its summary. The POC's pair format had no parameter types; issue #188
+// added them because a task description names what a call takes ("from a
+// curve array on a level with a roof type" is NewFootPrintRoof's parameter
+// list, word for word) and the summary alone ("Creates a new FootPrintRoof
+// element.") gave the reranker nothing to match, so it placed the method
+// 19th of a pool of 20 even when fusion had found it. Measured on the
+// 43-query label set (full pipeline, with tokenizeField's bridge): recall@1
+// 25, @3 33, @10 35 against 24/29/34 before both changes. Per query the
+// types cost "move an element" and "make an array of copies" rank 1 -> 2 and
+// "create a 3d view" 5 -> 6, and won "get an element by its id" 6 -> 1,
+// "export the view to dwg" 14 -> 1, "create a section view" 4 -> 2 and the
+// issue's query from absent to 1.
 func RerankText(d Doc) string {
 	s := d.ShortType() + "." + d.Name
+	if i := strings.IndexByte(d.Signature, '('); i >= 0 {
+		s += "(" + paramTypes(d.Signature[i+1:]) + ")"
+	}
 	if d.Summary != "" {
 		s += " — " + d.Summary
 	}
@@ -426,6 +441,56 @@ func SplitIdentifier(id string) []string {
 // Single-character free-text words are dropped (the POC kept len>1), but
 // sub-word parts from identifier splitting are kept so "IList" and "Level2"
 // tokenize the same on both sides of the index.
+// paramTypes reduces a signature's parameter list ("CurveArray footPrint,
+// Level level)") to its types ("CurveArray, Level"): the part of a signature
+// a task description echoes. Measured for issue #188 (see RerankText): the
+// full list, parameter names included, ranked "create a 3d view" 9th where
+// types alone rank it 6th.
+func paramTypes(params string) string {
+	params = strings.TrimSuffix(strings.TrimSpace(params), ")")
+	if params == "" {
+		return ""
+	}
+	var types []string
+	for _, p := range strings.Split(params, ",") {
+		fields := strings.Fields(p)
+		if len(fields) >= 2 {
+			types = append(types, strings.Join(fields[:len(fields)-1], " "))
+		} else if len(fields) == 1 {
+			types = append(types, fields[0])
+		}
+	}
+	return strings.Join(types, ", ")
+}
+
+// tokenizeField is Tokenize for INDEXED text: it also emits each adjacent
+// pair of identifier parts joined, so "FootPrintRoof" indexes as foot, print,
+// roof, footprint, printroof. Revit camel-cases compounds inconsistently
+// (NewFootPrintRoof next to RoofByFootprint), and people write them as one
+// word, so without the bridge "footprint" reached the second and never the
+// first (issue #188: Creation.Document.NewFootPrintRoof sat outside the
+// keyword pass's top 200 for a query that named it). The query side is
+// unchanged: "foot print" in a query already matches the split parts.
+// Measured on the 43-query POC label set (full pipeline): recall@1 24 -> 25,
+// @3 29 -> 31, @10 34 -> 35; per query, nothing on the first page moved
+// down.
+func tokenizeField(text string) []string {
+	var out []string
+	for _, piece := range strings.FieldsFunc(text, func(c rune) bool {
+		return !(isLower(c) || isUpper(c) || isDigit(c) || c == '_' || c == '`')
+	}) {
+		if len([]rune(piece)) < 2 {
+			continue
+		}
+		parts := SplitIdentifier(piece)
+		out = append(out, parts...)
+		for j := 0; j+1 < len(parts); j++ {
+			out = append(out, parts[j]+parts[j+1])
+		}
+	}
+	return out
+}
+
 func Tokenize(text string) []string {
 	var out []string
 	for _, piece := range strings.FieldsFunc(text, func(c rune) bool {
