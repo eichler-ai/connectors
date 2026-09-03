@@ -330,6 +330,19 @@ if ! $SKIP_BROKER_RESTART; then
   # tier-2 run to diagnose, twice, because the script's own failure contract (DEPLOY_RESULT:
   # PASS|FAIL) never gets a chance to print. An empty hash then correctly reads as "changed" below.
   broker_hash_before="$(shasum -a 256 "$BROKER_EXE" 2>/dev/null | awk '{print $1}' || true)"
+  # Fetch the pinned search embedding models into assets/ so `go build` embeds them (go:embed).
+  # Without them the broker builds and runs fine, but search_functions/search_howtos rank
+  # LEXICAL-ONLY -- which reads as "semantic search is broken" when it is really "this dev broker was
+  # built with no models". fetch-models is sha256-pinned and idempotent (it skips files already
+  # present), so after the first ~68MB fetch it costs only a hash check. The release pipeline
+  # (release.yml) runs the same script before its own build, so the dev broker and the shipped broker
+  # rank identically. Offline / to reuse an existing models-bundled binary, pass --skip-broker-restart
+  # (which skips this whole rebuild block).
+  say "fetching pinned search models so the broker builds WITH semantic ranking (idempotent)"
+  if ! ( "$REPO_ROOT/revit/mcp-server/internal/semsearch/models/fetch-models.sh" ); then
+    echo "fetch-models FAILED -- the broker would build lexical-only (no semantic ranking). Fix the fetch (network? sha256 pins?), or pass --skip-broker-restart to reuse an existing models-bundled binary." >&2
+    exit 1
+  fi
   say "rebuilding the Mac broker from this checkout -> $BROKER_EXE"
   if ! ( cd "$REPO_ROOT/revit/mcp-server" && go build "${broker_ldflags[@]}" -o "$BROKER_EXE" ./cmd/mcp-server ); then
     echo "broker build FAILED -- refusing to continue against whatever binary is already there" >&2
@@ -369,6 +382,27 @@ $SKIP_RELAUNCH && PS_ARGS+=(-SkipRelaunch)
 # passthrough.)
 say "running deploy-and-verify.ps1 on the VM (one prlctl exec call, output streamed live)"
 if prlctl exec "$VM_NAME" powershell -ExecutionPolicy Bypass -File "$UNC_ROOT\\revit\\dev-tooling\\deploy-and-verify.ps1" "${PS_ARGS[@]}" 2>&1; then
+  # Confirm the search index warmed as part of this deploy. The broker builds the API index (and the
+  # how-to index) when the add-in attaches, a few seconds after the connection the ps1 just verified,
+  # so waiting for it here makes "search is ready" part of a successful deploy rather than a lazy
+  # first-query cost. Warn-only: the index also builds lazily on the first query, so a miss is not a
+  # deploy failure -- but it does surface a broker built without models (lexical-only), which is the
+  # gap the fetch-models step above closes.
+  if ! $SKIP_BROKER_RESTART; then
+    echo
+    say "confirming the broker's search index warmed ..."
+    idx_deadline=$((SECONDS + 40)); idx_ready=""
+    while (( SECONDS < idx_deadline )); do
+      idx_ready="$(grep -E 'semsearch: index for instance .* ready' "$BROKER_LOG" 2>/dev/null | tail -1 || true)"
+      [[ -n "$idx_ready" ]] && break
+      sleep 1
+    done
+    if [[ -n "$idx_ready" ]]; then
+      say "search index ready -- ${idx_ready#*semsearch: }"
+    else
+      say "WARNING: search index did not report ready within 40s (it builds lazily on first search). Broker models: $("$BROKER_EXE" -search-models 2>&1 | head -1)"
+    fi
+  fi
   echo
   say "ready. Harness command:"
   echo

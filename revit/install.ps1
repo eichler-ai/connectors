@@ -825,6 +825,20 @@ if ((Test-Path $serverExe) -and (Get-Command claude -ErrorAction SilentlyContinu
     Write-Host "Claude Code CLI not found on PATH -- skipping MCP registration. Add it manually: $serverExe --mode local"
 }
 
+# --- Confirm the broker carries the search-ranking embedding models --------------------------------
+# A release built by release.yml always fetches the models before building, so a normal install has
+# them; only a hand-built -LocalPackagePath zip made without the fetch-models step would not -- and
+# then search_functions/search_howtos would silently rank LEXICAL-ONLY. `-search-models` prints one
+# line and exits, so this is a cheap probe; it exits non-zero when the models are missing, which under
+# $ErrorActionPreference='Stop' does NOT throw for a native exe (only $LASTEXITCODE is set), so guard
+# on the printed text rather than the exit code. Warn, don't fail: a lexical-only broker still works.
+if (Test-Path $serverExe) {
+    $modelsLine = (& $serverExe -search-models 2>&1 | Select-Object -First 1)
+    if ("$modelsLine" -notmatch 'bundled') {
+        Write-Host "WARNING: the installed broker has NO search-ranking models bundled -- search_functions/search_howtos will rank keyword-only. Expected only for a -LocalPackagePath build made without fetch-models; a real release always includes them. ($modelsLine)"
+    }
+}
+
 # --- Programs & Features entry ------------------------------------------------------------------------
 # The one thing a raw script doesn't get for free vs. a real installer -- write it ourselves so
 # uninstall is discoverable the normal Windows way, not "hunt down this script again."
