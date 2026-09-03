@@ -346,7 +346,7 @@ absent. For the why, a human can click **MCP Bridge → Status** on the Revit ri
 
 | Symptom | Most likely cause | What to do |
 |---|---|---|
-| `instances[]` empty | Revit not running, or the add-in didn't load | Wait a few seconds and re-check (the add-in retries on a backoff). If it stays empty, ask the user to confirm Revit is open and check **MCP Bridge → Status**. |
+| `instances[]` empty | Revit not running, the add-in didn't load, or Revit is registered with a *different* broker (its Status shows `Broker mode: REMOTE` while yours is local, or vice versa) | Wait a few seconds and re-check (the add-in retries on a backoff). If it stays empty, ask the user to confirm Revit is open and check **MCP Bridge → Status**; **Reconnect** there forces a fresh attempt, and the **Broker** toggle moves Revit to the other broker. |
 | Instance present, `documents[]` empty | Document still opening, or a modal dialog is blocking Revit | Wait and re-check. A dialog needs a human to dismiss it. |
 | Script stays `pending` | Revit's UI thread is blocked — usually a modal dialog, or the user is mid-edit | Don't retry; a second call just returns `busy`. Ask the user to check for an open dialog. |
 | `status: "unresponsive"` | Revit stopped answering heartbeats | Wait; if it persists, Revit needs attention from the user. |

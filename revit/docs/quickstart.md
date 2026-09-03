@@ -96,7 +96,10 @@ You should see your Revit instance with the document listed, then a
 guide (`get_skills`) covers the same ground for the agent automatically.
 
 If nothing shows up in `list_instances`: check **Add-Ins → MCP Bridge → Status** inside
-Revit (shows connection state and which broker it's dialing), and the add-in's
+Revit (shows connection state and, on its **Broker mode** line, which `broker.json` it's
+dialing — a Revit registered with a *different* broker than your client's looks healthy from
+both sides and shows up in neither), **Reconnect** to force a fresh `broker.json` read after
+restarting the broker, and the add-in's
 `connection.log` under `%LOCALAPPDATA%\Connectors\Revit\`. It rotates at roughly 5MB, keeping
 one previous generation as `connection.log.old` — so if the live file starts mid-stream, look
 there for the earlier history. Only that one generation is kept; the next rotation overwrites it.
@@ -109,9 +112,13 @@ There is no macOS Revit, so the Mac side only runs the broker (PRD §05 "remote 
    will connect to the Mac-side broker instead).
 2. On the Mac: `revit/install-mac.sh` — builds the broker from source, auto-detects the
    Parallels shared-network IP, and registers it with Claude Code in `-mode remote`.
-3. Launch Revit in the VM with `MCPBRIDGE_BROKER_MODE=remote` and
-   `MCPBRIDGE_SHARED_ROOT=<UNC path of the shared folder>` set for the Revit process, so the
-   add-in reads the Mac-side broker's `broker.json` from the shared drive.
+3. Point the add-in at the Mac-side broker. Either click **Add-Ins → MCP Bridge → Broker: Local**
+   inside Revit and enter the shared folder's UNC path (`\\Mac\connectors`); the add-in reconnects
+   to the remote broker at once, the button reads **Broker: REMOTE**, and the choice is saved to
+   `%LOCALAPPDATA%\Connectors\Revit\bridge-config.json` so it survives restarts. Or launch Revit
+   with `MCPBRIDGE_BROKER_MODE=remote` and `MCPBRIDGE_SHARED_ROOT=<UNC path of the shared folder>`
+   set for the Revit process (the older mechanism; a saved `bridge-config.json` takes precedence
+   over it). Click the button again to go back to the local broker.
 
 `revit/dev-tooling/` automates the VM-side loop for this repo's own development; see its
 README before reusing any of it.

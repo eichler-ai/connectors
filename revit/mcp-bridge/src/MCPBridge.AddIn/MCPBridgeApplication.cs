@@ -25,6 +25,13 @@ public sealed class MCPBridgeApplication : IExternalApplication
     /// </summary>
     internal static BridgeHost? CurrentHost { get; private set; }
 
+    /// <summary>
+    /// The ribbon's "Broker: Local / REMOTE" toggle (issue #185), kept so its label can be rewritten
+    /// after a switch -- see <see cref="UpdateBrokerModeButton"/>. Null if ribbon creation failed (a
+    /// best-effort UI nicety, like the Status button it sits beside).
+    /// </summary>
+    private static PushButton? _brokerModeButton;
+
     private BridgeHost? _host;
 
     public Result OnStartup(UIControlledApplication application)
@@ -54,6 +61,7 @@ public sealed class MCPBridgeApplication : IExternalApplication
             _host.Start();
 
             CreateStatusRibbonButton(application);
+            UpdateBrokerModeButton(discoveryOptions);
             DialogSuppressionHandler.Register(application, TryLogDiagnostic);
             SubscribeDocumentEvents(application);
 
@@ -89,7 +97,7 @@ public sealed class MCPBridgeApplication : IExternalApplication
     /// Less urgent here -- this file's writes are per-startup, not per-retry -- but it is the same
     /// unbounded append into the same directory, and leaving one of the two capped would only invite
     /// the question of why.</para></summary>
-    private static void TryLogDiagnostic(string message)
+    internal static void TryLogDiagnostic(string message)
         => RollingDiagnosticLog.Append(() => BrokerDiscoveryOptions.Local().ConnectorRoot, "startup-errors.log", message);
 
     public Result OnShutdown(UIControlledApplication application)
@@ -202,13 +210,15 @@ public sealed class MCPBridgeApplication : IExternalApplication
     }
 
     /// <summary>
-    /// Adds a single "Status" button to a new "MCP Bridge" ribbon panel on the Add-Ins tab, per the
-    /// user's own request: a quick, no-context-needed way to check "is this actually connected" and "what
-    /// build/commit is this" without going through logs or an external tool -- exactly the two questions
-    /// that took the most manual digging to answer during this add-in's own live-wiring development.
-    /// Best-effort: a ribbon-creation failure (e.g. a panel name collision with another add-in) must not
-    /// fail the whole add-in load over a UI nicety, so it's caught and swallowed here specifically, not
-    /// folded into OnStartup's own broader catch.
+    /// Adds the "MCP Bridge" ribbon panel on the Add-Ins tab: "Status" (per the user's own request: a
+    /// quick, no-context-needed way to check "is this actually connected" and "what build/commit is
+    /// this" without going through logs or an external tool -- exactly the two questions that took the
+    /// most manual digging to answer during this add-in's own live-wiring development), plus issue
+    /// #185's "Reconnect" and "Broker: Local/REMOTE" buttons (the reconnect tool, and the topology
+    /// switch that makes the Mac-broker dev case an explicit, VISIBLE choice rather than an environment
+    /// variable nobody can see). Best-effort: a ribbon-creation failure (e.g. a panel name collision
+    /// with another add-in) must not fail the whole add-in load over a UI nicety, so it's caught and
+    /// swallowed here specifically, not folded into OnStartup's own broader catch.
     /// </summary>
     private static void CreateStatusRibbonButton(UIControlledApplication application)
     {
@@ -216,15 +226,29 @@ public sealed class MCPBridgeApplication : IExternalApplication
         {
             var panel = application.CreateRibbonPanel("MCP Bridge");
             var assemblyLocation = typeof(MCPBridgeApplication).Assembly.Location;
-            var buttonData = new PushButtonData(
+            panel.AddItem(new PushButtonData(
                 "MCPBridgeStatus",
                 "Status",
                 assemblyLocation,
                 typeof(MCPBridgeStatusCommand).FullName)
             {
-                ToolTip = "Show MCP Bridge connection status and build info.",
-            };
-            panel.AddItem(buttonData);
+                ToolTip = "Show MCP Bridge connection status, broker mode, and build info.",
+            });
+            panel.AddItem(new PushButtonData(
+                "MCPBridgeReconnect",
+                "Reconnect",
+                assemblyLocation,
+                typeof(MCPBridgeReconnectCommand).FullName)
+            {
+                ToolTip = "Drop the current broker connection and re-read broker.json now (e.g. after restarting the broker), instead of waiting for the retry backoff.",
+            });
+            // Label/tooltip are placeholders here; UpdateBrokerModeButton writes the real ones once the
+            // resolved options are known (OnStartup) and after every switch.
+            _brokerModeButton = panel.AddItem(new PushButtonData(
+                "MCPBridgeBrokerMode",
+                "Broker",
+                assemblyLocation,
+                typeof(MCPBridgeBrokerModeCommand).FullName)) as PushButton;
         }
         catch (Exception ex)
         {
@@ -236,36 +260,67 @@ public sealed class MCPBridgeApplication : IExternalApplication
     }
 
     /// <summary>
-    /// Local mode (PRD §05: "the real target deployment") is the default. Remote mode -- needed for this
-    /// project's own Mac+Parallels dev setup, where the broker and Revit are on different machines -- is
-    /// opt-in via environment variables, since there's no other configuration mechanism in this add-in
-    /// yet: MCPBRIDGE_BROKER_MODE=remote plus MCPBRIDGE_SHARED_ROOT (a UNC path, e.g.
-    /// \\psf\connectors). Falls back to local mode on any misconfiguration (missing shared root, not a
-    /// UNC path) rather than throwing out of OnStartup and failing the whole add-in load over a topology
-    /// setting. (MCPBRIDGE_FALLBACK_HOST/MCPBRIDGE_FALLBACK_PORT were once read here too and are
-    /// deliberately gone -- see BrokerDiscoveryOptions for why the fallback address could never work.)
+    /// Rewrites the broker-mode toggle's label to the ACTIVE topology -- "Broker: Local" or, loudly,
+    /// "Broker: REMOTE" -- so that during development it is unambiguous from the ribbon alone which
+    /// broker owns this Revit session (the #185 symptom was precisely a Revit that looked healthy while
+    /// registered with a broker nobody was querying). Called from OnStartup and from the toggle command
+    /// after a switch; both run on Revit's UI thread, which is where ribbon items may be mutated.
     /// </summary>
-    private static BrokerDiscoveryOptions BuildDiscoveryOptions()
+    internal static void UpdateBrokerModeButton(BrokerDiscoveryOptions options)
     {
-        var mode = Environment.GetEnvironmentVariable("MCPBRIDGE_BROKER_MODE");
-        if (!string.Equals(mode, "remote", StringComparison.OrdinalIgnoreCase))
+        var button = _brokerModeButton;
+        if (button is null)
         {
-            return BrokerDiscoveryOptions.Local();
-        }
-
-        var sharedRoot = Environment.GetEnvironmentVariable("MCPBRIDGE_SHARED_ROOT");
-        if (string.IsNullOrWhiteSpace(sharedRoot))
-        {
-            return BrokerDiscoveryOptions.Local();
+            return;
         }
 
         try
         {
-            return BrokerDiscoveryOptions.Remote(sharedRoot);
+            if (options.Mode == BrokerTopologyMode.Remote)
+            {
+                button.ItemText = "Broker:\nREMOTE";
+                button.ToolTip = $"REMOTE broker mode: reading broker.json from the shared drive at {options.ConnectorRoot} (this project's Mac+Parallels dev topology). Click to switch back to the LOCAL broker on this machine.";
+            }
+            else
+            {
+                button.ItemText = "Broker:\nLocal";
+                button.ToolTip = $"Local broker mode (the default): reading broker.json from {options.ConnectorRoot}. Click to switch to a REMOTE broker on a shared drive.";
+            }
         }
-        catch (ArgumentException)
+        catch (Exception ex)
         {
-            return BrokerDiscoveryOptions.Local();
+            TryLogDiagnostic($"UpdateBrokerModeButton failed: {ex}");
         }
+    }
+
+    /// <summary>
+    /// Resolves the broker topology to dial at startup (issue #185): bridge-config.json (written by
+    /// the ribbon's broker-mode switch) → MCPBRIDGE_BROKER_MODE/MCPBRIDGE_SHARED_ROOT (the original
+    /// mechanism, kept for the dev launchers) → Local (PRD §05: "the real target deployment"). The
+    /// precedence, its rationale, and every fallback rule live in <see cref="BrokerModeResolver"/>,
+    /// which is pure and unit-tested; this method only supplies the file read and the real
+    /// environment, and logs the decision -- source included -- so "why is Revit dialing THAT broker"
+    /// is answerable from startup-errors.log alone. Never throws over a topology setting: a bad or
+    /// unreadable config, or a remote choice with no usable shared root, is logged and falls back to
+    /// Local, exactly as the env-only version always did. (MCPBRIDGE_FALLBACK_HOST/PORT were once read
+    /// here too and are deliberately gone -- see BrokerDiscoveryOptions for why they could never work.)
+    /// </summary>
+    private static BrokerDiscoveryOptions BuildDiscoveryOptions()
+    {
+        var configPath = BridgeConfig.DefaultPath();
+        var loaded = BridgeConfig.Load(configPath);
+        if (loaded.Diagnostic is { } loadDiagnostic)
+        {
+            TryLogDiagnostic($"{loadDiagnostic.Code}: {loadDiagnostic.Message}");
+        }
+
+        var resolution = BrokerModeResolver.Resolve(loaded.Config, Environment.GetEnvironmentVariable);
+        if (resolution.Diagnostic is { } resolveDiagnostic)
+        {
+            TryLogDiagnostic($"{resolveDiagnostic.Code}: {resolveDiagnostic.Message}");
+        }
+
+        TryLogDiagnostic($"broker mode decided by {resolution.Source} (config file: {(loaded.Config is null ? "absent" : configPath)})");
+        return resolution.Options;
     }
 }
