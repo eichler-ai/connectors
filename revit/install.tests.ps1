@@ -137,6 +137,52 @@ Describe 'Install-BrokerStaged' {
         Test-Path (Join-Path $app 'mcp-server.exe.new') | Should -BeFalse
         Test-Path (Join-Path $app 'mcp-server.exe.old') | Should -BeFalse
     }
+    It 'stages a DIFFERENT new image even while an older broker still holds .old, parking the current exe under a unique name (v0.1.1 -> v0.1.2 live)' {
+        New-Payload $app @{ 'mcp-server.exe' = 'current-exe'; 'mcp-server.exe.old' = 'older-still-running' }
+        Mock Get-BrokerProcess { @([pscustomobject]@{ Id = 4242 }) }
+        # .old is mapped by a running process: deleting it is refused (silently, as the real cmdlet does).
+        Mock Remove-Item { } -ParameterFilter { $Path -like '*mcp-server.exe.old' }
+        Install-BrokerStaged $payload $app | Should -Be 'staged'
+        Get-Content (Join-Path $app 'mcp-server.exe') -Raw | Should -Be 'new-exe'
+        Get-Content (Join-Path $app 'mcp-server.exe.old') -Raw | Should -Be 'older-still-running'
+        $parked = Get-ChildItem $app -Filter 'mcp-server.exe.old-*'
+        $parked.Count | Should -Be 1
+        Get-Content $parked[0].FullName -Raw | Should -Be 'current-exe'
+        Test-Path (Join-Path $app 'mcp-server.exe.new') | Should -BeFalse
+    }
+    It 'Remove-StaleBrokerImages sweeps every parked image (.old and .old-xxxxxxxx) and nothing else' {
+        New-Payload $app @{ 'mcp-server.exe' = 'exe'; 'mcp-server.exe.old' = 'a'; 'mcp-server.exe.old-1a2b3c4d' = 'b'; 'mcp-server.exe.new' = 'keep' }
+        Remove-StaleBrokerImages $app
+        Test-Path (Join-Path $app 'mcp-server.exe.old') | Should -BeFalse
+        Test-Path (Join-Path $app 'mcp-server.exe.old-1a2b3c4d') | Should -BeFalse
+        Test-Path (Join-Path $app 'mcp-server.exe.new') | Should -BeTrue
+        Get-Content (Join-Path $app 'mcp-server.exe') -Raw | Should -Be 'exe'
+    }
+    It 'Remove-StaleBrokerImages never throws when an image is still held' {
+        New-Payload $app @{ 'mcp-server.exe.old' = 'held' }
+        Mock Remove-Item { throw 'The process cannot access the file' }
+        { Remove-StaleBrokerImages $app } | Should -Not -Throw
+        Test-Path (Join-Path $app 'mcp-server.exe.old') | Should -BeTrue
+    }
+    It 'Complete-PendingServerMarker moves the deferred server hash from the sidecar into the marker and removes the sidecar' {
+        New-Payload $app @{ 'mcp-server.exe.new.sha256' = 'newhash' }
+        $markerPath = Join-Path $app 'installed-version.json'
+        @{ version = 'v0.1.2'; components = @{ server = 'oldhash'; 'addin-2027' = 'a27' } } | ConvertTo-Json | Set-Content $markerPath
+        Complete-PendingServerMarker $app $markerPath
+        $m = Get-Content $markerPath -Raw | ConvertFrom-Json
+        $m.components.server | Should -Be 'newhash'
+        $m.components.'addin-2027' | Should -Be 'a27'
+        $m.version | Should -Be 'v0.1.2'
+        Test-Path (Join-Path $app 'mcp-server.exe.new.sha256') | Should -BeFalse
+    }
+    It 'Complete-PendingServerMarker is a no-op without a sidecar and never throws on a bad marker' {
+        $markerPath = Join-Path $app 'installed-version.json'
+        New-Payload $app @{ 'installed-version.json' = '{ "version": "v1", "components": { "server": "keep" } }' }
+        Complete-PendingServerMarker $app $markerPath
+        (Get-Content $markerPath -Raw | ConvertFrom-Json).components.server | Should -Be 'keep'
+        New-Payload $app @{ 'mcp-server.exe.new.sha256' = 'x'; 'installed-version.json' = '{not json' }
+        { Complete-PendingServerMarker $app $markerPath } | Should -Not -Throw
+    }
     It 'Complete-PendingBrokerSwap recovers the moved-aside state (no exe, .old and .new present)' {
         New-Payload $app @{ 'mcp-server.exe.old' = 'old-exe'; 'mcp-server.exe.new' = 'new-exe' }
         Complete-PendingBrokerSwap $app | Should -BeTrue
@@ -144,15 +190,27 @@ Describe 'Install-BrokerStaged' {
         Test-Path (Join-Path $app 'mcp-server.exe.old') | Should -BeFalse
         Test-Path (Join-Path $app 'mcp-server.exe.new') | Should -BeFalse
     }
-    It 'Complete-PendingBrokerSwap finishes a pending swap only when no broker is running' {
+    It 'Complete-PendingBrokerSwap stages a pending .new even while a broker runs, and swaps outright when none does' {
         New-Payload $app @{ 'mcp-server.exe' = 'old-exe'; 'mcp-server.exe.new' = 'new-exe' }
         Mock Get-BrokerProcess { @([pscustomobject]@{ Id = 1 }) }
-        Complete-PendingBrokerSwap $app | Should -BeFalse
-        Get-Content (Join-Path $app 'mcp-server.exe') -Raw | Should -Be 'old-exe'
-        Mock Get-BrokerProcess { @() }
-        Complete-PendingBrokerSwap $app | Should -BeTrue
+        Complete-PendingBrokerSwap $app | Should -Be 'staged'
         Get-Content (Join-Path $app 'mcp-server.exe') -Raw | Should -Be 'new-exe'
+        Get-Content (Join-Path $app 'mcp-server.exe.old') -Raw | Should -Be 'old-exe'   # the running image, parked
         Test-Path (Join-Path $app 'mcp-server.exe.new') | Should -BeFalse
+
+        New-Payload $app @{ 'mcp-server.exe.new' = 'newer-exe' }
+        Mock Get-BrokerProcess { @() }
+        Complete-PendingBrokerSwap $app | Should -Be 'swapped'
+        Get-Content (Join-Path $app 'mcp-server.exe') -Raw | Should -Be 'newer-exe'
+        Get-ChildItem $app -Filter 'mcp-server.exe.old*' | Should -BeNullOrEmpty
+    }
+    It 'Complete-PendingBrokerSwap parks the current exe under a unique name when .old is still held' {
+        New-Payload $app @{ 'mcp-server.exe' = 'current'; 'mcp-server.exe.old' = 'held'; 'mcp-server.exe.new' = 'newest' }
+        Mock Get-BrokerProcess { @([pscustomobject]@{ Id = 1 }) }
+        Mock Remove-Item { } -ParameterFilter { $Path -like '*mcp-server.exe.old' }
+        Complete-PendingBrokerSwap $app | Should -Be 'staged'
+        Get-Content (Join-Path $app 'mcp-server.exe') -Raw | Should -Be 'newest'
+        (Get-ChildItem $app -Filter 'mcp-server.exe.old-*').Count | Should -Be 1
     }
     It 'is a no-op when nothing is pending, but still removes a stale .old image' {
         New-Payload $app @{ 'mcp-server.exe' = 'exe'; 'mcp-server.exe.old' = 'stale' }
