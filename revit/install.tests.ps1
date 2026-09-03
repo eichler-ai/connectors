@@ -320,6 +320,16 @@ Describe 'Self-copy source (issue #192): the installed install.ps1 must be the f
         Test-IsFullInstallerScript '' | Should -BeFalse
         Test-IsFullInstallerScript $fullScript.Substring(0, 5000) | Should -BeFalse
     }
+    It 'rejects a download truncated PAST both markers (review of #193: markers alone let 73% missing through)' {
+        # Both markers live in the first ~6 KB; a cut anywhere after them must still fail, at any length.
+        foreach ($len in 20000, 40000, ($fullScript.Length - 200)) {
+            Test-IsFullInstallerScript $fullScript.Substring(0, $len) | Should -BeFalse -Because "a $len-byte prefix is not the installer"
+        }
+    }
+    It 'rejects a script with an intact tail but a corrupted middle (the sentinel alone cannot see that)' {
+        $corrupt = $fullScript.Substring(0, 30000) + "`n{{{ not powershell`n" + $fullScript.Substring(30000)
+        Test-IsFullInstallerScript $corrupt | Should -BeFalse
+    }
     It 'uses the invocation definition when it is the full script, without touching the network' {
         Mock Invoke-WebRequest { throw 'network must not be used' }
         Get-InstallerSourceForBootstrap $fullScript 'https://example.invalid/install.ps1' | Should -Be $fullScript

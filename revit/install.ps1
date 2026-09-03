@@ -81,14 +81,31 @@ $RepoSlug = 'eichler-ai/connectors'
 $InstallerRawUrl = "https://raw.githubusercontent.com/$RepoSlug/main/revit/install.ps1"
 
 # The one-liner stub is ~90 bytes with no param block; the real script declares -LoadFunctionsOnly and
-# defines Copy-SelfIfNeeded. Both markers plus a size floor, so a truncated download fails too.
+# defines Copy-SelfIfNeeded. Those two markers reject the stub, but both sit in the first few KB, so
+# (independent review of #193) they say nothing about the REST of the text: a download cut off at 70%
+# carried both and would have been installed as the self-copy, to fail later as a bare ParserError in
+# a hidden window -- the same shape #192 was filed for. So the text must also END with the sentinel
+# comment on this file's last line (a cut anywhere above loses it, including a cut between two
+# complete statements that the parser would accept) AND parse as complete PowerShell (a corrupted
+# middle with an intact tail). Belt and braces, each covering what the other cannot.
 function Test-IsFullInstallerScript([string]$Text) {
     if (-not $Text) { return $false }
-    return ($Text.Length -gt 10000) -and
-        ($Text -match '(?m)^\s*\[switch\]\$LoadFunctionsOnly') -and
-        ($Text -match 'function Copy-SelfIfNeeded')
+    if (-not (($Text -match '(?m)^\s*\[switch\]\$LoadFunctionsOnly') -and ($Text -match 'function Copy-SelfIfNeeded'))) {
+        return $false
+    }
+    if ($Text.TrimEnd() -notmatch '# MCPBRIDGE-INSTALL-PS1-END-OF-FILE$') {
+        return $false
+    }
+    $tokens = $null; $parseErrors = $null
+    [System.Management.Automation.Language.Parser]::ParseInput($Text, [ref]$tokens, [ref]$parseErrors) | Out-Null
+    return ($null -eq $parseErrors) -or ($parseErrors.Count -eq 0)
 }
 
+# Piped invocations other than the documented one-liner (e.g. `Get-Content saved.ps1 | iex`) also reach
+# the download branch, since their real source is equally unrecoverable from $MyInvocation; the
+# self-copy is then main's current script rather than the text that ran. Acceptable: the self-copy's
+# job is to be a complete installer for Update Now/uninstall to run, and main is what the one-liner
+# installs anyway. Run a saved copy with -File to keep it byte-for-byte.
 function Get-InstallerSourceForBootstrap([string]$InvocationDefinition, [string]$Url) {
     if (Test-IsFullInstallerScript $InvocationDefinition) { return $InvocationDefinition }
     $text = (Invoke-WebRequest -Uri $Url -UseBasicParsing).Content
@@ -1138,3 +1155,8 @@ Write-Host $summary
 } finally {
     if ($BootstrapCreated -and (Test-Path $ScriptPath)) { Remove-Item $ScriptPath -Force -ErrorAction SilentlyContinue }
 }
+
+# Keep this the LAST line: Test-IsFullInstallerScript requires it, so a download cut off anywhere
+# above -- even between two complete statements, where the parser sees nothing wrong -- is rejected
+# rather than installed as the self-copy (issue #192, and its review).
+# MCPBRIDGE-INSTALL-PS1-END-OF-FILE
