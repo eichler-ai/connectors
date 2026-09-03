@@ -308,3 +308,23 @@ Describe 'Register-McpServer -- Claude Code CLI wiring' {
         { Register-McpServer $fakeExe 6>$null } | Should -Not -Throw
     }
 }
+
+Describe 'Get-RemoteBrokerModeWarning' {
+    It 'returns nothing when the mode is unset or local (the end-user case)' {
+        Get-RemoteBrokerModeWarning $null $null | Should -BeNullOrEmpty
+        Get-RemoteBrokerModeWarning '' '' | Should -BeNullOrEmpty
+        Get-RemoteBrokerModeWarning 'local' '\\Mac\connectors' | Should -BeNullOrEmpty
+    }
+    It 'warns when mode is remote, naming the shared root and the clear command' {
+        $w = Get-RemoteBrokerModeWarning 'remote' '\\Mac\connectors'
+        $w | Should -Match 'MCPBRIDGE_BROKER_MODE=remote'
+        $w | Should -Match '\\\\Mac\\connectors'
+        $w | Should -Match "SetEnvironmentVariable\('MCPBRIDGE_BROKER_MODE'"
+    }
+    It 'is case-insensitive and tolerates surrounding whitespace' {
+        Get-RemoteBrokerModeWarning ' Remote ' $null | Should -Not -BeNullOrEmpty
+    }
+    It 'omits the shared-root note when it is not set' {
+        Get-RemoteBrokerModeWarning 'remote' $null | Should -Not -Match 'MCPBRIDGE_SHARED_ROOT='
+    }
+}

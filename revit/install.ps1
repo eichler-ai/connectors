@@ -501,6 +501,28 @@ function Register-McpServer([string]$ServerExe, [switch]$OnlyIfMissing) {
     }
 }
 
+function Get-RemoteBrokerModeWarning([string]$BrokerMode, [string]$SharedRoot) {
+    # This installer sets up a LOCAL broker (mcp-server.exe --mode local). But the Revit add-in chooses
+    # its broker from MCPBRIDGE_BROKER_MODE: when that is 'remote' (this project's own dev tooling sets
+    # it -- dev-tooling/launch-revit-discovery.bat, install-mac.sh), the add-in IGNORES the local broker
+    # and connects to a shared/remote one at MCPBRIDGE_SHARED_ROOT instead. Revit then looks healthy
+    # ("connected to broker at <LAN ip>"), but a LOCAL Claude client's list_instances sees no Revit at
+    # all -- two different brokers. A real end-user never has this set; a developer switching back from
+    # the Mac+Parallels remote topology does, and it silently defeats a local install. Return the
+    # warning text to print, or $null when the environment is fine. (Pure, so it is unit-tested.)
+    if (-not $BrokerMode -or $BrokerMode.Trim().ToLowerInvariant() -ne 'remote') { return $null }
+    $rootNote = if ($SharedRoot) { " (MCPBRIDGE_SHARED_ROOT=$SharedRoot)" } else { '' }
+    return @(
+        "WARNING: MCPBRIDGE_BROKER_MODE=remote is set in your environment$rootNote."
+        '  The Revit add-in will connect to a REMOTE broker, NOT the local one this installer set up, so a'
+        "  local Claude client's list_instances will not see your Revit even while it is running. This is a"
+        '  leftover from the Mac+Parallels remote dev topology. For the local setup, clear it (User and/or'
+        '  Machine scope, whichever is set) and relaunch Revit from a fresh shell:'
+        "    [Environment]::SetEnvironmentVariable('MCPBRIDGE_BROKER_MODE', `$null, 'User')"
+        "    [Environment]::SetEnvironmentVariable('MCPBRIDGE_SHARED_ROOT', `$null, 'User')"
+    ) -join "`n"
+}
+
 if ($LoadFunctionsOnly) { return }
 
 try {
@@ -1044,6 +1066,22 @@ if (Test-Path $serverExe) {
     if ($modelsLine -and "$modelsLine" -notmatch 'bundled') {
         Write-Host "WARNING: the installed broker has NO search-ranking models bundled -- search_functions/search_howtos will rank keyword-only. Expected only for a -LocalPackagePath build made without fetch-models; a real release always includes them. ($modelsLine)"
     }
+}
+
+# --- Warn if the environment forces the add-in into REMOTE broker mode -----------------------------
+# Read the persistent value at User and Machine scope (the script runs as the interactive user, so
+# 'User' scope is that user's own -- unlike a `prlctl exec` query, which reads SYSTEM's). A stale value
+# still injected by a long-lived launcher after being cleared won't show here, but the common case (the
+# value still persisted) is caught, and this is exactly the condition that makes a healthy-looking Revit
+# invisible to a local list_instances.
+$envBrokerMode = [Environment]::GetEnvironmentVariable('MCPBRIDGE_BROKER_MODE', 'User')
+if (-not $envBrokerMode) { $envBrokerMode = [Environment]::GetEnvironmentVariable('MCPBRIDGE_BROKER_MODE', 'Machine') }
+$envSharedRoot = [Environment]::GetEnvironmentVariable('MCPBRIDGE_SHARED_ROOT', 'User')
+if (-not $envSharedRoot) { $envSharedRoot = [Environment]::GetEnvironmentVariable('MCPBRIDGE_SHARED_ROOT', 'Machine') }
+$brokerModeWarning = Get-RemoteBrokerModeWarning $envBrokerMode $envSharedRoot
+if ($brokerModeWarning) {
+    Write-Host ''
+    Write-Host $brokerModeWarning
 }
 
 # --- Programs & Features entry ------------------------------------------------------------------------
