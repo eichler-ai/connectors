@@ -482,9 +482,23 @@ function Register-McpServer([string]$ServerExe, [switch]$OnlyIfMissing) {
         $todo += "Claude Desktop / Cowork: ${jsonNote}add this under `"mcpServers`" in $cfgHint, then restart Claude Desktop:`n      `"revit`": { `"type`": `"stdio`", `"command`": `"$jsonExe`", `"args`": [`"--mode`", `"local`"] }"
     }
 
-    if ($registered.Count -gt 0) { Write-Host "Connected the revit MCP server to: $($registered -join '; ')." }
-    foreach ($t in $todo) { Write-Host "To finish connecting it -- $t" }
-    if ($didWork -or $todo.Count -gt 0) { Write-Host "(It runs as: `"$ServerExe`" --mode local. Restart any client that was open when this ran, so it reloads its MCP config.)" }
+    # One client (and the trailing note) per line -- crammed onto one line with '; ' separators and
+    # inline parentheticals it was hard to read at a glance.
+    if ($registered.Count -gt 0) {
+        Write-Host ''
+        Write-Host 'Connected the revit MCP server to:'
+        foreach ($r in $registered) { Write-Host "  - $r" }
+    }
+    if ($todo.Count -gt 0) {
+        Write-Host ''
+        Write-Host 'To finish connecting it:'
+        foreach ($t in $todo) { Write-Host "  - $t" }
+    }
+    if ($didWork -or $todo.Count -gt 0) {
+        Write-Host ''
+        Write-Host "It runs as: `"$ServerExe`" --mode local"
+        Write-Host 'Restart any Claude client that was open when this ran, so it reloads its MCP config.'
+    }
 }
 
 if ($LoadFunctionsOnly) { return }
