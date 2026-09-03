@@ -82,6 +82,27 @@ internal static class UpdateTrigger
             return;
         }
 
+        // The user's own request after the first live Update Now: say what is about to happen to
+        // their open Revit windows BEFORE anything happens, and let them back out. The installer
+        // never force-kills -- it asks each Revit to close (Revit's own save prompt appears) and
+        // defers any instance still running -- but "click, and Revit starts closing" with no warning
+        // is still a surprise when unsaved work is open in several windows.
+        var proceed = ShowOwnedMessageBox(
+            ownerHandle,
+            "Update the Revit MCP Bridge now?\n\n" +
+            "If the add-in changed, every open Revit window -- of every installed Revit version -- will be asked to close. " +
+            "Revit will prompt you to save unsaved work first; if you cancel, that Revit keeps running and is " +
+            "updated automatically the next time you close it. Reopen Revit yourself afterwards.\n\n" +
+            "If only the MCP Server changed, Revit stays open.",
+            "MCP Bridge - Update Now",
+            MessageBoxImage.Question,
+            MessageBoxButton.YesNo,
+            MessageBoxResult.No); // Enter backs out; proceeding is the deliberate click.
+        if (proceed != MessageBoxResult.Yes)
+        {
+            return;
+        }
+
         try
         {
             // ProcessStartInfo.ArgumentList (not a single concatenated string) avoids manual-quoting
@@ -118,7 +139,8 @@ internal static class UpdateTrigger
             // button cannot know which case applies before the installer has compared the manifest,
             // so the text states both outcomes rather than promising one.
             onStarted(
-                "Update started. If the MCP Bridge add-in changed, Revit will close to apply it; reopen it afterwards. " +
+                "Update started. If the MCP Bridge add-in changed, Revit will ask to close (saving unsaved work first) to apply it; " +
+                "a Revit you keep open is updated automatically when you next close it. Reopen Revit yourself afterwards. " +
                 "If only the MCP Server changed, Revit stays open and the update takes effect when your MCP client " +
                 "next starts the MCP Server (reconnect the revit MCP server, e.g. /mcp in Claude Code); " +
                 "this window shows the update as available until then.");
@@ -142,12 +164,11 @@ internal static class UpdateTrigger
     /// the taskbar, never activated on its own, created solely to give the MessageBox a real owner
     /// and closed immediately after.
     /// </summary>
-    internal static void ShowOwnedMessageBox(IntPtr ownerHandle, string text, string caption, MessageBoxImage icon)
+    internal static MessageBoxResult ShowOwnedMessageBox(IntPtr ownerHandle, string text, string caption, MessageBoxImage icon, MessageBoxButton buttons = MessageBoxButton.OK, MessageBoxResult defaultResult = MessageBoxResult.None)
     {
         if (ownerHandle == IntPtr.Zero)
         {
-            MessageBox.Show(text, caption, MessageBoxButton.OK, icon);
-            return;
+            return MessageBox.Show(text, caption, buttons, icon, defaultResult);
         }
 
         var owner = new Window
@@ -162,7 +183,7 @@ internal static class UpdateTrigger
         owner.Show();
         try
         {
-            MessageBox.Show(owner, text, caption, MessageBoxButton.OK, icon);
+            return MessageBox.Show(owner, text, caption, buttons, icon, defaultResult);
         }
         finally
         {
