@@ -48,6 +48,12 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# Windows PowerShell 5.1 (what Revit machines ship with) throttles Invoke-WebRequest/-RestMethod to a
+# small fraction of the real link speed while it renders the per-response progress bar -- the ~120 MB
+# release download can crawl for many minutes, appearing hung on "Writing request stream...". Silencing
+# progress restores full download speed. Set globally so it also applies to any re-launched (elevated)
+# process, which re-reads this from the top.
+$ProgressPreference = 'SilentlyContinue'
 
 $RepoSlug = 'eichler-ai/connectors'
 
