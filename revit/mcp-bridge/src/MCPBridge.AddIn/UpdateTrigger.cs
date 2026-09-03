@@ -90,13 +90,14 @@ internal static class UpdateTrigger
         var proceed = ShowOwnedMessageBox(
             ownerHandle,
             "Update the Revit MCP Bridge now?\n\n" +
-            "If the add-in changed, every open Revit window of this version will be asked to close. " +
+            "If the add-in changed, every open Revit window -- of every installed Revit version -- will be asked to close. " +
             "Revit will prompt you to save unsaved work first; if you cancel, that Revit keeps running and is " +
             "updated automatically the next time you close it. Reopen Revit yourself afterwards.\n\n" +
             "If only the MCP Server changed, Revit stays open.",
             "MCP Bridge - Update Now",
             MessageBoxImage.Question,
-            MessageBoxButton.YesNo);
+            MessageBoxButton.YesNo,
+            MessageBoxResult.No); // Enter backs out; proceeding is the deliberate click.
         if (proceed != MessageBoxResult.Yes)
         {
             return;
@@ -163,11 +164,11 @@ internal static class UpdateTrigger
     /// the taskbar, never activated on its own, created solely to give the MessageBox a real owner
     /// and closed immediately after.
     /// </summary>
-    internal static MessageBoxResult ShowOwnedMessageBox(IntPtr ownerHandle, string text, string caption, MessageBoxImage icon, MessageBoxButton buttons = MessageBoxButton.OK)
+    internal static MessageBoxResult ShowOwnedMessageBox(IntPtr ownerHandle, string text, string caption, MessageBoxImage icon, MessageBoxButton buttons = MessageBoxButton.OK, MessageBoxResult defaultResult = MessageBoxResult.None)
     {
         if (ownerHandle == IntPtr.Zero)
         {
-            return MessageBox.Show(text, caption, buttons, icon);
+            return MessageBox.Show(text, caption, buttons, icon, defaultResult);
         }
 
         var owner = new Window
@@ -182,7 +183,7 @@ internal static class UpdateTrigger
         owner.Show();
         try
         {
-            return MessageBox.Show(owner, text, caption, buttons, icon);
+            return MessageBox.Show(owner, text, caption, buttons, icon, defaultResult);
         }
         finally
         {
