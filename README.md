@@ -31,8 +31,22 @@ irm https://raw.githubusercontent.com/eichler-ai/connectors/main/revit/install.p
 
 This downloads the latest signed release and installs the add-in for whichever supported Revit
 versions are present, then registers the MCP server with Claude if the `claude` CLI is on `PATH`.
-Re-run it any time to update. To remove it, use Windows **Apps & features** (the installer registers
-an uninstall entry) or re-run `install.ps1 -Uninstall`.
+To remove it, use Windows **Apps & features** (the installer registers an uninstall entry) or re-run
+`install.ps1 -Uninstall`.
+
+**Updating.** Two ways, same result:
+
+- **From Revit.** The MCP Server checks GitHub for a newer release shortly after it starts and every
+  six hours after that. When one exists, **Add-Ins → MCP Bridge → Status** shows
+  `Update available (vX.Y.Z)` with an **Update Now** button. After you confirm, it runs the installed
+  updater silently. If the add-in changed, every open Revit window of that version is asked to close:
+  Revit prompts you to save unsaved work first, and if you cancel, that Revit keeps running and is
+  updated automatically the next time you close it. Reopen Revit yourself afterwards. If only the MCP
+  Server changed, Revit stays open and the update takes effect the next time your MCP client starts
+  the server (reconnect the `revit` server, e.g. `/mcp` in Claude Code). The Status window keeps
+  showing the update as available until then.
+- **From PowerShell.** Re-run the install one-liner above. It deploys only the components whose
+  content changed and closes Revit only if the add-in is one of them.
 
 Releases are **self-signed** for now, so Windows shows an "Unknown Publisher" prompt on first run;
 a CA-issued certificate is a later step (PRD §12). More detail, including the Mac + Parallels dev

@@ -22,8 +22,12 @@ irm https://raw.githubusercontent.com/eichler-ai/connectors/main/revit/install.p
 ```
 
 It downloads the latest signed release, installs the add-in for the Revit versions present, and
-registers the MCP server with Claude if the `claude` CLI is on `PATH`. Re-run any time to update;
-uninstall from Windows **Apps & features** or with `install.ps1 -Uninstall`. Releases are
+registers the MCP server with Claude if the `claude` CLI is on `PATH`. To update, either re-run it, or
+click **Update Now** in Revit's **Add-Ins → MCP Bridge → Status** window when it shows
+`Update available` (the MCP Server checks GitHub for releases; to apply an add-in change Revit asks
+to close, prompting to save unsaved work first, and a Revit you keep open is updated when you next
+close it). Uninstall from Windows **Apps & features** or with
+`install.ps1 -Uninstall`. Releases are
 **self-signed** for now, so Windows shows an "Unknown Publisher" prompt (a CA certificate is
 deferred — PRD §12). Full detail: [`install.md`](./install.md). The Mac + Parallels dev topology
 (broker on the Mac, add-in in the VM) uses [`install-mac.sh`](./install-mac.sh) instead.
