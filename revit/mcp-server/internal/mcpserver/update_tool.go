@@ -34,7 +34,13 @@ import (
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/updatecheck"
 )
 
-const updateSource = "mcp-server.internal.updatecheck"
+// Two sources, per §01 "source is a real module name": records about the tool's own decisions
+// (gating, launching, what the marker says) come from this package; the one record that
+// reports the GitHub check itself failing comes from the package that made the request.
+const (
+	updateSource      = "mcp-server.internal.mcpserver.update"
+	updateCheckSource = "mcp-server.internal.updatecheck"
+)
 
 // UpdateConnectorIn is update_connector's input. With neither flag it is a
 // read-only check; both flags together apply the update.
@@ -170,7 +176,7 @@ func updateConnector(ctx context.Context, deps UpdateDeps, in UpdateConnectorIn)
 
 	latest, cerr := deps.CheckNow(ctx)
 	if cerr != nil {
-		out.Error = diag.New(diag.SeverityError, "update-check-failed", updateSource,
+		out.Error = diag.New(diag.SeverityError, "update-check-failed", updateCheckSource,
 			"could not determine the latest release: "+cerr.Error()).
 			WithRemedy("retry in a few minutes (GitHub may be unreachable or rate-limiting this network)")
 		out.Revit = revitStatuses(marker, deps.Registry, "")
@@ -256,8 +262,9 @@ func revitStatuses(marker *InstalledMarker, reg *registry.Registry, latest strin
 			add(v, "deployed", marker.Version, latest != "" && versionBehind(marker.Version, latest))
 		}
 		for _, v := range marker.Deferred {
-			// Deferred: the release in marker.Version is parked for this version until its Revit exits.
-			add(v, "deferred", "", true)
+			// Deferred: the release in marker.Version is parked for this version until its Revit exits,
+			// so it is behind whenever a latest is known (review of #200: not asserted blindly on a failed check).
+			add(v, "deferred", "", latest != "")
 		}
 		for _, v := range marker.Skipped {
 			add(v, "skipped", "", false)

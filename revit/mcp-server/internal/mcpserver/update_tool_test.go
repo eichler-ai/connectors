@@ -136,11 +136,16 @@ func TestUpdateConnectorApplyRequiresConfirmationBeforeAnyWork(t *testing.T) {
 
 func TestUpdateConnectorApplyIsRefusedInRemoteMode(t *testing.T) {
 	deps, launches := updateDepsForTest(t, "remote", &InstalledMarker{Version: "v0.1.2", Deployed: []string{"2027"}}, "v0.1.3", nil)
+	checked := 0
+	deps.CheckNow = func(context.Context) (string, error) { checked++; return "v0.1.3", nil }
 
 	out := updateConnector(context.Background(), deps, UpdateConnectorIn{Apply: true, ConfirmLifecycleActions: true})
 
 	if out.Error == nil || out.Error.Code != "update-not-available-in-remote-mode" || len(*launches) != 0 {
 		t.Fatalf("expected remote-mode refusal: %+v launches=%v", out.Error, *launches)
+	}
+	if checked != 0 {
+		t.Fatal("a refused apply must not have run the check (no broker.json write before the gate)")
 	}
 	// The read-only check still works in remote mode.
 	check := updateConnector(context.Background(), deps, UpdateConnectorIn{})
@@ -193,15 +198,32 @@ func TestUpdateConnectorApplyWithoutASelfCopyNamesTheOneLiner(t *testing.T) {
 }
 
 func TestUpdateConnectorCheckFailureStillReportsWhatIsKnown(t *testing.T) {
-	deps, _ := updateDepsForTest(t, "local", &InstalledMarker{Version: "v0.1.2", Deployed: []string{"2027"}}, "", errors.New("dial tcp: no route"))
+	deps, _ := updateDepsForTest(t, "local", &InstalledMarker{Version: "v0.1.2", Deployed: []string{"2027"}, Deferred: []string{"2025"}}, "", errors.New("dial tcp: no route"))
 
 	out := updateConnector(context.Background(), deps, UpdateConnectorIn{})
 
-	if out.Error == nil || out.Error.Code != "update-check-failed" {
-		t.Fatalf("expected update-check-failed, got %+v", out.Error)
+	if out.Error == nil || out.Error.Code != "update-check-failed" || out.Error.Source != "mcp-server.internal.updatecheck" {
+		t.Fatalf("expected update-check-failed from the updatecheck source, got %+v", out.Error)
 	}
-	if out.Server.Installed != "v0.1.2" || len(out.Revit) != 1 || out.Revit[0].Version != "2027" {
+	if out.Server.Installed != "v0.1.2" || len(out.Revit) != 2 {
 		t.Fatalf("marker-derived facts should still be reported: %+v", out)
+	}
+	for _, r := range out.Revit {
+		// With no latest known, nothing can honestly be called "behind" -- not even a deferred version
+		// (review of #200: it used to be asserted unconditionally).
+		if r.UpdateAvailable {
+			t.Errorf("%s: update_available must be false when the check failed: %+v", r.Version, r)
+		}
+	}
+}
+
+func TestUpdateConnectorToolDecisionsCarryTheToolsOwnSource(t *testing.T) {
+	deps, _ := updateDepsForTest(t, "local", &InstalledMarker{Version: "v0.1.2", Deployed: []string{"2027"}}, "v0.1.3", nil)
+
+	out := updateConnector(context.Background(), deps, UpdateConnectorIn{Apply: true})
+
+	if out.Error.Source != "mcp-server.internal.mcpserver.update" || len(out.Error.Remedy) == 0 {
+		t.Fatalf("a gating record must name this package and carry a remedy: %+v", out.Error)
 	}
 }
 
