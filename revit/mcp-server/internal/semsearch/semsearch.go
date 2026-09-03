@@ -345,28 +345,48 @@ func (ix *IndexOf[T]) mask(accept func(T) bool) []bool {
 }
 
 // RerankText is what the cross-encoder reads for an API candidate: the
-// Type.Member identifier, its parameter types for a method or constructor,
-// and its summary. The POC's pair format had no parameter types; issue #188
-// added them because a task description names what a call takes ("from a
-// curve array on a level with a roof type" is NewFootPrintRoof's parameter
-// list, word for word) and the summary alone ("Creates a new FootPrintRoof
-// element.") gave the reranker nothing to match, so it placed the method
-// 19th of a pool of 20 even when fusion had found it. Measured on the
-// 43-query label set (full pipeline, with tokenizeField's bridge): recall@1
-// 25, @3 33, @10 35 against 24/29/34 before both changes. Per query the
-// types cost "move an element" and "make an array of copies" rank 1 -> 2 and
-// "create a 3d view" 5 -> 6, and won "get an element by its id" 6 -> 1,
-// "export the view to dwg" 14 -> 1, "create a section view" 4 -> 2 and the
-// issue's query from absent to 1.
+// Type.Member identifier, a callable's parameter list, and its summary. The
+// POC's pair format had no parameter list; issue #188 added it because a
+// task description names what a call takes ("from a curve array on a level
+// with a roof type" is NewFootPrintRoof's parameter list, word for word)
+// and the summary alone ("Creates a new FootPrintRoof element.") gave the
+// reranker nothing to match, so it placed the method 11th even once the
+// keyword bridge had fused it in. Measured on the 43-query label set (full
+// pipeline, with tokenizeField's bridge, one corpus construction): no
+// parameter list 25/31/35 (recall@1/@3/@10), parameter types only 24/32/35,
+// the full list with names 25/33/35 -- so the full list ships. Per query it
+// costs "move an element" 1 -> 2, "create a 3d view" 5 -> 9 and "prompt the
+// user to pick an element" 5 -> 6, and wins "get an element by its id"
+// 2 -> 1, "create a section view" 4 -> 2, "load a family from a file"
+// 5 -> 3, "create a sheet" 18 -> 15 and the issue's query 11 -> 1.
+// The cross-encoder's tokenizer cuts input from the tail at 512 wordpieces;
+// the longest Revit signatures (~10 parameters) plus a summary stay well
+// inside that.
 func RerankText(d Doc) string {
 	s := d.ShortType() + "." + d.Name
-	if i := strings.IndexByte(d.Signature, '('); i >= 0 {
-		s += "(" + paramTypes(d.Signature[i+1:]) + ")"
-	}
+	s += paramList(d.Signature)
 	if d.Summary != "" {
 		s += " — " + d.Summary
 	}
 	return s
+}
+
+// paramList is a signature's first parenthesised parameter list, parentheses
+// included, or "" for a property, field or event. Only the FIRST list: a
+// writable named indexed property renders two accessor calls
+// ("T get_X(A a); void set_X(A a, T value)", #186) and the setter's is not the
+// callable shape the reranker should read. Parentheses never occur inside a
+// parameter list (generics use angle brackets), so the first ')' ends it.
+func paramList(signature string) string {
+	i := strings.IndexByte(signature, '(')
+	if i < 0 {
+		return ""
+	}
+	j := strings.IndexByte(signature[i:], ')')
+	if j < 0 {
+		return signature[i:]
+	}
+	return signature[i : i+j+1]
 }
 
 // --- junk --------------------------------------------------------------------
@@ -441,26 +461,17 @@ func SplitIdentifier(id string) []string {
 // Single-character free-text words are dropped (the POC kept len>1), but
 // sub-word parts from identifier splitting are kept so "IList" and "Level2"
 // tokenize the same on both sides of the index.
-// paramTypes reduces a signature's parameter list ("CurveArray footPrint,
-// Level level)") to its types ("CurveArray, Level"): the part of a signature
-// a task description echoes. Measured for issue #188 (see RerankText): the
-// full list, parameter names included, ranked "create a 3d view" 9th where
-// types alone rank it 6th.
-func paramTypes(params string) string {
-	params = strings.TrimSuffix(strings.TrimSpace(params), ")")
-	if params == "" {
-		return ""
-	}
-	var types []string
-	for _, p := range strings.Split(params, ",") {
-		fields := strings.Fields(p)
-		if len(fields) >= 2 {
-			types = append(types, strings.Join(fields[:len(fields)-1], " "))
-		} else if len(fields) == 1 {
-			types = append(types, fields[0])
+func Tokenize(text string) []string {
+	var out []string
+	for _, piece := range strings.FieldsFunc(text, func(c rune) bool {
+		return !(isLower(c) || isUpper(c) || isDigit(c) || c == '_' || c == '`')
+	}) {
+		if len([]rune(piece)) < 2 {
+			continue
 		}
+		out = append(out, SplitIdentifier(piece)...)
 	}
-	return strings.Join(types, ", ")
+	return out
 }
 
 // tokenizeField is Tokenize for INDEXED text: it also emits each adjacent
@@ -473,7 +484,12 @@ func paramTypes(params string) string {
 // unchanged: "foot print" in a query already matches the split parts.
 // Measured on the 43-query POC label set (full pipeline): recall@1 24 -> 25,
 // @3 29 -> 31, @10 34 -> 35; per query, nothing on the first page moved
-// down.
+// down (the bridge-alone table is in docs/search-ranking-redesign.md).
+// Unexported on purpose: only BuildWith may widen, the query side stays
+// Tokenize. Stated trade-off: the bridged tokens count towards BM25 document
+// length, so an n-part name is 2n-1 tokens long where a one-part name stays
+// 1; the recall numbers above include that effect. Digits and backtick arity
+// bridge too ("List`1" -> list, 1, list1), harmless noise.
 func tokenizeField(text string) []string {
 	var out []string
 	for _, piece := range strings.FieldsFunc(text, func(c rune) bool {
@@ -487,19 +503,6 @@ func tokenizeField(text string) []string {
 		for j := 0; j+1 < len(parts); j++ {
 			out = append(out, parts[j]+parts[j+1])
 		}
-	}
-	return out
-}
-
-func Tokenize(text string) []string {
-	var out []string
-	for _, piece := range strings.FieldsFunc(text, func(c rune) bool {
-		return !(isLower(c) || isUpper(c) || isDigit(c) || c == '_' || c == '`')
-	}) {
-		if len([]rune(piece)) < 2 {
-			continue
-		}
-		out = append(out, SplitIdentifier(piece)...)
 	}
 	return out
 }

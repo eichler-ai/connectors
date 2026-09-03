@@ -506,27 +506,39 @@ func TestLexicalSearchReachesACamelCasedCompoundWrittenAsOneWord(t *testing.T) {
 	}
 }
 
-func TestParamTypes(t *testing.T) {
+func TestParamList(t *testing.T) {
 	cases := map[string]string{
-		"CurveArray footPrint, Level level, RoofType roofType, ModelCurveArray footPrintToModelCurvesMapping)": "CurveArray, Level, RoofType, ModelCurveArray",
-		"IList<ElementId> ids, XYZ translation)": "IList<ElementId>, XYZ",
-		")":                                      "",
+		"FootPrintRoof NewFootPrintRoof(CurveArray footPrint, Level level, RoofType roofType)": "(CurveArray footPrint, Level level, RoofType roofType)",
+		"void Export(string folder, IDictionary<string, int> map, ElementId[] ids)":            "(string folder, IDictionary<string, int> map, ElementId[] ids)",
+		// A writable named indexed property renders two accessor calls (#186);
+		// only the first list is the callable shape the reranker should see.
+		"Parameter get_Parameter(BuiltInParameter paramId); void set_Parameter(BuiltInParameter paramId, Parameter value)": "(BuiltInParameter paramId)",
+		"void Clear()":                    "()",
+		"RoofType RoofType { get;set; }":  "",
+		"event EventHandler<Args> Closed": "",
+		// No closing paren at all (defensive): the rest of the string.
+		"void Odd(CurveArray footPrint": "(CurveArray footPrint",
 	}
 	for in, want := range cases {
-		if got := paramTypes(in); got != want {
-			t.Errorf("paramTypes(%q) = %q, want %q", in, got, want)
+		if got := paramList(in); got != want {
+			t.Errorf("paramList(%q) = %q, want %q", in, got, want)
 		}
 	}
 }
 
-func TestRerankTextCarriesParameterTypesForCallables(t *testing.T) {
+func TestRerankTextCarriesTheParameterListForCallables(t *testing.T) {
 	// A task description names what a call takes ("from a curve array on a
 	// level with a roof type"); the summary alone does not, and the reranker
-	// buried the method for exactly that reason (#188). Types only -- parameter
-	// names are noise the reranker was measured to misread.
+	// buried the method for exactly that reason (#188).
 	d := Doc{DeclaringType: "Autodesk.Revit.Creation.Document", Name: "NewFootPrintRoof", Signature: "FootPrintRoof NewFootPrintRoof(CurveArray footPrint, Level level, RoofType roofType)", Summary: "Creates a new FootPrintRoof element."}
-	if got, want := RerankText(d), "Document.NewFootPrintRoof(CurveArray, Level, RoofType) — Creates a new FootPrintRoof element."; got != want {
+	if got, want := RerankText(d), "Document.NewFootPrintRoof(CurveArray footPrint, Level level, RoofType roofType) — Creates a new FootPrintRoof element."; got != want {
 		t.Errorf("RerankText = %q, want %q", got, want)
+	}
+	// A named indexed property (#186) shows its getter's list only, not the
+	// setter's accessor call that follows it in the signature.
+	n := Doc{DeclaringType: "Autodesk.Revit.DB.Element", Name: "Parameter", Signature: "Parameter get_Parameter(BuiltInParameter paramId); void set_Parameter(BuiltInParameter paramId, Parameter value)", Summary: "Retrieves a parameter."}
+	if got, want := RerankText(n), "Element.Parameter(BuiltInParameter paramId) — Retrieves a parameter."; got != want {
+		t.Errorf("RerankText(named indexed property) = %q, want %q", got, want)
 	}
 	// A property or field has no parameter list, so nothing is appended.
 	p := Doc{DeclaringType: "Autodesk.Revit.DB.RoofBase", Name: "RoofType", Signature: "RoofType RoofType { get;set; }", Summary: "Retrieve or set the Type."}
