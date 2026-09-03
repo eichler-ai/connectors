@@ -150,6 +150,22 @@ still exists — here, against the XML rather than the rendered string.
 
 **And prefer the shape that cannot drift.** A guard that reflects, parses, or derives from the real artifact stays true; one that restates a rule in a second language goes stale the first time the rule moves. That is the whole argument behind issue #91: five hand-maintained lists, three already wrong.
 
+## Symptom: `search_functions` / `search_howtos` ranks keyword-only
+
+The response's `ranker` field says `lexical` (and the guidance says "the embedding models were not
+bundled"). Search still returns results, but the semantic + cross-encoder pipeline (#154) is absent,
+so recall on task-style phrasings drops — this is not a ranking bug to chase in the ranker code.
+
+| Cause | Definitive check |
+|---|---|
+| The **broker** serving your session was built without the embedded models (`fetch-models` not run before `go build`) | Ask the binary, not the ranking: `<broker> -search-models` prints `bundled` or `not usable`. It is broker-side, so no add-in redeploy changes it — same family as symptom #9 above |
+
+`deploy-and-verify.sh` and the release pipeline (`release.yml`) both run `fetch-models` before the
+`go build`, so a broker from either is fine. The lexical-only broker comes from a bare `go build` for
+a quick local binary, or a `-LocalPackagePath` install zip built without the fetch step (`install.ps1`
+warns when it detects one). The models are `go:embed`ed at build time, so the fix is a rebuild with
+the fetch, not a config toggle or a restart.
+
 ## Symptom: a live run stalls with no error
 
 Screenshot first (`dev-environment.md` → When something looks wrong). A modal can hide *behind*
