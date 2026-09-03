@@ -51,7 +51,7 @@ func TestRealCorpusRecall(t *testing.T) {
 		Summary string `json:"summary"`
 		// Optional: the POC dump has no signatures, a dump taken from the
 		// add-in's discovery cache does. RerankText reads a callable's
-		// parameter types from it (issue #188), so the #188 measurement
+		// parameter list from it (issue #188), so the #188 measurement
 		// needs a dump that carries them; without the field the reranker
 		// sees Type.Member and summary only, as it did before #188.
 		Signature string `json:"signature"`

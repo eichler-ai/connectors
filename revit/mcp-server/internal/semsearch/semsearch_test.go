@@ -470,7 +470,7 @@ func TestPreferPartitionsTheHeadOnlyAndNeverFilters(t *testing.T) {
 	}
 }
 
-// --- issue #188: compound bridging + parameter types for the reranker -------
+// --- issue #188: compound bridging + parameter list for the reranker --------
 
 func TestTokenizeFieldBridgesAdjacentIdentifierParts(t *testing.T) {
 	// Revit spells the same compound two ways (NewFootPrintRoof, RoofByFootprint);

@@ -130,7 +130,7 @@ it reads as quasi-held-out.
 > So the bridge moved nothing on the first page down; the parameter list costs "move an element" 1→2,
 > "create a 3d view" 5→9 and "prompt the user to pick an element" 5→6, and wins "get an element by its
 > id" 2→1, "create a section view" 4→2, "load a family from a file" 5→3 and the issue's own query 11→1.
-> Parameter *types only* was measured as a middle ground and lost to the full list on every aggregate.
+> Parameter *types only* was measured as a middle ground and lost to the full list at recall@1 and @3, tied at @10.
 > The 43 labels and the corpus dump live outside the repo (POC scratch). `TestRealCorpusRecall`
 > reproduces the aggregate rows from a `members.json` that carries `signature`, `namespace` and `core`
 > (a discovery-cache dump does; the original POC dump does not, and then measures the pre-#188
