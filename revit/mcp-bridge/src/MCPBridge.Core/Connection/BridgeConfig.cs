@@ -48,8 +48,12 @@ internal sealed class BridgeConfig
     /// it again as the default.</summary>
     public string? SharedRoot { get; set; }
 
-    /// <summary>Convenience for callers that only need the yes/no: does this file say "remote"?</summary>
-    public bool IsRemote => string.Equals(BrokerMode, RemoteMode, StringComparison.OrdinalIgnoreCase);
+    /// <summary>Does this file say "remote"? Case-insensitive and trimmed -- a hand-edited value.</summary>
+    public bool IsRemote => string.Equals(BrokerMode?.Trim(), RemoteMode, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Does this file say "local"? Anything that is neither this nor <see cref="IsRemote"/>
+    /// is not a decision -- see <see cref="BrokerModeResolver"/>.</summary>
+    public bool IsLocal => string.Equals(BrokerMode?.Trim(), LocalMode, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>The one production location, beside broker.json's LOCAL-mode home.</summary>
     public static string DefaultPath()

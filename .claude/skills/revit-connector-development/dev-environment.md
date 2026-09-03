@@ -339,7 +339,8 @@ re-resolve rather than hardcoding either. `robocopy` from `cmd /c` mangles a `\\
   harness result: `get_skills`' `build` field names the revision.
 - **`bridge-config.json` outranks `MCPBRIDGE_*` (issue #185).** The ribbon's **Broker: Local / REMOTE**
   toggle writes `%LOCALAPPDATA%\Connectors\Revit\bridge-config.json`, and once that file states a
-  `brokerMode` the environment variables are ignored entirely — so a launcher-agent env change that
+  valid `brokerMode` the `MCPBRIDGE_BROKER_MODE` variable is ignored (`MCPBRIDGE_SHARED_ROOT` still
+  serves as the remote root when the file has no `sharedRoot`) — so a launcher-agent env change that
   "doesn't take" may be a saved config pinning the mode, not the stale-environment-snapshot problem
   above. Two consequences: to move Revit between brokers, click the toggle (it reconnects at once, no
   relaunch) rather than editing the environment; and `startup-errors.log`'s

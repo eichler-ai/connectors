@@ -142,7 +142,7 @@ internal static class UpdateTrigger
     /// the taskbar, never activated on its own, created solely to give the MessageBox a real owner
     /// and closed immediately after.
     /// </summary>
-    private static void ShowOwnedMessageBox(IntPtr ownerHandle, string text, string caption, MessageBoxImage icon)
+    internal static void ShowOwnedMessageBox(IntPtr ownerHandle, string text, string caption, MessageBoxImage icon)
     {
         if (ownerHandle == IntPtr.Zero)
         {

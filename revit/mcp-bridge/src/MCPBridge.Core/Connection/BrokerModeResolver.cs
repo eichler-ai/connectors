@@ -39,8 +39,9 @@ internal static class BrokerModeResolver
     public const string ModeVariable = "MCPBRIDGE_BROKER_MODE";
     public const string SharedRootVariable = "MCPBRIDGE_SHARED_ROOT";
 
-    /// <summary>Where the winning decision came from -- logged at startup and shown in the status
-    /// window, so "why is Revit dialing THAT broker" is answerable without a debugger.</summary>
+    /// <summary>Where the winning decision came from -- logged at startup (startup-errors.log's
+    /// "broker mode decided by ..." line), so "why is Revit dialing THAT broker" is answerable without
+    /// a debugger.</summary>
     public enum DecisionSource
     {
         Default,
@@ -57,7 +58,11 @@ internal static class BrokerModeResolver
 
         // 1. Config, when it states a mode at all. An absent/blank brokerMode means "nothing decided
         //    here" and drops through to the environment -- the file may exist purely to remember a
-        //    sharedRoot for the next switch.
+        //    sharedRoot for the next switch. Only the two known values count as a decision
+        //    (independent PR review finding, #187): a typo in a hand-edited file used to be read as
+        //    "local, decided by config", silently -- §01 says it must leave a trace, and it must not
+        //    outrank an environment that IS well-formed.
+        DiagnosticRecord? invalidModeDiagnostic = null;
         if (config is not null && !string.IsNullOrWhiteSpace(config.BrokerMode))
         {
             if (config.IsRemote)
@@ -66,17 +71,29 @@ internal static class BrokerModeResolver
                 return TryRemote(root, DecisionSource.Config, "bridge-config.json says brokerMode=remote");
             }
 
-            return new Resolution(BrokerDiscoveryOptions.Local(), DecisionSource.Config, null);
+            if (config.IsLocal)
+            {
+                return new Resolution(BrokerDiscoveryOptions.Local(), DecisionSource.Config, null);
+            }
+
+            invalidModeDiagnostic = DiagnosticRecord.Create(
+                DiagnosticSeverity.Warning,
+                "bridge-config-invalid-mode",
+                DiagnosticSource.Connection,
+                $"bridge-config.json has brokerMode='{config.BrokerMode}', which is neither 'local' nor 'remote'; ignoring it and resolving broker mode from the environment/default instead.",
+                detail: new Dictionary<string, object?> { ["broker_mode"] = config.BrokerMode },
+                remedy: new[] { "Set brokerMode to \"local\" or \"remote\" -- the ribbon's broker-mode switch rewrites the file correctly." });
         }
 
         // 2. Environment (the pre-#185 behaviour, unchanged).
-        if (string.Equals(envMode, BridgeConfig.RemoteMode, StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(envMode?.Trim(), BridgeConfig.RemoteMode, StringComparison.OrdinalIgnoreCase))
         {
-            return TryRemote(envRoot, DecisionSource.Environment, $"{ModeVariable}=remote is set");
+            var remote = TryRemote(envRoot, DecisionSource.Environment, $"{ModeVariable}=remote is set");
+            return remote.Diagnostic is null ? remote with { Diagnostic = invalidModeDiagnostic } : remote;
         }
 
         // 3. Default.
-        return new Resolution(BrokerDiscoveryOptions.Local(), DecisionSource.Default, null);
+        return new Resolution(BrokerDiscoveryOptions.Local(), DecisionSource.Default, invalidModeDiagnostic);
     }
 
     private static Resolution TryRemote(string? sharedRoot, DecisionSource source, string decidedBy)

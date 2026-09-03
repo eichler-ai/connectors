@@ -676,7 +676,7 @@ internal sealed class BridgeHost
             try
             {
                 RunOneConnection(discoveryResult.BrokerJson, discoveryResult.Address, dispatcher, documentSnapshotHandler, documentSnapshotEvent, reconnectController, stopToken);
-                LogConnectionDiagnostic($"connection to {discoveryResult.Address.Host}:{discoveryResult.Address.Port} ended (broker closed it, or Stop() was called); will reconnect");
+                LogConnectionDiagnostic($"connection to {discoveryResult.Address.Host}:{discoveryResult.Address.Port} ended (broker closed it, Stop() was called, or a reconnect/mode switch was requested); will reconnect");
             }
             catch (Exception ex)
             {
@@ -833,6 +833,25 @@ internal sealed class BridgeHost
     {
         using var tcpClient = new TcpClient();
         _activeTcpClient = tcpClient;
+
+        // Independent PR review finding (#187): Reconnect()/SwitchTo() closes _activeTcpClient, but
+        // between the previous connection's finally (which nulls it) and the assignment just above
+        // there is nothing to close -- and a request landing in that window (the loop is inside
+        // TryDiscoverWithTimeout, up to 5s on a stalled read) would otherwise be honoured by nothing:
+        // this method would connect with the OPTIONS CAPTURED BEFORE THE SWITCH, succeed, and never
+        // reach Backoff(), where the flag is consumed. The ribbon, the saved config, and the
+        // confirmation text would all say REMOTE while the process sat registered with the local
+        // broker until that connection happened to drop -- the exact #185 symptom, reachable from the
+        // button meant to cure it. Reconnect() sets the flag BEFORE it calls Close(), so checking the
+        // flag after publishing the client covers both orderings: a request that came earlier is seen
+        // here, a request that comes later finds a client to close. Returning (not throwing) routes
+        // through the same "connection ended" path a broker-side close takes, and Backoff() then sees
+        // the flag and retries at once with the options as they are NOW.
+        if (_reconnectRequested)
+        {
+            LogConnectionDiagnostic($"reconnect was requested while this attempt was being prepared; abandoning the dial to {address.Host}:{address.Port} so the next attempt re-reads the current options");
+            return;
+        }
 
         if (!tcpClient.ConnectAsync(address.Host, address.Port).Wait(TimeSpan.FromSeconds(5)))
         {

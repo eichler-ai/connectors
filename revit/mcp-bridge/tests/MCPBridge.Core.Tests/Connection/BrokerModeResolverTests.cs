@@ -152,6 +152,45 @@ public class BrokerModeResolverTests
     }
 
     [Fact]
+    public void ConfigWithUnknownMode_IsNotADecision_FallsThroughWithDiagnostic()
+    {
+        // PR #187 review finding: a typo ("remot", "Local ") used to read as "local, decided by
+        // config" with no trace, outranking a well-formed environment.
+        var config = new BridgeConfig { BrokerMode = "remot", SharedRoot = @"\\Mac\connectors" };
+        var env = Env(("MCPBRIDGE_BROKER_MODE", "remote"), ("MCPBRIDGE_SHARED_ROOT", @"\\Mac\connectors"));
+
+        var resolution = BrokerModeResolver.Resolve(config, env);
+
+        Assert.Equal(BrokerTopologyMode.Remote, resolution.Options.Mode);
+        Assert.Equal(BrokerModeResolver.DecisionSource.Environment, resolution.Source);
+        Assert.NotNull(resolution.Diagnostic);
+        Assert.Equal("bridge-config-invalid-mode", resolution.Diagnostic!.Code);
+        Assert.Contains("remot", resolution.Diagnostic.Message);
+    }
+
+    [Fact]
+    public void ConfigWithUnknownMode_NoEnv_DefaultsToLocal_WithDiagnostic()
+    {
+        var resolution = BrokerModeResolver.Resolve(new BridgeConfig { BrokerMode = "both" }, NoEnv);
+
+        Assert.Equal(BrokerTopologyMode.Local, resolution.Options.Mode);
+        Assert.Equal(BrokerModeResolver.DecisionSource.Default, resolution.Source);
+        Assert.Equal("bridge-config-invalid-mode", resolution.Diagnostic!.Code);
+    }
+
+    [Fact]
+    public void ConfigMode_IsTrimmedAndCaseInsensitive()
+    {
+        var local = BrokerModeResolver.Resolve(new BridgeConfig { BrokerMode = " Local " }, Env(("MCPBRIDGE_BROKER_MODE", "remote"), ("MCPBRIDGE_SHARED_ROOT", @"\\Mac\x")));
+        var remote = BrokerModeResolver.Resolve(new BridgeConfig { BrokerMode = " REMOTE ", SharedRoot = @"\\Mac\x" }, NoEnv);
+
+        Assert.Equal(BrokerTopologyMode.Local, local.Options.Mode);
+        Assert.Equal(BrokerModeResolver.DecisionSource.Config, local.Source);
+        Assert.Null(local.Diagnostic);
+        Assert.Equal(BrokerTopologyMode.Remote, remote.Options.Mode);
+    }
+
+    [Fact]
     public void SharedRoot_IsTrimmed()
     {
         var config = new BridgeConfig { BrokerMode = "remote", SharedRoot = @"  \\Mac\connectors  " };

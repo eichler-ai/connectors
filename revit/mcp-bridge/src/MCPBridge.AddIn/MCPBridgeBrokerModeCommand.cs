@@ -78,8 +78,9 @@ public sealed class MCPBridgeBrokerModeCommand : IExternalCommand
             catch (ArgumentException ex)
             {
                 // Same UNC rule the startup path enforces (PRD §09); here it can be explained to the
-                // person who typed it rather than logged and silently fallen back from.
-                MessageBox.Show(ex.Message, "MCP Bridge - Broker mode", MessageBoxButton.OK, MessageBoxImage.Warning);
+                // person who typed it rather than logged and silently fallen back from. Owned, so it
+                // cannot land behind Revit's main window (UpdateTrigger's own reasoning).
+                UpdateTrigger.ShowOwnedMessageBox(ownerHandle, ex.Message, "MCP Bridge - Broker mode", MessageBoxImage.Warning);
                 return Result.Cancelled;
             }
 
@@ -116,9 +117,12 @@ public sealed class MCPBridgeBrokerModeCommand : IExternalCommand
 
     /// <summary>
     /// A minimal owned, modal prompt for the shared root -- one label, one text box, OK/Cancel. Modal
-    /// is right here: this runs on a real ribbon click by a person, not from a script (the deadlock
-    /// hazard MCPBridgeStatusWindow's doc comment describes is specific to a window a SCRIPT might open
-    /// and then need to close; nothing scripts can reach opens this one). Returns the trimmed entry, or
+    /// is right here: this exists to be answered by a person at a ribbon click. (A script could reach
+    /// this command via UIApplication.PostCommand -- confirmation-gated in the denylist, and the
+    /// posted command only runs after the script's own run has ended, so it cannot deadlock the
+    /// execute_script that posted it; it would merely leave a prompt open for the user, who can
+    /// cancel it. The deadlock hazard MCPBridgeStatusWindow's doc comment describes is specific to a
+    /// window a script opens AND needs to close within its own run.) Returns the trimmed entry, or
     /// null on Cancel/close/blank.
     /// </summary>
     private static string? PromptForSharedRoot(IntPtr ownerHandle, string suggestion)

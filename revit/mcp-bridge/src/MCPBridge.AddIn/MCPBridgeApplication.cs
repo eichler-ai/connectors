@@ -226,6 +226,8 @@ public sealed class MCPBridgeApplication : IExternalApplication
         {
             var panel = application.CreateRibbonPanel("MCP Bridge");
             var assemblyLocation = typeof(MCPBridgeApplication).Assembly.Location;
+            // All three stay enabled with no document open -- see MCPBridgeCommandAvailability.
+            var availability = typeof(MCPBridgeCommandAvailability).FullName;
             panel.AddItem(new PushButtonData(
                 "MCPBridgeStatus",
                 "Status",
@@ -233,6 +235,7 @@ public sealed class MCPBridgeApplication : IExternalApplication
                 typeof(MCPBridgeStatusCommand).FullName)
             {
                 ToolTip = "Show MCP Bridge connection status, broker mode, and build info.",
+                AvailabilityClassName = availability,
             });
             panel.AddItem(new PushButtonData(
                 "MCPBridgeReconnect",
@@ -241,6 +244,7 @@ public sealed class MCPBridgeApplication : IExternalApplication
                 typeof(MCPBridgeReconnectCommand).FullName)
             {
                 ToolTip = "Drop the current broker connection and re-read broker.json now (e.g. after restarting the broker), instead of waiting for the retry backoff.",
+                AvailabilityClassName = availability,
             });
             // Label/tooltip are placeholders here; UpdateBrokerModeButton writes the real ones once the
             // resolved options are known (OnStartup) and after every switch.
@@ -248,7 +252,10 @@ public sealed class MCPBridgeApplication : IExternalApplication
                 "MCPBridgeBrokerMode",
                 "Broker",
                 assemblyLocation,
-                typeof(MCPBridgeBrokerModeCommand).FullName)) as PushButton;
+                typeof(MCPBridgeBrokerModeCommand).FullName)
+            {
+                AvailabilityClassName = availability,
+            }) as PushButton;
         }
         catch (Exception ex)
         {
