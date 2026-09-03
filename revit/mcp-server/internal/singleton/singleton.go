@@ -31,6 +31,18 @@ type BrokerInfo struct {
 	// Version is the running broker's own version, mirroring
 	// cmd/mcp-server/main.go's build-time -ldflags -X main.version=... var.
 	Version string `json:"version,omitempty"`
+	// Revision is the source revision the primary was built from
+	// (buildinfo.Read().Revision), for offline diagnosis of which build holds
+	// the singleton. Unlike Version -- "dev" for every local build -- this
+	// distinguishes two dev builds from different checkouts.
+	Revision string `json:"revision,omitempty"`
+	// SchemaFingerprint is the primary's tool-contract hash
+	// (mcpserver.ToolSchemaFingerprint): a secondary compares it to its own
+	// before proxying, and refuses on a mismatch rather than serving the
+	// primary's stale tool schema (issue #197). Empty in a broker.json written
+	// by a primary that predates this field, which a newer secondary treats as
+	// an incompatible (unknown) contract.
+	SchemaFingerprint string `json:"schema_fingerprint,omitempty"`
 	// LatestAvailableVersion is kept current by internal/updatecheck's background goroutine, which
 	// periodically checks GitHub's latest release and caches the result here. Empty until that
 	// goroutine's first successful check completes, and left at its previous value (never cleared)

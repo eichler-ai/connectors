@@ -109,6 +109,17 @@ after the block. The run above returned `status: "success"` having created nothi
 |---|---|
 | A script's native `SubTransaction` was still ACTIVE when the enclosing connector transaction closed -- the `WithTransaction` block ending, `Connector.Settle`, or an exception unwinding through the connector's rollback -- because it was not held in a `using` | Observed once, live, Revit 2025 (#146 Phase 1 / H8 probe, a bare `var st = new SubTransaction(doc); st.Start();` left open at block end): the commit raised nothing, the slice was kept, the next `WithTransaction` block ran -- and the fixture document's `Close(false)` ~45s later took Revit down with the crash-report dialog. The connector cannot see the script's `SubTransaction` object at runtime, so `ScriptApiDenylist` now refuses any construction that is not a `using` resource (Dispose ends an active sub-transaction). The harness has NO live pin for the crash shape itself (it kills the shared session); the `using`-only path (no explicit Commit/RollBack, Dispose does the work) IS pinned live. Evidence beside `TestSubTransactionIsASavepointInsideTheConnectorsTransaction` |
 
+## Symptom: a valid tool argument is rejected as an "unexpected additional property", or `search_functions` ranks like an older build, with no code change
+
+The broker is a **singleton**: whichever process wins the lock is primary and binds the port; every other broker process (each MCP client's own `mcp-server`) proxies its entire MCP session -- tool list *and* argument validation -- through the primary. So the schema a client is validated against, and the ranker that answers discovery, are the **primary's build**, not the one the client launched. On a dev machine with several worktrees the primary is often an older build, and it changes whenever the lock-holder is killed (the port in `broker.json` changes under a live client; Revit in remote mode re-dials within ~1 min).
+
+| Cause | Definitive check |
+|---|---|
+| The primary is an older build whose tool schema predates a parameter the client sent (issue #197: a `label` rejected as an unexpected property, having worked moments earlier). Since #197 a newer secondary **refuses to proxy** through a schema-incompatible primary and exits with a message naming the primary's pid to restart; an OLDER secondary still proxies silently | Read `broker.json`: `pid`, `revision`, `schema_fingerprint`. `lsof -p <pid> \| awk '$4=="txt"'` gives the primary binary's path; `<path> -version` its revision. If it is not the build you expect, that is the answer |
+| The primary answers `search_functions`/`describe_function`, so a ranking or schema change you just built is not live until *your* build is primary | Byte-identical scores across a change you expected to move ranking = you are hitting the old primary. Make your build primary: stop the old primary (coordinate -- other sessions and Revit proxy through it), the next running secondary wins the lock and rewrites `broker.json`, then `/mcp` to reconnect |
+
+The fingerprint keys on the tool **input schemas**, not the revision, so it fires only when the argument contracts actually differ -- two builds that changed only prose or non-tool code proxy fine.
+
 ## Symptom: tests are green but prove nothing
 
 | Cause | Definitive check |

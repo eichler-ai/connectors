@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/buildinfo"
+	"github.com/eichler-ai/connectors/revit/mcp-server/internal/mcpserver"
+	"github.com/eichler-ai/connectors/revit/mcp-server/internal/singleton"
 )
 
 // TestTurnReaderStopUnblocksReadEvenWithNoData is the regression test for
@@ -594,5 +596,43 @@ func TestVersionLineNamesBothTheReleaseAndTheBuild(t *testing.T) {
 	// plain `go build`/`go test` honest rather than merely non-crashing.
 	if !buildinfo.Read().Known() && !strings.Contains(got, "unknown") {
 		t.Errorf("versionLine() = %q: with no VCS information it must say the revision is unknown", got)
+	}
+}
+
+// --- issue #197: secondary refuses to proxy through an incompatible primary ---
+
+func TestSchemaMismatchAllowsAMatchingPrimary(t *testing.T) {
+	own, err := mcpserver.ToolSchemaFingerprint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	logger := log.New(io.Discard, "", 0)
+	info := singleton.BrokerInfo{PID: 1, Version: "dev", SchemaFingerprint: own}
+	if err := schemaMismatch(info, logger); err != nil {
+		t.Fatalf("matching fingerprint should proxy, got refusal: %v", err)
+	}
+}
+
+func TestSchemaMismatchRefusesADifferentPrimary(t *testing.T) {
+	logger := log.New(io.Discard, "", 0)
+	info := singleton.BrokerInfo{PID: 4321, Version: "dev", Revision: "abcdef1234567890", SchemaFingerprint: "0000000000000000000000000000000000000000000000000000000000000000"}
+	err := schemaMismatch(info, logger)
+	if !errors.Is(err, errSchemaMismatch) {
+		t.Fatalf("different fingerprint should refuse with errSchemaMismatch, got %v", err)
+	}
+	// The message must name the primary's pid so the reader knows what to restart.
+	if !strings.Contains(err.Error(), "4321") {
+		t.Fatalf("refusal should name the primary pid to restart, got %q", err.Error())
+	}
+}
+
+func TestSchemaMismatchRefusesAPrimaryThatPredatesTheCheck(t *testing.T) {
+	// An older primary's broker.json has no schema_fingerprint at all -- the
+	// exact reported scenario. A newer secondary must refuse, not wave it
+	// through as if empty meant "compatible".
+	logger := log.New(io.Discard, "", 0)
+	info := singleton.BrokerInfo{PID: 77, Version: "dev", SchemaFingerprint: ""}
+	if err := schemaMismatch(info, logger); !errors.Is(err, errSchemaMismatch) {
+		t.Fatalf("empty primary fingerprint should refuse, got %v", err)
 	}
 }
