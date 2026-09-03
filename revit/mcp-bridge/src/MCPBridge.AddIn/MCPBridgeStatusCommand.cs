@@ -43,12 +43,30 @@ public sealed class MCPBridgeStatusCommand : IExternalCommand
         var updateAvailable = UpdateAvailability.IsAvailable(host?.BrokerVersion, latestAvailableVersion);
 
         var content = BuildStatusContent(host);
+        var ownerHandle = commandData.Application.MainWindowHandle;
+
+        // Which component is behind? The comparison above is server-vs-latest only, and after the
+        // first live update (v0.1.1 -> v0.1.2) that produced "Update available (v0.1.2)" on a Revit
+        // whose add-in WAS v0.1.2, because the MCP client was still running the previous server image.
+        // The installer's own version marker says what is installed on disk; when it already matches
+        // the latest release, the only step left is restarting the MCP client, so say exactly that and
+        // offer no button -- re-running the installer cannot restart another process's server.
         if (updateAvailable)
         {
-            content += $"\n\nUpdate available ({UpdateAvailability.DisplayTag(latestAvailableVersion!)})";
-        }
+            var latestTag = UpdateAvailability.DisplayTag(latestAvailableVersion!);
+            var runningTag = UpdateAvailability.DisplayTag(host!.BrokerVersion!);
+            var installedTag = UpdateTrigger.TryReadInstalledVersion();
+            if (installedTag is not null && string.Equals(UpdateAvailability.DisplayTag(installedTag), latestTag, StringComparison.OrdinalIgnoreCase))
+            {
+                content +=
+                    $"\n\n{latestTag} is installed. The MCP Server you are connected to is still {runningTag}: " +
+                    "restart your MCP client (Claude Desktop, Claude Code) or reconnect its revit server to load the new one.";
+                MCPBridgeStatusWindow.ShowOrActivate(ownerHandle, content);
+                return Result.Succeeded;
+            }
 
-        var ownerHandle = commandData.Application.MainWindowHandle;
+            content += $"\n\nUpdate available: {latestTag} (MCP Server running {runningTag})";
+        }
 
         if (updateAvailable)
         {
@@ -94,14 +112,13 @@ public sealed class MCPBridgeStatusCommand : IExternalCommand
             connectionLine = "Not connected -- reconnecting in the background.";
         }
 
-        var (buildTimestamp, gitCommit) = ReadBuildIdentity();
+        var (buildTimestamp, gitCommit, addInVersion) = ReadBuildIdentity();
 
         return
             $"Instance ID: {MCPBridgeApplication.InstanceId}\n" +
             $"MCP Server: {DescribeMode(host?.DiscoveryOptions)}\n" +
             $"Status: {connectionLine}\n\n" +
-            $"Build: {buildTimestamp}\n" +
-            $"Commit: {gitCommit}";
+            $"Add-in: {addInVersion} (build {buildTimestamp}, commit {gitCommit})";
     }
 
     /// <summary>
@@ -130,7 +147,7 @@ public sealed class MCPBridgeStatusCommand : IExternalCommand
     /// rule); surfacing it in the UI means answering it never again needs a log file or a
     /// screen-sharing session.
     /// </summary>
-    private static (string BuildTimestamp, string GitCommit) ReadBuildIdentity()
+    private static (string BuildTimestamp, string GitCommit, string AddInVersion) ReadBuildIdentity()
     {
         var assembly = typeof(MCPBridgeStatusCommand).Assembly;
 
@@ -148,9 +165,15 @@ public sealed class MCPBridgeStatusCommand : IExternalCommand
         // at build time); absent (falls through to "unknown") on a machine without git on PATH or building
         // outside a git checkout -- deliberately non-fatal, this is a diagnostic convenience, not a
         // build-correctness requirement.
-        var gitCommit = assembly.GetCustomAttributes<AssemblyMetadataAttribute>()
-            .FirstOrDefault(a => a.Key == "GitCommit")?.Value;
+        var metadata = assembly.GetCustomAttributes<AssemblyMetadataAttribute>().ToList();
+        var gitCommit = metadata.FirstOrDefault(a => a.Key == "GitCommit")?.Value;
 
-        return (buildTimestamp, string.IsNullOrWhiteSpace(gitCommit) ? "unknown" : gitCommit);
+        // The release tag the pipeline embedded (MCPBridge.AddIn.csproj's MCPBridgeEmbedVersion,
+        // from MCPBRIDGE_VERSION); "dev" for a local build. Shown so a person can see at a glance
+        // whether the ADD-IN is current, independently of what the MCP Server reports.
+        var version = metadata.FirstOrDefault(a => a.Key == "Version")?.Value;
+        var addInVersion = string.IsNullOrWhiteSpace(version) || version == "dev" ? "dev build" : UpdateAvailability.DisplayTag(version);
+
+        return (buildTimestamp, string.IsNullOrWhiteSpace(gitCommit) ? "unknown" : gitCommit, addInVersion);
     }
 }
