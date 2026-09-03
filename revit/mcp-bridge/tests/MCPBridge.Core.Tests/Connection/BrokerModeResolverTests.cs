@@ -179,6 +179,22 @@ public class BrokerModeResolverTests
     }
 
     [Fact]
+    public void ConfigWithUnknownMode_AndEnvRemoteWithBadRoot_ReportsBothFaults()
+    {
+        // Second #187 review: two faults at once must not hide each other -- the config typo goes in
+        // ConfigDiagnostic, the unusable env root in Diagnostic, and the result is Local via Environment.
+        var config = new BridgeConfig { BrokerMode = "remot" };
+        var env = Env(("MCPBRIDGE_BROKER_MODE", "remote"), ("MCPBRIDGE_SHARED_ROOT", @"Z:\mapped"));
+
+        var resolution = BrokerModeResolver.Resolve(config, env);
+
+        Assert.Equal(BrokerTopologyMode.Local, resolution.Options.Mode);
+        Assert.Equal(BrokerModeResolver.DecisionSource.Environment, resolution.Source);
+        Assert.Equal("broker-mode-remote-unusable", resolution.Diagnostic!.Code);
+        Assert.Equal("bridge-config-invalid-mode", resolution.ConfigDiagnostic!.Code);
+    }
+
+    [Fact]
     public void ConfigMode_IsTrimmedAndCaseInsensitive()
     {
         var local = BrokerModeResolver.Resolve(new BridgeConfig { BrokerMode = " Local " }, Env(("MCPBRIDGE_BROKER_MODE", "remote"), ("MCPBRIDGE_SHARED_ROOT", @"\\Mac\x")));

@@ -26,7 +26,7 @@ public sealed class MCPBridgeApplication : IExternalApplication
     internal static BridgeHost? CurrentHost { get; private set; }
 
     /// <summary>
-    /// The ribbon's "Broker: Local / REMOTE" toggle (issue #185), kept so its label can be rewritten
+    /// The ribbon's "MCP Server: Local / REMOTE" toggle (issue #185), kept so its label can be rewritten
     /// after a switch -- see <see cref="UpdateBrokerModeButton"/>. Null if ribbon creation failed (a
     /// best-effort UI nicety, like the Status button it sits beside).
     /// </summary>
@@ -214,7 +214,7 @@ public sealed class MCPBridgeApplication : IExternalApplication
     /// quick, no-context-needed way to check "is this actually connected" and "what build/commit is
     /// this" without going through logs or an external tool -- exactly the two questions that took the
     /// most manual digging to answer during this add-in's own live-wiring development), plus issue
-    /// #185's "Reconnect" and "Broker: Local/REMOTE" buttons (the reconnect tool, and the topology
+    /// #185's "Reconnect" and "MCP Server: Local/REMOTE" buttons (the reconnect tool, and the topology
     /// switch that makes the Mac-broker dev case an explicit, VISIBLE choice rather than an environment
     /// variable nobody can see). Best-effort: a ribbon-creation failure (e.g. a panel name collision
     /// with another add-in) must not fail the whole add-in load over a UI nicety, so it's caught and
@@ -324,6 +324,11 @@ public sealed class MCPBridgeApplication : IExternalApplication
         }
 
         var resolution = BrokerModeResolver.Resolve(loaded.Config, Environment.GetEnvironmentVariable);
+        if (resolution.ConfigDiagnostic is { } configDiagnostic)
+        {
+            TryLogDiagnostic($"{configDiagnostic.Code}: {configDiagnostic.Message}");
+        }
+
         if (resolution.Diagnostic is { } resolveDiagnostic)
         {
             TryLogDiagnostic($"{resolveDiagnostic.Code}: {resolveDiagnostic.Message}");

@@ -49,7 +49,11 @@ internal static class BrokerModeResolver
         Config,
     }
 
-    public sealed record Resolution(BrokerDiscoveryOptions Options, DecisionSource Source, DiagnosticRecord? Diagnostic);
+    /// <summary><paramref name="Diagnostic"/> explains a fallback in the WINNING source (remote chosen but
+    /// unusable, or an unknown config mode with nothing else to say); <paramref name="ConfigDiagnostic"/>
+    /// is set additionally when the config was rejected AND the environment then also had something to
+    /// report, so neither fault hides the other (second independent review, #187).</summary>
+    public sealed record Resolution(BrokerDiscoveryOptions Options, DecisionSource Source, DiagnosticRecord? Diagnostic, DiagnosticRecord? ConfigDiagnostic = null);
 
     public static Resolution Resolve(BridgeConfig? config, Func<string, string?> getEnvironmentVariable)
     {
@@ -89,7 +93,9 @@ internal static class BrokerModeResolver
         if (string.Equals(envMode?.Trim(), BridgeConfig.RemoteMode, StringComparison.OrdinalIgnoreCase))
         {
             var remote = TryRemote(envRoot, DecisionSource.Environment, $"{ModeVariable}=remote is set");
-            return remote.Diagnostic is null ? remote with { Diagnostic = invalidModeDiagnostic } : remote;
+            return remote.Diagnostic is null
+                ? remote with { Diagnostic = invalidModeDiagnostic }
+                : remote with { ConfigDiagnostic = invalidModeDiagnostic };
         }
 
         // 3. Default.

@@ -844,9 +844,14 @@ internal sealed class BridgeHost
         // broker until that connection happened to drop -- the exact #185 symptom, reachable from the
         // button meant to cure it. Reconnect() sets the flag BEFORE it calls Close(), so checking the
         // flag after publishing the client covers both orderings: a request that came earlier is seen
-        // here, a request that comes later finds a client to close. Returning (not throwing) routes
-        // through the same "connection ended" path a broker-side close takes, and Backoff() then sees
-        // the flag and retries at once with the options as they are NOW.
+        // here, a request that comes later finds a client to close. The full fence between the two is
+        // what makes that true (second independent review, #187): volatile gives a store followed by a
+        // load no ordering guarantee on x64, so without it this thread could read a stale
+        // _reconnectRequested while the UI thread, having just set it, reads a stale null
+        // _activeTcpClient -- both sides missing each other. Returning (not throwing) routes through
+        // the same "connection ended" path a broker-side close takes, and Backoff() then sees the flag
+        // and retries at once with the options as they are NOW.
+        Interlocked.MemoryBarrier();
         if (_reconnectRequested)
         {
             LogConnectionDiagnostic($"reconnect was requested while this attempt was being prepared; abandoning the dial to {address.Host}:{address.Port} so the next attempt re-reads the current options");

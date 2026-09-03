@@ -11,7 +11,7 @@ using TextBox = System.Windows.Controls.TextBox;
 namespace MCPBridge.AddIn;
 
 /// <summary>
-/// The "MCP Bridge" ribbon panel's "Broker: Local / REMOTE" toggle (issue #185). Flips the running
+/// The "MCP Bridge" ribbon panel's "MCP Server: Local / REMOTE" toggle (issue #185). Flips the running
 /// <see cref="BridgeHost"/> between the LOCAL broker (this machine's
 /// <c>%LOCALAPPDATA%\Connectors\Revit\broker.json</c>, PRD §05's real target deployment) and a
 /// REMOTE one (a shared drive's <c>\\host\share\Connectors\Revit\broker.json</c> -- this project's own

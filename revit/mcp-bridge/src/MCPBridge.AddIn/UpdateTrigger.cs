@@ -118,9 +118,9 @@ internal static class UpdateTrigger
             // button cannot know which case applies before the installer has compared the manifest,
             // so the text states both outcomes rather than promising one.
             onStarted(
-                "Update started. If the add-in changed, Revit will close to apply it; reopen it afterwards. " +
-                "If only the broker changed, Revit stays open and the update takes effect when your MCP client " +
-                "next starts the broker (reconnect the revit MCP server, e.g. /mcp in Claude Code); " +
+                "Update started. If the MCP Bridge add-in changed, Revit will close to apply it; reopen it afterwards. " +
+                "If only the MCP Server changed, Revit stays open and the update takes effect when your MCP client " +
+                "next starts the MCP Server (reconnect the revit MCP server, e.g. /mcp in Claude Code); " +
                 "this window shows the update as available until then.");
         }
         catch (Exception ex)
