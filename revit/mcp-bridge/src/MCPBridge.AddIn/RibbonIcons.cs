@@ -31,26 +31,46 @@ internal static class RibbonIcons
     /// <summary>A circular arrow: drop and re-dial the MCP Server.</summary>
     public static ImageSource Reconnect() => Render(dc =>
     {
-        // 300 degrees of arc, clockwise from the top, ending in an arrowhead.
-        var pen = new Pen(Ink, 3) { StartLineCap = PenLineCap.Round, EndLineCap = PenLineCap.Round };
-        var geometry = new StreamGeometry();
-        using (var ctx = geometry.Open())
+        // A 270-degree arc with a gap at the top-right, ending in an arrowhead. Built from short
+        // segments rather than ArcTo: the first version's single ArcTo rendered as a filled blob on
+        // the live ribbon (user screenshot), and a polyline has no large-arc/sweep ambiguity.
+        var center = new Point(16, 16);
+        const double radius = 10.5;
+        var pen = new Pen(Ink, 3) { StartLineCap = PenLineCap.Round, EndLineCap = PenLineCap.Round, LineJoin = PenLineJoin.Round };
+        var arc = new StreamGeometry();
+        const double startDeg = 60, endDeg = 330; // screen coordinates: 90 is the bottom, 270 the top
+        using (var ctx = arc.Open())
         {
-            ctx.BeginFigure(new Point(16, 4), isFilled: false, isClosed: false);
-            ctx.ArcTo(new Point(5.6, 22), new Size(12, 12), 0, isLargeArc: true, SweepDirection.Counterclockwise, isStroked: true, isSmoothJoin: true);
+            ctx.BeginFigure(PointAt(center, radius, startDeg), isFilled: false, isClosed: false);
+            for (var deg = startDeg + 5; deg <= endDeg; deg += 5)
+            {
+                ctx.LineTo(PointAt(center, radius, deg), true, true);
+            }
         }
 
-        dc.DrawGeometry(null, pen, geometry);
+        dc.DrawGeometry(null, pen, arc);
+
+        // Arrowhead at the arc's end, pointing along the direction of travel (increasing angle).
+        var end = PointAt(center, radius, endDeg);
+        var rad = endDeg * Math.PI / 180;
+        var dir = new Vector(-Math.Sin(rad), Math.Cos(rad));
+        var normal = new Vector(-dir.Y, dir.X);
         var head = new StreamGeometry();
         using (var ctx = head.Open())
         {
-            ctx.BeginFigure(new Point(16, 4), isFilled: true, isClosed: true);
-            ctx.LineTo(new Point(22, 0), true, true);
-            ctx.LineTo(new Point(22, 9), true, true);
+            ctx.BeginFigure(end + dir * 5, isFilled: true, isClosed: true);
+            ctx.LineTo(end - dir * 2 + normal * 4.5, true, true);
+            ctx.LineTo(end - dir * 2 - normal * 4.5, true, true);
         }
 
         dc.DrawGeometry(Ink, null, head);
     });
+
+    private static Point PointAt(Point center, double radius, double degrees)
+    {
+        var rad = degrees * Math.PI / 180;
+        return new Point(center.X + radius * Math.Cos(rad), center.Y + radius * Math.Sin(rad));
+    }
 
     /// <summary>One machine: the MCP Server on this computer.</summary>
     public static ImageSource ServerLocal() => Render(dc =>
