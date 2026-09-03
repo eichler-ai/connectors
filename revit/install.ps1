@@ -474,8 +474,29 @@ if ($Uninstall) {
             }
         }
         $dir = Get-AddinsDir $version $Scope
-        Remove-Item "$dir\MCPBridge.*" -Force -ErrorAction SilentlyContinue
-        Remove-Item "$dir\Microsoft.CodeAnalysis*.dll" -Force -ErrorAction SilentlyContinue
+        # Install deploys a self-contained payload STRAIGHT into Addins\<version> (Copy-Item
+        # "$payloadDir\*"): the .addin manifest, MCPBridge.* and Roslyn, plus Eichler.Connectors.Revit.*,
+        # the SQLite stack, System.Data.Common, the localization satellite folders and runtimes\. The old
+        # removal of only "MCPBridge.*" + Roslyn stopped the add-in loading (the manifest is a MCPBridge.*
+        # file) but orphaned the rest -- functional, not clean. A self-contained payload OWNS the folder,
+        # so remove the whole folder when it is exclusively ours (our .addin is the only manifest in it),
+        # which is the normal case. If ANOTHER add-in shares this folder (a foreign *.addin), fall back to
+        # removing only our own payload members, so a third party's add-in is never deleted.
+        if (Test-Path (Join-Path $dir 'MCPBridge.addin')) {
+            $foreign = @(Get-ChildItem $dir -Filter '*.addin' -File -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -ne 'MCPBridge.addin' })
+            if ($foreign.Count -eq 0) {
+                Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue
+            } else {
+                foreach ($pat in 'MCPBridge.*', 'Eichler.Connectors.Revit.*', 'Microsoft.CodeAnalysis*.dll',
+                                  'Microsoft.Data.Sqlite.dll', 'e_sqlite3.dll', 'SQLitePCLRaw.*.dll',
+                                  'System.Data.Common.dll') {
+                    Remove-Item (Join-Path $dir $pat) -Force -Recurse -ErrorAction SilentlyContinue
+                }
+            }
+        }
+        # A DLL surviving removal means a running Revit held it locked -- the "close it and re-run" case
+        # below. Revit doesn't hold the .addin manifest open, so the loaded DLL is the reliable signal.
         if (Test-Path (Join-Path $dir 'MCPBridge.AddIn.dll')) { $leftoverVersions += $version }
     }
     Unregister-ScheduledTask -TaskName (Get-PendingUpdateTaskName $Scope) -Confirm:$false -ErrorAction SilentlyContinue
