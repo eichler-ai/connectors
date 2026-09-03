@@ -11,7 +11,7 @@
 # API call and a version-string comparison, nothing else. Three outcomes, not two -- see the
 # version-check block below for why "the marker says current" alone is not enough to skip work.
 #
-# Primary invocation is piped (irm .../install.ps1 | iex, PRD §12) -- $PSCommandPath is empty in that
+# Primary invocation is piped (irm https://raw.githubusercontent.com/eichler-ai/connectors/main/revit/install.ps1 | iex, PRD §12) -- $PSCommandPath is empty in that
 # mode (no file on disk), so this script never references it directly; see $ScriptPath below.
 
 param(
@@ -58,7 +58,7 @@ $ProgressPreference = 'SilentlyContinue'
 $RepoSlug = 'eichler-ai/connectors'
 
 # Review finding: $PSCommandPath is empty/null under the script's own PRIMARY documented invocation
-# (irm .../install.ps1 | iex, PRD §12) -- there's no file on disk to point at. Every downstream use
+# (irm https://raw.githubusercontent.com/eichler-ai/connectors/main/revit/install.ps1 | iex, PRD §12) -- there's no file on disk to point at. Every downstream use
 # of "this script's own path" (elevation re-invoke, the self-copy used for the uninstall string and
 # for the deferred-update watcher task) goes through $ScriptPath instead, which is always a real
 # file: materialize our own source to one when piped, since $MyInvocation.MyCommand.Definition inside
@@ -482,9 +482,23 @@ function Register-McpServer([string]$ServerExe, [switch]$OnlyIfMissing) {
         $todo += "Claude Desktop / Cowork: ${jsonNote}add this under `"mcpServers`" in $cfgHint, then restart Claude Desktop:`n      `"revit`": { `"type`": `"stdio`", `"command`": `"$jsonExe`", `"args`": [`"--mode`", `"local`"] }"
     }
 
-    if ($registered.Count -gt 0) { Write-Host "Connected the revit MCP server to: $($registered -join '; ')." }
-    foreach ($t in $todo) { Write-Host "To finish connecting it -- $t" }
-    if ($didWork -or $todo.Count -gt 0) { Write-Host "(It runs as: `"$ServerExe`" --mode local. Restart any client that was open when this ran, so it reloads its MCP config.)" }
+    # One client (and the trailing note) per line -- crammed onto one line with '; ' separators and
+    # inline parentheticals it was hard to read at a glance.
+    if ($registered.Count -gt 0) {
+        Write-Host ''
+        Write-Host 'Connected the revit MCP server to:'
+        foreach ($r in $registered) { Write-Host "  - $r" }
+    }
+    if ($todo.Count -gt 0) {
+        Write-Host ''
+        Write-Host 'To finish connecting it:'
+        foreach ($t in $todo) { Write-Host "  - $t" }
+    }
+    if ($didWork -or $todo.Count -gt 0) {
+        Write-Host ''
+        Write-Host "It runs as: `"$ServerExe`" --mode local"
+        Write-Host 'Restart any Claude client that was open when this ran, so it reloads its MCP config.'
+    }
 }
 
 if ($LoadFunctionsOnly) { return }

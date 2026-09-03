@@ -16,9 +16,28 @@ an in-process **Bridge** (a plugin/add-in inside the host app) plus a standalone
   corpus of worked examples that grows from agent submissions. Working today against Revit
   2025 and 2027: the core execution loop, dialog suppression, multi-instance addressing, API
   discovery, file exchange and the how-to corpus are shipped and live-validated; releases are
-  built and self-signed by the release pipeline (a CA certificate is deferred), or install from
-  source — see the [quickstart](./revit/docs/quickstart.md). Design:
+  built and self-signed by the release pipeline (a CA certificate is deferred). **Install with one
+  line** (see [Install](#install) below), or build from source — the
+  [quickstart](./revit/docs/quickstart.md). Design:
   [`revit/docs/PRD.md`](./revit/docs/PRD.md); per-phase status: PRD §15.
+
+## Install
+
+**Revit connector, on Windows** with Revit 2025 and/or 2027 installed. In PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/eichler-ai/connectors/main/revit/install.ps1 | iex
+```
+
+This downloads the latest signed release and installs the add-in for whichever supported Revit
+versions are present, then registers the MCP server with Claude if the `claude` CLI is on `PATH`.
+Re-run it any time to update. To remove it, use Windows **Apps & features** (the installer registers
+an uninstall entry) or re-run `install.ps1 -Uninstall`.
+
+Releases are **self-signed** for now, so Windows shows an "Unknown Publisher" prompt on first run;
+a CA-issued certificate is a later step (PRD §12). More detail, including the Mac + Parallels dev
+topology, is in [`revit/install.md`](./revit/install.md); installing an unreleased local build is in
+the [quickstart](./revit/docs/quickstart.md).
 
 ## Contributing & security
 

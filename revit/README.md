@@ -13,6 +13,21 @@ Plus:
 - [`install-mac.sh`](./install-mac.sh) — Mac-side setup for this project's own Mac+Parallels dev topology (PRD §12 "Mac + Parallels")
 - [`test-harness/`](./test-harness/) — live MCP test harness (see its own README)
 
+## Install
+
+On Windows with Revit 2025 and/or 2027 installed, run this in PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/eichler-ai/connectors/main/revit/install.ps1 | iex
+```
+
+It downloads the latest signed release, installs the add-in for the Revit versions present, and
+registers the MCP server with Claude if the `claude` CLI is on `PATH`. Re-run any time to update;
+uninstall from Windows **Apps & features** or with `install.ps1 -Uninstall`. Releases are
+**self-signed** for now, so Windows shows an "Unknown Publisher" prompt (a CA certificate is
+deferred — PRD §12). Full detail: [`install.md`](./install.md). The Mac + Parallels dev topology
+(broker on the Mac, add-in in the VM) uses [`install-mac.sh`](./install-mac.sh) instead.
+
 ## Getting started
 
 - [`docs/quickstart.md`](./docs/quickstart.md) — build from source, install, run a first script
