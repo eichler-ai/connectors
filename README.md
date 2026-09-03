@@ -43,8 +43,9 @@ To remove it, use Windows **Apps & features** (the installer registers an uninst
   Revit prompts you to save unsaved work first, and if you cancel, that Revit keeps running and is
   updated automatically the next time you close it. Reopen Revit yourself afterwards. If only the MCP
   Server changed, Revit stays open and the update takes effect the next time your MCP client starts
-  the server (reconnect the `revit` server, e.g. `/mcp` in Claude Code). The Status window keeps
-  showing the update as available until then.
+  the server: reconnect the `revit` server (e.g. `/mcp` in Claude Code), or quit the client fully and
+  start it again (closing Claude Desktop's window leaves its server running). Until then the Status
+  window says the new version is installed but the running server is still the old one.
 - **From PowerShell.** Re-run the install one-liner above. It deploys only the components whose
   content changed and closes Revit only if the add-in is one of them.
 

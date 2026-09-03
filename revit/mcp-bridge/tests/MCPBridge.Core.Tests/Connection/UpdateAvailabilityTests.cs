@@ -21,4 +21,14 @@ public class UpdateAvailabilityTests
     {
         Assert.Equal(expected, UpdateAvailability.IsAvailable(runningVersion, latestAvailableVersion));
     }
+
+    [Theory]
+    [InlineData("v0.1.2", "v0.1.2")] // the tag as GitHub publishes it and broker.json carries it -- no second "v"
+    [InlineData("0.1.2", "v0.1.2")] // a bare tag still gets exactly one
+    [InlineData("V0.1.2", "v0.1.2")] // case-normalised
+    [InlineData(" v0.1.2 ", "v0.1.2")]
+    public void DisplayTag_HasExactlyOneLeadingV(string latest, string expected)
+    {
+        Assert.Equal(expected, UpdateAvailability.DisplayTag(latest));
+    }
 }

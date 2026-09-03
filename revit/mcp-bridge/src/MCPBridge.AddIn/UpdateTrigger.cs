@@ -46,31 +46,63 @@ internal static class UpdateTrigger
     /// look hung with no visible dialog (exactly the failure mode <see cref="MCPBridgeStatusWindow"/>'s
     /// own class doc comment describes going non-modal to avoid).
     /// </summary>
-    public static void TriggerUpdate(IntPtr ownerHandle, Action<string> onStarted)
+    /// <summary>
+    /// Where this add-in was installed from, derived from where this DLL was loaded. Independent
+    /// review finding: picking whichever of the User/AllUsers install.ps1 paths happens to exist
+    /// first (existence-based inference) can invoke a stale copy from an old install scope no longer
+    /// in use, on a machine that has both. Scope is instead determined DETERMINISTICALLY from which
+    /// Addins folder actually loaded this running DLL -- there is exactly one true answer to "which
+    /// scope is this session" and it's encoded in our own load path, not in which files happen to be
+    /// present on disk. Matches install.ps1's own Get-AddinsDir / Get-AppDir exactly:
+    ///   User scope:     %AppData%\Autodesk\Revit\Addins\&lt;version&gt;  ->  %LocalAppData%\Programs\MCPBridge
+    ///   AllUsers scope: C:\Program Files\Autodesk\Revit\Addins\&lt;version&gt;  ->  C:\Program Files\MCPBridge
+    /// </summary>
+    internal static (string Scope, string AppDir) ResolveInstallLocation()
     {
-        // Independent review finding: picking whichever of the User/AllUsers install.ps1 paths
-        // happens to exist first (existence-based inference) can invoke a stale copy from an old
-        // install scope no longer in use, on a machine that has both. Scope is instead determined
-        // DETERMINISTICALLY from which Addins folder actually loaded this running DLL -- there is
-        // exactly one true answer to "which scope is this session" and it's encoded in our own
-        // load path, not in which files happen to be present on disk. Matches install.ps1's own
-        // Get-AddinsDir exactly (install.ps1 ~line 75-83):
-        //   User scope:     %AppData%\Autodesk\Revit\Addins\<version>
-        //   AllUsers scope: C:\Program Files\Autodesk\Revit\Addins\<version>
         var executingAssemblyLocation = Assembly.GetExecutingAssembly().Location;
         var scope = executingAssemblyLocation.Contains(
             @"\Program Files\Autodesk\Revit\Addins\", StringComparison.OrdinalIgnoreCase)
             ? "AllUsers"
             : "User";
+        var appDir = scope == "AllUsers"
+            ? @"C:\Program Files\MCPBridge"
+            : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "MCPBridge");
+        return (scope, appDir);
+    }
 
-        // Matches install.ps1's own Get-AppDir exactly (install.ps1 ~line 85):
-        //   User scope:     %LocalAppData%\Programs\MCPBridge
-        //   AllUsers scope: C:\Program Files\MCPBridge
+    /// <summary>
+    /// The release tag install.ps1's version marker (installed-version.json, `version`) says is
+    /// installed on disk -- null when there is no marker or it cannot be read. This is what tells the
+    /// status window "the update is already installed, only the MCP client needs restarting" apart
+    /// from "an update is available": the running server's self-reported version cannot, because a
+    /// client keeps running the previous image until it restarts.
+    /// </summary>
+    internal static string? TryReadInstalledVersion()
+    {
+        try
+        {
+            var markerPath = Path.Combine(ResolveInstallLocation().AppDir, "installed-version.json");
+            if (!File.Exists(markerPath))
+            {
+                return null;
+            }
+
+            using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(markerPath));
+            return doc.RootElement.TryGetProperty("version", out var v) && v.ValueKind == System.Text.Json.JsonValueKind.String
+                ? v.GetString()
+                : null;
+        }
+        catch
+        {
+            return null; // best-effort: a missing/corrupt marker only means "cannot tell", never a failed click.
+        }
+    }
+
+    public static void TriggerUpdate(IntPtr ownerHandle, string targetVersionTag, Action<string> onStarted)
+    {
+        var (scope, appDir) = ResolveInstallLocation();
         // install.ps1's own $selfCopyPath is Join-Path $appDir 'install.ps1'.
-        var installScriptPath = scope == "AllUsers"
-            ? Path.Combine(@"C:\Program Files\MCPBridge", "install.ps1")
-            : Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "MCPBridge", "install.ps1");
+        var installScriptPath = Path.Combine(appDir, "install.ps1");
 
         if (!File.Exists(installScriptPath))
         {
@@ -87,18 +119,23 @@ internal static class UpdateTrigger
         // never force-kills -- it asks each Revit to close (Revit's own save prompt appears) and
         // defers any instance still running -- but "click, and Revit starts closing" with no warning
         // is still a surprise when unsaved work is open in several windows.
+        // Presentation (the user's feedback on the first version, a paragraph of caveats ending in
+        // "Yes/No"): the question names the version, the consequences are a short list, and the
+        // buttons are OK/Cancel with Cancel as the default so Enter backs out.
         var proceed = ShowOwnedMessageBox(
             ownerHandle,
-            "Update the Revit MCP Bridge now?\n\n" +
-            "If the add-in changed, every open Revit window -- of every installed Revit version -- will be asked to close. " +
-            "Revit will prompt you to save unsaved work first; if you cancel, that Revit keeps running and is " +
-            "updated automatically the next time you close it. Reopen Revit yourself afterwards.\n\n" +
+            $"Update Revit MCP Bridge to {targetVersionTag}?\n\n" +
+            "Revit will close to install the update:\n" +
+            "  •  You will be asked to save any unsaved work first.\n" +
+            "  •  This applies to every open Revit window, of every installed Revit version.\n" +
+            "  •  A Revit you keep open is updated the next time you close it.\n" +
+            "  •  Reopen Revit yourself when the update has finished.\n\n" +
             "If only the MCP Server changed, Revit stays open.",
-            "MCP Bridge - Update Now",
+            $"MCP Bridge - Update to {targetVersionTag}",
             MessageBoxImage.Question,
-            MessageBoxButton.YesNo,
-            MessageBoxResult.No); // Enter backs out; proceeding is the deliberate click.
-        if (proceed != MessageBoxResult.Yes)
+            MessageBoxButton.OKCancel,
+            MessageBoxResult.Cancel);
+        if (proceed != MessageBoxResult.OK)
         {
             return;
         }
