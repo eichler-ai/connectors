@@ -24,6 +24,7 @@ Design rationale for all of it: [`PRD.md`](PRD.md) §06 (execution), §07 (dialo
 | `search_howtos` | no | ranked search over the how-to corpus (embedded seed + the user's local documents); needs exactly one of `instance_id` / `revit_version` |
 | `describe_howto` | no | one how-to in full, with its verification for the caller's Revit version |
 | `submit_howto` | no | hand in a how-to the agent just learned (saved to the user's local corpus; optionally prepared for the maintainers' review queue) |
+| `update_connector` | no | check GitHub now for a newer release and report the server and each Revit version's add-in; with `apply` + `confirm_lifecycle_actions` start the installed updater (local mode only) |
 
 > **Everything above is compiled into the broker binary** — the guide, these schemas, the
 > descriptions — so a broker left running from an older build serves an older connector
@@ -171,6 +172,33 @@ carries the `revit_version` that answered.
   for those; the accessor call is the only spelling, so that is what discovery shows. `member` may
   name either spelling (`FootPrintRoof.SlopeAngle` or `FootPrintRoof.set_SlopeAngle`); `list_functions`
   lists the property name only. A type's genuine default indexer still renders as `T this[...]`.
+
+### `update_connector`
+
+The agent-side counterpart of the Revit ribbon's **Update Now**. With no arguments it performs the
+server's GitHub latest-release check **now** (the same code path as the 6-hourly background check, so
+the two cannot disagree), records the result in `broker.json` — which the add-in's Status window
+re-reads on every click — and returns the picture: `latest`; `server.running` (this process),
+`server.installed` (the installer's version marker; differs from running after a staged swap until the
+MCP client reconnects) and `server.update_available`; and `revit[]`, one entry per Revit version the
+installer tracks (`state`: `deployed` / `deferred` while that Revit was running / `skipped` when the
+release shipped no payload for it; `unknown` for a connected version the marker does not list) with
+`addin_installed`, `connected_instances` (from the registry) and `update_available`. Multiple Revit
+versions are first-class: an update asks every running one to close. Notices: `server-restart-pending`
+when the new release is installed but this process is still the old one (reconnect the `revit` server,
+or quit the client fully — closing its window can leave the server running).
+
+With `apply: true` **and** `confirm_lifecycle_actions: true` it also starts the installed updater
+(`install.ps1 -Update -Silent -Scope <User|AllUsers>`, detached) when anything is behind: every running
+Revit is asked to close (Revit prompts to save unsaved work; a Revit kept open is updated when it is
+next closed), nothing is relaunched, and this server keeps serving the old version until the client
+reconnects (`update-started` notice says all of this; `already-current` when there is nothing to do).
+Refusals: `update-requires-confirmation` (apply without the confirmation — the same gating shape as
+`execute_script`'s lifecycle actions; ask the user first), `update-not-available-in-remote-mode` (the
+installer lives on the Revit machine, not where a remote-mode server runs; the check still works),
+`installer-not-found` (no `install.ps1` self-copy beside the server — run the one-liner once),
+`installer-launch-failed`. `update-check-failed` (GitHub unreachable or rate-limiting) still returns
+what the marker and registry know.
 
 ### `search_howtos` / `describe_howto`
 

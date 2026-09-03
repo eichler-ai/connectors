@@ -127,24 +127,39 @@ func checkAndUpdateBrokerJSONAt(ctx context.Context, client *http.Client, apiBas
 			logger.Printf("updatecheck: recovered from panic during update check: %v", r)
 		}
 	}()
+	if _, err := checkNowAt(ctx, client, apiBase, dataDir, version, logger); err != nil {
+		logger.Printf("updatecheck: %v", err)
+	}
+}
 
+// CheckNow is the on-demand form of the periodic check (issue #199, the
+// update_connector tool): one GitHub latest-release request, broker.json's
+// LatestAvailableVersion updated on success, and the tag RETURNED so a caller
+// can report it — unlike CheckAndUpdateBrokerJSON, which only logs. Both go
+// through the same code path, so the 6 h timer and an on-demand call can never
+// disagree about what "latest" is. On failure broker.json is left untouched
+// (a failed check must never look like "no update") and the error says which
+// step failed.
+func CheckNow(ctx context.Context, client *http.Client, dataDir, version string, logger *log.Logger) (string, error) {
+	return checkNowAt(ctx, client, githubAPIBase, dataDir, version, logger)
+}
+
+func checkNowAt(ctx context.Context, client *http.Client, apiBase, dataDir, version string, logger *log.Logger) (string, error) {
 	tag, err := checkLatestReleaseAt(ctx, client, apiBase, RepoSlug, version)
 	if err != nil {
-		logger.Printf("updatecheck: latest-release check failed (leaving broker.json unchanged): %v", err)
-		return
+		return "", fmt.Errorf("latest-release check failed (leaving broker.json unchanged): %w", err)
 	}
 
 	info, err := singleton.ReadBrokerJSON(dataDir)
 	if err != nil {
-		logger.Printf("updatecheck: reading broker.json from %q to record latest release %q: %v", dataDir, tag, err)
-		return
+		return "", fmt.Errorf("reading broker.json from %q to record latest release %q: %w", dataDir, tag, err)
 	}
 	info.LatestAvailableVersion = tag
 	if err := singleton.WriteBrokerJSON(dataDir, info); err != nil {
-		logger.Printf("updatecheck: writing broker.json at %q with latest release %q: %v", dataDir, tag, err)
-		return
+		return "", fmt.Errorf("writing broker.json at %q with latest release %q: %w", dataDir, tag, err)
 	}
 	logger.Printf("updatecheck: latest available release is %s (running %s)", tag, version)
+	return tag, nil
 }
 
 // Run periodically checks GitHub's latest-release API and keeps
