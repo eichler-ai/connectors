@@ -171,15 +171,27 @@ Describe 'Install-BrokerStaged' {
         Test-Path (Join-Path $app 'mcp-server.exe.old') | Should -BeFalse
         Test-Path (Join-Path $app 'mcp-server.exe.new') | Should -BeFalse
     }
-    It 'Complete-PendingBrokerSwap finishes a pending swap only when no broker is running' {
+    It 'Complete-PendingBrokerSwap stages a pending .new even while a broker runs, and swaps outright when none does' {
         New-Payload $app @{ 'mcp-server.exe' = 'old-exe'; 'mcp-server.exe.new' = 'new-exe' }
         Mock Get-BrokerProcess { @([pscustomobject]@{ Id = 1 }) }
-        Complete-PendingBrokerSwap $app | Should -BeFalse
-        Get-Content (Join-Path $app 'mcp-server.exe') -Raw | Should -Be 'old-exe'
-        Mock Get-BrokerProcess { @() }
-        Complete-PendingBrokerSwap $app | Should -BeTrue
+        Complete-PendingBrokerSwap $app | Should -Be 'staged'
         Get-Content (Join-Path $app 'mcp-server.exe') -Raw | Should -Be 'new-exe'
+        Get-Content (Join-Path $app 'mcp-server.exe.old') -Raw | Should -Be 'old-exe'   # the running image, parked
         Test-Path (Join-Path $app 'mcp-server.exe.new') | Should -BeFalse
+
+        New-Payload $app @{ 'mcp-server.exe.new' = 'newer-exe' }
+        Mock Get-BrokerProcess { @() }
+        Complete-PendingBrokerSwap $app | Should -Be 'swapped'
+        Get-Content (Join-Path $app 'mcp-server.exe') -Raw | Should -Be 'newer-exe'
+        Get-ChildItem $app -Filter 'mcp-server.exe.old*' | Should -BeNullOrEmpty
+    }
+    It 'Complete-PendingBrokerSwap parks the current exe under a unique name when .old is still held' {
+        New-Payload $app @{ 'mcp-server.exe' = 'current'; 'mcp-server.exe.old' = 'held'; 'mcp-server.exe.new' = 'newest' }
+        Mock Get-BrokerProcess { @([pscustomobject]@{ Id = 1 }) }
+        Mock Remove-Item { } -ParameterFilter { $Path -like '*mcp-server.exe.old' }
+        Complete-PendingBrokerSwap $app | Should -Be 'staged'
+        Get-Content (Join-Path $app 'mcp-server.exe') -Raw | Should -Be 'newest'
+        (Get-ChildItem $app -Filter 'mcp-server.exe.old-*').Count | Should -Be 1
     }
     It 'is a no-op when nothing is pending, but still removes a stale .old image' {
         New-Payload $app @{ 'mcp-server.exe' = 'exe'; 'mcp-server.exe.old' = 'stale' }

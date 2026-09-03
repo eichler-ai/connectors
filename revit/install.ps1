@@ -436,19 +436,29 @@ function Complete-PendingBrokerSwap([string]$AppDir) {
     # mapped). Runs on every install, not only when the server changes -- found live: a run that
     # skipped an unchanged broker left the previous run's .old in place. Returns $true when a swap
     # happened.
+    # Returns 'swapped', 'staged' (the new image is in place but a running broker still serves the
+    # previous one -- same meaning as Install-BrokerStaged's), or $false when nothing was pending or
+    # the move was refused. A running broker no longer blocks this (second live update): the current
+    # image is parked under a unique name, exactly as Install-BrokerStaged does, so a .new left by an
+    # earlier 'pending' run lands on the next run instead of waiting for every broker to exit.
     $exe = Join-Path $AppDir 'mcp-server.exe'
     $new = "$exe.new"
+    $old = "$exe.old"
     Remove-StaleBrokerImages $AppDir
     if (-not (Test-Path $new)) { return $false }
-    if (Get-BrokerProcess $AppDir) { return $false }
+    $running = @(Get-BrokerProcess $AppDir)
     try {
-        if (Test-Path $exe) { Move-Item $exe "$exe.old" -Force }
+        if (Test-Path $exe) {
+            $aside = if (Test-Path $old) { "$exe.old-$([guid]::NewGuid().ToString('N').Substring(0, 8))" } else { $old }
+            Move-Item $exe $aside -Force
+        }
         Move-Item $new $exe -Force
-        Remove-StaleBrokerImages $AppDir
-        return $true
     } catch {
         return $false
     }
+    if ($running.Count -gt 0) { return 'staged' }
+    Remove-StaleBrokerImages $AppDir
+    return 'swapped'
 }
 
 # --- Claude client MCP registration -----------------------------------------------------------------
@@ -843,8 +853,13 @@ $installed = if ($marker) { $marker.version } else { $null }
 # completion only inside the deploy block, a broker-only release whose exe was locked stranded its
 # .new until the NEXT release, while the summary told the user to re-run. The marker recorded the
 # new server hash only once the swap actually happened, so this is the one step still owed.
-if (Complete-PendingBrokerSwap $appDir) {
-    if (-not $Silent) { Write-Host "Finished a broker update that was waiting for the previous broker to exit." }
+$completedEarly = Complete-PendingBrokerSwap $appDir
+if ($completedEarly -and -not $Silent) {
+    if ($completedEarly -eq 'staged') {
+        Write-Host "Installed the broker update that was waiting. A running broker still serves the previous version until your MCP client restarts it (reconnect the revit MCP server, or restart the client)."
+    } else {
+        Write-Host "Finished a broker update that was waiting for the previous broker to exit."
+    }
 }
 
 # Only require a DLL for versions the LAST INSTALL ACTUALLY COVERED. Checking every detected version
@@ -1054,7 +1069,8 @@ try {
     $serverPayloadDir = Join-Path $extractDir 'server'
     $serverExe = Join-Path $appDir 'mcp-server.exe'
     $brokerOutcome = $null
-    if (Complete-PendingBrokerSwap $appDir) { $brokerOutcome = 'swapped' }
+    $completed = Complete-PendingBrokerSwap $appDir
+    if ($completed) { $brokerOutcome = $completed }
     if (Test-Path $serverPayloadDir) {
         if (Test-ComponentUnchanged $packageManifest $marker 'server' (Test-Path $serverExe)) {
             if (-not $brokerOutcome) { $brokerOutcome = 'unchanged' }
