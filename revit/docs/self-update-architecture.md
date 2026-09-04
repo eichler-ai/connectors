@@ -306,9 +306,24 @@ changed, is wedged until a manual reconnect. Two viable designs, in preference o
   so it is consistent and acceptable.
 
 Recommendation: **(a)** for a server auto-swap so a running client keeps working, with **(b)** as the
-guaranteed fallback. Note the current code does neither — it promotes in place and serves a stale
-session — so this is a real change Part B must make, not an existing property to preserve. The
-`initialize`-replay is small and worth building; the probe confirms the exact failure it must fix.
+guaranteed fallback. Before Part B step 1 the code did neither — it promoted in place and served a
+stale session.
+
+**Implemented (Part B step 1, `cmd/mcp-server/continuity.go`).** One per-process holder outlives
+run()'s role turns. It tees the client's first stdin line (the `initialize`) out of the byte proxy
+without consuming it separately, so framing behind it is untouched; on every *successor* upstream —
+a new primary reached after a reconnect, or this process's own `mcp.Server` after a promotion — it
+feeds that line plus a synthesized `notifications/initialized` ahead of the live client bytes; and it
+wraps the client-facing stdout so the client receives exactly one `initialize` response by id (the
+first through is the client's answer, wherever it came from; later ones are a replay's duplicate and
+are dropped). Output is only parsed per line while a response is outstanding; the rest of the time
+it is the streaming byte copy it always was. The go-sdk gate is `InitializeParams != nil`, set by the
+`initialize` handler and evaluated before dispatch, and `initialize` is handled synchronously in
+the sequential handler queue, so the replay is always answered before any live request behind it.
+Re-measured with the same probe shape (`TestSessionSurvivesPrimaryDeath*`, which spawns real
+processes): B's next request after A's death with no re-initialize now answers `OK tools/list`, in
+both successor roles. What it does not do: a request in flight on the dead upstream is lost with it,
+as before; (b) remains the fallback if a client's first message is not an `initialize`.
 
 ---
 
@@ -456,10 +471,10 @@ UX and independent of both parts).
 - **(Part A — RESOLVED, §4.6)** Revit's trust prompt keys on the manifest-named shim, not on the
   `LoadFrom`ed add-in; the project already signs, so a shim signed with the same certificate adds no
   prompt. No longer gates phase 1.
-- **(Part B — MEASURED, §5.6)** A secondary does **not** survive a primary restart transparently: the
-  promoted/reconnected process starts a fresh MCP server that rejects the next request until
-  re-`initialize`d. Part B must either replay the cached `initialize` (transparent) or exit to force a
-  client reconnect (acceptable). This is a change to build, not a property to preserve.
+- **(Part B — RESOLVED, §5.6)** Measured first: a secondary did **not** survive a primary restart
+  transparently — the promoted/reconnected process started a fresh MCP server that rejected the next
+  request until re-`initialize`d. Part B step 1 implemented option (a), the cached-`initialize`
+  replay, and re-measured it transparent in both successor roles; (b) stays the fallback.
 - **(Part B, AllUsers only)** Under a service, where does `broker.json` live and how is the token file
   ACL'd so every interactive user the service serves can authenticate, without widening it to a local
   privilege leak? Blocks only the AllUsers variant, not per-user.
