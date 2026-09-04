@@ -54,4 +54,52 @@ public static class UpdateAvailability
 
         return !string.Equals(runningVersion, latestAvailableVersion, StringComparison.Ordinal);
     }
+
+    /// <summary>
+    /// The Status window's add-in line (self-update-architecture.md §6.2, issue #209), in the
+    /// <c>installed · running</c> shape: the version the installer's pointer (<c>addin\current.json</c>)
+    /// says a NEW Revit would load, against the version THIS process actually loaded, with the one-line
+    /// remedy only when they differ. Under the shim an add-in update is a pointer flip that closes
+    /// nothing, so a running Revit keeps the previous add-in until it is restarted -- this line is how
+    /// the user learns that. Degrades to the single running value when there is no pointer (a legacy
+    /// flat install, or the file is unreadable), when the two agree, or when the running build is the
+    /// unreleased "dev" sentinel (which cannot be compared with anything, as in <see cref="IsAvailable"/>).
+    /// </summary>
+    public static string AddInStatusLine(string? runningVersion, string? installedPointerVersion)
+    {
+        var running = (runningVersion ?? string.Empty).Trim();
+        if (running.Length == 0 || string.Equals(running, "dev", StringComparison.Ordinal))
+        {
+            return "dev build";
+        }
+
+        var runningTag = FolderTag(running);
+        var installed = (installedPointerVersion ?? string.Empty).Trim();
+        if (installed.Length == 0)
+        {
+            return runningTag;
+        }
+
+        // Compared the way the folder was named: one leading "v" either way, case-insensitively, so a
+        // pointer written as "0.1.5" and an assembly stamped "v0.1.5" do not read as a pending restart.
+        var installedTag = FolderTag(installed);
+        if (string.Equals(installedTag, runningTag, StringComparison.OrdinalIgnoreCase))
+        {
+            return runningTag;
+        }
+
+        return $"{installedTag} installed · running {runningTag} — restart Revit to load it";
+    }
+
+    /// <summary>
+    /// <see cref="DisplayTag"/> for a release tag; anything that is not one (install.ps1's
+    /// <c>local-&lt;timestamp&gt;</c> tag for a <c>-LocalPackagePath</c> install) is shown as written,
+    /// rather than as "vlocal-…".
+    /// </summary>
+    private static string FolderTag(string tag)
+    {
+        var t = tag.Trim();
+        var bare = t.StartsWith("v", StringComparison.OrdinalIgnoreCase) ? t.Substring(1) : t;
+        return bare.Length > 0 && char.IsDigit(bare[0]) ? DisplayTag(t) : t;
+    }
 }

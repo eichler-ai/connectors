@@ -52,10 +52,12 @@ is reported and cleaned up by a second run.
 - **From Revit.** The MCP Server checks GitHub for a newer release shortly after it starts and every
   six hours after that. When one exists, **Add-Ins → MCP Bridge → Status** shows
   `Update available (vX.Y.Z)` with an **Update Now** button. After you confirm, it runs the installed
-  updater silently. If the add-in changed, every open Revit window of that version is asked to close:
-  Revit prompts you to save unsaved work first, and if you cancel, that Revit keeps running and is
-  updated automatically the next time you close it. Reopen Revit yourself afterwards. If only the MCP
-  Server changed, Revit stays open and the update takes effect the next time your MCP client starts
+  updater silently. Nothing is closed: the new add-in is installed beside the one Revit is running,
+  and Revit loads it the next time you start it — until then Status reads
+  `MCP Bridge (add-in): vX.Y.Z installed · running vX.Y.W — restart Revit to load it`. (An install
+  still on the older flat add-in layout is asked to close Revit once, to switch to the new layout;
+  Revit prompts you to save unsaved work first, and a Revit you keep open switches the next time you
+  close it.) If only the MCP Server changed, the update takes effect the next time your MCP client starts
   the server. Running server processes notice the new release on disk and step aside on their own
   within about a minute, so the next call from any client starts the new one; if a Status check still
   shows the old server after that, reconnect the `revit` server (e.g. `/mcp` in Claude Code). Until
@@ -63,9 +65,10 @@ is reported and cleaned up by a second run.
 - **From Claude.** Ask whether the connector is up to date: the `update_connector` tool checks GitHub
   right away (no waiting for the server's six-hourly check) and reports the server and each Revit
   version's add-in. Ask it to apply the update and it starts the same updater as Update Now, after
-  confirming with you, since Revit will be asked to close.
+  confirming with you, then tells you what to restart (Revit, to load the new add-in; the `revit`
+  server, if it changed) — it never restarts Revit for you.
 - **From PowerShell.** Re-run the install one-liner above. It deploys only the components whose
-  content changed and closes Revit only if the add-in is one of them.
+  content changed and ends with the same "restart Revit to load the new add-in" line when one applies.
 
 Releases are **self-signed** for now, so Windows shows an "Unknown Publisher" prompt on first run;
 a CA-issued certificate is a later step (PRD §12). More detail, including the Mac + Parallels dev

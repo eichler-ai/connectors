@@ -122,6 +122,15 @@ public sealed class MCPBridgeStatusCommand : IExternalCommand
         // add-in's from its embedded release tag, the server's as it reports itself in broker.json
         // (re-read on every click, so it reflects the server currently running -- or, when nothing
         // is connected yet, the one broker.json last described).
+        //
+        // The add-in line has two values under the shim (self-update-architecture.md §6.2, issue #209):
+        // what addin\current.json says a NEW Revit would load, and what THIS process actually loaded.
+        // An add-in update flips that pointer without closing anything, so after one the two differ
+        // until the user restarts Revit, and this line is where they learn that. It is the version
+        // this assembly carries -- not the marker, not the pointer -- that is "running"; with no
+        // pointer (a legacy flat install) the line is the single value it always was.
+        var addInLine = UpdateAvailability.AddInStatusLine(addInVersion, UpdateTrigger.TryReadAddinPointerVersion());
+
         var brokerVersion = host?.BrokerVersion;
         var serverVersion = string.IsNullOrWhiteSpace(brokerVersion) ? "version unknown"
             : brokerVersion == "dev" ? "dev build"
@@ -130,7 +139,7 @@ public sealed class MCPBridgeStatusCommand : IExternalCommand
         return
             $"Instance ID: {MCPBridgeApplication.InstanceId}\n" +
             $"Status: {connectionLine}\n\n" +
-            $"MCP Bridge (add-in): {addInVersion}\n" +
+            $"MCP Bridge (add-in): {addInLine}\n" +
             $"  build {buildTimestamp}, commit {gitCommit}\n" +
             $"MCP Server: {serverVersion}\n" +
             $"  {DescribeMode(host?.DiscoveryOptions)}";
@@ -184,10 +193,10 @@ public sealed class MCPBridgeStatusCommand : IExternalCommand
         var gitCommit = metadata.FirstOrDefault(a => a.Key == "GitCommit")?.Value;
 
         // The release tag the pipeline embedded (MCPBridge.AddIn.csproj's MCPBridgeEmbedVersion,
-        // from MCPBRIDGE_VERSION); "dev" for a local build. Shown so a person can see at a glance
-        // whether the ADD-IN is current, independently of what the MCP Server reports.
+        // from MCPBRIDGE_VERSION); "dev" for a local build. Returned raw: UpdateAvailability.AddInStatusLine
+        // renders it ("dev build", one leading "v") and compares it with the installed pointer.
         var version = metadata.FirstOrDefault(a => a.Key == "Version")?.Value;
-        var addInVersion = string.IsNullOrWhiteSpace(version) || version == "dev" ? "dev build" : UpdateAvailability.DisplayTag(version);
+        var addInVersion = string.IsNullOrWhiteSpace(version) ? "dev" : version!;
 
         return (buildTimestamp, string.IsNullOrWhiteSpace(gitCommit) ? "unknown" : gitCommit, addInVersion);
     }

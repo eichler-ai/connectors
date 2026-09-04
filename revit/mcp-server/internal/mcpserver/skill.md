@@ -346,7 +346,8 @@ Pick one from `candidates` and pass its `instance_id`. Every discovery response 
 **`list_instances` reports successful connections only** — a Revit that never connected is simply
 absent. For the why, a human can click **MCP Bridge → Status** on the Revit ribbon. If the user asks
 whether the connector is current, `update_connector` (no arguments) checks GitHub now and reports the
-server and each Revit version's add-in; only apply it when they say so — it closes Revit.
+server and each Revit version's add-in; only apply it when they say so, and never restart Revit for
+them — the result says what to tell them to restart (on a legacy `flat` layout it closes Revit).
 
 | Symptom | Most likely cause | What to do |
 |---|---|---|
