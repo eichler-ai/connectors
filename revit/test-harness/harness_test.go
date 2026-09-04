@@ -30,6 +30,7 @@ var (
 	brokerMode       = flag.String("broker-mode", envOr("MCP_SERVER_MODE", "local"), "topology to launch the broker in -- local or remote (PRD §05). MUST match whatever topology the real Revit instance is actually configured for: a mismatch doesn't error, it makes this process its own independent broker with zero connected instances, and every case below silently SKIPs rather than failing (the exact trap this flag exists to make loud instead of quiet)")
 	brokerBind       = flag.String("broker-bind", envOr("MCP_SERVER_BIND", ""), "remote mode only: non-loopback bind address (PRD §05) -- required when -broker-mode=remote")
 	brokerAppDataDir = flag.String("broker-app-data-dir", envOr("MCP_SERVER_APPDATA", ""), "remote mode: required, the shared-drive broker.json rendezvous directory, passed to the broker as -shared-root. local mode: optional app-data override, passed as -app-data-dir")
+	revitVersionSel  = flag.String("revit-version", os.Getenv("MCP_REVIT_VERSION"), "when set (e.g. 2025 or 2027), select the connected instance of THAT Revit version instead of the first one -- needed to target one version for a both-version sweep when both are connected at once; skips loudly if no instance of that version is connected. The stamp's version is still read from the live instance, so this only chooses, it cannot mislabel.")
 )
 
 func envOr(key, fallback string) string {
@@ -85,15 +86,17 @@ func startClient(t *testing.T) (*mcpclient.Client, listInstancesOut) {
 }
 
 type listInstancesOut struct {
-	Instances []struct {
-		InstanceID   string `json:"instance_id"`
-		RevitVersion string `json:"revit_version"`
-		Documents    []struct {
-			DocumentID string `json:"document_id"`
-			Title      string `json:"title"`
-			Active     bool   `json:"active"`
-		} `json:"documents"`
-	} `json:"instances"`
+	Instances []instanceInfo `json:"instances"`
+}
+
+type instanceInfo struct {
+	InstanceID   string `json:"instance_id"`
+	RevitVersion string `json:"revit_version"`
+	Documents    []struct {
+		DocumentID string `json:"document_id"`
+		Title      string `json:"title"`
+		Active     bool   `json:"active"`
+	} `json:"documents"`
 }
 
 // toolResult mirrors the MCP tools/call envelope: text content (always
@@ -198,10 +201,42 @@ func (o executeScriptOut) diag() string {
 
 // targetDocument returns a connected instance and one open document, or
 // skips -- the shared preamble for every case below.
+// pickInstance chooses which connected instance the live tests target. With
+// -revit-version set it returns the instance of that Revit version (skipping
+// loudly when none is connected), so a both-version sweep can aim at one
+// version while both are up; otherwise it keeps the historical first-instance
+// behaviour. It never invents a version -- callers read revit_version off the
+// instance it returns, so a wrong pick would mislabel nothing, only run on the
+// wrong version, which the returned version then makes obvious.
+func pickInstance(t *testing.T, instances listInstancesOut) instanceInfo {
+	t.Helper()
+	if len(instances.Instances) == 0 {
+		t.Skip("no connected instance")
+	}
+	if *revitVersionSel == "" {
+		return instances.Instances[0]
+	}
+	for _, inst := range instances.Instances {
+		if inst.RevitVersion == *revitVersionSel {
+			return inst
+		}
+	}
+	t.Skipf("-revit-version %q: no connected instance of that version (have %s)", *revitVersionSel, revitVersionsOf(instances))
+	return instanceInfo{}
+}
+
+func revitVersionsOf(instances listInstancesOut) string {
+	var vs []string
+	for _, inst := range instances.Instances {
+		vs = append(vs, inst.RevitVersion)
+	}
+	return strings.Join(vs, ", ")
+}
+
 func targetDocument(t *testing.T) (*mcpclient.Client, string, string) {
 	t.Helper()
 	c, instances := startClient(t)
-	inst := instances.Instances[0]
+	inst := pickInstance(t, instances)
 	if len(inst.Documents) == 0 {
 		t.Skip("connected instance has no open document")
 	}
