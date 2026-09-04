@@ -99,7 +99,25 @@ public sealed class ShimApplication : IExternalApplication
         catch (Exception ex)
         {
             Log("shim: OnStartup failed: " + ex);
+            // Revit does not call OnShutdown for an application whose OnStartup failed, so a handler
+            // registered above must be detached here or it stays live process-wide for the session (and a
+            // second OnStartup attempt would add another). Only on the failure path: a successful start
+            // keeps it until OnShutdown, and s_real is the record of that.
+            if (s_real is null)
+            {
+                DetachResolveHandler();
+                s_versionDir = null;
+            }
             return Result.Failed;
+        }
+    }
+
+    private static void DetachResolveHandler()
+    {
+        if (s_resolveHandler is not null)
+        {
+            AppDomain.CurrentDomain.AssemblyResolve -= s_resolveHandler;
+            s_resolveHandler = null;
         }
     }
 
@@ -110,11 +128,7 @@ public sealed class ShimApplication : IExternalApplication
             var result = s_real is not null && s_shutdown is not null
                 ? (Result)s_shutdown.Invoke(s_real, new object[] { application })!
                 : Result.Succeeded;
-            if (s_resolveHandler is not null)
-            {
-                AppDomain.CurrentDomain.AssemblyResolve -= s_resolveHandler;
-                s_resolveHandler = null;
-            }
+            DetachResolveHandler();
             return result;
         }
         catch (Exception ex)

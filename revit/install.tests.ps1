@@ -326,6 +326,19 @@ Describe 'Versioned add-in layout (self-update-architecture.md §4): pointer, ve
         Test-Path (Join-Path $addins 'MCPBridge.Shim.dll') | Should -BeFalse
         Get-Content (Join-Path $addins 'MCPBridge.addin') -Raw | Should -Be '<addin/>'
     }
+    It 'Install-AddinFlat (a release without shim-<year>/) refuses to overwrite an installed shim, so a migrated machine is never reverted to the flat layout' {
+        Install-AddinShim $shim $addins | Out-Null
+        Install-AddinFlat $payload $addins | Should -Be 'kept-shim'
+        Get-Content (Join-Path $addins 'MCPBridge.addin') -Raw | Should -Be '<shim/>'
+        Get-Content (Join-Path $addins 'MCPBridge.Shim.dll') -Raw | Should -Be 'shim-bytes'
+        Test-Path (Join-Path $addins 'MCPBridge.AddIn.dll') | Should -BeFalse
+        Test-Path (Join-Path $addins 'Microsoft.CodeAnalysis.dll') | Should -BeFalse
+    }
+    It 'Install-AddinFlat deploys the whole payload into an Addins folder that has no shim (the legacy path)' {
+        Install-AddinFlat $payload $addins | Should -Be 'deployed'
+        Test-LegacyFlatAddin $addins | Should -BeTrue
+        Get-Content (Join-Path $addins 'MCPBridge.addin') -Raw | Should -Be '<addin/>'
+    }
     It 'Remove-OwnedAddinFiles is a no-op on a folder without our manifest' {
         New-Payload $addins @{ 'ThirdParty.dll' = 'theirs'; 'Other.addin' = '<o/>' }
         Remove-OwnedAddinFiles $addins
