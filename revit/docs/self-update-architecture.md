@@ -476,3 +476,83 @@ UX and independent of both parts).
 
 The net is a smaller installer, one update lifecycle, one Status vocabulary, and no path in which a user
 is left with a silently stuck update.
+
+---
+
+## Appendix A — Prior art and the Autodesk-review question
+
+Web research (2026-09-04) grounding the design and answering "will this pass Autodesk's add-in review?"
+
+### A.1 This is the standard Windows auto-update pattern
+
+The versioned-folder-plus-atomic-pointer core of Part A is exactly how the mainstream Windows
+desktop updaters work; the design is a port of a proven pattern to Revit's add-in loader, not a novel
+mechanism:
+
+- **Squirrel.Windows** keeps apps under `%LOCALAPPDATA%\<App>\` with versioned folders
+  (`app-1.2.3`, `app-1.2.4`), a stable `Update.exe` **shim** that finds the latest version and
+  launches it, and shortcuts that point at the shim. Update = download → new `app-<version>` folder →
+  repoint. That is `addin\<version>\` + `MCPBridge.Shim.dll` + `current.json`, one-for-one.
+- **ClickOnce** builds a complete new folder of binaries and, as its last step, rewrites the
+  shortcut/pointer to it — the same atomic "write everything, flip the pointer last" this design uses.
+
+The hosted-primary half (Part B) is likewise the ordinary "a background service owns the resource; the
+installer restarts one known process" model.
+
+### A.2 pyRevit has our exact constraint and does not solve it
+
+pyRevit — the most widely deployed Revit add-in framework — hits the identical wall: **its core DLLs
+are loaded into the Revit process and cannot be updated while Revit runs.** Its updater detects a core
+update, prints a warning, **skips it**, and requires the user to close Revit and update from the CLI.
+So the incumbent leaves exactly the "close Revit to update" burden this design removes; the shim is a
+step beyond the ecosystem norm, not a workaround below it.
+
+### A.3 The byte-load alternative, and why versioned folders win
+
+A known trick avoids the file lock differently: the manifest DLL reads the real add-in bytes with
+`File.ReadAllBytes` and loads them via `Assembly.Load(byte[])`, leaving the on-disk file unlocked and
+replaceable in place. Rejected here, because this codebase depends on `Assembly.Location`, which is
+**empty** for a byte-loaded assembly:
+
+- `AssemblyResolution` builds its `AssemblyDependencyResolver` from `self.Location` (needs a real
+  path);
+- the ribbon `PushButtonData` needs the command classes' assembly path;
+- `DiscoveryReflector`/`XmlDocIndex` load the `.xml` doc file next to the `.dll` via
+  `Path.ChangeExtension(assembly.Location, ".xml")`.
+
+Byte-load would break all three, and it still only takes effect at the next Revit start (the assembly
+is in memory for the session) while *losing* the ability to keep a running Revit's exact files intact —
+an in-place overwrite can desync a running session's dependencies. Versioned folders preserve
+`Location`, keep each running Revit's files byte-stable until it restarts, and give the same
+next-start semantics. They are the correct choice for this codebase specifically.
+
+### A.4 The Autodesk-review question
+
+**Autodesk App Store certification applies only to apps distributed through the App Store — it is not
+a gate on a directly-installed add-in.** The connector installs via its own PowerShell one-liner, so
+today there is no Autodesk review to pass; the only Autodesk-side gate is Revit's **runtime** add-in
+trust prompt, which §4.6 handles (signed shim → publisher trust → no prompt; a CA certificate, PRD
+§12, removes it for unsigned-machine cases).
+
+If App Store distribution ever becomes a goal, **this self-update scheme and the App Store model are
+largely mutually exclusive**, and that is a deliberate fork to be aware of:
+
+- App Store apps ship as an **`ApplicationPlugins\<app>.bundle\`** with a `PackageContents.xml`, and
+  **Autodesk builds the MSI** ("We'll create the installer for you"). We ship our own script installer.
+- The store requires an app to **"work immediately after installation — no manual file copying,
+  registration, or settings changes,"** and it manages versioning/updates through the App Manager.
+  A self-updater that downloads new versions, a background broker process, and a local network
+  listener all sit outside that model and would, at best, invite scrutiny.
+
+Recommendation: keep **direct distribution** as the channel for the self-updating connector (where
+this design lives and no Autodesk review applies), and treat App Store publication — if ever wanted —
+as a **separate, stripped build** (bundle format, Autodesk MSI, no self-update, server started
+differently), not as something this design must satisfy. Nothing in Parts A/B needs to change for the
+direct-distribution channel to be correct; the App Store is a different product shape.
+
+**Sources:** [Squirrel.Windows FAQ](https://github.com/Squirrel/Squirrel.Windows/blob/master/docs/faq.md),
+[ClickOnce deployment (Microsoft Learn)](https://learn.microsoft.com/en-us/visualstudio/deployment/clickonce-security-and-deployment),
+[pyRevit version management & updates (DeepWiki)](https://deepwiki.com/pyrevitlabs/pyRevit/6.3-version-management-and-updates),
+[Revit publisher guidelines (Autodesk APS)](https://aps.autodesk.com/app-store/publisher-center/revit),
+[Autodesk desktop app submission overview (PDF)](https://damassets.autodesk.net/content/dam/autodesk/www/adn/pdf/desktop-app-submission-process-overview.pdf),
+[Revit 2022 self-signed add-in loading change (Autodesk forum)](https://forums.autodesk.com/t5/revit-api-forum/revit-2022-change-of-behavior-loading-addins-signed-with-a-self/td-p/10880619).
