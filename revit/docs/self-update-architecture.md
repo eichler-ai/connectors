@@ -254,19 +254,36 @@ old primary notices its image changed and steps aside.
 ### 5.6 Session continuity across a primary restart — **the key open question**
 
 When the hosted primary restarts, each client's secondary loses its upstream. A secondary is a
-byte-level stdio proxy; the MCP `initialize` handshake was answered by the *old* primary. Two possible
-behaviours, to be settled by prototype (§10):
+byte-level stdio proxy; the MCP `initialize` handshake was answered by the *old* primary.
 
-- **(a) Transparent re-proxy.** The secondary re-reaches the new primary and continues. Works if the
-  client's post-`initialize` traffic is effectively stateless request/response (MCP `tools/call` is),
-  and the new primary does not require a fresh `initialize`. If viable, the user sees nothing.
-- **(b) One clean reconnect.** If the new primary needs its own `initialize`, the secondary exits
-  cleanly, the client respawns it, and the client re-initializes — one brief reconnect, no error
-  dialog. Still far better than today's "restart the right client and hope."
+**Measured 2026-09-04 (probe: two servers on one app-data dir, kill the primary mid-session).** The
+promoted/reconnecting process starts a **fresh** MCP server that requires `initialize`. The client's
+original `initialize` went to the dead primary, so the very next request is rejected:
 
-The design should target (a) and fall back to (b); either is acceptable UX, and both are strictly
-better than the current behaviour. This is the single riskiest unknown in Part B and should be
-prototyped before committing (§9).
+```
+B next request after A death (NO re-initialize): ERROR method "tools/list" is invalid during session initialization
+B fresh initialize after death:                  OK
+B tools/list after fresh initialize:             OK (14 tools)
+```
+
+So **transparent re-proxy is not free** — the new primary has no session state, and today the
+promoted process keeps *running* (it does not exit), so the client, which never learns its upstream
+changed, is wedged until a manual reconnect. Two viable designs, in preference order:
+
+- **(a) Replay the cached `initialize`.** The secondary remembers the client's `initialize` request
+  and, on connecting to any new primary, replays it and swallows the duplicate `initialize` response
+  before resuming the proxy. Truly transparent: the user sees nothing across a host restart. Cost: the
+  secondary must parse just enough of the stream to capture the first request and one response.
+- **(b) Exit to force a client-driven reconnect.** On losing its upstream, the secondary **exits**
+  (rather than promoting/serving a stale session), the MCP client respawns it, and the fresh child
+  re-`initialize`s against the new primary. One brief reconnect — exactly the "reconnect the `revit`
+  server / restart Claude" step the canonical UX (§6.2) already asks of the user for a server update,
+  so it is consistent and acceptable.
+
+Recommendation: **(a)** for a server auto-swap so a running client keeps working, with **(b)** as the
+guaranteed fallback. Note the current code does neither — it promotes in place and serves a stale
+session — so this is a real change Part B must make, not an existing property to preserve. The
+`initialize`-replay is small and worth building; the probe confirms the exact failure it must fix.
 
 ---
 
