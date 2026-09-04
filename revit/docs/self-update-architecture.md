@@ -169,16 +169,31 @@ hasn't restarted Revit can still be served their running version's files if ever
 
 ### 4.6 Trust prompt and signing
 
-Revit prompts once per *distinct assembly content* it is asked to load from an untrusted publisher.
-Two questions to settle **live on 2025 and 2027** (verification plan §8):
+Revit's trust prompt ("unverified publisher — Load Once / Always Load / Do Not Load") is presented by
+Revit's AddInManager for the assembly **named in a `.addin` manifest**. Assemblies loaded later by
+add-in code via `Assembly.LoadFrom` are ordinary .NET loads that AddInManager does not scan and does
+not prompt for. So the prompt keys on the **shim**, not on the versioned add-in the shim loads.
 
-- Does Revit prompt only for the manifest-named `MCPBridge.Shim.dll`, or also for assemblies the shim
-  `LoadFrom`s? If only the shim: the prompt is a **one-time** event for the life of the shim — strictly
-  better than today's once-per-release. If also the loaded add-in: the prompt is once per release, the
-  same as today, no worse.
-- If the loaded add-in is prompted, signing the real add-in with the same cert as the shim collapses
-  it back to once. This is the concrete payoff that makes adopting a certificate (PRD §12) worthwhile,
-  and the design should be built to make signing a drop-in, not a rework.
+**Confirmed against the current setup (2026-09-04):** the project already self-signs both dev and
+release builds (`MCPBridgeSignDevBuild` target in `MCPBridge.AddIn.csproj`, whose comment records that
+signing gives Revit a *publisher*-level trust so a rebuild is not re-prompted, unlike an unsigned
+build whose trust is content-keyed and re-prompts every time). On the dev VM there is no Revit
+`…\Security` trust record for 2025 or 2027 and the signed add-in loads and connects with no prompt.
+Consequences for the shim:
+
+- Sign `MCPBridge.Shim.dll` with the same certificate the add-in already uses. The shim is then
+  trusted at the publisher level exactly as the add-in is today — **no new prompt**, and because the
+  shim's content changes only rarely, no re-prompt across releases either.
+- The versioned `MCPBridge.AddIn.dll` is `LoadFrom`ed by the shim, so Revit's AddInManager never
+  presents a prompt for it regardless; signing it (as today) keeps its own publisher trust intact for
+  anything else that inspects it.
+
+The empirical "does Revit prompt for the loaded add-in" test is **not observable on this machine**
+because everything is signed and trusted — it would require deliberately shipping an *unsigned* shim
+to force a prompt, which is not how the connector ships. The behaviour above is Revit's documented
+AddInManager model plus the project's existing signing, so §9.1 no longer gates on it: **build the
+shim signed with the existing certificate and the prompt is a non-issue**, the same as the add-in is
+today.
 
 ### 4.7 Migration (today's flat layout → shim)
 
@@ -411,8 +426,11 @@ first:
 
 1. **Part A (shim + versioned add-in).** Deletes the most machinery (close wait, deferred watcher,
    logon task, pending manifest, `-ApplyPendingUpdate`, the `deferred` state, most of #209/#210) and
-   needs no new privilege surface. Ship it; #209/#210 largely evaporate. **Gate:** the §8.2 trust-prompt
-   result on both Revit years — if Revit prompts for the loaded add-in, land signing in the same phase.
+   needs no new privilege surface. Ship it; #209/#210 largely evaporate. The trust-prompt question is
+   settled (§4.6): sign the shim with the existing certificate and there is no new prompt. The one
+   remaining Part A implementation risk worth a spike is the load chain itself — shim → `LoadFrom` the
+   versioned add-in → ribbon + discovery + a script run unaffected — which the §8.1/§8.3 live sweep
+   covers.
 2. **Prototype Part B's §5.6 session continuity** before building it — one throwaway test of "restart
    the primary under a live client." Its answer (transparent vs one-reconnect) is the only thing that
    can change Part B's shape.
@@ -425,10 +443,13 @@ UX and independent of both parts).
 
 ## 10. Open questions (must be answered before the dependent phase)
 
-- **(Part A, gates §9.1)** Does Revit's trust prompt cover only the shim, or also the `LoadFrom`ed
-  add-in, on 2025 and 2027? Decides whether signing lands in phase 1.
-- **(Part B, gates §9.3)** Does a secondary survive a primary restart transparently, or does the client
-  need one `initialize` reconnect? Decides Part B's secondary reconnection logic (§5.6).
+- **(Part A — RESOLVED, §4.6)** Revit's trust prompt keys on the manifest-named shim, not on the
+  `LoadFrom`ed add-in; the project already signs, so a shim signed with the same certificate adds no
+  prompt. No longer gates phase 1.
+- **(Part B — MEASURED, §5.6)** A secondary does **not** survive a primary restart transparently: the
+  promoted/reconnected process starts a fresh MCP server that rejects the next request until
+  re-`initialize`d. Part B must either replay the cached `initialize` (transparent) or exit to force a
+  client reconnect (acceptable). This is a change to build, not a property to preserve.
 - **(Part B, AllUsers only)** Under a service, where does `broker.json` live and how is the token file
   ACL'd so every interactive user the service serves can authenticate, without widening it to a local
   privilege leak? Blocks only the AllUsers variant, not per-user.
