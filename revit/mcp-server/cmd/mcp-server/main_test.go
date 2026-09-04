@@ -8,6 +8,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/eichler-ai/connectors/revit/mcp-server/internal/execution"
+	"github.com/eichler-ai/connectors/revit/mcp-server/internal/registry"
+
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/buildinfo"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/mcpserver"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/singleton"
@@ -646,14 +649,13 @@ func TestIsPrimaryUnreachableClassifiesRunSecondaryErrors(t *testing.T) {
 		"reading auth response from primary: read tcp: i/o timeout",
 		"decoding auth response from primary: unexpected EOF",
 		"primary rejected this secondary's auth: bad token",
-		"reading broker.json from \"C:\\x\" after waiting for the primary: not found",
 	}
 	for _, m := range unreachable {
 		if !isPrimaryUnreachable(errors.New(m)) {
 			t.Errorf("%q should count as unreachable", m)
 		}
 	}
-	ordinary := []string{"", "read tcp: connection reset by peer", "EOF"}
+	ordinary := []string{"", "read tcp: connection reset by peer", "EOF", "reading broker.json from \"C:\\x\" after waiting for the primary: not found"}
 	for _, m := range ordinary {
 		var err error
 		if m != "" {
@@ -662,5 +664,17 @@ func TestIsPrimaryUnreachableClassifiesRunSecondaryErrors(t *testing.T) {
 		if isPrimaryUnreachable(err) {
 			t.Errorf("%q should NOT count as unreachable", m)
 		}
+	}
+}
+
+func TestAnyExecutionInFlightIsFalseWithNothingRunning(t *testing.T) {
+	reg := registry.New()
+	mgr := execution.NewManager()
+	if anyExecutionInFlight(reg, mgr) {
+		t.Fatal("empty registry must not report an execution in flight")
+	}
+	reg.Register(&registry.Instance{InstanceID: "idle-one", RevitVersion: "2027", PID: 1}, time.Now())
+	if anyExecutionInFlight(reg, mgr) {
+		t.Fatal("an idle instance must not report an execution in flight")
 	}
 }

@@ -569,7 +569,9 @@ func run(mode, bindAddr string, port int, appDataDirOverride, sharedRoot string,
 			if info, rerr := singleton.ReadBrokerJSON(rendezvousRoot); rerr == nil {
 				pid = info.PID
 			}
-			if primaryFailures.Record(pid) {
+			// No readable broker.json means "no primary yet", not an unresponsive one (review of
+			// #205): the 5 s wait in runSecondary already covers a primary still writing it.
+			if pid != 0 && primaryFailures.Record(pid) {
 				logger.Printf("primary-unresponsive: %d consecutive attempts to reach the primary (pid %d) failed, last: %v. It holds the singleton lock and port but does not answer; end that process (or reboot if it cannot be ended) and reconnect this MCP server.", primaryFailures.Count(), pid, err)
 				return fmt.Errorf("%w: primary pid %d does not answer (%d attempts, last: %v); end that process or reboot, then reconnect", errPrimaryUnresponsive, pid, primaryFailures.Count(), err)
 			}
@@ -579,6 +581,18 @@ func run(mode, bindAddr string, port int, appDataDirOverride, sharedRoot string,
 		logger.Printf("secondary: upstream connection to primary ended (%v); re-attempting lock acquisition", err)
 		time.Sleep(500 * time.Millisecond) // bound the retry rate if the lock is held by something that never releases it
 	}
+}
+
+// anyExecutionInFlight reports whether any connected Revit instance has a script pending or
+// running (execution.Manager's view), so a voluntary eviction can wait for it.
+func anyExecutionInFlight(reg *registry.Registry, mgr *execution.Manager) bool {
+	for _, inst := range reg.List() {
+		switch mgr.StatusForInstance(inst.InstanceID) {
+		case execution.StatusBusy, execution.StatusPending:
+			return true
+		}
+	}
+	return false
 }
 
 // errPrimaryUnresponsive is terminal like errSchemaMismatch: the primary named
@@ -603,7 +617,8 @@ func isPrimaryUnreachable(err error) bool {
 		"reading auth response from primary",
 		"decoding auth response from primary",
 		"primary rejected this secondary's auth",
-		"reading broker.json from",
+		"building auth request",
+		"encoding auth request",
 	} {
 		if strings.HasPrefix(msg, prefix) {
 			return true
@@ -623,15 +638,26 @@ const staleImageCheckInterval = 30 * time.Second
 // run() returns, the client respawns the exe on disk, and the secondaries whose
 // upstream just dropped re-race the lock (evicting themselves if stale, see
 // run). Never evicts a dev build or an install with no marker.
-func watchForStaleImage(ctx context.Context, cancel context.CancelFunc, imageAtStart selfcheck.ImageStamp, logger *log.Logger) {
+func watchForStaleImage(ctx context.Context, cancel context.CancelFunc, imageAtStart selfcheck.ImageStamp, inFlight func() bool, logger *log.Logger) {
 	ticker := time.NewTicker(staleImageCheckInterval)
 	defer ticker.Stop()
+	deferred := false
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 			if disk := selfcheck.ReadMarkerVersion(); selfcheck.ShouldEvict(version, disk) && selfcheck.ExecutableReplaced(imageAtStart) {
+				// A voluntary shutdown must not cut off a script mid-run (review of #205): the
+				// broker dying mid-execute_script is a known gap with no replay yet, and an
+				// update is the one time it would happen unprompted. Wait for the next tick.
+				if inFlight() {
+					if !deferred {
+						logger.Printf("stale-image-eviction deferred: the install on disk is %s but a script is running on a connected Revit; will step aside once it finishes", disk)
+						deferred = true
+					}
+					continue
+				}
 				logger.Printf("stale-image-evicted: this primary is %s but the install on disk is now %s; shutting down so the client's next start runs the installed release (issue #201)", version, disk)
 				cancel()
 				return
@@ -643,7 +669,6 @@ func watchForStaleImage(ctx context.Context, cancel context.CancelFunc, imageAtS
 func runPrimary(ctx context.Context, mode, bindAddr string, port int, rendezvousRoot, privateRoot string, imageAtStart selfcheck.ImageStamp, logger *log.Logger, stdin io.Reader) error {
 	ctx, cancelEviction := context.WithCancel(ctx)
 	defer cancelEviction()
-	go watchForStaleImage(ctx, cancelEviction, imageAtStart, logger)
 
 	ln, err := net.Listen("tcp", net.JoinHostPort(bindAddr, strconv.Itoa(port)))
 	if err != nil {
@@ -690,6 +715,9 @@ func runPrimary(ctx context.Context, mode, bindAddr string, port int, rendezvous
 	execMgr.Logf = logger.Printf
 	mcpserver.Register(mcpServer, execMgr)
 	reg := registry.New()
+	// Issue #201: the primary steps aside once the install on disk has moved on -- started here, after
+	// the registry and execution manager exist, because it defers while any instance is busy.
+	go watchForStaleImage(ctx, cancelEviction, imageAtStart, func() bool { return anyExecutionInFlight(reg, execMgr) }, logger)
 	discoveryRouter := discovery.NewRouter(reg)
 	embedder, reranker := loadSearchModels(privateRoot, logger)
 	searchIndex := manager.New(discoveryRouter, embedder, reranker, logger.Printf)
