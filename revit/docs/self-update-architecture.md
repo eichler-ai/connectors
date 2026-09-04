@@ -131,6 +131,16 @@ deliberately small and stable so that (a) Revit's trust prompt for the *manifest
 at most once across many releases, and (b) it almost never needs an update that would reintroduce the
 close-to-replace problem for itself.
 
+**Validated live (2026-09-04, Revit 2027 on the dev VM).** A ~90-line signed shim built exactly as
+above loaded the real v0.1.5 add-in from `addin\v0.1.5\2027\` (confirmed by Revit's loaded-module path
+and the shim's own log line). Every downstream mechanic worked with no change to the real add-in:
+ribbon present, broker auth+register connected, Roslyn `execute_script` warmed up, and discovery ran
+(`added=230`) — i.e. the deps.json resolution, the Roslyn/SQLite isolation contexts, and
+`Eichler.Connectors.Revit` discovery all resolved from the versioned folder, and `PushButtonData`
+resolved the command classes from the versioned path. **No trust prompt** appeared, with the shim
+signed by the same machine-local dev cert the add-in already uses (§4.6). The load chain is the design's
+biggest mechanical risk and it is now known-good.
+
 ### 4.3 Load-context correctness (the part that must not regress)
 
 Today Revit `Assembly.LoadFrom`s `MCPBridge.AddIn.dll` directly, and the add-in's own
