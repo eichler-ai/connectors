@@ -18,6 +18,7 @@
 package mcpserver
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"log"
@@ -314,6 +315,10 @@ func readMarker(path string) *InstalledMarker {
 	if err != nil {
 		return nil
 	}
+	// install.ps1 writes the marker with Windows PowerShell's Out-File -Encoding utf8, which prepends a
+	// UTF-8 BOM that encoding/json rejects -- found live: the first update_connector call from Claude
+	// Desktop reported the connected Revit as state "unknown" with no installed version.
+	b = bytes.TrimPrefix(b, []byte{0xEF, 0xBB, 0xBF})
 	var m InstalledMarker
 	if err := json.Unmarshal(b, &m); err != nil {
 		return nil

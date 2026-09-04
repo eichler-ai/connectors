@@ -265,3 +265,17 @@ func TestReadMarkerParsesInstallPs1Shape(t *testing.T) {
 		t.Fatal("corrupt marker must read as nil")
 	}
 }
+
+func TestReadMarkerAcceptsTheUtf8BomWindowsPowerShellWrites(t *testing.T) {
+	// Found live: install.ps1's Out-File -Encoding utf8 (Windows PowerShell 5.1) prepends a BOM, and
+	// the first update_connector call from Claude Desktop reported the marker as absent.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "installed-version.json")
+	os.WriteFile(path, append([]byte{0xEF, 0xBB, 0xBF}, []byte(`{"version":"v0.1.2","deployed":["2027"]}`)...), 0o644)
+
+	m := readMarker(path)
+
+	if m == nil || m.Version != "v0.1.2" {
+		t.Fatalf("BOM-prefixed marker must parse: %+v", m)
+	}
+}
