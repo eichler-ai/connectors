@@ -1,0 +1,62 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The stable, manifest-named add-in (revit/docs/self-update-architecture.md §4, issue #211). Revit
+    loads THIS assembly from Addins\<year>\; it reads %LOCALAPPDATA%\Programs\MCPBridge\addin\current.json
+    and Assembly.LoadFrom's the real MCPBridge.AddIn.dll out of the versioned folder that names. It
+    deliberately has no ProjectReference to the real add-in and no NuGet dependencies: its whole value is
+    that it almost never changes, so (a) Revit's per-manifest-assembly trust decision is made once for the
+    life of the install and (b) an add-in update is a folder + a pointer write, with nothing asked to
+    close. Anything that would make this project change per release belongs in MCPBridge.AddIn instead.
+  -->
+  <PropertyGroup>
+    <!-- Same multi-target as MCPBridge.AddIn (see MCPBridge.RevitAdapter.csproj for the per-version .NET requirements, PRD §11). -->
+    <TargetFrameworks>net10.0-windows;net8.0-windows</TargetFrameworks>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>MCPBridge.Shim</RootNamespace>
+    <AssemblyName>MCPBridge.Shim</AssemblyName>
+    <!-- Same opt-out and same "no cert configured is fine, a failed signing attempt is not" contract as
+         MCPBridge.AddIn.csproj's MCPBridgeSignDevBuild; see the comment there. The shim MUST be signed
+         with the same certificate as the add-in: it is the assembly Revit's AddInManager keys its
+         publisher trust on (§4.6), so an unsigned shim would re-introduce the trust prompt. -->
+    <MCPBridgeSignDevBuild Condition="'$(MCPBridgeSignDevBuild)'==''">true</MCPBridgeSignDevBuild>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(TargetFramework)'=='net10.0-windows'">
+    <RevitVersion>2027</RevitVersion>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(TargetFramework)'=='net8.0-windows'">
+    <RevitVersion>2025</RevitVersion>
+  </PropertyGroup>
+  <PropertyGroup>
+    <RevitInstallDir>C:\Program Files\Autodesk\Revit $(RevitVersion)</RevitInstallDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="RevitAPI">
+      <HintPath>$(RevitInstallDir)\RevitAPI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="RevitAPIUI">
+      <HintPath>$(RevitInstallDir)\RevitAPIUI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The shim's manifest: same AddInId as MCPBridge.AddIn\MCPBridge.addin so Revit treats the shim as
+         the same add-in across the migration (§4.1), but Assembly/FullClassName name this project. -->
+    <None Include="MCPBridge.addin">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+  <!-- Identical to MCPBridge.AddIn.csproj's target of the same name (including the inner-pass guard on
+       $(TargetFramework)); one shared Sign-AddIn.ps1, one cert, one trust decision. -->
+  <Target Name="MCPBridgeSignDevBuild" AfterTargets="Build" Condition="'$(MCPBridgeSignDevBuild)'=='true' And '$(OS)'=='Windows_NT' And '$(TargetFramework)'!=''">
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildThisFileDirectory)..\..\tools\Sign-AddIn.ps1&quot; -DllPath &quot;$(TargetPath)&quot;" />
+  </Target>
+
+</Project>
