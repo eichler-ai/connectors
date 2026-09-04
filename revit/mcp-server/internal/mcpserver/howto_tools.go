@@ -44,7 +44,8 @@ type HowToDeps struct {
 	Router *discovery.Router
 	// Exec answers "did this exact script succeed in this session".
 	Exec *execution.Manager
-	// Version is the broker's version line, recorded on a session stamp.
+	// Version labels a session stamp (connector_version). Keep it within
+	// howto.MaxStampConnectorVersionLen; a longer label is cut to fit.
 	Version string
 	// RepoSlug is the review-queue repository.
 	RepoSlug string

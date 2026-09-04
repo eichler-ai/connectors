@@ -115,6 +115,39 @@ func errorsAs(err error, target **ValidationError) bool {
 	return false
 }
 
+// The broker labels a session stamp with its full version line -- main.go's
+// versionLine() is "<version> (revision <sha> committed <time>...)", 53
+// chars for a dev build and longer for a release -- while the stamp schema
+// bounds connector_version at 40. Save built the stamp, watched
+// ValidateStamp reject it, and dropped it silently, so every real
+// submit_howto reported howto-script-not-run-this-session for a script that
+// had just succeeded in this very session. A label the caller passes can
+// never be allowed to cost the submitter the stamp.
+func TestSaveStampsWhenConnectorVersionIsTheFullVersionLine(t *testing.T) {
+	env := testEnv(t)
+	env.ConnectorVersion = "v0.1.2 (revision 4079fc7 committed 2026-09-03T01:02:03Z)"
+	if len(env.ConnectorVersion) <= MaxStampConnectorVersionLen {
+		t.Fatalf("this test needs a label longer than the schema bound %d, got %d", MaxStampConnectorVersionLen, len(env.ConnectorVersion))
+	}
+	sub := goodSubmission()
+	ranSHA := ScriptSHA256(sub.Script)
+	env.SessionSucceeded = func(sha string) (time.Time, bool) { return env.Now(), sha == ranSHA }
+	saved, err := Save(env, sub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.Stamp == nil || saved.Stamp.By != BySession || saved.Stamp.Status != StampPassed {
+		t.Fatalf("the exact script succeeded this session, so the save must carry a session stamp; got %+v", saved.Stamp)
+	}
+	if !strings.HasPrefix(env.ConnectorVersion, saved.Stamp.ConnectorVersion) || len(saved.Stamp.ConnectorVersion) > MaxStampConnectorVersionLen {
+		t.Fatalf("connector_version must be the caller's label cut to the schema bound, got %q", saved.Stamp.ConnectorVersion)
+	}
+	side, err := os.ReadFile(filepath.Join(env.LocalDir, SessionSidecarName))
+	if err != nil || !strings.Contains(string(side), `"by":"session"`) {
+		t.Fatalf("the stamp must reach the sidecar too: %v %s", err, side)
+	}
+}
+
 func TestSaveStampsWhenTheExactScriptRanThisSession(t *testing.T) {
 	env := testEnv(t)
 	sub := goodSubmission()

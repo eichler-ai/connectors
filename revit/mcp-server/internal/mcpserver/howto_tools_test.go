@@ -16,6 +16,8 @@ import (
 
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/diag"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/discovery"
+	"github.com/eichler-ai/connectors/revit/mcp-server/internal/execution"
+	"github.com/eichler-ai/connectors/revit/mcp-server/internal/howto"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/registry"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/transport"
 )
@@ -188,6 +190,53 @@ func TestSubmitHowToImprovesAnExistingLocalDocument(t *testing.T) {
 	}
 	if _, isErr := callSubmit(t, cs, map[string]any{"id": first.Document.ID}); !isErr {
 		t.Fatal("edit without change_note accepted")
+	}
+}
+
+// The live symptom (TestHowToEndToEnd, and a Claude Desktop session on
+// v0.1.2): execute_script runs a script to success, submit_howto with the
+// identical text on the same instance answers howto-script-not-run-this-session.
+// Reproduced here without Revit: a real execution.Manager settles the run
+// through the same ExecuteScript path the execute_script tool uses
+// (tools.go), and the deps carry the version line main.go actually passes --
+// which is longer than the stamp schema allows for connector_version.
+func TestSubmitHowToStampsAScriptThatSucceededThisSession(t *testing.T) {
+	deps := howToDeps(t)
+	deps.Version = "dev (revision unknown, built without VCS information)" // main.go versionLine() for a dev build
+	mgr := execution.NewManager()
+	attachFakeInstance(t, mgr, "inst-1", func(ctx context.Context, method string, params json.RawMessage) (any, *transport.RPCError) {
+		var p map[string]any
+		json.Unmarshal(params, &p)
+		return map[string]any{"status": "success", "execution_id": p["execution_id"], "return_value": "1"}, nil
+	})
+	deps.Exec = mgr
+	args := goodArgs()
+	script := args["script"].(string)
+	res, drec := mgr.ExecuteScript(context.Background(), "inst-1", "doc-1", script, 5000, 60000, execution.ScriptOptions{})
+	if drec != nil || res.Status != execution.StatusSuccess {
+		t.Fatalf("the run must succeed first: %+v %+v", res, drec)
+	}
+	if _, ok := mgr.SucceededRecently("inst-1", howto.ScriptSHA256(script)); !ok {
+		t.Fatal("the manager has no record of the run; the submit side cannot be blamed")
+	}
+
+	cs := connectHowToClient(t, deps)
+	args["instance_id"] = "inst-1"
+	args["confirm_submission"] = true
+	out, isErr := callSubmit(t, cs, args)
+	if isErr || out.Document == nil {
+		t.Fatalf("submit: err=%v out=%+v", isErr, out)
+	}
+	for _, n := range out.Notices {
+		if n.Code == "howto-script-not-run-this-session" || n.Code == "unverified-script-change" {
+			t.Fatalf("the exact script succeeded on inst-1 in this session, yet: %s: %s", n.Code, n.Message)
+		}
+	}
+	if out.Verified == nil || out.Verified.By != howto.BySession || out.Verified.RevitVersion != "2025" || out.Verified.Status != howto.StampPassed {
+		t.Fatalf("expected a passed session stamp for Revit 2025, got %+v", out.Verified)
+	}
+	if out.Verified.ConnectorVersion == "" || !strings.HasPrefix(deps.Version, out.Verified.ConnectorVersion) {
+		t.Fatalf("the stamp should carry the broker's version label (cut to the schema bound), got %q", out.Verified.ConnectorVersion)
 	}
 }
 
