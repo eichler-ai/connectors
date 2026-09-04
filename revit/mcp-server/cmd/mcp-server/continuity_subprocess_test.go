@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -246,6 +247,72 @@ func TestSessionSurvivesPrimaryDeathAcrossProcesses(t *testing.T) {
 		t.Fatalf("B did not log a replay:\n%s", tl)
 	}
 	t.Logf("--- B.log (transition) ---\n%s", tl)
+}
+
+// TestPromotedProcessAnswersAnInitializeTheDeadPrimaryNeverDid: A is stopped
+// (SIGSTOP) before B's client sends initialize, so A receives it and never
+// answers; A is then killed. B promotes, and B's OWN mcp.Server must supply
+// the first -- and only -- initialize response the client sees, after which
+// the session is live.
+func TestPromotedProcessAnswersAnInitializeTheDeadPrimaryNeverDid(t *testing.T) {
+	if testing.Short() {
+		t.Skip("spawns real mcp-server processes; skipped with -short")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("uses SIGSTOP to hold the primary unanswering")
+	}
+	bin := serverBinary(t)
+	dataDir := t.TempDir()
+
+	a := spawnServer(t, bin, dataDir, "A")
+	a.send(initLine)
+	a.recv(30 * time.Second)
+	a.send(initedLine)
+
+	b := spawnServer(t, bin, dataDir, "B")
+	waitForSecondary(t, b)
+
+	// Freeze A, then let B's client initialize: the request reaches A's
+	// socket and is never answered.
+	if err := a.cmd.Process.Signal(syscall.SIGSTOP); err != nil {
+		t.Fatal(err)
+	}
+	b.send(initLine)
+	select {
+	case l := <-b.lines:
+		t.Fatalf("B answered initialize while A was frozen: %q", l)
+	case <-time.After(500 * time.Millisecond):
+	}
+	t.Logf("--- killing frozen primary A (pid %d) with B's initialize unanswered ---", a.cmd.Process.Pid)
+	a.kill()
+
+	m, ok := b.recv(60 * time.Second)
+	if !ok {
+		t.Fatalf("B exited after A's death:\n%s", b.transitionLog())
+	}
+	t.Logf("B first line after A death: %s", summarize(m))
+	if m["id"] != float64(0) || m["result"] == nil {
+		t.Fatalf("expected the client's one initialize answer, from promoted B, got %v\n%s", m, b.transitionLog())
+	}
+	b.send(initedLine)
+	b.send(toolsListLine(1))
+	m, _ = b.recv(30 * time.Second)
+	t.Logf("B tools/list: %s", summarize(m))
+	if m["id"] != float64(1) || m["result"] == nil {
+		t.Fatalf("expected the tools list and no stray second initialize response, got %v", m)
+	}
+	select {
+	case l := <-b.lines:
+		t.Fatalf("stray line after the tools result: %q", l)
+	case <-time.After(300 * time.Millisecond):
+	}
+	tl := b.transitionLog()
+	if !strings.Contains(tl, "primary: listening") || !strings.Contains(tl, "session-continuity: replaying") {
+		t.Fatalf("expected B to promote and replay:\n%s", tl)
+	}
+	if strings.Contains(tl, "dropped the duplicate") {
+		t.Fatalf("nothing should have been dropped -- the replay's answer was the client's first:\n%s", tl)
+	}
 }
 
 // TestSessionSurvivesPrimaryDeathWithAThirdProcess adds a second idle

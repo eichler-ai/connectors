@@ -148,7 +148,7 @@ func TestContinuityFirstInitializeResponseReachesTheClient(t *testing.T) {
 	toolsResp := `{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}` + "\n"
 	for _, n := range []int{1, 7, 4096} {
 		out.Reset()
-		c.answered, c.outstanding = false, 1
+		c.answered, c.answerPending = false, true
 		writeChunked(t, w, initRespLine+toolsResp, n)
 		if out.String() != initRespLine+toolsResp {
 			t.Fatalf("chunk=%d: client got %q, want the initialize response and the tools response", n, out.String())
@@ -252,8 +252,54 @@ func TestContinuityStreamsAnOverlongWatchedLine(t *testing.T) {
 	huge := `{"jsonrpc":"2.0","id":9,"result":"` + strings.Repeat("y", maxWatchedOutputLineBytes) + `"}` + "\n"
 	writeChunked(t, w, huge+initRespLine, 1<<16)
 	if out.String() != huge+initRespLine {
-		t.Fatal("an overlong line must stream through intact, and watching resumes on the next line")
+		t.Fatal("an overlong line must stream through intact, and the next line must follow")
 	}
+	// Overflow while watching ends watching for good: the client counts as
+	// answered, so a later replay's duplicate is dropped rather than
+	// becoming a second initialize response, and no further line is parsed.
+	if c.watching() {
+		t.Fatal("still watching after an overlong line; every later output line would be parsed")
+	}
+	if !c.answered {
+		t.Fatal("overflow must mark the client answered")
+	}
+	c.replayPrefix()
+	writeChunked(t, c.outputWriter(&out), initRespLine, 1<<16)
+	if out.String() != huge+initRespLine {
+		t.Fatalf("a replay's duplicate reached the client after an overflow:\n%q", out.String()[len(huge):])
+	}
+}
+
+// A client whose first message is not an initialize gets no continuity, and
+// must get no worse than today's behavior either: on a successor upstream
+// nothing is replayed, live bytes stream through, and the fresh primary's own
+// rejection reaches the client unaltered.
+func TestSecondaryWithoutACachedInitializeDegradesToTodaysBehavior(t *testing.T) {
+	root := t.TempDir()
+	p1 := startRealPrimary(t, root)
+	s := newSecondaryUnderTest(t, root)
+
+	turn1 := s.connect()
+	s.send(toolsListLine(1)) // never initialized: primary 1 rejects it
+	m := s.recv()
+	if m["id"] != float64(1) || m["error"] == nil {
+		t.Fatalf("expected primary 1's own rejection, got %v", m)
+	}
+	p1.kill()
+	<-turn1
+
+	startRealPrimary(t, root)
+	s.connect()
+	s.send(toolsListLine(2))
+	m = s.recv()
+	errObj, _ := m["error"].(map[string]any)
+	if m["id"] != float64(2) || errObj == nil || !strings.Contains(errObj["message"].(string), "invalid during session initialization") {
+		t.Fatalf("expected primary 2's own 'invalid during session initialization' rejection to reach the client unaltered, got %v", m)
+	}
+	if s.continuity.replays != 0 || s.continuity.initLine != nil {
+		t.Fatalf("nothing should have been cached or replayed: replays=%d cached=%q", s.continuity.replays, s.continuity.initLine)
+	}
+	s.expectNothing(200 * time.Millisecond)
 }
 
 // --- against real go-sdk primaries, in process ---------------------------

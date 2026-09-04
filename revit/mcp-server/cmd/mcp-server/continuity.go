@@ -63,13 +63,12 @@ type sessionContinuity struct {
 
 	// answered records that the client has received an initialize response.
 	answered bool
-	// outstanding is how many initialize responses this holder still expects
-	// from the CURRENT upstream: 1 after the client's own request was
-	// forwarded, or after a replay; 0 otherwise. Only while it is non-zero
-	// does the output path parse lines at all -- the rest of the time it is
-	// the same streaming byte copy it always was. Reset per upstream, since a
-	// dead upstream will never answer.
-	outstanding int
+	// answerPending is set while the CURRENT upstream owes an initialize
+	// response: after the client's own request was forwarded, or after a
+	// replay. Only while it is set does the output path parse lines at all --
+	// the rest of the time it is the same streaming byte copy it always was.
+	// Reset per upstream, since a dead upstream will never answer.
+	answerPending bool
 
 	// replays counts successor upstreams fed the prefix; for logging and tests.
 	replays int
@@ -156,7 +155,7 @@ func (s *sessionContinuity) observe(b []byte) {
 	s.initID = id
 	// The client's own initialize is now on its way to the current upstream,
 	// which owes exactly one response for it.
-	s.outstanding = 1
+	s.answerPending = true
 }
 
 // initializeRequestID validates that line is a JSON-RPC `initialize` request
@@ -186,8 +185,8 @@ func initializeRequestID(line []byte) (any, error) {
 // replayPrefix returns the bytes a SUCCESSOR upstream must be fed before any
 // live client bytes, or nil when there is nothing to replay (no initialize
 // captured yet). Calling it declares a new upstream: the previous one can no
-// longer answer anything, so its outstanding response is written off and one
-// is expected from the successor.
+// longer answer anything, so its pending response is written off and one is
+// expected from the successor.
 func (s *sessionContinuity) replayPrefix() []byte {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -195,11 +194,11 @@ func (s *sessionContinuity) replayPrefix() []byte {
 		// No initialize captured: either this is the first upstream and the
 		// client has not spoken yet (the normal first-connection case, where
 		// the real initialize flows through and is captured on the way), or
-		// the client never sent one. Nothing to replay, nothing outstanding.
-		s.outstanding = 0
+		// the client never sent one. Nothing to replay, nothing pending.
+		s.answerPending = false
 		return nil
 	}
-	s.outstanding = 1
+	s.answerPending = true
 	s.replays++
 	s.logf("session-continuity: replaying the client's cached initialize to a new upstream (replay %d); its duplicate response will not reach the client", s.replays)
 	prefix := make([]byte, 0, len(s.initLine)+len(initializedNotification))
@@ -209,7 +208,7 @@ func (s *sessionContinuity) replayPrefix() []byte {
 }
 
 // outputWriter wraps the client-facing stdout for one upstream. While an
-// initialize response is outstanding it frames upstream output into lines
+// initialize response is pending it frames upstream output into lines
 // and decides per line via forwardLine; otherwise it streams bytes through
 // untouched. Not safe for concurrent Write calls -- neither is os.Stdout for
 // interleaved NDJSON, and every caller drives it from one goroutine.
@@ -251,7 +250,14 @@ func (c *continuityWriter) Write(p []byte) (int, error) {
 		i := bytes.IndexByte(p, '\n')
 		if i < 0 {
 			if len(c.pending)+len(p) > maxWatchedOutputLineBytes {
-				// Too big to be the initialize response; stop holding it.
+				// Too big to be an initialize response (a real one is a
+				// few KiB), so stop holding it -- and stop watching for
+				// good: if it somehow were the answer, letting a later
+				// replay's duplicate through would show the client two
+				// responses, and watching forever would parse every line
+				// of every later upstream. Either way the client is
+				// treated as answered from here.
+				c.s.giveUpWatching()
 				c.streaming = true
 				if err := writeAll(c.w, c.pending); err != nil {
 					return total, err
@@ -290,7 +296,18 @@ func writeAll(w io.Writer, b []byte) error {
 func (s *sessionContinuity) watching() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.outstanding > 0
+	return s.answerPending
+}
+
+// giveUpWatching marks the client as answered without having matched a
+// response -- see the overflow path in continuityWriter.Write. It logs, since
+// an initialize response over the cap is not something a healthy build emits.
+func (s *sessionContinuity) giveUpWatching() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.answerPending = false
+	s.answered = true
+	s.logf("session-continuity: an upstream output line exceeded %d bytes while an initialize response was pending; streaming it and treating the client as answered", maxWatchedOutputLineBytes)
 }
 
 // forwardLine decides whether one complete upstream->client line reaches the
@@ -301,14 +318,14 @@ func (s *sessionContinuity) watching() bool {
 func (s *sessionContinuity) forwardLine(line []byte) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.outstanding == 0 {
+	if !s.answerPending {
 		return true
 	}
 	matched, rpcErr := responseTo(line, s.initID)
 	if !matched {
 		return true
 	}
-	s.outstanding--
+	s.answerPending = false
 	if !s.answered {
 		s.answered = true
 		return true
