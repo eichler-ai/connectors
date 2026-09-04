@@ -344,7 +344,9 @@ Pick one from `candidates` and pass its `instance_id`. Every discovery response 
 ## When something isn't working
 
 **`list_instances` reports successful connections only** — a Revit that never connected is simply
-absent. For the why, a human can click **MCP Bridge → Status** on the Revit ribbon.
+absent. For the why, a human can click **MCP Bridge → Status** on the Revit ribbon. If the user asks
+whether the connector is current, `update_connector` (no arguments) checks GitHub now and reports the
+server and each Revit version's add-in; only apply it when they say so — it closes Revit.
 
 | Symptom | Most likely cause | What to do |
 |---|---|---|
@@ -381,6 +383,7 @@ local mode; in remote mode it moves to the shared drive — ask a human where th
 | `describe_howto` | no | one how-to's script, pitfalls and verification |
 | `submit_howto` | no | record a how-to, or fix one that misled you |
 | `get_skills` | no | this document |
+| `update_connector` | no | is a newer connector release out? (server + add-in per Revit version); `apply: true` + `confirm_lifecycle_actions: true` installs it — asks every Revit to close, so ask the user first |
 
 **Starting from nothing:** `list_instances` → pick an instance and document → `search_howtos` →
 `execute_script`.

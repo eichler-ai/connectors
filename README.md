@@ -46,6 +46,10 @@ To remove it, use Windows **Apps & features** (the installer registers an uninst
   the server: reconnect the `revit` server (e.g. `/mcp` in Claude Code), or quit the client fully and
   start it again (closing Claude Desktop's window leaves its server running). Until then the Status
   window says the new version is installed but the running server is still the old one.
+- **From Claude.** Ask whether the connector is up to date: the `update_connector` tool checks GitHub
+  right away (no waiting for the server's six-hourly check) and reports the server and each Revit
+  version's add-in. Ask it to apply the update and it starts the same updater as Update Now, after
+  confirming with you, since Revit will be asked to close.
 - **From PowerShell.** Re-run the install one-liner above. It deploys only the components whose
   content changed and closes Revit only if the add-in is one of them.
 
