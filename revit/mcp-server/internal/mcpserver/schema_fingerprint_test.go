@@ -2,6 +2,8 @@ package mcpserver
 
 import (
 	"context"
+	"io"
+	"log"
 	"testing"
 
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/discovery"
@@ -89,7 +91,7 @@ func TestSchemaFingerprintCoversEveryRegisteredTool(t *testing.T) {
 	RegisterInstances(s, reg, execMgr)
 	RegisterHowTo(s, HowToDeps{Registry: reg, Router: router, Exec: execMgr, Version: "test"})
 	RegisterSkills(s, "test")
-	RegisterUpdate(s, UpdateDeps{Mode: "local", Version: "test"})
+	RegisterUpdate(s, NewUpdateDeps("remote", t.TempDir(), "test", reg, nil, log.New(io.Discard, "", 0)))
 
 	ct, st := mcp.NewInMemoryTransports()
 	ctx := context.Background()
