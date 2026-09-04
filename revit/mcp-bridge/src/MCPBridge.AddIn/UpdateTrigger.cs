@@ -13,8 +13,9 @@ namespace MCPBridge.AddIn;
 /// <c>Get-AppDir</c>/<c>$selfCopyPath</c> logic) and re-invokes it with <c>-Update -Silent</c> --
 /// exactly the shape install.ps1's own comments already anticipate as "the ribbon's -Update -Silent
 /// self-update path". No new orchestration logic here; install.ps1 already owns the actual update
-/// mechanics (per-version deploy-skip-if-running, the deferred-update Scheduled Task, re-updating the
-/// broker binary).
+/// mechanics (the versioned add-in folders and the current.json pointer flip under the shim; the
+/// per-version deploy-skip-if-running and deferred-update Scheduled Task on the legacy flat layout;
+/// re-updating the broker binary).
 ///
 /// CRITICAL BOUNDARY: this type is <c>internal</c> and its only caller is
 /// <see cref="MCPBridgeStatusCommand"/>'s <c>IExternalCommand.Execute()</c> -- a ribbon-button click.
@@ -92,15 +93,69 @@ internal static class UpdateTrigger
                 return null;
             }
 
-            using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(markerPath));
-            return doc.RootElement.TryGetProperty("version", out var v) && v.ValueKind == System.Text.Json.JsonValueKind.String
-                ? v.GetString()
-                : null;
+            return ReadVersionProperty(markerPath);
         }
         catch
         {
             return null; // best-effort: a missing/corrupt marker only means "cannot tell", never a failed click.
         }
+    }
+
+    /// <summary>
+    /// The version the shim's pointer (<c>&lt;app dir&gt;\addin\current.json</c>, self-update-architecture.md
+    /// §4.1) names -- what a Revit started NOW would load -- or null when there is no pointer (a legacy
+    /// flat install) or it cannot be read. Distinct from <see cref="TryReadInstalledVersion"/>: the
+    /// marker describes the whole install, the pointer is specifically the add-in's "apply" step, and
+    /// the Status window compares it with the version THIS process loaded to tell the user whether a
+    /// restart is what stands between them and the installed add-in (issue #209). Same BOM tolerance
+    /// as the shim's own reader: File.ReadAllText strips the UTF-8 BOM Windows PowerShell writes.
+    /// </summary>
+    internal static string? TryReadAddinPointerVersion()
+    {
+        try
+        {
+            var pointerPath = Path.Combine(ResolveInstallLocation().AppDir, "addin", "current.json");
+            return ReadVersionProperty(pointerPath);
+        }
+        catch
+        {
+            return null; // best-effort, as above: never a failed Status click.
+        }
+    }
+
+    /// <summary>
+    /// Whether THIS add-in was loaded by the shim out of a versioned <c>addin\&lt;version&gt;\&lt;year&gt;\</c>
+    /// folder (so an add-in update is a pointer flip that closes nothing), as opposed to flat out of
+    /// Revit's Addins folder (so the next update -- a legacy flat deploy, or the one-time §4.7 migration
+    /// to the shim -- still has to replace the loaded DLL and asks Revit to close). Decided from the
+    /// load path alone, the one fact this process owns outright; the decision itself is
+    /// <see cref="MCPBridge.Core.Connection.UpdateAvailability.IsVersionedAddinLocation"/> (tested in Core),
+    /// this is only the wrapper that supplies its two inputs.
+    /// </summary>
+    internal static bool IsLoadedFromVersionedFolder()
+    {
+        try
+        {
+            return MCPBridge.Core.Connection.UpdateAvailability.IsVersionedAddinLocation(
+                Assembly.GetExecutingAssembly().Location, ResolveInstallLocation().AppDir);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static string? ReadVersionProperty(string jsonPath)
+    {
+        if (!File.Exists(jsonPath))
+        {
+            return null;
+        }
+
+        using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(jsonPath));
+        return doc.RootElement.TryGetProperty("version", out var v) && v.ValueKind == System.Text.Json.JsonValueKind.String
+            ? v.GetString()
+            : null;
     }
 
     public static void TriggerUpdate(IntPtr ownerHandle, string targetVersionTag, Action<string> onStarted)
@@ -120,22 +175,37 @@ internal static class UpdateTrigger
         }
 
         // The user's own request after the first live Update Now: say what is about to happen to
-        // their open Revit windows BEFORE anything happens, and let them back out. The installer
-        // never force-kills -- it asks each Revit to close (Revit's own save prompt appears) and
-        // defers any instance still running -- but "click, and Revit starts closing" with no warning
-        // is still a surprise when unsaved work is open in several windows.
+        // their open Revit windows BEFORE anything happens, and let them back out.
         // Presentation (the user's feedback on the first version, a paragraph of caveats ending in
         // "Yes/No"): the question names the version, the consequences are a short list, and the
         // buttons are OK/Cancel with Cancel as the default so Enter backs out.
+        //
+        // Two truthful texts, chosen by how THIS add-in was loaded (self-update-architecture.md §6.2):
+        //   - Shim layout: an add-in update writes a new version folder and flips addin\current.json;
+        //     nothing is asked to close, this Revit keeps the add-in it has until the user restarts it.
+        //     "Apply" and "load" are two user-controlled steps, and the text says so.
+        //   - Flat layout (not migrated yet): the next update replaces the DLL this Revit has loaded --
+        //     the legacy deploy, or the one-time §4.7 switch to the shim -- so the installer still asks
+        //     each Revit of an affected version to close (Revit's own save prompt appears; it never
+        //     force-kills) and defers any instance still running. That wording stays until the shim
+        //     has shipped and this machine is on it.
+        var shim = IsLoadedFromVersionedFolder();
         var proceed = ShowOwnedMessageBox(
             ownerHandle,
             $"Update Revit MCP Bridge to {targetVersionTag}?\n\n" +
-            "Revit will close to install the update:\n" +
-            "  •  You will be asked to save any unsaved work first.\n" +
-            "  •  This applies to every open Revit window, of every installed Revit version.\n" +
-            "  •  A Revit you keep open is updated the next time you close it.\n" +
-            "  •  Reopen Revit yourself when the update has finished.\n\n" +
-            "If only the MCP Server changed, Revit stays open.",
+            (shim
+                ? "The update is installed in the background; nothing is closed:\n" +
+                  "  •  Revit keeps running the add-in it has now.\n" +
+                  "  •  Restart Revit when convenient to load the new add-in.\n" +
+                  "  •  If the MCP Server changed too, reconnect the revit server in your MCP client (or restart it).\n" +
+                  "  •  This window shows what is installed and what is running until then."
+                : "Revit will close to install the update:\n" +
+                  "  •  You will be asked to save any unsaved work first.\n" +
+                  "  •  This applies to every open Revit window, of every installed Revit version.\n" +
+                  "  •  A Revit you keep open is updated the next time you close it.\n" +
+                  "  •  Reopen Revit yourself when the update has finished.\n" +
+                  "  •  Once this machine is on the new add-in layout, later updates install in the background without closing Revit.\n\n" +
+                  "If only the MCP Server changed, Revit stays open."),
             $"MCP Bridge - Update to {targetVersionTag}",
             MessageBoxImage.Question,
             MessageBoxButton.OKCancel,
@@ -172,20 +242,27 @@ internal static class UpdateTrigger
 
             Process.Start(startInfo); // fire-and-forget: never waited on.
 
-            // Independent review finding: install.ps1's -Silent flag SKIPS Revit's automatic relaunch
-            // (`if (-not $Silent -and ...)`) -- under -Silent, Revit closes and does NOT reopen on its
-            // own. Since the release manifest (seed plan §1, step 5) the installer also skips every
-            // component whose hash is unchanged, so Revit closes ONLY when this version's add-in
-            // payload actually changed; a broker-only release (a how-to corpus update, say) is staged
-            // beside the running broker and takes effect when the MCP client next starts it. This
-            // button cannot know which case applies before the installer has compared the manifest,
-            // so the text states both outcomes rather than promising one.
-            onStarted(
-                "Update started. If the MCP Bridge add-in changed, Revit will ask to close (saving unsaved work first) to apply it; " +
-                "a Revit you keep open is updated automatically when you next close it. Reopen Revit yourself afterwards. " +
-                "If only the MCP Server changed, Revit stays open; the running MCP Server steps aside on its own within about a minute " +
-                "and your MCP client's next call starts the new one (if not, reconnect the revit MCP server, e.g. /mcp in Claude Code); " +
-                "this window shows the update as available until then.");
+            // Shim layout (§6.2): the installer stages the new add-in beside the running one and flips
+            // the pointer; this Revit is not asked to close and loads the new add-in at its next start.
+            // The MCP Server half is unchanged either way: since the release manifest the installer
+            // skips every component whose hash is unchanged, a changed server image is staged beside
+            // the running one, and the running process steps aside on its own (issue #201).
+            //
+            // Flat layout: install.ps1's -Silent flag SKIPS Revit's automatic relaunch (`if (-not
+            // $Silent -and ...)`) -- under -Silent, Revit closes and does NOT reopen on its own, and it
+            // closes ONLY when this version's add-in payload actually changed. This button cannot know
+            // which components changed before the installer has compared the manifest, so that text
+            // states both outcomes rather than promising one.
+            onStarted(shim
+                ? "Update started. Nothing is closed: the new add-in is installed beside the running one and Revit keeps the current add-in until you restart it. " +
+                  "Restart Revit when convenient to load the new add-in -- reopen this window afterwards and the add-in line shows one version again. " +
+                  "If the MCP Server changed too, the running MCP Server steps aside on its own within about a minute " +
+                  "and your MCP client's next call starts the new one (if not, reconnect the revit MCP server, e.g. /mcp in Claude Code)."
+                : "Update started. If the MCP Bridge add-in changed, Revit will ask to close (saving unsaved work first) to apply it; " +
+                  "a Revit you keep open is updated automatically when you next close it. Reopen Revit yourself afterwards. " +
+                  "If only the MCP Server changed, Revit stays open; the running MCP Server steps aside on its own within about a minute " +
+                  "and your MCP client's next call starts the new one (if not, reconnect the revit MCP server, e.g. /mcp in Claude Code); " +
+                  "this window shows the update as available until then.");
         }
         catch (Exception ex)
         {

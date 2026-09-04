@@ -31,4 +31,44 @@ public class UpdateAvailabilityTests
     {
         Assert.Equal(expected, UpdateAvailability.DisplayTag(latest));
     }
+
+    // The Status window's add-in line (self-update-architecture.md §6.2, issue #209): the pointer's
+    // version against the version this process loaded, remedy only when they differ.
+    [Theory]
+    [InlineData("v0.1.4", "v0.1.5", "v0.1.5 installed · running v0.1.4 — restart Revit to load it")] // the shim case the line exists for
+    [InlineData("0.1.4", "v0.1.5", "v0.1.5 installed · running v0.1.4 — restart Revit to load it")] // bare assembly stamp still gets one "v"
+    [InlineData("v0.1.5", "v0.1.5", "v0.1.5")] // agree -> single value, no remedy
+    [InlineData("v0.1.5", "0.1.5", "v0.1.5")] // agree modulo the leading "v"
+    [InlineData("v0.1.5", "V0.1.5", "v0.1.5")] // agree modulo case
+    [InlineData("v0.1.5", null, "v0.1.5")] // no current.json (legacy flat install) -> today's display, never "restart to load"
+    [InlineData("v0.1.5", "", "v0.1.5")]
+    [InlineData("v0.1.5", "   ", "v0.1.5")]
+    [InlineData("dev", "v0.1.5", "dev build")] // an unreleased build cannot be compared with anything
+    [InlineData("dev", null, "dev build")]
+    [InlineData(null, "v0.1.5", "dev build")]
+    [InlineData("", null, "dev build")]
+    [InlineData("v0.1.5", "local-20260904120000", "local-20260904120000 installed · running v0.1.5 — restart Revit to load it")] // a -LocalPackagePath tag is shown as written, not "vlocal-…"
+    public void AddInStatusLine_ComparesLoadedWithPointer(string? running, string? pointer, string expected)
+    {
+        Assert.Equal(expected, UpdateAvailability.AddInStatusLine(running, pointer));
+    }
+
+    // The shim-vs-flat decision behind Update Now's two (contradictory) dialog texts: loaded out of
+    // <app dir>\addin\<version>\<year>\ means a pointer flip; anything else still closes Revit.
+    [Theory]
+    [InlineData(@"C:\Users\nick\AppData\Local\Programs\MCPBridge\addin\v0.1.5\2027\MCPBridge.AddIn.dll", @"C:\Users\nick\AppData\Local\Programs\MCPBridge", true)] // shim, User scope
+    [InlineData(@"C:\Program Files\MCPBridge\addin\v0.1.5\2025\MCPBridge.AddIn.dll", @"C:\Program Files\MCPBridge", true)] // shim, AllUsers scope
+    [InlineData(@"c:\program files\mcpbridge\ADDIN\v0.1.5\2025\MCPBridge.AddIn.dll", @"C:\Program Files\MCPBridge", true)] // case-insensitive, as NTFS is
+    [InlineData(@"C:\Program Files\MCPBridge\addin\v0.1.5\2025\MCPBridge.AddIn.dll", @"C:\Program Files\MCPBridge\", true)] // app dir given with a trailing separator
+    [InlineData(@"C:\Users\nick\AppData\Roaming\Autodesk\Revit\Addins\2027\MCPBridge.AddIn.dll", @"C:\Users\nick\AppData\Local\Programs\MCPBridge", false)] // flat, User scope
+    [InlineData(@"C:\Program Files\Autodesk\Revit\Addins\2025\MCPBridge.AddIn.dll", @"C:\Program Files\MCPBridge", false)] // flat, AllUsers scope
+    [InlineData(@"C:\Program Files\MCPBridge\addin-old\v0.1.5\2025\MCPBridge.AddIn.dll", @"C:\Program Files\MCPBridge", false)] // a sibling folder that merely starts with "addin"
+    [InlineData(@"C:\Program Files\MCPBridge\MCPBridge.AddIn.dll", @"C:\Program Files\MCPBridge", false)] // the app dir itself, not its addin\ tree
+    [InlineData("", @"C:\Program Files\MCPBridge", false)] // no location (a byte-loaded assembly) -> never promise a pointer flip
+    [InlineData(null, @"C:\Program Files\MCPBridge", false)]
+    [InlineData(@"C:\Program Files\MCPBridge\addin\v0.1.5\2025\MCPBridge.AddIn.dll", "", false)] // no app dir -> same
+    public void IsVersionedAddinLocation_DecidesShimVersusFlat(string? location, string appDir, bool expected)
+    {
+        Assert.Equal(expected, UpdateAvailability.IsVersionedAddinLocation(location, appDir));
+    }
 }
