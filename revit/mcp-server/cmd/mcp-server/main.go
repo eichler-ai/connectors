@@ -15,6 +15,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -516,6 +517,12 @@ func run(mode, bindAddr string, port int, appDataDirOverride, sharedRoot string,
 		if ctx.Err() != nil {
 			return nil // clean shutdown (signal), not a dropped-primary retry case
 		}
+		if errors.Is(err, errSchemaMismatch) {
+			// Terminal by design: retrying re-reads the same broker.json and
+			// refuses again. The recovery is a human restarting the older
+			// broker (the log line above says which), not this loop spinning.
+			return err
+		}
 		if relay.exhausted() {
 			// The MCP client closed stdin — its normal stdio shutdown
 			// signal, after which it is not waiting on further responses —
@@ -548,13 +555,24 @@ func runPrimary(ctx context.Context, bindAddr string, port int, rendezvousRoot, 
 		return fmt.Errorf("generating auth token: %w", err)
 	}
 
+	// The tool-contract fingerprint a secondary checks before proxying (#197).
+	// A failure to compute it is not fatal -- the broker still serves -- but it
+	// leaves the field empty, which a newer secondary treats as incompatible,
+	// so log it loudly rather than swallow it.
+	fingerprint, err := mcpserver.ToolSchemaFingerprint()
+	if err != nil {
+		logger.Printf("primary: WARNING: could not compute tool-schema fingerprint (%v); secondaries on a newer build will refuse to proxy", err)
+	}
+
 	info := singleton.BrokerInfo{
-		Host:      bindAddr,
-		Port:      tcpAddr.Port,
-		PID:       os.Getpid(),
-		StartedAt: time.Now().UTC(),
-		Token:     token,
-		Version:   version,
+		Host:              bindAddr,
+		Port:              tcpAddr.Port,
+		PID:               os.Getpid(),
+		StartedAt:         time.Now().UTC(),
+		Token:             token,
+		Version:           version,
+		Revision:          buildinfo.Read().Revision,
+		SchemaFingerprint: fingerprint,
 	}
 	if err := singleton.WriteBrokerJSON(rendezvousRoot, info); err != nil {
 		return fmt.Errorf("writing broker.json: %w", err)
@@ -663,6 +681,50 @@ func runPrimary(ctx context.Context, bindAddr string, port int, rendezvousRoot, 
 	return nil
 }
 
+// errSchemaMismatch marks a secondary's refusal to proxy through a primary
+// whose tool contract differs from this build's (#197). It is terminal: the
+// re-election loop must NOT retry it. Retrying would re-read the same
+// broker.json and refuse again on a 500ms poll -- not a tight loop, but a
+// silently-hanging stdio client, which is worse UX than one legible failure.
+// The recovery is a human restarting the older broker (the log names its
+// pid), so surface that once and exit rather than poll for it.
+var errSchemaMismatch = errors.New("broker tool-schema mismatch")
+
+// schemaMismatch decides whether this secondary may proxy through the primary
+// described by info. It returns a wrapped errSchemaMismatch, with a message
+// aimed at the person reading the failed MCP connection, when the contracts
+// differ; nil when they match or when this build cannot compute its own
+// fingerprint to compare (in which case it degrades to the prior
+// proxy-anyway behavior rather than blocking).
+func schemaMismatch(info singleton.BrokerInfo, logger *log.Logger) error {
+	own, err := mcpserver.ToolSchemaFingerprint()
+	if err != nil {
+		logger.Printf("secondary: WARNING: could not compute own tool-schema fingerprint (%v); proxying through the primary without a compatibility check", err)
+		return nil
+	}
+	if info.SchemaFingerprint == own {
+		return nil
+	}
+
+	self := version + " (" + buildinfo.Read().Summary() + ")"
+	primary := info.Version
+	if info.Revision != "" {
+		primary += " (revision " + buildinfo.Info{Revision: info.Revision}.ShortRevision() + ")"
+	}
+	var why string
+	if info.SchemaFingerprint == "" {
+		why = "the primary broker predates the tool-schema compatibility check, or could not compute its own fingerprint"
+	} else {
+		why = "the primary broker advertises a different tool schema than this build"
+	}
+	logger.Printf("secondary: refusing to proxy: %s. primary pid %d version %s; this build %s. "+
+		"A call that is valid for this build could be rejected by the primary's schema (issue #197). "+
+		"Restart the primary broker (stop pid %d) so the newest build serves the singleton, then reconnect.",
+		why, info.PID, primary, self, info.PID)
+	return fmt.Errorf("%w: primary pid %d is %s, this build is %s; restart the primary broker (stop pid %d) and reconnect",
+		errSchemaMismatch, info.PID, primary, self, info.PID)
+}
+
 func runSecondary(ctx context.Context, rendezvousRoot string, logger *log.Logger, stdin io.Reader, stop chan struct{}, wg *sync.WaitGroup) error {
 	var info singleton.BrokerInfo
 	var err error
@@ -679,6 +741,18 @@ func runSecondary(ctx context.Context, rendezvousRoot string, logger *log.Logger
 			return fmt.Errorf("reading broker.json from %q after waiting for the primary: %w", rendezvousRoot, err)
 		}
 		time.Sleep(100 * time.Millisecond)
+	}
+
+	// Issue #197: the singleton means this secondary proxies its whole MCP
+	// session -- tool list and argument validation included -- through the
+	// primary's build. If the primary validates tool calls differently from
+	// how this build would, valid calls fail against the primary's schema (the
+	// reported case: a `label` argument the primary's older build predated,
+	// rejected as an unexpected property). Refuse to proxy across that boundary
+	// with a legible, terminal error, instead of connecting and letting the
+	// mismatch surface mid-session as an unattributable per-call rejection.
+	if mismatch := schemaMismatch(info, logger); mismatch != nil {
+		return mismatch
 	}
 
 	conn, err := net.Dial("tcp", net.JoinHostPort(info.Host, strconv.Itoa(info.Port)))
