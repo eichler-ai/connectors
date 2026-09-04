@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // Marker is the subset of install.ps1's installed-version.json this package
@@ -70,4 +71,48 @@ func ShouldEvict(ownVersion, markerVersion string) bool {
 
 func normalize(tag string) string {
 	return strings.TrimPrefix(strings.ToLower(strings.TrimSpace(tag)), "v")
+}
+
+// ImageStamp identifies the executable file this process was started from, as
+// it was at start: size and modification time of the file at os.Executable().
+type ImageStamp struct {
+	Path    string
+	Size    int64
+	ModTime time.Time
+	ok      bool
+}
+
+// StampExecutable records the executable as it is right now. Call once at
+// process start; ExecutableReplaced compares against it later.
+func StampExecutable() ImageStamp {
+	exe, err := os.Executable()
+	if err != nil {
+		return ImageStamp{}
+	}
+	fi, err := os.Stat(exe)
+	if err != nil {
+		return ImageStamp{Path: exe}
+	}
+	return ImageStamp{Path: exe, Size: fi.Size(), ModTime: fi.ModTime(), ok: true}
+}
+
+// ExecutableReplaced reports whether the file at the stamped path is no longer
+// the one this process started from (size or mtime differ). This is the second
+// half of the eviction test: the marker can name a newer release while the exe
+// on disk is still the old one -- install.ps1 bumps the marker when the add-ins
+// deploy even if the server swap is 'pending' behind a locked .old -- and
+// evicting then would respawn the same old exe into an immediate re-eviction,
+// forever, with no server at all. Only a replaced file means a fresh start
+// would run something different. A process started from a parked .old-* image
+// (its path never changes) therefore never self-evicts; the client that owns it
+// restarts it eventually, and every fresh process is the installed exe.
+func ExecutableReplaced(at ImageStamp) bool {
+	if !at.ok {
+		return false
+	}
+	fi, err := os.Stat(at.Path)
+	if err != nil {
+		return false // missing mid-swap: nothing to respawn into yet
+	}
+	return fi.Size() != at.Size || !fi.ModTime().Equal(at.ModTime)
 }

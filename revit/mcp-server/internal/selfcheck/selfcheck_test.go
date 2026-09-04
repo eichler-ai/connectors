@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestShouldEvict(t *testing.T) {
@@ -73,5 +74,30 @@ func TestPrimaryFailuresThresholdIsConfigurable(t *testing.T) {
 	f := PrimaryFailures{Threshold: 1}
 	if !f.Record(7) {
 		t.Fatal("threshold 1 must give up on the first failure")
+	}
+}
+
+func TestExecutableReplacedDetectsAReplacedFileOnly(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mcp-server.exe")
+	os.WriteFile(path, []byte("image-one"), 0o755)
+	fi, _ := os.Stat(path)
+	stamp := ImageStamp{Path: path, Size: fi.Size(), ModTime: fi.ModTime(), ok: true}
+
+	if ExecutableReplaced(stamp) {
+		t.Fatal("unchanged file must not read as replaced")
+	}
+	// Same size, different content and a later mtime (the installer's Move-Item of a new image).
+	os.WriteFile(path, []byte("image-two"), 0o755)
+	os.Chtimes(path, fi.ModTime().Add(time.Minute), fi.ModTime().Add(time.Minute))
+	if !ExecutableReplaced(stamp) {
+		t.Fatal("a replaced file must read as replaced")
+	}
+	os.Remove(path)
+	if ExecutableReplaced(stamp) {
+		t.Fatal("a missing file (mid-swap) must not read as replaced")
+	}
+	if ExecutableReplaced(ImageStamp{}) {
+		t.Fatal("an unknown stamp must never evict")
 	}
 }

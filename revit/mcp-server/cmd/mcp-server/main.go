@@ -488,6 +488,9 @@ func run(mode, bindAddr string, port int, appDataDirOverride, sharedRoot string,
 	// Issue #201: consecutive failures to reach the same primary, across
 	// re-election turns. See PrimaryFailures for the live case this exists for.
 	var primaryFailures selfcheck.PrimaryFailures
+	// And the executable as it was when this process started: eviction also requires that file
+	// to have been REPLACED since (see selfcheck.ExecutableReplaced for the respawn-loop this avoids).
+	imageAtStart := selfcheck.StampExecutable()
 
 	for {
 		lock, primary, err := singleton.AcquireLock(lockPath)
@@ -502,7 +505,7 @@ func run(mode, bindAddr string, port int, appDataDirOverride, sharedRoot string,
 		// secondary (a stale secondary would be the next stale primary). The MCP
 		// client respawns the exe on disk on its next call, so exiting IS the
 		// upgrade. Dev builds and installs without a marker never evict.
-		if disk := selfcheck.ReadMarkerVersion(); selfcheck.ShouldEvict(version, disk) {
+		if disk := selfcheck.ReadMarkerVersion(); selfcheck.ShouldEvict(version, disk) && selfcheck.ExecutableReplaced(imageAtStart) {
 			lock.Release()
 			role := "secondary"
 			if primary {
@@ -516,7 +519,7 @@ func run(mode, bindAddr string, port int, appDataDirOverride, sharedRoot string,
 		reader := &turnReader{relay: relay, stop: stop}
 
 		if primary {
-			err := runPrimary(ctx, mode, bindAddr, port, rendezvousRoot, privateRoot, logger, reader)
+			err := runPrimary(ctx, mode, bindAddr, port, rendezvousRoot, privateRoot, imageAtStart, logger, reader)
 			close(stop)
 			lock.Release()
 			return err // this process's own session ending is a real shutdown, not something to retry
@@ -620,7 +623,7 @@ const staleImageCheckInterval = 30 * time.Second
 // run() returns, the client respawns the exe on disk, and the secondaries whose
 // upstream just dropped re-race the lock (evicting themselves if stale, see
 // run). Never evicts a dev build or an install with no marker.
-func watchForStaleImage(ctx context.Context, cancel context.CancelFunc, logger *log.Logger) {
+func watchForStaleImage(ctx context.Context, cancel context.CancelFunc, imageAtStart selfcheck.ImageStamp, logger *log.Logger) {
 	ticker := time.NewTicker(staleImageCheckInterval)
 	defer ticker.Stop()
 	for {
@@ -628,7 +631,7 @@ func watchForStaleImage(ctx context.Context, cancel context.CancelFunc, logger *
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if disk := selfcheck.ReadMarkerVersion(); selfcheck.ShouldEvict(version, disk) {
+			if disk := selfcheck.ReadMarkerVersion(); selfcheck.ShouldEvict(version, disk) && selfcheck.ExecutableReplaced(imageAtStart) {
 				logger.Printf("stale-image-evicted: this primary is %s but the install on disk is now %s; shutting down so the client's next start runs the installed release (issue #201)", version, disk)
 				cancel()
 				return
@@ -637,10 +640,10 @@ func watchForStaleImage(ctx context.Context, cancel context.CancelFunc, logger *
 	}
 }
 
-func runPrimary(ctx context.Context, mode, bindAddr string, port int, rendezvousRoot, privateRoot string, logger *log.Logger, stdin io.Reader) error {
+func runPrimary(ctx context.Context, mode, bindAddr string, port int, rendezvousRoot, privateRoot string, imageAtStart selfcheck.ImageStamp, logger *log.Logger, stdin io.Reader) error {
 	ctx, cancelEviction := context.WithCancel(ctx)
 	defer cancelEviction()
-	go watchForStaleImage(ctx, cancelEviction, logger)
+	go watchForStaleImage(ctx, cancelEviction, imageAtStart, logger)
 
 	ln, err := net.Listen("tcp", net.JoinHostPort(bindAddr, strconv.Itoa(port)))
 	if err != nil {
