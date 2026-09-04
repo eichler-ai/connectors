@@ -178,8 +178,8 @@ internal static class UpdateTrigger
             onStarted(
                 "Update started. If the MCP Bridge add-in changed, Revit will ask to close (saving unsaved work first) to apply it; " +
                 "a Revit you keep open is updated automatically when you next close it. Reopen Revit yourself afterwards. " +
-                "If only the MCP Server changed, Revit stays open and the update takes effect when your MCP client " +
-                "next starts the MCP Server (reconnect the revit MCP server, e.g. /mcp in Claude Code); " +
+                "If only the MCP Server changed, Revit stays open; the running MCP Server steps aside on its own within about a minute " +
+                "and your MCP client's next call starts the new one (if not, reconnect the revit MCP server, e.g. /mcp in Claude Code); " +
                 "this window shows the update as available until then.");
         }
         catch (Exception ex)

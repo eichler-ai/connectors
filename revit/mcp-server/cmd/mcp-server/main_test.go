@@ -636,3 +636,31 @@ func TestSchemaMismatchRefusesAPrimaryThatPredatesTheCheck(t *testing.T) {
 		t.Fatalf("empty primary fingerprint should refuse, got %v", err)
 	}
 }
+
+func TestIsPrimaryUnreachableClassifiesRunSecondaryErrors(t *testing.T) {
+	// Issue #201: only failures to REACH the primary count toward primary-unresponsive; a session
+	// that ran and then ended is the ordinary re-election case and must not.
+	unreachable := []string{
+		"dialing primary broker at 127.0.0.1:50993: connectex: refused",
+		"sending auth request to primary: broken pipe",
+		"reading auth response from primary: read tcp: i/o timeout",
+		"decoding auth response from primary: unexpected EOF",
+		"primary rejected this secondary's auth: bad token",
+		"reading broker.json from \"C:\\x\" after waiting for the primary: not found",
+	}
+	for _, m := range unreachable {
+		if !isPrimaryUnreachable(errors.New(m)) {
+			t.Errorf("%q should count as unreachable", m)
+		}
+	}
+	ordinary := []string{"", "read tcp: connection reset by peer", "EOF"}
+	for _, m := range ordinary {
+		var err error
+		if m != "" {
+			err = errors.New(m)
+		}
+		if isPrimaryUnreachable(err) {
+			t.Errorf("%q should NOT count as unreachable", m)
+		}
+	}
+}

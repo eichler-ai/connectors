@@ -189,8 +189,8 @@ func updateConnector(ctx context.Context, deps UpdateDeps, in UpdateConnectorIn)
 
 	if marker != nil && !versionBehind(marker.Version, latest) && versionBehind(deps.Version, latest) {
 		out.Notices = append(out.Notices, diag.New(diag.SeverityInfo, "server-restart-pending", updateSource,
-			latest+" is installed on disk but this server process is still "+deps.Version+"; it takes effect when the MCP client next starts the server").
-			WithRemedy("reconnect the revit MCP server in the client, or quit the client fully and start it again (closing its window may leave the server running)"))
+			latest+" is installed on disk but this server process is still "+deps.Version+"; it steps aside on its own within about a minute (issue #201) and the client's next call starts the installed release").
+			WithRemedy("wait a minute and call again; if the version still lags, reconnect the revit MCP server in the client"))
 	}
 
 	if !in.Apply {
@@ -229,8 +229,8 @@ func updateConnector(ctx context.Context, deps UpdateDeps, in UpdateConnectorIn)
 	}
 	out.Applied = true
 	out.Notices = append(out.Notices, diag.New(diag.SeverityInfo, "update-started", updateSource,
-		"the updater is running: every running Revit is asked to close (Revit prompts to save unsaved work; a Revit kept open is updated when it is next closed) and nothing is relaunched. This server keeps serving "+deps.Version+" until the MCP client reconnects.").
-		WithRemedy("tell the user to reopen Revit once it has closed, and to reconnect the revit MCP server (or quit and restart the client) to load the new server"))
+		"the updater is running: every running Revit is asked to close (Revit prompts to save unsaved work; a Revit kept open is updated when it is next closed) and nothing is relaunched. Once the new server is on disk this process steps aside on its own within about a minute, and the client's next call starts the installed release.").
+		WithRemedy("tell the user to reopen Revit once it has closed; call update_connector again in a minute or two to confirm every component reports the new version"))
 	if deps.Logger != nil {
 		deps.Logger.Printf("update_connector: started %s -Update -Silent -Scope %s (running %s, latest %s)", script, scope, deps.Version, latest)
 	}
