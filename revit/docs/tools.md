@@ -189,10 +189,10 @@ installer tracks (`state`: `deployed` / `deferred` while that Revit was running 
 does not list) with `addin_installed` (what a Revit of that version loads at its next start: the
 pointer's version on the shim layout, the marker's on the flat one), `connected_instances` (from the
 registry), `update_available`, and a `note` where a connected Revit has something left to do — on the
-shim layout, a Revit that was already open when the add-in was installed keeps the previous add-in
-until it is restarted (the registry does not know which add-in version an instance runs; that Revit's
-own Status window shows `installed · running`); a `deferred` flat one is applied when that Revit
-exits. Multiple Revit versions are first-class. Notices: `server-restart-pending`
+shim layout, only when an update is available or this call just applied one: a Revit that is open when
+the add-in is installed keeps the previous add-in until it is restarted (the registry does not know
+which add-in version an instance runs; that Revit's own Status window shows `installed · running`); a
+`deferred` one is applied when that Revit exits. Multiple Revit versions are first-class. Notices: `server-restart-pending`
 when the new release is installed but this process is still the old one — it steps aside on its own
 within about a minute (a running server re-reads the installer's version marker every 30 s and exits
 once the release on disk differs *and* its own executable has been replaced, waiting first for any

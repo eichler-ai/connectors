@@ -128,15 +128,16 @@ internal static class UpdateTrigger
     /// folder (so an add-in update is a pointer flip that closes nothing), as opposed to flat out of
     /// Revit's Addins folder (so the next update -- a legacy flat deploy, or the one-time §4.7 migration
     /// to the shim -- still has to replace the loaded DLL and asks Revit to close). Decided from the
-    /// load path alone, the one fact this process owns outright.
+    /// load path alone, the one fact this process owns outright; the decision itself is
+    /// <see cref="MCPBridge.Core.Connection.UpdateAvailability.IsVersionedAddinLocation"/> (tested in Core),
+    /// this is only the wrapper that supplies its two inputs.
     /// </summary>
     internal static bool IsLoadedFromVersionedFolder()
     {
         try
         {
-            var location = Assembly.GetExecutingAssembly().Location;
-            var versionsRoot = Path.Combine(ResolveInstallLocation().AppDir, "addin") + Path.DirectorySeparatorChar;
-            return !string.IsNullOrEmpty(location) && location.StartsWith(versionsRoot, StringComparison.OrdinalIgnoreCase);
+            return MCPBridge.Core.Connection.UpdateAvailability.IsVersionedAddinLocation(
+                Assembly.GetExecutingAssembly().Location, ResolveInstallLocation().AppDir);
         }
         catch
         {

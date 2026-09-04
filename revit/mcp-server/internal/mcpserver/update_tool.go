@@ -89,10 +89,11 @@ type UpdateServerStatus struct {
 // skipped because the release shipped no payload for it). AddinInstalled is
 // what a Revit of that version loads at its next start: the pointer's version
 // on the shim layout, the marker's on the flat one. Note carries the one-line
-// consequence for a connected Revit -- "restart it to load" on the shim
-// layout, "applied when it exits" for a deferred flat one -- because the
-// registry does not carry the add-in version each instance is running, so the
-// per-instance running-vs-installed comparison lives in that Revit's own
+// consequence for a connected Revit when there is one -- "restart it to load"
+// on the shim layout once an update is available or was just applied (never
+// in steady state), "applied when it exits" for a deferred flat one -- because
+// the registry does not carry the add-in version each instance is running, so
+// the per-instance running-vs-installed comparison lives in that Revit's own
 // Status window (the shim's whole point is that the two can differ).
 type UpdateRevitStatus struct {
 	Version            string `json:"version"`
@@ -278,6 +279,13 @@ func updateConnector(ctx context.Context, deps UpdateDeps, in UpdateConnectorIn)
 	}
 	out.Applied = true
 	if out.AddinLayout == AddinLayoutShim {
+		// The launch just happened: every connected Revit of a deployed version is now (about to be)
+		// behind the pointer, whatever the pre-apply comparison said.
+		for i := range out.Revit {
+			if out.Revit[i].State == "deployed" && out.Revit[i].ConnectedInstances > 0 {
+				out.Revit[i].Note = "installed on disk; a Revit that was already open when it was installed keeps the previous add-in until it is restarted (its Status window shows installed vs running)"
+			}
+		}
 		// §6.2: apply and load are two user-controlled steps. The tool installs; the user restarts.
 		out.Notices = append(out.Notices, diag.New(diag.SeverityInfo, "update-started", updateSource,
 			"the updater is running and closes nothing: the new add-in is installed beside the running one and each running Revit keeps its current add-in until it is restarted. Once the new server is on disk this process steps aside on its own within about a minute, and the client's next call starts the installed release.").
@@ -325,23 +333,30 @@ func revitStatuses(marker *InstalledMarker, pointer string, reg *registry.Regist
 			if pointer != "" {
 				installed = pointer
 			}
+			behind := latest != "" && versionBehind(installed, latest)
 			note := ""
-			if pointer != "" && connected[v] > 0 {
-				// The shim case #209 is about: installed on disk, but a Revit that was already open
-				// when it was installed is still running the previous add-in. The registry does not
-				// know which add-in version an instance runs, so this is a statement about the
-				// layout, not a measurement -- that Revit's Status window has the measured line.
-				note = "installed on disk; a Revit that was already open when it was installed keeps the previous add-in until it is restarted (its Status window shows installed vs running)"
+			if pointer != "" && connected[v] > 0 && behind {
+				// The shim case #209 is about: once the update is applied, a Revit that is open at that
+				// moment keeps running the previous add-in. Said only when there is a delta a restart
+				// could resolve (review of #219: in steady state -- installed == latest, nothing
+				// applied -- the note told users to restart for no reason). The post-apply variant is
+				// stamped by updateConnector once the launch has happened. The registry does not know
+				// which add-in version an instance runs, so both are statements about the layout, not
+				// measurements -- that Revit's Status window has the measured line.
+				note = "an add-in update is available; a Revit that is open when it is applied keeps its current add-in until it is restarted, so tell the user to restart Revit after applying"
 			}
-			add(v, "deployed", installed, latest != "" && versionBehind(installed, latest), note)
+			add(v, "deployed", installed, behind, note)
 		}
 		for _, v := range marker.Deferred {
 			// Deferred: the release in marker.Version is parked for this version until its Revit exits,
 			// so it is behind whenever a latest is known (review of #200: not asserted blindly on a failed check).
-			// Flat-layout only (the legacy deploy, or the one-time migration onto the shim): under the
-			// shim an add-in update is never deferred because it never needs Revit closed.
+			// Only a flat-layout add-in is ever deferred (the legacy deploy, or the one-time migration
+			// onto the shim, §4.7): under the shim an update never needs Revit closed. A pointer CAN
+			// coexist with a deferred entry -- mid-migration, the versioned payload and pointer are
+			// written first and the Addins\<year> swap waits for Revit to exit -- so addin_layout may
+			// read "shim" beside this note; the wording names the loaded add-in, not the layout.
 			add(v, "deferred", "", latest != "",
-				"deferred: this Revit was running and the flat add-in layout needs it closed to replace the loaded add-in; the update is applied automatically when that Revit exits, and nothing else is closed for it")
+				"deferred: this Revit was running the previous, in-place add-in, which can only be replaced once that Revit exits; the update is applied automatically then, and nothing else is closed for it")
 		}
 		for _, v := range marker.Skipped {
 			add(v, "skipped", "", false, "")

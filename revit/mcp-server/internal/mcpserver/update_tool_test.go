@@ -269,29 +269,61 @@ func TestReadMarkerParsesInstallPs1Shape(t *testing.T) {
 
 // The shim layout (self-update-architecture.md §4, §6.2): addin\current.json names what a Revit
 // loads at its next start, and a Revit already open keeps the previous add-in until restarted.
-func TestUpdateConnectorShimLayoutReportsThePointerAndARestartNote(t *testing.T) {
-	reg := registry.New()
-	reg.Register(&registry.Instance{InstanceID: "a", RevitVersion: "2027", PID: 1}, time.Now())
-	marker := &InstalledMarker{Version: "v0.1.3", Deployed: []string{"2025", "2027"}}
-	deps, _ := updateDepsForTest(t, "local", marker, "v0.1.3", nil)
-	deps.Registry = reg
-	deps.ReadAddinPointer = func(string) string { return "v0.1.3" }
+func TestUpdateConnectorShimLayoutReportsThePointerAndARestartNoteOnlyWhenARestartResolvesSomething(t *testing.T) {
+	byVersion := func(out UpdateConnectorOut) map[string]UpdateRevitStatus {
+		m := map[string]UpdateRevitStatus{}
+		for _, r := range out.Revit {
+			m[r.Version] = r
+		}
+		return m
+	}
+	newDeps := func(t *testing.T, latest string) UpdateDeps {
+		reg := registry.New()
+		reg.Register(&registry.Instance{InstanceID: "a", RevitVersion: "2027", PID: 1}, time.Now())
+		marker := &InstalledMarker{Version: "v0.1.3", Deployed: []string{"2025", "2027"}}
+		deps, _ := updateDepsForTest(t, "local", marker, latest, nil)
+		deps.Registry = reg
+		deps.ReadAddinPointer = func(string) string { return "v0.1.3" }
+		return deps
+	}
 
-	out := updateConnector(context.Background(), deps, UpdateConnectorIn{})
+	t.Run("steady state: installed == latest, nothing applied -> no note (review of #219: it used to tell users to restart for nothing)", func(t *testing.T) {
+		out := updateConnector(context.Background(), newDeps(t, "v0.1.3"), UpdateConnectorIn{})
 
-	if out.AddinLayout != AddinLayoutShim {
-		t.Fatalf("pointer present must report the shim layout, got %q", out.AddinLayout)
-	}
-	byVersion := map[string]UpdateRevitStatus{}
-	for _, r := range out.Revit {
-		byVersion[r.Version] = r
-	}
-	if r := byVersion["2027"]; r.AddinInstalled != "v0.1.3" || r.UpdateAvailable || !strings.Contains(r.Note, "restarted") || strings.Contains(r.Note, "close") {
-		t.Errorf("a connected shim-layout Revit: installed from the pointer, a restart note and no talk of closing; got %+v", r)
-	}
-	if r := byVersion["2025"]; r.Note != "" {
-		t.Errorf("no connected Revit 2025, so nothing to restart: %+v", r)
-	}
+		if out.AddinLayout != AddinLayoutShim {
+			t.Fatalf("pointer present must report the shim layout, got %q", out.AddinLayout)
+		}
+		if r := byVersion(out)["2027"]; r.AddinInstalled != "v0.1.3" || r.UpdateAvailable || r.Note != "" {
+			t.Errorf("current, connected: installed from the pointer and NO note; got %+v", r)
+		}
+	})
+
+	t.Run("an update is available -> the connected version gets the restart-after-applying note, the unconnected one none", func(t *testing.T) {
+		out := updateConnector(context.Background(), newDeps(t, "v0.1.4"), UpdateConnectorIn{})
+
+		r := byVersion(out)
+		if x := r["2027"]; !x.UpdateAvailable || !strings.Contains(x.Note, "restart") || strings.Contains(x.Note, "close") {
+			t.Errorf("behind + connected: a restart note and no talk of closing; got %+v", x)
+		}
+		if x := r["2025"]; x.Note != "" {
+			t.Errorf("no connected Revit 2025, so nothing to restart: %+v", x)
+		}
+	})
+
+	t.Run("just applied -> the connected version's note says installed, restart to load", func(t *testing.T) {
+		out := updateConnector(context.Background(), newDeps(t, "v0.1.4"), UpdateConnectorIn{Apply: true, ConfirmLifecycleActions: true})
+
+		if !out.Applied {
+			t.Fatalf("expected applied: %+v", out)
+		}
+		r := byVersion(out)
+		if x := r["2027"]; !strings.Contains(x.Note, "installed on disk") || !strings.Contains(x.Note, "restarted") {
+			t.Errorf("applied + connected: installed-on-disk restart note; got %+v", x)
+		}
+		if x := r["2025"]; x.Note != "" {
+			t.Errorf("no connected Revit 2025: %+v", x)
+		}
+	})
 }
 
 func TestUpdateConnectorShimPointerIsWhatANewRevitLoads(t *testing.T) {
