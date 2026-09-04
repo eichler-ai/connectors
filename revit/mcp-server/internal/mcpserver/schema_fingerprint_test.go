@@ -89,6 +89,7 @@ func TestSchemaFingerprintCoversEveryRegisteredTool(t *testing.T) {
 	RegisterInstances(s, reg, execMgr)
 	RegisterHowTo(s, HowToDeps{Registry: reg, Router: router, Exec: execMgr, Version: "test"})
 	RegisterSkills(s, "test")
+	RegisterUpdate(s, UpdateDeps{Mode: "local", Version: "test"})
 
 	ct, st := mcp.NewInMemoryTransports()
 	ctx := context.Background()
