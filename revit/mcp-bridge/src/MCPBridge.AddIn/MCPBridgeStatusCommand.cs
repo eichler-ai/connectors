@@ -62,9 +62,9 @@ public sealed class MCPBridgeStatusCommand : IExternalCommand
                 // (and therefore the old image) running; only a real quit, or reconnecting the revit
                 // server inside the client, starts the new exe.
                 content +=
-                    $"\n\n{latestTag} is installed. The MCP Server you are connected to is still {runningTag}. " +
-                    "To load the new one, reconnect the revit server in your MCP client, or quit the client fully " +
-                    "(closing its window may leave the old server running) and start it again.";
+                    $"\n\n{latestTag} is installed. The MCP Server you are connected to is still {runningTag}; " +
+                    "it steps aside on its own within about a minute and the next call from your MCP client starts the new one. " +
+                    "If this line is still here after that, reconnect the revit server in your MCP client.";
                 MCPBridgeStatusWindow.ShowOrActivate(ownerHandle, content);
                 return Result.Succeeded;
             }

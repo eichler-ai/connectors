@@ -185,8 +185,13 @@ installer tracks (`state`: `deployed` / `deferred` while that Revit was running 
 release shipped no payload for it; `unknown` for a connected version the marker does not list) with
 `addin_installed`, `connected_instances` (from the registry) and `update_available`. Multiple Revit
 versions are first-class: an update asks every running one to close. Notices: `server-restart-pending`
-when the new release is installed but this process is still the old one (reconnect the `revit` server,
-or quit the client fully — closing its window can leave the server running).
+when the new release is installed but this process is still the old one — it steps aside on its own
+within about a minute (a running server re-reads the installer's version marker every 30 s and exits
+once the release on disk differs *and* its own executable has been replaced, waiting first for any
+script that is pending or running on a connected Revit; a process that wins the singleton lock while
+stale exits instead of serving), after which the client's next call starts the installed release. Fail-fast: a secondary
+that cannot reach or authenticate with the primary three times in a row exits with
+`primary-unresponsive` naming the pid, instead of retrying behind an opaque client timeout.
 
 With `apply: true` **and** `confirm_lifecycle_actions: true` it also starts the installed updater
 (`install.ps1 -Update -Silent -Scope <User|AllUsers>`, detached) when anything is behind: every running

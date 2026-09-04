@@ -43,9 +43,10 @@ To remove it, use Windows **Apps & features** (the installer registers an uninst
   Revit prompts you to save unsaved work first, and if you cancel, that Revit keeps running and is
   updated automatically the next time you close it. Reopen Revit yourself afterwards. If only the MCP
   Server changed, Revit stays open and the update takes effect the next time your MCP client starts
-  the server: reconnect the `revit` server (e.g. `/mcp` in Claude Code), or quit the client fully and
-  start it again (closing Claude Desktop's window leaves its server running). Until then the Status
-  window says the new version is installed but the running server is still the old one.
+  the server. Running server processes notice the new release on disk and step aside on their own
+  within about a minute, so the next call from any client starts the new one; if a Status check still
+  shows the old server after that, reconnect the `revit` server (e.g. `/mcp` in Claude Code). Until
+  then the Status window says the new version is installed but the running server is still the old one.
 - **From Claude.** Ask whether the connector is up to date: the `update_connector` tool checks GitHub
   right away (no waiting for the server's six-hourly check) and reports the server and each Revit
   version's add-in. Ask it to apply the update and it starts the same updater as Update Now, after

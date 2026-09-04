@@ -26,6 +26,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -41,6 +42,7 @@ import (
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/howtosearch"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/mcpserver"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/registry"
+	"github.com/eichler-ai/connectors/revit/mcp-server/internal/selfcheck"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/semsearch"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/semsearch/crossenc"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/semsearch/manager"
@@ -483,17 +485,41 @@ func run(mode, bindAddr string, port int, appDataDirOverride, sharedRoot string,
 	// actually happen, instead of the secondary process just exiting
 	// (killing whatever MCP client session it was proxying for) the moment
 	// the primary it was following goes away.
+	// Issue #201: consecutive failures to reach the same primary, across
+	// re-election turns. See PrimaryFailures for the live case this exists for.
+	var primaryFailures selfcheck.PrimaryFailures
+	// And the executable as it was when this process started: eviction also requires that file
+	// to have been REPLACED since (see selfcheck.ExecutableReplaced for the respawn-loop this avoids).
+	imageAtStart := selfcheck.StampExecutable()
+
 	for {
 		lock, primary, err := singleton.AcquireLock(lockPath)
 		if err != nil {
 			return fmt.Errorf("acquiring singleton lock: %w", err)
 		}
 
+		// Issue #201, stale-image self-eviction: if the install on disk has moved
+		// to a different release than this process was built as, step aside in
+		// EITHER role -- before serving as primary (a stale primary is exactly
+		// what the installer's staged swap leaves behind) and before proxying as
+		// secondary (a stale secondary would be the next stale primary). The MCP
+		// client respawns the exe on disk on its next call, so exiting IS the
+		// upgrade. Dev builds and installs without a marker never evict.
+		if disk := selfcheck.ReadMarkerVersion(); selfcheck.ShouldEvict(version, disk) && selfcheck.ExecutableReplaced(imageAtStart) {
+			lock.Release()
+			role := "secondary"
+			if primary {
+				role = "primary"
+			}
+			logger.Printf("stale-image-evicted: this process is %s but the install on disk is %s; exiting as %s so the client's next start runs the installed release (issue #201)", version, disk, role)
+			return nil
+		}
+
 		stop := make(chan struct{})
 		reader := &turnReader{relay: relay, stop: stop}
 
 		if primary {
-			err := runPrimary(ctx, mode, bindAddr, port, rendezvousRoot, privateRoot, logger, reader)
+			err := runPrimary(ctx, mode, bindAddr, port, rendezvousRoot, privateRoot, imageAtStart, logger, reader)
 			close(stop)
 			lock.Release()
 			return err // this process's own session ending is a real shutdown, not something to retry
@@ -533,12 +559,117 @@ func run(mode, bindAddr string, port int, appDataDirOverride, sharedRoot string,
 			logger.Printf("secondary: stdin closed and drained; exiting")
 			return nil
 		}
+		// Issue #201, fail fast: a primary that never answers is not something to
+		// retry forever behind an opaque client timeout. Failures to REACH the
+		// primary (dial, auth handshake) count against its pid; a session that
+		// was established and then ended does not (that is the normal re-election
+		// case). Three strikes against one pid -> a terminal, legible error.
+		if isPrimaryUnreachable(err) {
+			pid := 0
+			if info, rerr := singleton.ReadBrokerJSON(rendezvousRoot); rerr == nil {
+				pid = info.PID
+			}
+			// No readable broker.json means "no primary yet", not an unresponsive one (review of
+			// #205): the 5 s wait in runSecondary already covers a primary still writing it.
+			if pid != 0 && primaryFailures.Record(pid) {
+				logger.Printf("primary-unresponsive: %d consecutive attempts to reach the primary (pid %d) failed, last: %v. It holds the singleton lock and port but does not answer; end that process (or reboot if it cannot be ended) and reconnect this MCP server.", primaryFailures.Count(), pid, err)
+				return fmt.Errorf("%w: primary pid %d does not answer (%d attempts, last: %v); end that process or reboot, then reconnect", errPrimaryUnresponsive, pid, primaryFailures.Count(), err)
+			}
+		} else {
+			primaryFailures.Reset()
+		}
 		logger.Printf("secondary: upstream connection to primary ended (%v); re-attempting lock acquisition", err)
 		time.Sleep(500 * time.Millisecond) // bound the retry rate if the lock is held by something that never releases it
 	}
 }
 
-func runPrimary(ctx context.Context, mode, bindAddr string, port int, rendezvousRoot, privateRoot string, logger *log.Logger, stdin io.Reader) error {
+// anyExecutionInFlight reports whether any connected Revit instance has a script pending or
+// running (execution.Manager's view), so a voluntary eviction can wait for it.
+func anyExecutionInFlight(reg *registry.Registry, mgr *execution.Manager) bool {
+	for _, inst := range reg.List() {
+		switch mgr.StatusForInstance(inst.InstanceID) {
+		case execution.StatusBusy, execution.StatusPending:
+			return true
+		}
+	}
+	return false
+}
+
+// errPrimaryUnresponsive is terminal like errSchemaMismatch: the primary named
+// in broker.json holds the lock and the port but never completes the auth
+// handshake (issue #201's live case was a dead process whose listener and lock
+// were still held). Retrying re-dials the same corpse; the recovery is a human
+// ending that process or rebooting, so say so once and exit.
+var errPrimaryUnresponsive = errors.New("primary broker unresponsive")
+
+// isPrimaryUnreachable classifies a runSecondary error as "could not reach or
+// authenticate with the primary" (counts toward primary-unresponsive) versus
+// "the session ran and then ended" (the ordinary re-election case). Matched on
+// the messages runSecondary itself produces.
+func isPrimaryUnreachable(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	for _, prefix := range []string{
+		"dialing primary broker",
+		"sending auth request to primary",
+		"reading auth response from primary",
+		"decoding auth response from primary",
+		"primary rejected this secondary's auth",
+		"building auth request",
+		"encoding auth request",
+	} {
+		if strings.HasPrefix(msg, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// staleImageCheckInterval is how often a running primary re-reads the
+// installer's version marker (issue #201). Short enough that an update applied
+// while this process serves takes effect within about a minute with no client
+// action; the read is one small file.
+const staleImageCheckInterval = 30 * time.Second
+
+// watchForStaleImage ends the primary's ctx when the install on disk moves to a
+// different release than this process (issue #201): the session ends cleanly,
+// run() returns, the client respawns the exe on disk, and the secondaries whose
+// upstream just dropped re-race the lock (evicting themselves if stale, see
+// run). Never evicts a dev build or an install with no marker.
+func watchForStaleImage(ctx context.Context, cancel context.CancelFunc, imageAtStart selfcheck.ImageStamp, inFlight func() bool, logger *log.Logger) {
+	ticker := time.NewTicker(staleImageCheckInterval)
+	defer ticker.Stop()
+	deferred := false
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if disk := selfcheck.ReadMarkerVersion(); selfcheck.ShouldEvict(version, disk) && selfcheck.ExecutableReplaced(imageAtStart) {
+				// A voluntary shutdown must not cut off a script mid-run (review of #205): the
+				// broker dying mid-execute_script is a known gap with no replay yet, and an
+				// update is the one time it would happen unprompted. Wait for the next tick.
+				if inFlight() {
+					if !deferred {
+						logger.Printf("stale-image-eviction deferred: the install on disk is %s but a script is running on a connected Revit; will step aside once it finishes", disk)
+						deferred = true
+					}
+					continue
+				}
+				logger.Printf("stale-image-evicted: this primary is %s but the install on disk is now %s; shutting down so the client's next start runs the installed release (issue #201)", version, disk)
+				cancel()
+				return
+			}
+		}
+	}
+}
+
+func runPrimary(ctx context.Context, mode, bindAddr string, port int, rendezvousRoot, privateRoot string, imageAtStart selfcheck.ImageStamp, logger *log.Logger, stdin io.Reader) error {
+	ctx, cancelEviction := context.WithCancel(ctx)
+	defer cancelEviction()
+
 	ln, err := net.Listen("tcp", net.JoinHostPort(bindAddr, strconv.Itoa(port)))
 	if err != nil {
 		return fmt.Errorf("binding TCP listener on %s:%d: %w", bindAddr, port, err)
@@ -584,6 +715,9 @@ func runPrimary(ctx context.Context, mode, bindAddr string, port int, rendezvous
 	execMgr.Logf = logger.Printf
 	mcpserver.Register(mcpServer, execMgr)
 	reg := registry.New()
+	// Issue #201: the primary steps aside once the install on disk has moved on -- started here, after
+	// the registry and execution manager exist, because it defers while any instance is busy.
+	go watchForStaleImage(ctx, cancelEviction, imageAtStart, func() bool { return anyExecutionInFlight(reg, execMgr) }, logger)
 	discoveryRouter := discovery.NewRouter(reg)
 	embedder, reranker := loadSearchModels(privateRoot, logger)
 	searchIndex := manager.New(discoveryRouter, embedder, reranker, logger.Printf)
