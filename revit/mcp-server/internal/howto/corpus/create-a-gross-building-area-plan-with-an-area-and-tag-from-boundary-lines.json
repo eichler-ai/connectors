@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "id": "create-a-gross-building-area-plan-with-an-area-and-tag-from-boundary-lines",
+  "rev": 1,
+  "kind": "howto",
+  "title": "Create a gross-building area plan with an area and tag from boundary lines",
+  "task": "Create an area plan bound to the Gross Building area scheme on a level, enclose a region with area boundary lines, place an Area inside it and tag it, then read the computed area. Uses ViewPlan.CreateAreaPlan, AreaScheme.IsGrossBuildingArea, Document.Create.NewAreaBoundaryLine, NewArea and NewAreaTag.",
+  "members": [
+    "Autodesk.Revit.DB.FilteredElementCollector.OfClass",
+    "Autodesk.Revit.DB.AreaScheme.IsGrossBuildingArea",
+    "Autodesk.Revit.DB.ViewPlan.CreateAreaPlan",
+    "Autodesk.Revit.DB.Plane.CreateByNormalAndOrigin",
+    "Autodesk.Revit.DB.SketchPlane.Create",
+    "Autodesk.Revit.DB.Line.CreateBound",
+    "Autodesk.Revit.Creation.Document.NewAreaBoundaryLine",
+    "Autodesk.Revit.DB.Document.Regenerate",
+    "Autodesk.Revit.Creation.Document.NewArea",
+    "Autodesk.Revit.Creation.Document.NewAreaTag",
+    "Autodesk.Revit.DB.Area.Area"
+  ],
+  "script": "using Autodesk.Revit.DB;\nvar doc = Document;\n// Goal: create a Gross Building area plan on a level, enclose a region with area boundary lines,\n// place an Area inside it and tag it, then read the computed area. Reads at top level; every write\n// is in one WithTransaction block.\n\n// 1. Level: the lowest existing level.\nLevel level = null;\nforeach (Level l in new FilteredElementCollector(doc).OfClass(typeof(Level)))\n  if (level == null || l.Elevation < level.Elevation) level = l;\nif (level == null) throw new System.Exception(\"no level in document\");\n\n// 2. The area scheme. A Gross Building plan measures to the outside; pick the scheme whose\n//    AreaScheme.IsGrossBuildingArea is true, falling back to the first scheme (e.g. \"Rentable\").\n//    AreaScheme has no native collector class filter beyond OfClass(typeof(AreaScheme)).\nAreaScheme scheme = null, firstScheme = null;\nforeach (AreaScheme s in new FilteredElementCollector(doc).OfClass(typeof(AreaScheme))) {\n  if (firstScheme == null) firstScheme = s;\n  if (s.IsGrossBuildingArea) { scheme = s; break; }\n}\nbool usedFallbackScheme = scheme == null;\nif (scheme == null) scheme = firstScheme;\nif (scheme == null) throw new System.Exception(\"no AreaScheme in this document\");\n\nreturn Connector.WithTransaction(doc, () => {\n  double z = level.Elevation;\n  // 3. The area plan VIEW is bound to a scheme, not just a level: ViewPlan.CreateAreaPlan takes the\n  //    areaSchemeId and the levelId (a plain floor plan cannot host areas). Name it so it is findable.\n  var av = ViewPlan.CreateAreaPlan(doc, scheme.Id, level.Id);\n  av.Name = level.Name + \" - \" + scheme.Name + \" Area\";\n\n  // 4. Area boundary lines define the region and are independent of walls. They need a SketchPlane\n  //    at the level elevation and the AREA VIEW (av) as the third argument -- NewAreaBoundaryLine\n  //    draws into that specific area plan. Draw a CLOSED rectangle: an open loop leaves the area\n  //    unenclosed and its Area reads 0.\n  var sp = SketchPlane.Create(doc, Plane.CreateByNormalAndOrigin(XYZ.BasisZ, new XYZ(0, 0, z)));\n  var pts = new[] { new XYZ(0, 0, z), new XYZ(40, 0, z), new XYZ(40, 30, z), new XYZ(0, 30, z) };\n  for (int i = 0; i < 4; i++)\n    doc.Create.NewAreaBoundaryLine(sp, Line.CreateBound(pts[i], pts[(i + 1) % 4]), av);\n  // 5. Regenerate so the enclosed region is resolved before placing the Area.\n  doc.Regenerate();\n\n  // 6. Place the Area at a UV that lies INSIDE the enclosed region (a point outside yields a\n  //    zero-area, unbounded Area). NewArea takes the area view and a UV in plan coordinates.\n  var center = new UV(20, 15);\n  var area = doc.Create.NewArea(av, center);\n  area.Name = \"Gross - \" + level.Name;\n  doc.Regenerate();\n\n  // 7. Tag it. NewAreaTag takes the Area ELEMENT directly (ViewPlan, Area, UV) -- unlike NewRoomTag,\n  //    which takes a LinkElementId. The tag must go in the area view av.\n  var tag = doc.Create.NewAreaTag(av, area, center);\n  doc.Regenerate();\n\n  return new {\n    viewId = av.Id.Value, viewName = av.Name, scheme = scheme.Name,\n    isGrossScheme = scheme.IsGrossBuildingArea, usedFallbackScheme,\n    areaId = area.Id.Value, areaSqFt = area.Area, enclosed = area.Area > 0,\n    tagId = tag.Id.Value\n  };\n});",
+  "script_language": "csharp-script",
+  "pitfalls": [
+    {
+      "symptom": "There is nowhere to place an Area: a view made with ViewPlan.Create (a normal floor plan) will not host areas, and NewArea has no view to accept it.",
+      "cause": "Areas live only in an area plan, which is bound to an AreaScheme -- not in an ordinary floor plan.",
+      "fix": "Create the view with ViewPlan.CreateAreaPlan(doc, areaSchemeId, levelId). Find the scheme by iterating OfClass(typeof(AreaScheme)) and testing AreaScheme.IsGrossBuildingArea (fall back to the first scheme for a Rentable-style plan)."
+    },
+    {
+      "symptom": "Area.Area comes back 0 and the area has no boundary, though NewArea succeeded.",
+      "cause": "The area boundary loop is open, or the boundary lines were drawn into the wrong view, so no enclosed region contains the placement point.",
+      "fix": "Draw a CLOSED loop of NewAreaBoundaryLine(sketchPlane, line, areaView) into the area view av, with a SketchPlane at the level elevation, then doc.Regenerate() before NewArea; pass a UV that lies inside the loop (e.g. its centre)."
+    },
+    {
+      "symptom": "Reusing the room-tag pattern -- NewAreaTag(new LinkElementId(area.Id), ...) -- does not compile or picks the wrong overload.",
+      "cause": "NewAreaTag's signature is (ViewPlan areaView, Area area, UV point): it takes the Area element directly, whereas NewRoomTag takes a LinkElementId because rooms may live in a linked model.",
+      "fix": "Pass the Area element itself: doc.Create.NewAreaTag(av, area, uv), placing the tag in the same area view."
+    }
+  ],
+  "tags": [
+    "areas",
+    "area-plan",
+    "gross-building",
+    "annotation",
+    "views"
+  ],
+  "provenance": {
+    "kind": "submission",
+    "ref": "submission staged in the connector outbox (VM), not filed as an issue; triaged 2026-09-04",
+    "reviewed_by": "nchim",
+    "reviewed_at": "2026-09-04T00:00:00Z"
+  },
+  "created_at": "2026-09-03T21:54:25Z",
+  "updated_at": "2026-09-04T00:00:00Z"
+}

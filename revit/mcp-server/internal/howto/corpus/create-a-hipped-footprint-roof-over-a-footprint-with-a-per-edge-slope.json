@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "id": "create-a-hipped-footprint-roof-over-a-footprint-with-a-per-edge-slope",
+  "rev": 1,
+  "kind": "howto",
+  "title": "Create a hipped footprint roof over a footprint with a per-edge slope",
+  "task": "Create a FootPrintRoof on a level from a rectangular footprint and make it a hip roof by giving every eave a slope. Uses Document.Create.NewFootPrintRoof(CurveArray, level, RoofType, out ModelCurveArray) and sets FootPrintRoof.DefinesSlope / SlopeAngle per model curve.",
+  "members": [
+    "Autodesk.Revit.DB.FilteredElementCollector.OfClass",
+    "Autodesk.Revit.DB.Line.CreateBound",
+    "Autodesk.Revit.DB.CurveArray.Append",
+    "Autodesk.Revit.Creation.Document.NewFootPrintRoof",
+    "Autodesk.Revit.DB.FootPrintRoof.set_DefinesSlope",
+    "Autodesk.Revit.DB.FootPrintRoof.set_SlopeAngle",
+    "Autodesk.Revit.DB.Document.Regenerate",
+    "Autodesk.Revit.DB.Element.get_BoundingBox"
+  ],
+  "script": "using Autodesk.Revit.DB;\nvar doc = Document;\n// Goal: put a hipped roof over a rectangular footprint on the highest level. Reads at top level;\n// the roof is created and its edge slopes set inside one WithTransaction block.\n\n// 1. Roof base level: the highest existing level (a real task picks the roof/top storey level).\nLevel level = null;\nforeach (Level l in new FilteredElementCollector(doc).OfClass(typeof(Level)))\n  if (level == null || l.Elevation > level.Elevation) level = l;\nif (level == null) throw new System.Exception(\"no level in document\");\n\n// 2. Roof type by name, template-dependent, so fall back to the first RoofType. Every RoofType\n//    (including \"Sloped Glazing\") comes back from OfClass(typeof(RoofType)).\nstring wantedType = \"Wood Rafter 8\\\" - Asphalt Shingle\";\nRoofType roofType = null, firstRt = null;\nforeach (RoofType rt in new FilteredElementCollector(doc).OfClass(typeof(RoofType))) {\n  if (firstRt == null) firstRt = rt;\n  if (rt.Name == wantedType) { roofType = rt; break; }\n}\nbool usedFallback = roofType == null;\nif (roofType == null) roofType = firstRt;\nif (roofType == null) throw new System.Exception(\"no RoofType in this document\");\n\nreturn Connector.WithTransaction(doc, () => {\n  double z = level.Elevation;\n  // 3. The footprint as a CurveArray (NOT a CurveLoop): NewFootPrintRoof takes CurveArray.\n  //    Expand the rectangle outward for an eave overhang if you want one.\n  var pts = new[] {\n    new XYZ(-1.5, -1.5, z), new XYZ(41.5, -1.5, z),\n    new XYZ(41.5, 31.5, z), new XYZ(-1.5, 31.5, z)\n  };\n  var fp = new CurveArray();\n  for (int i = 0; i < 4; i++) fp.Append(Line.CreateBound(pts[i], pts[(i + 1) % 4]));\n\n  // 4. Create the roof. The last parameter is an OUT ModelCurveArray: Revit fills it with one\n  //    ModelCurve per footprint curve, in the same order. You set slope on THESE model curves,\n  //    not on the input Line objects.\n  ModelCurveArray mapping = new ModelCurveArray();\n  var roof = doc.Create.NewFootPrintRoof(fp, level, roofType, out mapping);\n\n  // 5. Give every edge a slope -> a hip roof. DefinesSlope and SlopeAngle are named INDEXED\n  //    PROPERTIES keyed by ModelCurve; describe_function shows them as the accessor pair\n  //    \"void set_DefinesSlope(ModelCurve, bool)\" / \"void set_SlopeAngle(ModelCurve, double)\".\n  //    C# has no obj[key] syntax for a named indexed property, so call the accessor exactly as\n  //    shown. SlopeAngle is rise-over-run despite the name: 0.5 == 6:12 pitch. Slope a subset of\n  //    edges instead for a gable (two opposite edges) or a shed/mono-pitch (one edge).\n  int sloped = 0;\n  foreach (ModelCurve mc in mapping) {\n    roof.set_DefinesSlope(mc, true);\n    roof.set_SlopeAngle(mc, 0.5);\n    sloped++;\n  }\n  // 6. Regenerate before reading geometry back; the ridge height is not resolved until then.\n  doc.Regenerate();\n\n  var bb = roof.get_BoundingBox(null);\n  double ridgeZ = bb != null ? bb.Max.Z : -1;\n  return new {\n    roofId = roof.Id.Value, roofType = roofType.Name, usedFallbackType = usedFallback,\n    level = level.Name, slopedEdges = sloped, ridgeTopFeet = ridgeZ,\n    isHip = sloped == 4, ridgeAboveEave = ridgeZ > z + 0.01\n  };\n});",
+  "script_language": "csharp-script",
+  "pitfalls": [
+    {
+      "symptom": "roof.SlopeAngle[mc] = 0.5 or treating SlopeAngle/DefinesSlope as a plain property will not compile, so it looks like there is no way to set a roof edge's slope.",
+      "cause": "DefinesSlope and SlopeAngle are named INDEXED properties keyed by a ModelCurve; C# has no obj[key] syntax for a named indexed property, and describe_function prints them as the accessor pair 'bool get_DefinesSlope(ModelCurve); void set_DefinesSlope(ModelCurve, bool)' (and likewise for SlopeAngle).",
+      "fix": "Call the accessors exactly as describe_function shows: roof.set_DefinesSlope(mc, true) and roof.set_SlopeAngle(mc, slope); read back with roof.get_DefinesSlope(mc) / roof.get_SlopeAngle(mc). SlopeAngle is rise-over-run (0.5 == 6:12), not an angle in radians."
+    },
+    {
+      "symptom": "NewFootPrintRoof throws or the profile is rejected when a CurveLoop (as used for Floor.Create) is passed.",
+      "cause": "NewFootPrintRoof takes a CurveArray of the footprint curves, not a CurveLoop / IList<CurveLoop> like Floor.Create.",
+      "fix": "Build the footprint as a CurveArray and Append each Line; keep all points at the level elevation Z."
+    },
+    {
+      "symptom": "Setting slope on the input Line objects, or on the footprint you passed in, has no effect on the roof.",
+      "cause": "Slope is a property of the roof's own ModelCurves, returned via the out ModelCurveArray parameter, not of the Curve objects passed in.",
+      "fix": "Capture the out ModelCurveArray from NewFootPrintRoof and iterate it to call set_DefinesSlope / set_SlopeAngle on each ModelCurve."
+    }
+  ],
+  "tags": [
+    "roofs",
+    "creation",
+    "footprint-roof",
+    "slope"
+  ],
+  "provenance": {
+    "kind": "submission",
+    "ref": "submission staged in the connector outbox (VM), not filed as an issue; supersedes the submitter's first cut (id ...-per-edge-slope) whose only difference was a pre-#186 comment",
+    "reviewed_by": "nchim",
+    "reviewed_at": "2026-09-04T00:00:00Z"
+  },
+  "created_at": "2026-09-03T21:53:37Z",
+  "updated_at": "2026-09-04T00:00:00Z"
+}

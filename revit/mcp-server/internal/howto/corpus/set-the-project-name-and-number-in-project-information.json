@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "id": "set-the-project-name-and-number-in-project-information",
+  "rev": 1,
+  "kind": "howto",
+  "title": "Set the project name and number in Project Information",
+  "task": "Read and set the project's Name and Number through Document.ProjectInformation (a ProjectInfo element every project has) inside one Connector.WithTransaction block, and return the values read back after the commit.",
+  "queries": {
+    "miss": [
+      {
+        "text": "set the project name and number",
+        "tool": "search_howtos",
+        "surfaced": "element-parameters-read-write-delete",
+        "revit_version": "2027",
+        "ranker": "semantic"
+      }
+    ]
+  },
+  "members": [
+    "Autodesk.Revit.DB.Document.ProjectInformation",
+    "Autodesk.Revit.DB.ProjectInfo.Name",
+    "Autodesk.Revit.DB.ProjectInfo.Number"
+  ],
+  "script": "var doc = Document;\n// Goal: set the project's name and number, then read them back to prove the change.\n// 1. ProjectInformation is the one ProjectInfo element every project carries; reads need no block.\nvar info = doc.ProjectInformation;\nvar before = new { name = info.Name, number = info.Number };\n// 2. Writes go inside one WithTransaction block; Name and Number are plain string properties.\nConnector.WithTransaction(doc, () => {\n    info.Name = \"MCP Test Tower\";\n    info.Number = \"MCP-0001\";\n});\n// 3. Read back after the commit, from the same element.\nreturn new { before, after = new { name = info.Name, number = info.Number } };\n",
+  "script_language": "csharp-script",
+  "pitfalls": [
+    {
+      "symptom": "Setting ProjectInfo.Name outside a block fails with script-write-outside-transaction.",
+      "cause": "Every write, even to a settings-style element like ProjectInfo, is a document modification.",
+      "fix": "Set the properties inside Connector.WithTransaction(doc, () => { ... })."
+    }
+  ],
+  "tags": [
+    "project-information",
+    "settings"
+  ],
+  "provenance": {
+    "kind": "submission",
+    "ref": "https://github.com/eichler-ai/connectors/issues/176",
+    "reviewed_by": "nchim",
+    "reviewed_at": "2026-09-04T00:00:00Z"
+  },
+  "created_at": "2026-09-02T19:17:01Z",
+  "updated_at": "2026-09-04T00:00:00Z"
+}
