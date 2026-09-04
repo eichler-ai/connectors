@@ -202,6 +202,43 @@ func TestSubmitHowToWithNoInstanceSavesUnstamped(t *testing.T) {
 	}
 }
 
+func TestSubmitHowToTokenSetButFilingFailsHandsOffWithoutClaimingNoToken(t *testing.T) {
+	// A token is configured but GitHub rejects the POST. The tool must fall back
+	// to the hand-off (populate submission.issue) and report the REAL reason via
+	// howto-issue-not-filed -- and must NOT emit howto-submission-not-filed,
+	// whose text blames a missing token that is present (review of #204).
+	deps := howToDeps(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprint(w, `{"message":"boom"}`)
+	}))
+	defer srv.Close()
+	deps.GitHubToken, deps.HTTPClient, deps.GitHubAPI = "ghp_test", srv.Client(), srv.URL
+	cs := connectHowToClient(t, deps)
+	args := goodArgs()
+	args["confirm_submission"] = true
+	out, isErr := callSubmit(t, cs, args)
+	if isErr {
+		t.Fatalf("tool error: %+v", out.Error)
+	}
+	if out.Submission == nil || out.Submission.Issue == nil || out.Submission.NewIssueURL == "" || out.Submission.FiledIssueURL != "" {
+		t.Fatalf("filing failure should hand off the issue fields: %+v", out.Submission)
+	}
+	codes := map[string]bool{}
+	for _, n := range out.Notices {
+		codes[n.Code] = true
+	}
+	if !codes["howto-issue-not-filed"] {
+		t.Fatalf("the real filing error must be reported: %+v", out.Notices)
+	}
+	if codes["howto-submission-not-filed"] {
+		t.Fatalf("must not claim 'no token' when a token was set and filing failed: %+v", out.Notices)
+	}
+	if strings.Contains(out.Guidance, "no REVIT_MCP_GITHUB_TOKEN is set") {
+		t.Fatalf("guidance wrongly blames a missing token: %q", out.Guidance)
+	}
+}
+
 func TestSubmitHowToFilesTheIssueWhenATokenIsConfigured(t *testing.T) {
 	deps := howToDeps(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -226,6 +263,11 @@ func TestSubmitHowToFilesTheIssueWhenATokenIsConfigured(t *testing.T) {
 	}
 	if !codes["howto-issue-unlabelled"] {
 		t.Fatalf("an unlabelled filing must be reported: %+v", out.Notices)
+	}
+	// A successful filing must NOT also carry the no-token "not filed" notice
+	// (the token-success path returns before it; guard against that regressing).
+	if codes["howto-submission-not-filed"] {
+		t.Fatalf("a filed submission wrongly carries howto-submission-not-filed: %+v", out.Notices)
 	}
 	// Without confirmation nothing is posted even with a token.
 	deps2 := deps

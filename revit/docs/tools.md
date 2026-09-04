@@ -258,8 +258,11 @@ the broker files the issue over GitHub's REST API and returns its URL; otherwise
 the issue fields (`repo`, `title`, `body`, `labels`) for the agent to create with its own GitHub tool
 (the GitHub connector, or the `gh` CLI — the equivalent command is included), plus a prefilled issue
 URL (which applies the queue label through the Issue Form template) for filing by hand. The broker
-never carries a maintainer credential; while the repository is private only collaborators can file,
-and the outbox file is the hand-off for anyone else.
+never carries a maintainer credential. The repository is public, so anyone with a GitHub account can
+file — through the agent's GitHub tool, `gh`, or the prefilled URL in a browser — but filing always
+needs a sign-in; there is no anonymous/`curl`-without-token path. A non-collaborator should use the
+prefilled URL, whose Issue Form template applies the label that a plain API or `gh` label request
+from a non-collaborator would drop.
 
 ## Script globals
 
