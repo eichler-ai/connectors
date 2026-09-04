@@ -13,6 +13,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -472,6 +473,13 @@ func run(mode, bindAddr string, port int, appDataDirOverride, sharedRoot string,
 	// comment) — both branches below read through it via a fresh
 	// turnReader per role-attempt, never os.Stdin directly.
 	relay := newStdinRelay()
+	// And one session-continuity holder (self-update-architecture.md §5.6):
+	// it captures the client's initialize the first time it passes through
+	// and replays it to every later upstream this process serves the same
+	// client through -- a new primary after a reconnect, or this process's
+	// own MCP server after a promotion -- so the client's session survives
+	// the change without re-initializing.
+	continuity := newSessionContinuity(logger)
 
 	// PRD §05 "Broker singleton & port contention": whichever process wins
 	// the lock is primary; everyone else proxies as secondary. If a
@@ -566,15 +574,25 @@ func run(mode, bindAddr string, port int, appDataDirOverride, sharedRoot string,
 			// This process's own session ending is a real shutdown, not something
 			// to retry: return whatever runPrimary returns.
 			stop := make(chan struct{})
-			reader := &turnReader{relay: relay, stop: stop}
-			err := runPrimary(ctx, mode, bindAddr, bindPort, rendezvousRoot, privateRoot, imageAtStart, logger, reader)
+			// A promotion is a change of upstream from the client's point of
+			// view: the session it initialized against the old primary now has
+			// to be served by this process's own fresh mcp.Server. Feed it the
+			// cached initialize first (nil, and so a no-op, when this process
+			// was primary from the start and the client's real initialize is
+			// about to arrive), then the live stdin; and let the client see
+			// exactly one initialize response.
+			var stdin io.Reader = continuity.capturing(&turnReader{relay: relay, stop: stop})
+			if prefix := continuity.replayPrefix(); prefix != nil {
+				stdin = io.MultiReader(bytes.NewReader(prefix), stdin)
+			}
+			err := runPrimary(ctx, mode, bindAddr, bindPort, rendezvousRoot, privateRoot, imageAtStart, logger, stdin, continuity.outputWriter(os.Stdout))
 			close(stop)
 			lock.Release()
 			return err
 		}
 
 		stop := make(chan struct{})
-		reader := &turnReader{relay: relay, stop: stop}
+		reader := continuity.capturing(&turnReader{relay: relay, stop: stop})
 
 		// runSecondary closes stop itself, as the very first thing it does
 		// on returning — before it closes its upstream connection to the
@@ -589,7 +607,7 @@ func run(mode, bindAddr string, port int, appDataDirOverride, sharedRoot string,
 		// exactly the "misrouted into an already-closed connection" bug
 		// this whole mechanism exists to prevent.
 		var wg sync.WaitGroup
-		err = runSecondary(ctx, rendezvousRoot, logger, reader, stop, &wg)
+		err = runSecondary(ctx, rendezvousRoot, logger, reader, os.Stdout, continuity, stop, &wg)
 		wg.Wait()
 		if ctx.Err() != nil {
 			return nil // clean shutdown (signal), not a dropped-primary retry case
@@ -736,7 +754,7 @@ func watchForStaleImage(ctx context.Context, cancel context.CancelFunc, imageAtS
 	}
 }
 
-func runPrimary(ctx context.Context, mode, bindAddr string, port int, rendezvousRoot, privateRoot string, imageAtStart selfcheck.ImageStamp, logger *log.Logger, stdin io.Reader) error {
+func runPrimary(ctx context.Context, mode, bindAddr string, port int, rendezvousRoot, privateRoot string, imageAtStart selfcheck.ImageStamp, logger *log.Logger, stdin io.Reader, stdout io.Writer) error {
 	ctx, cancelEviction := context.WithCancel(ctx)
 	defer cancelEviction()
 
@@ -880,8 +898,9 @@ func runPrimary(ctx context.Context, mode, bindAddr string, port int, rendezvous
 	// broker process it happens to be talking to"). IOTransport, not
 	// StdioTransport, deliberately — it reads through the shared stdin
 	// relay (via stdin) rather than os.Stdin directly, so a promotion from
-	// secondary never races two independent physical stdin readers.
-	stdioTransport := &mcp.IOTransport{Reader: io.NopCloser(stdin), Writer: nopCloseWriter{os.Stdout}}
+	// secondary never races two independent physical stdin readers. stdout
+	// is likewise the caller's (continuity-wrapped) writer, not os.Stdout.
+	stdioTransport := &mcp.IOTransport{Reader: io.NopCloser(stdin), Writer: nopCloseWriter{stdout}}
 	err = mcpServer.Run(ctx, stdioTransport)
 	stop := ctx.Err() != nil
 	if err != nil && !stop {
@@ -934,7 +953,12 @@ func schemaMismatch(info singleton.BrokerInfo, logger *log.Logger) error {
 		errSchemaMismatch, info.PID, primary, self, info.PID)
 }
 
-func runSecondary(ctx context.Context, rendezvousRoot string, logger *log.Logger, stdin io.Reader, stop chan struct{}, wg *sync.WaitGroup) error {
+// runSecondary proxies one upstream connection's worth of the client's stdio
+// through the primary named in broker.json. stdin/stdout are the client-facing
+// streams; continuity supplies the cached initialize to replay when this is a
+// successor upstream (self-update-architecture.md §5.6) and the writer that
+// keeps the replay's duplicate initialize response from reaching the client.
+func runSecondary(ctx context.Context, rendezvousRoot string, logger *log.Logger, stdin io.Reader, stdout io.Writer, continuity *sessionContinuity, stop chan struct{}, wg *sync.WaitGroup) error {
 	var info singleton.BrokerInfo
 	var err error
 	// The primary listens before anything else (PRD §05), but there's still
@@ -1005,10 +1029,25 @@ func runSecondary(ctx context.Context, rendezvousRoot string, logger *log.Logger
 		return fmt.Errorf("primary rejected this secondary's auth: %s", resp.Error.Message)
 	}
 
+	// §5.6: if this process already carried the client's initialize to an
+	// earlier primary, this primary is a successor and knows nothing of that
+	// session. Replay the cached initialize (and the handshake-completing
+	// notification) ahead of any live client bytes; the writer below drops
+	// the duplicate response. Nil on the first upstream, where the client's
+	// own initialize flows through -- and is captured -- like any other line.
+	out := continuity.outputWriter(stdout)
+	if prefix := continuity.replayPrefix(); prefix != nil {
+		if _, err := conn.Write(prefix); err != nil {
+			return fmt.Errorf("replaying cached initialize to primary: %w", err)
+		}
+	}
+
 	// From here, transparently pipe stdin -> conn and conn -> stdout. The
 	// MCP stdio protocol is itself NDJSON, matching the wire framing we
 	// just used for auth (PRD §05 "Framing"), so no re-encoding is needed —
-	// this process is a pure byte-level proxy of its own stdio traffic.
+	// this process is a byte-level proxy of its own stdio traffic (the one
+	// exception being the initialize response dedupe above, which inspects
+	// lines only while a response is outstanding).
 	// Either direction closing ends the proxy: the MCP client closes stdin
 	// as its normal stdio-subprocess shutdown signal (it isn't waiting on
 	// further responses once it does), and the primary closing its end
@@ -1022,7 +1061,7 @@ func runSecondary(ctx context.Context, rendezvousRoot string, logger *log.Logger
 	}()
 	go func() {
 		defer wg.Done()
-		_, err := io.Copy(os.Stdout, br)
+		_, err := io.Copy(out, br)
 		errCh <- err
 	}()
 
