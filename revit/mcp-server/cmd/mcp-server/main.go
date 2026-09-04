@@ -296,6 +296,11 @@ func main() {
 	// installer can record which how-to corpus a release carried without
 	// parsing prose.
 	showBuildInfo := flag.Bool("build-info", false, "print this binary's version, source revision and how-to corpus version as JSON, then exit")
+	// -hosted marks the one long-lived server per user (self-update-architecture.md §5): it
+	// serves no stdio client of its own, never settles as a secondary, asks a client-primary to
+	// yield the lock, and never yields it itself. Everything else -- election, dead-holder
+	// takeover, stale-image eviction, schema check -- is the same as any other process.
+	hosted := flag.Bool("hosted", envOr("MCPBRIDGE_HOSTED", "") != "", "run as the hosted primary: a long-lived broker with no stdio client that always ends up holding the singleton (self-update-architecture.md §5); client-spawned servers proxy through it")
 	flag.Parse()
 
 	if *showBuildInfo {
@@ -340,7 +345,7 @@ func main() {
 	// the one who can act on it.
 	logger.Printf("starting %s", versionLine())
 
-	if err := run(*mode, *bindAddr, *port, *appDataDir, *sharedRoot, logger); err != nil {
+	if err := run(*mode, *bindAddr, *port, *appDataDir, *sharedRoot, *hosted, logger); err != nil {
 		logger.Fatalf("fatal: %v", err)
 	}
 }
@@ -417,7 +422,7 @@ func resolveRoots(mode, appDataDirOverride, sharedRoot string) (privateRoot, ren
 	return privateRoot, rendezvousRoot, deprecatedFallback, nil
 }
 
-func run(mode, bindAddr string, port int, appDataDirOverride, sharedRoot string, logger *log.Logger) error {
+func run(mode, bindAddr string, port int, appDataDirOverride, sharedRoot string, hosted bool, logger *log.Logger) error {
 	if mode != "local" && mode != "remote" {
 		return fmt.Errorf("invalid -mode %q: must be \"local\" or \"remote\"", mode)
 	}
@@ -501,7 +506,28 @@ func run(mode, bindAddr string, port int, appDataDirOverride, sharedRoot string,
 	// to have been REPLACED since (see selfcheck.ExecutableReplaced for the respawn-loop this avoids).
 	imageAtStart := selfcheck.StampExecutable()
 
+	// Hosted primary (self-update-architecture.md §5): whether this process has
+	// said so in the log yet, so a hosted server waiting for a client-primary to
+	// yield logs once per wait, not once per 500 ms turn.
+	hostedWaiting := false
+
 	for {
+		// §5 yield bias: a non-hosted process that reaches the election while a
+		// hosted server is asking for the lock gives it a head start rather than
+		// racing it -- this is how a client that has just stepped down (or a
+		// secondary whose upstream just did) ends up proxying through the hosted
+		// primary instead of re-winning the lock it was asked to release. Bounded:
+		// if the hosted server does not take over in time, elect anyway; a
+		// re-won lock is yielded again on the watcher's next tick (see
+		// watchForHostedYield for the convergence argument).
+		if !hosted {
+			if req, ok := singleton.PendingHostedRequest(rendezvousRoot, os.Getpid(), time.Now(), singleton.ProcessAlive); ok {
+				if !waitForHostedTakeover(ctx, rendezvousRoot, hostedTakeoverWait) {
+					logger.Printf("hosted-yield: hosted server pid %d asked for the lock but has not become primary after %v; re-entering the election", req.PID, hostedTakeoverWait)
+				}
+			}
+		}
+
 		// Issue #212: the election steps over a lock whose recorded holder has
 		// exited (a process the OS could not finish terminating keeps its lock
 		// and port until reboot) and takes the next generation instead, so a
@@ -571,8 +597,26 @@ func run(mode, bindAddr string, port int, appDataDirOverride, sharedRoot string,
 			if e.CleanedGenerations > 0 {
 				logger.Printf("primary: removed %d stale lock generation file(s) left by an earlier dead-primary takeover (issue #212)", e.CleanedGenerations)
 			}
+			if hosted {
+				// The lock is ours; the request that asked for it has done its job.
+				// Removed before broker.json is written so no non-hosted primary can
+				// ever see "hosted primary advertised" and "hosted request pending"
+				// at once and wonder which to believe.
+				if err := singleton.RemoveHostedRequest(rendezvousRoot); err != nil {
+					logger.Printf("hosted: WARNING: %v; a non-hosted primary would ignore the stale request within %v anyway", err, singleton.HostedRequestMaxAge)
+				}
+				if hostedWaiting {
+					logger.Printf("hosted: the client-primary yielded; this process now holds the singleton")
+				}
+				// No stdio client and nothing to return to: the hosted primary serves
+				// until it is signalled or self-evicts on a stale image.
+				err := runPrimary(ctx, mode, bindAddr, bindPort, rendezvousRoot, privateRoot, imageAtStart, true, logger, nil, nil)
+				lock.Release()
+				return err
+			}
 			// This process's own session ending is a real shutdown, not something
-			// to retry: return whatever runPrimary returns.
+			// to retry -- except a yield to a hosted server, after which this
+			// process carries the same client session on as a secondary.
 			stop := make(chan struct{})
 			// A promotion is a change of upstream from the client's point of
 			// view: the session it initialized against the old primary now has
@@ -585,10 +629,48 @@ func run(mode, bindAddr string, port int, appDataDirOverride, sharedRoot string,
 			if prefix := continuity.replayPrefix(); prefix != nil {
 				stdin = io.MultiReader(bytes.NewReader(prefix), stdin)
 			}
-			err := runPrimary(ctx, mode, bindAddr, bindPort, rendezvousRoot, privateRoot, imageAtStart, logger, stdin, continuity.outputWriter(os.Stdout))
+			err := runPrimary(ctx, mode, bindAddr, bindPort, rendezvousRoot, privateRoot, imageAtStart, false, logger, stdin, continuity.outputWriter(os.Stdout))
 			close(stop)
 			lock.Release()
+			if errors.Is(err, errYieldedToHosted) {
+				// §5 cooperative yield: the listener is closed and the lock released
+				// above, so the hosted server's next election turn wins it. Give it
+				// that turn before this process re-enters the election as (it is
+				// hoped) a secondary; the client's session rides across on the
+				// continuity replay exactly as it does after a promotion, in reverse.
+				if !waitForHostedTakeover(ctx, rendezvousRoot, hostedTakeoverWait) {
+					logger.Printf("hosted-yield: no hosted primary appeared within %v of stepping down; re-entering the election (a re-won lock is yielded again while the request stands)", hostedTakeoverWait)
+				}
+				continue
+			}
 			return err
+		}
+
+		if hosted {
+			// A hosted server never settles as a secondary: it has no stdio client
+			// to proxy for, and its whole purpose is to be THE primary. Whoever
+			// holds the lock is either another hosted server (then this one is
+			// redundant and exits, so a double launch cannot leave two long-lived
+			// servers taking turns asking each other to yield) or a client that
+			// became primary in the gap -- ask it to step down and keep trying.
+			if info, err := singleton.ReadBrokerJSON(rendezvousRoot); err == nil && info.Hosted && info.PID != os.Getpid() && singleton.ProcessAlive(info.PID) {
+				logger.Printf("hosted: another hosted primary (pid %d) already holds the singleton; exiting so there is exactly one", info.PID)
+				return nil
+			}
+			if err := singleton.WriteHostedRequest(rendezvousRoot, os.Getpid(), time.Now()); err != nil {
+				return fmt.Errorf("hosted: publishing the yield request: %w", err)
+			}
+			if !hostedWaiting {
+				hostedWaiting = true
+				logger.Printf("hosted: the singleton lock is held by a client-spawned primary (broker.json pid %d); asked it to yield via %s and retrying the election every %v", brokerPID(rendezvousRoot), filepath.Base(singleton.HostedRequestPath(rendezvousRoot)), hostedRetryInterval)
+			}
+			select {
+			case <-ctx.Done():
+				_ = singleton.RemoveHostedRequest(rendezvousRoot)
+				return nil
+			case <-time.After(hostedRetryInterval):
+			}
+			continue
 		}
 
 		stop := make(chan struct{})
@@ -650,6 +732,92 @@ func run(mode, bindAddr string, port int, appDataDirOverride, sharedRoot string,
 		}
 		logger.Printf("secondary: upstream connection to primary ended (%v); re-attempting lock acquisition", err)
 		time.Sleep(500 * time.Millisecond) // bound the retry rate if the lock is held by something that never releases it
+	}
+}
+
+// hostedRetryInterval is how often a hosted server that found the lock held
+// refreshes its yield request and re-runs the election. Short, so the hand-off
+// completes within a second or two of the client stepping down; the work per
+// turn is one small file write and one non-blocking lock attempt.
+const hostedRetryInterval = 500 * time.Millisecond
+
+// hostedTakeoverWait bounds how long a non-hosted process defers to a pending
+// hosted request before electing anyway: long enough for several of the hosted
+// server's hostedRetryInterval turns, short enough that a hosted server that
+// died between asking and winning costs a client at most this much delay.
+const hostedTakeoverWait = 2 * time.Second
+
+// waitForHostedTakeover polls broker.json until it names a live hosted primary,
+// for at most timeout. It returns true when one appeared (proceed straight to
+// proxying through it) and false on timeout or shutdown.
+func waitForHostedTakeover(ctx context.Context, rendezvousRoot string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if info, err := singleton.ReadBrokerJSON(rendezvousRoot); err == nil && info.Hosted && singleton.ProcessAlive(info.PID) {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+}
+
+// errYieldedToHosted is runPrimary's report that its ctx was ended by
+// watchForHostedYield, not by a shutdown signal or a stale image: run() must
+// then re-enter the election with the same client session, not exit.
+var errYieldedToHosted = errors.New("primary yielded the singleton to a hosted server")
+
+// hostedYieldCheckInterval is how often a non-hosted primary looks for a yield
+// request. A hand-off costs the client one continuity replay, so a few seconds'
+// latency is fine; the check is one small file read.
+const hostedYieldCheckInterval = 5 * time.Second
+
+// watchForHostedYield ends a NON-hosted primary's ctx, with cause
+// errYieldedToHosted, once a valid yield request from a hosted server is
+// present (self-update-architecture.md §5): the primary's session ends, run()
+// releases the lock, and the hosted server's next election turn wins it. Like
+// watchForStaleImage it defers while a script is running on a connected Revit,
+// since a voluntary step-down must never cut one off. A hosted primary does not
+// run this watcher: it never yields.
+//
+// Convergence, not atomicity: nothing prevents the yielding process (or a
+// secondary whose upstream just vanished) from re-winning the freed lock before
+// the hosted server's next turn. run() biases against it with
+// waitForHostedTakeover, and if it happens anyway the request is still on disk,
+// so the re-won primary sees it on its next tick and steps down again. Each
+// round costs the affected clients one replay; the request stays valid while
+// the hosted server is alive and looping, so rounds continue until it wins.
+// The election mutex (#212) is what keeps the lock itself single-holder
+// throughout -- this watcher only decides when to let go of it.
+func watchForHostedYield(ctx context.Context, yield func(), rendezvousRoot string, inFlight func() bool, logger *log.Logger) {
+	ticker := time.NewTicker(hostedYieldCheckInterval)
+	defer ticker.Stop()
+	deferred := false
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			req, ok := singleton.PendingHostedRequest(rendezvousRoot, os.Getpid(), time.Now(), singleton.ProcessAlive)
+			if !ok {
+				continue
+			}
+			if inFlight() {
+				if !deferred {
+					logger.Printf("hosted-yield deferred: hosted server pid %d asked for the singleton but a script is running on a connected Revit; will step down once it finishes", req.PID)
+					deferred = true
+				}
+				continue
+			}
+			logger.Printf("hosted-yield: hosted server pid %d asked for the singleton; this client-spawned primary is stepping down to proxy through it (self-update-architecture.md §5)", req.PID)
+			yield()
+			return
+		}
 	}
 }
 
@@ -754,8 +922,15 @@ func watchForStaleImage(ctx context.Context, cancel context.CancelFunc, imageAtS
 	}
 }
 
-func runPrimary(ctx context.Context, mode, bindAddr string, port int, rendezvousRoot, privateRoot string, imageAtStart selfcheck.ImageStamp, logger *log.Logger, stdin io.Reader, stdout io.Writer) error {
-	ctx, cancelEviction := context.WithCancel(ctx)
+// runPrimary serves as primary until ctx ends, the stdio client session ends,
+// or -- for a non-hosted primary -- a hosted server asks for the singleton, in
+// which case it returns errYieldedToHosted. hosted primaries have no stdio
+// client: stdin/stdout are ignored and the process serves TCP only.
+func runPrimary(ctx context.Context, mode, bindAddr string, port int, rendezvousRoot, privateRoot string, imageAtStart selfcheck.ImageStamp, hosted bool, logger *log.Logger, stdin io.Reader, stdout io.Writer) error {
+	// Cancellation carries a cause so run() can tell a yield (re-elect, keep the
+	// session) from an eviction or shutdown (exit).
+	ctx, cancelCause := context.WithCancelCause(ctx)
+	cancelEviction := func() { cancelCause(nil) }
 	defer cancelEviction()
 
 	ln, err := net.Listen("tcp", net.JoinHostPort(bindAddr, strconv.Itoa(port)))
@@ -792,11 +967,16 @@ func runPrimary(ctx context.Context, mode, bindAddr string, port int, rendezvous
 		Version:           version,
 		Revision:          buildinfo.Read().Revision,
 		SchemaFingerprint: fingerprint,
+		Hosted:            hosted,
 	}
 	if err := singleton.WriteBrokerJSON(rendezvousRoot, info); err != nil {
 		return fmt.Errorf("writing broker.json: %w", err)
 	}
-	logger.Printf("primary: listening on %s:%d, broker.json written to %s", bindAddr, tcpAddr.Port, rendezvousRoot)
+	role := "primary"
+	if hosted {
+		role = "hosted primary"
+	}
+	logger.Printf("primary: listening on %s:%d as %s, broker.json written to %s", bindAddr, tcpAddr.Port, role, rendezvousRoot)
 
 	mcpServer := mcp.NewServer(&mcp.Implementation{Name: serverName, Version: versionLine()}, nil)
 	execMgr := execution.NewManager()
@@ -806,6 +986,10 @@ func runPrimary(ctx context.Context, mode, bindAddr string, port int, rendezvous
 	// Issue #201: the primary steps aside once the install on disk has moved on -- started here, after
 	// the registry and execution manager exist, because it defers while any instance is busy.
 	go watchForStaleImage(ctx, cancelEviction, imageAtStart, func() bool { return anyExecutionInFlight(reg, execMgr) }, logger)
+	if !hosted {
+		// §5: only a client-spawned primary yields; the hosted one is what it yields to.
+		go watchForHostedYield(ctx, func() { cancelCause(errYieldedToHosted) }, rendezvousRoot, func() bool { return anyExecutionInFlight(reg, execMgr) }, logger)
+	}
 	discoveryRouter := discovery.NewRouter(reg)
 	embedder, reranker := loadSearchModels(privateRoot, logger)
 	searchIndex := manager.New(discoveryRouter, embedder, reranker, logger.Printf)
@@ -900,8 +1084,18 @@ func runPrimary(ctx context.Context, mode, bindAddr string, port int, rendezvous
 	// relay (via stdin) rather than os.Stdin directly, so a promotion from
 	// secondary never races two independent physical stdin readers. stdout
 	// is likewise the caller's (continuity-wrapped) writer, not os.Stdout.
+	if hosted {
+		// A hosted primary has no MCP client of its own -- launched at logon, its
+		// stdin is nothing a session could arrive on -- so it serves the TCP side
+		// only, until it is signalled or steps aside for a newer install.
+		<-ctx.Done()
+		return nil
+	}
 	stdioTransport := &mcp.IOTransport{Reader: io.NopCloser(stdin), Writer: nopCloseWriter{stdout}}
 	err = mcpServer.Run(ctx, stdioTransport)
+	if errors.Is(context.Cause(ctx), errYieldedToHosted) {
+		return errYieldedToHosted
+	}
 	stop := ctx.Err() != nil
 	if err != nil && !stop {
 		return fmt.Errorf("stdio MCP session ended: %w", err)

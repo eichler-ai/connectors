@@ -70,14 +70,14 @@ type mcpProc struct {
 	log   string
 }
 
-func spawnServer(t *testing.T, bin, dataDir, name string) *mcpProc {
+func spawnServer(t *testing.T, bin, dataDir, name string, extraArgs ...string) *mcpProc {
 	t.Helper()
 	logPath := filepath.Join(dataDir, name+".log")
 	logFile, err := os.Create(logPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command(bin, "-mode", "local", "-app-data-dir", dataDir)
+	cmd := exec.Command(bin, append([]string{"-mode", "local", "-app-data-dir", dataDir}, extraArgs...)...)
 	cmd.Stderr = logFile
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -143,7 +143,7 @@ func (p *mcpProc) transitionLog() string {
 	b, _ := os.ReadFile(p.log)
 	var keep []string
 	for _, ln := range strings.Split(string(b), "\n") {
-		for _, k := range []string{"primary:", "secondary:", "session-continuity", "takeover", "unresponsive", "election"} {
+		for _, k := range []string{"primary:", "secondary:", "session-continuity", "takeover", "unresponsive", "election", "hosted"} {
 			if strings.Contains(ln, k) {
 				keep = append(keep, ln)
 				break

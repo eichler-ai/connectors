@@ -416,7 +416,7 @@ func TestRunRejectsUnparseableBindAddr(t *testing.T) {
 	}
 	for _, bindAddr := range cases {
 		t.Run(bindAddr, func(t *testing.T) {
-			err := run("remote", bindAddr, 0, t.TempDir(), "", logger)
+			err := run("remote", bindAddr, 0, t.TempDir(), "", false, logger)
 			if err == nil {
 				t.Fatalf("run(mode=remote, bind=%q) = nil error, want it rejected as an unparseable -bind value", bindAddr)
 			}
@@ -439,7 +439,7 @@ func TestRunRemoteModeRequiresSharedRoot(t *testing.T) {
 	logger := log.New(io.Discard, "", 0)
 	// A valid non-loopback -bind, so the error under test is the
 	// rendezvous-root one, not an earlier -bind validation failure.
-	err := run("remote", "192.0.2.1", 0, "", "", logger)
+	err := run("remote", "192.0.2.1", 0, "", "", false, logger)
 	if err == nil {
 		t.Fatal("run(mode=remote, shared-root=\"\") = nil error, want it rejected for missing -shared-root")
 	}
@@ -539,7 +539,7 @@ func TestRunRejectsUnspecifiedBindAddr(t *testing.T) {
 	logger := log.New(io.Discard, "", 0)
 	for _, bindAddr := range []string{"0.0.0.0", "::", "::0"} {
 		t.Run(bindAddr, func(t *testing.T) {
-			err := run("remote", bindAddr, 0, t.TempDir(), "", logger)
+			err := run("remote", bindAddr, 0, t.TempDir(), "", false, logger)
 			if err == nil {
 				t.Fatalf("run(mode=remote, bind=%q) = nil error, want it rejected as an every-interface address", bindAddr)
 			}

@@ -48,6 +48,12 @@ type BrokerInfo struct {
 	// goroutine's first successful check completes, and left at its previous value (never cleared)
 	// on any check failure -- see internal/updatecheck's own doc comment for why.
 	LatestAvailableVersion string `json:"latest_available_version,omitempty"`
+	// Hosted is true when the primary is the long-lived hosted server
+	// (mcp-server -hosted; self-update-architecture.md §5), the one process an
+	// installer or a person can restart by name. A non-hosted primary steps down
+	// for a hosted server that asks (see hosted.go); a hosted primary never
+	// yields, and a second hosted server exits on seeing a live one here.
+	Hosted bool `json:"hosted,omitempty"`
 }
 
 const brokerJSONFile = "broker.json"
