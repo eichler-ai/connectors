@@ -191,7 +191,11 @@ once the release on disk differs *and* its own executable has been replaced, wai
 script that is pending or running on a connected Revit; a process that wins the singleton lock while
 stale exits instead of serving), after which the client's next call starts the installed release. Fail-fast: a secondary
 that cannot reach or authenticate with the primary three times in a row exits with
-`primary-unresponsive` naming the pid, instead of retrying behind an opaque client timeout.
+`primary-unresponsive` naming the pid, instead of retrying behind an opaque client timeout. If that pid
+has already *exited* yet still holds the lock and port (a process Windows could not finish terminating,
+issue #212), the secondary instead takes over as primary on a fallback lock file (`broker.lock.<n>`) and
+rewrites `broker.json`; only when every fallback is in the same state does it exit with the
+reboot-to-clear message.
 
 With `apply: true` **and** `confirm_lifecycle_actions: true` it also starts the installed updater
 (`install.ps1 -Update -Silent -Scope <User|AllUsers>`, detached) when anything is behind: every running

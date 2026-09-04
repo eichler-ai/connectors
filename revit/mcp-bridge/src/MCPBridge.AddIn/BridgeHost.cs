@@ -116,6 +116,13 @@ internal sealed class BridgeHost
     private static readonly TimeSpan TimeoutCheckInterval = TimeSpan.FromSeconds(1);
 
     /// <summary>
+    /// Bound on the auth-response read of a fresh connection (issue #212). Matches the Go side's own
+    /// pre-auth deadlines (the broker's handleConn and a secondary's auth read are both 10 s); a healthy
+    /// primary answers in milliseconds, and the dead-listener case this guards against never answers.
+    /// </summary>
+    private const int HandshakeReadTimeoutMs = 15_000;
+
+    /// <summary>
     /// How often a `ping` notification (PRD §05 heartbeat) is sent on an established connection.
     /// Not independently configurable from the Go broker's <c>registry.UnresponsiveThreshold</c> (30s,
     /// three missed pings) -- the two constants aren't coupled across languages, so changing one should
@@ -888,12 +895,23 @@ internal sealed class BridgeHost
         // here, immediately after writing the auth request, and only awaited once the auth round trip has
         // already completed. That overlaps one network round trip with one UI-thread dispatch instead of
         // paying both latencies back-to-back on every connect/reconnect.
+        // Issue #212: a listener whose process has exited but which Windows never tore down still
+        // completes the TCP handshake (the kernel does that from the backlog) and then never answers.
+        // Unbounded, this read waited on such a corpse forever -- "broker discovered ...; connecting"
+        // was the last line this log ever showed, and the ribbon said connecting until Revit was
+        // restarted, even after a new primary had taken over and rewritten broker.json. Bounded for the
+        // handshake only: a timed-out synchronous read throws IOException, ReadOneLine reports null, the
+        // throw below tears this attempt down into the normal reconnect loop, and the next iteration
+        // re-reads broker.json. Once registered, the heartbeat governs liveness and the read loop must
+        // block indefinitely between requests, so the bound is lifted again right after auth.
+        stream.ReadTimeout = HandshakeReadTimeoutMs;
         var authMessage = new AuthMessage(id: 1, token: brokerJson.Token, role: AuthRole.AddIn);
         WriteLine(stream, authMessage.ToJson());
         var documentsTask = documentSnapshotHandler.SnapshotAsync(documentSnapshotEvent);
 
         var authResponseLine = ReadOneLine(stream, buffer, pendingLines, readBuffer, stopToken)
-            ?? throw new IOException("broker closed the connection before an auth response arrived.");
+            ?? throw new IOException($"no auth response from the broker at {address.Host}:{address.Port} within {HandshakeReadTimeoutMs / 1000}s (or it closed the connection first); if its process has exited but still holds the port, a new primary takes over on the server side and the next attempt follows broker.json to it.");
+        stream.ReadTimeout = Timeout.Infinite;
 
         using (var authDoc = JsonDocument.Parse(authResponseLine))
         {

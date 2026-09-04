@@ -468,7 +468,7 @@ func run(mode, bindAddr string, port int, appDataDirOverride, sharedRoot string,
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	lockPath := filepath.Join(rendezvousRoot, "broker.lock")
+	lockPath := singleton.LockPath(rendezvousRoot)
 
 	// One stdin relay for the whole process lifetime (see its own doc
 	// comment) — both branches below read through it via a fresh
@@ -515,15 +515,31 @@ func run(mode, bindAddr string, port int, appDataDirOverride, sharedRoot string,
 			return nil
 		}
 
-		stop := make(chan struct{})
-		reader := &turnReader{relay: relay, stop: stop}
-
-		if primary {
+		// servePrimary runs this process as primary on the lock it holds, whether
+		// that is the base lock won just above or a generation lock claimed by a
+		// takeover below. This process's own session ending is a real shutdown,
+		// not something to retry, so the caller returns whatever it returns.
+		servePrimary := func(lock *singleton.Lock) error {
+			stop := make(chan struct{})
+			reader := &turnReader{relay: relay, stop: stop}
 			err := runPrimary(ctx, mode, bindAddr, port, rendezvousRoot, privateRoot, imageAtStart, logger, reader)
 			close(stop)
 			lock.Release()
-			return err // this process's own session ending is a real shutdown, not something to retry
+			return err
 		}
+
+		if primary {
+			// Issue #212: holding the BASE lock means whatever corpse forced a
+			// takeover onto the generation files is gone (a reboot freed it), so
+			// they are no longer needed. Held ones are left alone.
+			if n := singleton.ReleaseStaleGenerations(rendezvousRoot); n > 0 {
+				logger.Printf("primary: removed %d stale lock generation file(s) left by an earlier dead-primary takeover (issue #212)", n)
+			}
+			return servePrimary(lock)
+		}
+
+		stop := make(chan struct{})
+		reader := &turnReader{relay: relay, stop: stop}
 
 		// runSecondary closes stop itself, as the very first thing it does
 		// on returning — before it closes its upstream connection to the
@@ -542,6 +558,36 @@ func run(mode, bindAddr string, port int, appDataDirOverride, sharedRoot string,
 		wg.Wait()
 		if ctx.Err() != nil {
 			return nil // clean shutdown (signal), not a dropped-primary retry case
+		}
+		// Issue #212, dead-holder takeover: the primary broker.json names has
+		// EXITED yet the lock is still held and its listener still accepts (a
+		// process Windows terminated but could not tear down keeps both until a
+		// reboot). Nothing will ever answer on that port, so one failed attempt
+		// is conclusive once the pid is known dead -- take over on a fresh lock
+		// generation instead of striking out (or, for a corpse from an older
+		// build, refusing its schema) and telling the user to end a process that
+		// cannot be ended. Checked BEFORE the two terminal paths below, since
+		// either of them would otherwise end this process with the same advice.
+		if errors.Is(err, errSchemaMismatch) || isPrimaryUnreachable(err) {
+			if pid := brokerPID(rendezvousRoot); pid != 0 && !singleton.ProcessAlive(pid) {
+				lock, gen, terr := singleton.TakeOver(rendezvousRoot, pid, singleton.ProcessAlive, takeoverSettle)
+				switch {
+				case terr == nil:
+					logger.Printf("dead-primary-takeover: primary pid %d has exited but still holds %s and its port (a process the OS could not finish terminating); this process becomes primary on %s (issue #212)", pid, filepath.Base(lockPath), filepath.Base(singleton.GenerationLockPath(rendezvousRoot, gen)))
+					return servePrimary(lock)
+				case errors.Is(terr, singleton.ErrHolderAlive), errors.Is(terr, singleton.ErrTakeoverInProgress):
+					// Someone live is (about to be) primary; broker.json will name
+					// it. Not a strike against anyone: the pid changes hands.
+					logger.Printf("dead-primary-takeover: standing down (%v); re-reading broker.json", terr)
+					time.Sleep(500 * time.Millisecond)
+					continue
+				case errors.Is(terr, singleton.ErrNoFreeGeneration):
+					logger.Printf("dead-primary-takeover failed: %v", terr)
+					return fmt.Errorf("%w: primary pid %d has exited but the OS has not released its lock or port, and every fallback lock is in the same state; reboot to clear them, then reconnect", errPrimaryUnresponsive, pid)
+				default:
+					logger.Printf("dead-primary-takeover failed: %v", terr)
+				}
+			}
 		}
 		if errors.Is(err, errSchemaMismatch) {
 			// Terminal by design: retrying re-reads the same broker.json and
@@ -565,13 +611,9 @@ func run(mode, bindAddr string, port int, appDataDirOverride, sharedRoot string,
 		// was established and then ended does not (that is the normal re-election
 		// case). Three strikes against one pid -> a terminal, legible error.
 		if isPrimaryUnreachable(err) {
-			pid := 0
-			if info, rerr := singleton.ReadBrokerJSON(rendezvousRoot); rerr == nil {
-				pid = info.PID
-			}
 			// No readable broker.json means "no primary yet", not an unresponsive one (review of
 			// #205): the 5 s wait in runSecondary already covers a primary still writing it.
-			if pid != 0 && primaryFailures.Record(pid) {
+			if pid := brokerPID(rendezvousRoot); pid != 0 && primaryFailures.Record(pid) {
 				logger.Printf("primary-unresponsive: %d consecutive attempts to reach the primary (pid %d) failed, last: %v. It holds the singleton lock and port but does not answer; end that process (or reboot if it cannot be ended) and reconnect this MCP server.", primaryFailures.Count(), pid, err)
 				return fmt.Errorf("%w: primary pid %d does not answer (%d attempts, last: %v); end that process or reboot, then reconnect", errPrimaryUnresponsive, pid, primaryFailures.Count(), err)
 			}
@@ -594,6 +636,23 @@ func anyExecutionInFlight(reg *registry.Registry, mgr *execution.Manager) bool {
 	}
 	return false
 }
+
+// brokerPID is the pid broker.json currently names, or 0 when the file is
+// missing or unreadable ("no primary yet").
+func brokerPID(rendezvousRoot string) int {
+	info, err := singleton.ReadBrokerJSON(rendezvousRoot)
+	if err != nil {
+		return 0
+	}
+	return info.PID
+}
+
+// takeoverSettle is how long a dead-holder takeover waits under the takeover
+// lock before re-reading broker.json (issue #212). A live primary that has
+// just won a lock writes broker.json within milliseconds of binding, so one
+// second is ample to tell "stale file, dead holder" from "new primary, file
+// not yet written" -- and it is paid only on the already-failed path.
+const takeoverSettle = time.Second
 
 // errPrimaryUnresponsive is terminal like errSchemaMismatch: the primary named
 // in broker.json holds the lock and the port but never completes the auth
