@@ -37,6 +37,7 @@ var toolInputTypes = []struct {
 	{"describe_howto", schemaFor[DescribeHowToIn]},
 	{"submit_howto", schemaFor[SubmitHowToIn]},
 	{"get_skills", schemaFor[GetSkillsIn]},
+	{"update_connector", schemaFor[UpdateConnectorIn]},
 }
 
 func schemaFor[T any]() (*jsonschema.Schema, error) { return jsonschema.For[T](nil) }

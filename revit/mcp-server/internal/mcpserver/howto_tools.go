@@ -253,9 +253,26 @@ func submitHowTo(deps HowToDeps, in SubmitHowToIn) SubmitHowToOut {
 	}
 	out.Submission.Issue = &IssueToFile{Repo: env.RepoSlug, Title: prep.Title, Body: prep.Body, Labels: prep.Labels}
 	out.Submission.NewIssueURL, out.Submission.GhCommand = prep.IssueURL, prep.GhCommand
-	out.Guidance = "The scrubbed document is what will leave this machine -- read it with the user. The connector did not file the issue (no REVIT_MCP_GITHUB_TOKEN is set), so file it yourself with the GitHub tool you have: " +
-		"create an issue in " + env.RepoSlug + " from submission.issue (title, body, labels verbatim) using the GitHub connector if it is installed, or the gh CLI (gh_command). Without either, the user opens new_issue_url and pastes the body from " + prep.BodyPath +
-		". The repository is private during development, so only collaborators can file; anyone else hands the outbox file to a maintainer."
+	// The hand-off tail is the same however we got here (no token, or a token
+	// whose filing failed): the agent files from submission.issue.
+	handoff := "create an issue in " + env.RepoSlug + " from submission.issue (title, body, labels verbatim) using the GitHub connector if it is installed, or the gh CLI (gh_command). Without either, the user opens new_issue_url and pastes the body from " + prep.BodyPath +
+		". The repository is public, so anyone with a GitHub account can file it (through that GitHub tool, gh_command, or new_issue_url in a browser); there is no anonymous path -- filing always needs a GitHub sign-in. Prefer new_issue_url when the account is not a collaborator: its issue-form template still applies the queue label, which a plain API/gh label request from a non-collaborator would drop."
+	// A first-class notice, not only guidance prose: without a token the issue
+	// is NOT filed, and confirm_submission succeeding otherwise reads as "done"
+	// (four real submissions were reported as "confirmed to review queue" when
+	// they had only reached this outbox). Gate the "no token" wording on the
+	// token actually being absent: a token that was SET but whose filing FAILED
+	// falls through to here too, and there the truthful reason is already in the
+	// howto-issue-not-filed notice appended above -- claiming "no token" there
+	// would be flatly wrong.
+	if deps.GitHubToken == "" {
+		out.Notices = append(out.Notices, diag.New(diag.SeverityWarning, "howto-submission-not-filed", howtoSource,
+			"scrubbed and staged to the outbox, but NOT filed to the review queue: the broker has no GitHub token, so nothing has left this machine yet").
+			WithRemedy("file it yourself from submission.issue (title, body, labels verbatim) with your GitHub tool or gh_command, or have the user open new_issue_url and paste "+prep.BodyPath+"; until an issue exists in "+env.RepoSlug+", the submission is not in the queue"))
+		out.Guidance = "The scrubbed document is what will leave this machine -- read it with the user. The connector did NOT file the issue and nothing has reached the review queue yet (no REVIT_MCP_GITHUB_TOKEN is set), so file it yourself with the GitHub tool you have: " + handoff
+	} else {
+		out.Guidance = "The scrubbed document is what will leave this machine -- read it with the user. The connector tried to file the issue and could not (see the howto-issue-not-filed notice above); nothing reached the review queue, so file it yourself: " + handoff
+	}
 	return out
 }
 

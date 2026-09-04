@@ -424,6 +424,14 @@ Two cases the review walked, decided here:
 
 ### 4e. While the repository is private
 
+> **Update (2026-09): the repository is now public.** Anyone with a GitHub account can file a
+> submission — through the agent's GitHub tool, `gh`, or the prefilled issue URL in a browser — so the
+> "non-collaborator hands the outbox to a maintainer" step below no longer applies. What is unchanged:
+> filing still needs a GitHub sign-in (there is no anonymous or token-less `curl` path to create an
+> issue), and the prefilled URL's Issue Form template remains the robust way to get the queue label,
+> since a non-collaborator's plain `--label`/API label request is still dropped. The paragraphs below
+> are kept as the original private-repo reasoning.
+
 The repository is private during development, and a private repository's issues are visible and
 writable only to collaborators. Consequences for the growth loop, decided:
 
