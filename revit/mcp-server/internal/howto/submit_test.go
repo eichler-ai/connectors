@@ -3,6 +3,7 @@ package howto
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -503,5 +504,27 @@ func TestSaveResendOfTheSameSubmissionReplacesItsLocalFile(t *testing.T) {
 	}
 	if third.Doc.ID == first.Doc.ID {
 		t.Fatalf("a different script under the same title must not overwrite the first document")
+	}
+}
+
+func TestSaveReportsAStampErrorNamingTheSavedPathWhenTheBrokerBuiltABadStamp(t *testing.T) {
+	// Review of #208: the document is written before the stamp is validated, so a broker-side
+	// stamp defect must surface as a typed error carrying the saved path -- not as the generic
+	// save-failed remedy that sends the submitter to check a directory that is fine.
+	env := testEnv(t)
+	env.RevitVersion = "abcd" // violates the schema's ^20[2-9][0-9]$ -- every stamp field is the broker's own
+	sub := goodSubmission()
+	ranSHA := ScriptSHA256(sub.Script)
+	env.SessionSucceeded = func(sha string) (time.Time, bool) { return env.Now(), sha == ranSHA }
+	saved, err := Save(env, sub)
+	var se *StampError
+	if saved != nil || !errors.As(err, &se) {
+		t.Fatalf("expected a *StampError, got saved=%v err=%v", saved, err)
+	}
+	if se.Path == "" {
+		t.Fatal("StampError must name the path the document was saved at")
+	}
+	if _, statErr := os.Stat(se.Path); statErr != nil {
+		t.Fatalf("the document must be on disk at %s: %v", se.Path, statErr)
 	}
 }
