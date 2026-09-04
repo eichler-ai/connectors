@@ -31,8 +31,21 @@ irm https://raw.githubusercontent.com/eichler-ai/connectors/main/revit/install.p
 
 This downloads the latest signed release and installs the add-in for whichever supported Revit
 versions are present, then registers the MCP server with Claude if the `claude` CLI is on `PATH`.
-To remove it, use Windows **Apps & features** (the installer registers an uninstall entry) or re-run
-`install.ps1 -Uninstall`.
+
+**Uninstalling.** Quit Claude Desktop fully (tray icon → Quit; closing the window leaves its server
+running) and close Revit, then either remove **Revit MCP Bridge** from Windows **Apps & features**, or
+run the installed copy of the installer from PowerShell:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File "$env:LocalAppData\Programs\MCPBridge\install.ps1" -Uninstall -Scope User
+```
+
+Use `-Scope AllUsers` and the `%ProgramFiles%\MCPBridge` copy for an all-users install. The
+`-ExecutionPolicy Bypass` is needed because Windows blocks saved scripts by default (the one-liner
+avoids that by piping into `iex`). It removes the add-in from every Revit version, the server and its
+data under `%LocalAppData%`, the Apps & features entry, and the `revit` registration in Claude Code
+and Claude Desktop. If a Revit is still running it is asked to close first; anything it keeps locked
+is reported and cleaned up by a second run.
 
 **Updating.** Two ways, same result:
 
