@@ -493,7 +493,7 @@ func Scrub(d *Document, env Env) (*Document, []Residue) {
 	}
 	// Local provenance never leaves the machine as "local": the reviewer sets
 	// submission provenance on acceptance.
-	out.Provenance = Provenance{Kind: ProvenanceSubmission, Ref: "pending: filed through the review queue"}
+	out.Provenance = Provenance{Kind: ProvenanceSubmission, Ref: "pending: not yet filed; awaiting hand-off to the review queue"}
 	return &out, residue
 }
 

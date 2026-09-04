@@ -14,6 +14,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/eichler-ai/connectors/revit/mcp-server/internal/diag"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/discovery"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/registry"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/transport"
@@ -149,6 +150,22 @@ func TestSubmitHowToWithConfirmationPreparesScrubbedIssue(t *testing.T) {
 	}
 	if strings.Contains(s.Issue.Body, "Tower B") || !strings.Contains(out.Guidance, "GitHub connector") || !strings.Contains(out.Guidance, "new_issue_url") {
 		t.Fatalf("issue body / guidance: %q", out.Guidance)
+	}
+	// A token-less confirm must surface the not-filed state as a first-class
+	// notice, not only in guidance prose -- confirm_submission otherwise
+	// succeeding reads as "queued" (submissions were reported that way when
+	// they had only reached the outbox).
+	var notFiled *diag.Record
+	for _, n := range out.Notices {
+		if n.Code == "howto-submission-not-filed" {
+			notFiled = n
+		}
+	}
+	if notFiled == nil {
+		t.Fatalf("no howto-submission-not-filed notice; notices = %+v", out.Notices)
+	}
+	if notFiled.Severity != diag.SeverityWarning || !strings.Contains(notFiled.Message, "NOT filed") {
+		t.Fatalf("not-filed notice too quiet: %+v", notFiled)
 	}
 	// The unscrubbed local copy keeps the user's own text (it never leaves the machine).
 	raw, _ := os.ReadFile(out.LocalPath)
