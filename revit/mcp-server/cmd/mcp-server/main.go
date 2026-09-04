@@ -493,7 +493,7 @@ func run(mode, bindAddr string, port int, appDataDirOverride, sharedRoot string,
 		reader := &turnReader{relay: relay, stop: stop}
 
 		if primary {
-			err := runPrimary(ctx, bindAddr, port, rendezvousRoot, privateRoot, logger, reader)
+			err := runPrimary(ctx, mode, bindAddr, port, rendezvousRoot, privateRoot, logger, reader)
 			close(stop)
 			lock.Release()
 			return err // this process's own session ending is a real shutdown, not something to retry
@@ -538,7 +538,7 @@ func run(mode, bindAddr string, port int, appDataDirOverride, sharedRoot string,
 	}
 }
 
-func runPrimary(ctx context.Context, bindAddr string, port int, rendezvousRoot, privateRoot string, logger *log.Logger, stdin io.Reader) error {
+func runPrimary(ctx context.Context, mode, bindAddr string, port int, rendezvousRoot, privateRoot string, logger *log.Logger, stdin io.Reader) error {
 	ln, err := net.Listen("tcp", net.JoinHostPort(bindAddr, strconv.Itoa(port)))
 	if err != nil {
 		return fmt.Errorf("binding TCP listener on %s:%d: %w", bindAddr, port, err)
@@ -589,6 +589,9 @@ func runPrimary(ctx context.Context, bindAddr string, port int, rendezvousRoot, 
 	searchIndex := manager.New(discoveryRouter, embedder, reranker, logger.Printf)
 	mcpserver.RegisterDiscovery(mcpServer, discoveryRouter, searchIndex)
 	mcpserver.RegisterInstances(mcpServer, reg, execMgr)
+	// update_connector (issue #199): the on-demand form of the periodic check below, plus a gated
+	// apply. Shares the rendezvous root so it writes the same broker.json the add-in reads.
+	mcpserver.RegisterUpdate(mcpServer, mcpserver.NewUpdateDeps(mode, rendezvousRoot, version, reg, &http.Client{Timeout: 10 * time.Second}, logger))
 	// The how-to index shares the models; it is built lazily on the first
 	// search_howtos/describe_howto call and rebuilt when the local
 	// directory changes.

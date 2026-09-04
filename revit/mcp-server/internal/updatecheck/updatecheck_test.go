@@ -3,6 +3,7 @@ package updatecheck
 import (
 	"bytes"
 	"context"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -266,4 +267,43 @@ func assertNoPanic(t *testing.T, f func()) {
 		}
 	}()
 	f()
+}
+
+func TestCheckNowReturnsTheTagAndRecordsIt(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"tag_name": "v0.1.3"}`))
+	}))
+	defer server.Close()
+	dir := t.TempDir()
+	if err := singleton.WriteBrokerJSON(dir, singleton.BrokerInfo{Host: "127.0.0.1", Port: 1, PID: 1, StartedAt: time.Now().UTC(), Token: "t", Version: "v0.1.2"}); err != nil {
+		t.Fatal(err)
+	}
+
+	tag, err := checkNowAt(context.Background(), server.Client(), server.URL, dir, "v0.1.2", log.New(io.Discard, "", 0))
+
+	if err != nil || tag != "v0.1.3" {
+		t.Fatalf("tag=%q err=%v", tag, err)
+	}
+	info, err := singleton.ReadBrokerJSON(dir)
+	if err != nil || info.LatestAvailableVersion != "v0.1.3" || info.Version != "v0.1.2" {
+		t.Fatalf("broker.json not updated as expected: %+v err=%v", info, err)
+	}
+}
+
+func TestCheckNowReturnsAnErrorAndLeavesBrokerJSONOnFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusForbidden) }))
+	defer server.Close()
+	dir := t.TempDir()
+	singleton.WriteBrokerJSON(dir, singleton.BrokerInfo{Host: "h", Port: 1, PID: 1, StartedAt: time.Now().UTC(), Token: "t", Version: "v0.1.2", LatestAvailableVersion: "v0.1.2"})
+
+	tag, err := checkNowAt(context.Background(), server.Client(), server.URL, dir, "v0.1.2", log.New(io.Discard, "", 0))
+
+	if err == nil || tag != "" {
+		t.Fatalf("expected an error, got tag=%q err=%v", tag, err)
+	}
+	info, _ := singleton.ReadBrokerJSON(dir)
+	if info.LatestAvailableVersion != "v0.1.2" {
+		t.Fatalf("a failed check must leave broker.json untouched: %+v", info)
+	}
 }
