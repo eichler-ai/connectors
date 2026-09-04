@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "id": "create-a-new-area-scheme-by-cloning-an-existing-one",
+  "rev": 1,
+  "kind": "howto",
+  "title": "Create a new area scheme by cloning an existing one",
+  "task": "Create a new AreaScheme by copying an existing one with ElementTransformUtils.CopyElement, then renaming it uniquely. AreaScheme has no Create and no Duplicate, and IsGrossBuildingArea is read-only and inherited from the clone source.",
+  "members": [
+    "Autodesk.Revit.DB.FilteredElementCollector.OfClass",
+    "Autodesk.Revit.DB.AreaScheme.IsGrossBuildingArea",
+    "Autodesk.Revit.DB.ElementTransformUtils.CopyElement",
+    "Autodesk.Revit.DB.Document.GetElement",
+    "Autodesk.Revit.DB.Element.Name",
+    "Autodesk.Revit.DB.Document.Regenerate"
+  ],
+  "script": "using Autodesk.Revit.DB;\nvar doc = Document;\n// Goal: create a NEW area scheme by cloning an existing one. AreaScheme has no Create and no\n// Duplicate; it is copied. Reads at top level, the copy + rename in one WithTransaction block.\n\n// 1. Pick the source scheme to clone. The clone INHERITS IsGrossBuildingArea from its source and\n//    that flag is read-only, so choose by the kind you want: the Gross Building scheme for a gross\n//    plan, otherwise a Rentable/BOMA scheme. Here: prefer the gross one, else the first scheme.\nAreaScheme source = null, firstScheme = null;\nforeach (AreaScheme s in new FilteredElementCollector(doc).OfClass(typeof(AreaScheme))) {\n  if (firstScheme == null) firstScheme = s;\n  if (s.IsGrossBuildingArea) { source = s; break; }\n}\nif (source == null) source = firstScheme;\nif (source == null) throw new System.Exception(\"no AreaScheme to clone in this document\");\n\n// 2. A unique name: setting AreaScheme.Name to one already in use throws. Collect existing names.\nvar existing = new System.Collections.Generic.HashSet<string>();\nforeach (AreaScheme s in new FilteredElementCollector(doc).OfClass(typeof(AreaScheme))) existing.Add(s.Name);\nstring wanted = \"Custom Area Scheme\";\nstring newName = wanted;\nint n = 1;\nwhile (existing.Contains(newName)) { n++; newName = wanted + \" \" + n; }\n\nreturn Connector.WithTransaction(doc, () => {\n  // 3. Clone it. AreaScheme derives from Element (NOT ElementType), so ElementType.Duplicate(name)\n  //    does not exist on it and there is no AreaScheme.Create. ElementTransformUtils.CopyElement\n  //    copies the scheme element; the translation is irrelevant (a scheme has no geometry), so pass\n  //    XYZ.Zero. It returns a collection of new ids; the new AreaScheme is the one among them.\n  var copied = ElementTransformUtils.CopyElement(doc, source.Id, XYZ.Zero);\n  AreaScheme created = null;\n  foreach (var id in copied) { var e = doc.GetElement(id) as AreaScheme; if (e != null) { created = e; break; } }\n  if (created == null) throw new System.Exception(\"copy produced no AreaScheme\");\n\n  // 4. Rename the clone (Revit names it \"<source> 1\"); the name must be unique among area schemes.\n  created.Name = newName;\n  doc.Regenerate();\n\n  return new {\n    sourceName = source.Name, sourceGross = source.IsGrossBuildingArea,\n    createdId = created.Id.Value, createdName = created.Name,\n    createdGross = created.IsGrossBuildingArea,\n    grossInheritedFromSource = created.IsGrossBuildingArea == source.IsGrossBuildingArea\n  };\n});",
+  "script_language": "csharp-script",
+  "pitfalls": [
+    {
+      "symptom": "There is no obvious way to make a new area scheme: AreaScheme has no Create method, and ElementType.Duplicate(name) is not available on it.",
+      "cause": "AreaScheme derives from Element, not ElementType, so it has no Duplicate; there is no factory for it either.",
+      "fix": "Clone an existing scheme with ElementTransformUtils.CopyElement(doc, sourceScheme.Id, XYZ.Zero) (translation is irrelevant, a scheme has no geometry). The returned collection holds the new element id(s); the new AreaScheme is the one whose GetElement casts to AreaScheme."
+    },
+    {
+      "symptom": "You cannot set whether the new scheme is a Gross Building scheme; AreaScheme.IsGrossBuildingArea has no setter.",
+      "cause": "IsGrossBuildingArea is read-only and is inherited from whatever scheme you copied.",
+      "fix": "Choose the clone source by the kind you want: copy the scheme whose IsGrossBuildingArea is true for a gross plan, or a Rentable/BOMA scheme for a net plan. You cannot flip it afterwards."
+    },
+    {
+      "symptom": "Setting the clone's Name throws that the name is already in use.",
+      "cause": "Area scheme names must be unique; the copy is auto-named '<source> 1', and blindly assigning a fixed name can collide.",
+      "fix": "Gather existing AreaScheme.Name values first and pick an unused name (append a counter) before assigning created.Name."
+    }
+  ],
+  "tags": [
+    "areas",
+    "area-scheme",
+    "creation",
+    "clone"
+  ],
+  "provenance": {
+    "kind": "submission",
+    "ref": "submission staged in the connector outbox (VM), not filed as an issue; triaged 2026-09-04",
+    "reviewed_by": "nchim",
+    "reviewed_at": "2026-09-04T00:00:00Z"
+  },
+  "created_at": "2026-09-03T21:56:17Z",
+  "updated_at": "2026-09-04T00:00:00Z"
+}
