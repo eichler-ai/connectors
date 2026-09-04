@@ -211,12 +211,14 @@ func readHolder(path string) (pid int, recorded bool) {
 }
 
 // removeStaleGenerations deletes every generation lock file above 0 that is
-// not held. Called under the election mutex by the generation-0 winner, so
-// no other process is acquiring a generation meanwhile; the file is removed
-// BEFORE its lock is released so that even outside the mutex no process
-// could lock a path that is about to disappear (on unix an unlink of a locked
-// file always succeeds and would otherwise hand two processes the same
-// generation name on different inodes). Held files fail to lock and stay.
+// not held. Called under the election mutex by the generation-0 winner, so no
+// other process is acquiring a generation meanwhile -- that mutex, not the
+// order of remove and release, is what keeps a removal from racing an
+// acquirer. The order differs per OS anyway: unix unlinks a file that is
+// still open (and would, outside the mutex, hand two processes one name on
+// different inodes -- so remove first there), while Windows refuses to delete
+// a file this process still has open (Go opens without FILE_SHARE_DELETE) and
+// needs the handle closed first. Held files fail to lock and stay.
 func removeStaleGenerations(dir string) int {
 	removed := 0
 	for n := 1; n <= MaxLockGenerations; n++ {
@@ -228,10 +230,14 @@ func removeStaleGenerations(dir string) int {
 		if err != nil || !got {
 			continue
 		}
-		if err := os.Remove(path); err == nil {
+		err = os.Remove(path) // unix: succeeds while held
+		l.Release()
+		if err != nil {
+			err = os.Remove(path) // Windows: only after the handle is closed
+		}
+		if err == nil {
 			removed++
 		}
-		l.Release()
 	}
 	return removed
 }
