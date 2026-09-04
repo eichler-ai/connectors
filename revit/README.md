@@ -26,8 +26,9 @@ registers the MCP server with Claude if the `claude` CLI is on `PATH`. To update
 click **Update Now** in Revit's **Add-Ins → MCP Bridge → Status** window when it shows
 `Update available` (the MCP Server checks GitHub for releases; to apply an add-in change Revit asks
 to close, prompting to save unsaved work first, and a Revit you keep open is updated when you next
-close it). Uninstall from Windows **Apps & features** or with
-`install.ps1 -Uninstall`. Releases are
+close it). Uninstall from Windows **Apps & features**, or run the installed copy with
+`powershell -ExecutionPolicy Bypass -File "$env:LocalAppData\Programs\MCPBridge\install.ps1" -Uninstall`
+after quitting Claude Desktop and Revit (details in the [top-level README](../README.md#install)). Releases are
 **self-signed** for now, so Windows shows an "Unknown Publisher" prompt (a CA certificate is
 deferred — PRD §12). Full detail: [`install.md`](./install.md). The Mac + Parallels dev topology
 (broker on the Mac, add-in in the VM) uses [`install-mac.sh`](./install-mac.sh) instead.

@@ -1221,13 +1221,13 @@ if ($parts.Count -gt 0) { $summary += ": $($parts -join '; ')" }
 $summary += "."
 if ($deferredVersions.Count -gt 0) { $summary += " Revit $($deferredVersions -join ', ') will update automatically once you close it." }
 switch ($brokerOutcome) {
-    'swapped'   { $summary += " Broker updated." }
-    'staged'    { $summary += " Broker updated on disk, but a running broker is still serving the previous version: it takes effect when your MCP client next starts it -- reconnect the revit MCP server (e.g. /mcp in Claude Code) or restart the client. The Revit ribbon shows the update as available until then." }
+    'swapped'   { $summary += " MCP Server updated." }
+    'staged'    { $summary += " MCP Server updated on disk, but a running server is still serving the previous version: it takes effect when your MCP client next starts it -- reconnect the revit MCP server (e.g. /mcp in Claude Code) or restart the client. The Revit ribbon shows the update as available until then." }
     'pending'   {
-        $summary += " The new broker is waiting as mcp-server.exe.new; re-run this installer once no broker is running to finish the swap."
-        if (-not (Test-Path $serverExe)) { $summary += " Until then there is NO mcp-server.exe in place (the old one was moved aside before the swap was refused), so a new MCP client session cannot start the broker." }
+        $summary += " The new MCP Server is waiting as mcp-server.exe.new; re-run this installer once no server is running to finish the swap."
+        if (-not (Test-Path $serverExe)) { $summary += " Until then there is NO mcp-server.exe in place (the old one was moved aside before the swap was refused), so a new MCP client session cannot start the server." }
     }
-    'unchanged' { $summary += " Broker already current." }
+    'unchanged' { $summary += " MCP Server already current." }
 }
 Write-Host $summary
 
