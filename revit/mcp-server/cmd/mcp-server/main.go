@@ -738,7 +738,9 @@ func runPrimary(ctx context.Context, mode, bindAddr string, port int, rendezvous
 		Registry:    reg,
 		Router:      discoveryRouter,
 		Exec:        execMgr,
-		Version:     versionLine(),
+		// The stamp schema bounds connector_version at 40 chars (howto.MaxStampConnectorVersionLen);
+		// the full versionLine() does not fit, so the stamp carries version + short revision.
+		Version: version + " (" + buildinfo.Read().ShortRevision() + ")",
 		// An edit by id (submit_howto with id + change_note) targets the
 		// embedded seed as well as the user's local documents.
 		Bases: func() []*howto.Corpus {

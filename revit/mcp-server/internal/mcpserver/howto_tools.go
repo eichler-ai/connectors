@@ -44,7 +44,8 @@ type HowToDeps struct {
 	Router *discovery.Router
 	// Exec answers "did this exact script succeed in this session".
 	Exec *execution.Manager
-	// Version is the broker's version line, recorded on a session stamp.
+	// Version labels a session stamp (connector_version). Keep it within
+	// howto.MaxStampConnectorVersionLen; a longer label is cut to fit.
 	Version string
 	// RepoSlug is the review-queue repository.
 	RepoSlug string
@@ -193,6 +194,15 @@ func submitHowTo(deps HowToDeps, in SubmitHowToIn) SubmitHowToOut {
 				"the submission does not conform to the how-to schema: "+strings.Join(ve.Problems, "; ")).
 				WithDetail(map[string]any{"problems": ve.Problems}).
 				WithRemedy("fix the named fields and call submit_howto again; nothing was saved. Field rules: id kebab-case; title 8-120 chars; task 20-600 chars naming element type and operation; members fully qualified (Namespace.Type.Member); pitfalls need symptom, cause and fix; queries.hit needs rank, queries.miss needs surfaced")}
+		}
+		var se *howto.StampError
+		if errors.As(err, &se) {
+			// The document is on disk; only its verification stamp is missing, and every field of a
+			// stamp is the broker's own. Do not send the submitter to check the directory or re-run
+			// the script -- neither is the problem (review of #208).
+			return SubmitHowToOut{Error: diag.New(diag.SeverityError, "howto-stamp-failed", howtoSource, se.Error()).
+				WithDetail(map[string]any{"local_path": se.Path}).
+				WithRemedy("the how-to was saved but carries no verification stamp; this is a connector bug, not a submission problem -- report it with this message (re-running the script or resubmitting will not help)")}
 		}
 		return SubmitHowToOut{Error: diag.New(diag.SeverityError, "howto-save-failed", howtoSource, err.Error()).
 			WithRemedy("check the local corpus directory is writable: " + deps.LocalDir)}

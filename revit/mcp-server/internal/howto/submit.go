@@ -69,6 +69,12 @@ const (
 	SessionSidecarName = "verified.jsonl"
 	// IssueTemplate is the Issue Form that applies the queue label for any author.
 	IssueTemplate = "howto-submission.yml"
+	// MaxStampConnectorVersionLen mirrors connector_version.maxLength in
+	// schema/howto-verification-schema.json. The broker passes a short label
+	// ("v0.1.2 (abc1234)"); its full version line (~55 chars) used to be passed
+	// here and silently cost every submitter their stamp. Save bounds whatever
+	// it is given so a label can never do that again.
+	MaxStampConnectorVersionLen = 40
 )
 
 // Saved is the outcome of the non-gated half.
@@ -143,14 +149,25 @@ func Save(env Env, sub Submission) (*Saved, error) {
 			if env.RevitVersion == "" {
 				st.RevitVersion = "0000"
 			}
-			if raw, err := json.Marshal(st); err == nil {
-				if _, err := ValidateStamp(raw); err == nil {
-					if err := appendStamp(filepath.Join(env.LocalDir, SessionSidecarName), st, raw); err != nil {
-						return nil, fmt.Errorf("howto: writing the session stamp: %w", err)
-					}
-					saved.Stamp = &st
-				}
+			// Bound the label: it must never cost the submitter the stamp the run earned.
+			if len(st.ConnectorVersion) > MaxStampConnectorVersionLen {
+				st.ConnectorVersion = st.ConnectorVersion[:MaxStampConnectorVersionLen]
 			}
+			raw, err := json.Marshal(st)
+			if err != nil {
+				return nil, fmt.Errorf("howto: encoding the session stamp: %w", err)
+			}
+			// Every field here is the broker's own; a stamp that fails its own
+			// schema is a bug, and it used to be a silent one -- the stamp was
+			// dropped and the tool blamed the submitter for not running the
+			// script (howto-script-not-run-this-session). Say so instead.
+			if _, err := ValidateStamp(raw); err != nil {
+				return nil, &StampError{Path: saved.LocalPath, Err: fmt.Errorf("the session stamp the broker built fails its own schema: %w", err)}
+			}
+			if err := appendStamp(filepath.Join(env.LocalDir, SessionSidecarName), st, raw); err != nil {
+				return nil, &StampError{Path: saved.LocalPath, Err: fmt.Errorf("writing the session stamp: %w", err)}
+			}
+			saved.Stamp = &st
 		}
 	}
 	return saved, nil
@@ -675,3 +692,20 @@ func appendStamp(path string, st Stamp, raw []byte) error {
 	_, err = f.Write(append(raw, '\n'))
 	return err
 }
+
+// StampError reports that the how-to document WAS saved (at Path) but the
+// session stamp the run earned could not be recorded -- the broker built a
+// stamp that fails its own schema, or could not write the sidecar. Every field
+// of a stamp is the broker's own, so this is a broker bug, not a submission
+// problem, and callers must not send the submitter off to "fix" the document
+// or the directory (review of #208: the generic save-failed remedy did exactly
+// that for a document that was already on disk).
+type StampError struct {
+	Path string
+	Err  error
+}
+
+func (e *StampError) Error() string {
+	return "howto: saved " + e.Path + " but could not record its session stamp: " + e.Err.Error()
+}
+func (e *StampError) Unwrap() error { return e.Err }
