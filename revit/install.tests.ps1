@@ -43,13 +43,14 @@ Describe 'New-PackageManifest' {
         $stage = Join-Path $TestDrive 'stage'
         New-Payload (Join-Path $stage 'addin-2027') @{ 'MCPBridge.AddIn.dll' = '2027' }
         New-Payload (Join-Path $stage 'addin-2025') @{ 'MCPBridge.AddIn.dll' = '2025' }
+        New-Payload (Join-Path $stage 'shim-2027') @{ 'MCPBridge.Shim.dll' = 'shim'; 'MCPBridge.addin' = '<m/>' }
         New-Payload (Join-Path $stage 'server') @{ 'mcp-server.exe' = 'exe' }
         New-Payload (Join-Path $stage 'unrelated') @{ 'readme.txt' = 'no' }
         $corpus = [ordered]@{ documents = 23; hash = 'abc'; verified_on = @('2025', '2027') }
         $m = New-PackageManifest $stage 'v1.2.3' $corpus
         $m.version | Should -Be 'v1.2.3'
         $m.schema_version | Should -Be 1
-        @($m.components.Keys) | Should -Be @('addin-2025', 'addin-2027', 'server')
+        @($m.components.Keys) | Should -Be @('addin-2025', 'addin-2027', 'server', 'shim-2027')
         $m.components['server'].sha256 | Should -Be (Get-DirectoryContentHash (Join-Path $stage 'server'))
         $m.howto_corpus.hash | Should -Be 'abc'
 
@@ -217,6 +218,173 @@ Describe 'Install-BrokerStaged' {
         Complete-PendingBrokerSwap $app | Should -BeFalse
         Test-Path (Join-Path $app 'mcp-server.exe.old') | Should -BeFalse
         Get-Content (Join-Path $app 'mcp-server.exe') -Raw | Should -Be 'exe'
+    }
+}
+
+Describe 'Versioned add-in layout (self-update-architecture.md §4): pointer, version folders, shim, migration' {
+    BeforeEach {
+        $script:app = Join-Path $TestDrive "app-$([guid]::NewGuid())"
+        $script:addins = Join-Path $TestDrive "addins-$([guid]::NewGuid())"
+        $script:payload = Join-Path $TestDrive "payload-$([guid]::NewGuid())"
+        $script:shim = Join-Path $TestDrive "shim-$([guid]::NewGuid())"
+        New-Payload $payload @{ 'MCPBridge.AddIn.dll' = 'addin-v2'; 'MCPBridge.addin' = '<addin/>'; 'Microsoft.CodeAnalysis.dll' = 'roslyn'; 'de/Microsoft.CodeAnalysis.resources.dll' = 'de' }
+        New-Payload $shim @{ 'MCPBridge.Shim.dll' = 'shim-bytes'; 'MCPBridge.addin' = '<shim/>' }
+    }
+
+    It 'Write-AddinPointer writes {version} atomically, without a BOM, and Read-AddinPointer reads it back' {
+        Write-AddinPointer $app 'v0.1.5'
+        $path = Get-AddinPointerPath $app
+        $path | Should -Be (Join-Path (Join-Path $app 'addin') 'current.json')
+        (Read-AddinPointer $app).version | Should -Be 'v0.1.5'
+        (Read-AddinPointer $app).PSObject.Properties['previous'] | Should -BeNullOrEmpty
+        $bytes = [IO.File]::ReadAllBytes($path)
+        ($bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) | Should -BeFalse
+        # No temp file survives the rename.
+        Get-ChildItem (Split-Path $path) -Filter 'current.json.tmp-*' | Should -BeNullOrEmpty
+    }
+    It 'Write-AddinPointer remembers the replaced version as previous, and keeps it across a same-version rewrite' {
+        Write-AddinPointer $app 'v0.1.4'
+        Write-AddinPointer $app 'v0.1.5'
+        $p = Read-AddinPointer $app
+        $p.version | Should -Be 'v0.1.5'
+        $p.previous | Should -Be 'v0.1.4'
+        Write-AddinPointer $app 'v0.1.5'
+        (Read-AddinPointer $app).previous | Should -Be 'v0.1.4'
+    }
+    It 'Read-AddinPointer tolerates a UTF-8 BOM (Windows PowerShell Out-File -Encoding utf8) and returns null for junk or no version' {
+        $path = Get-AddinPointerPath $app
+        New-Item -ItemType Directory -Force -Path (Split-Path $path) | Out-Null
+        [IO.File]::WriteAllText($path, '{"version":"v0.1.9"}', (New-Object System.Text.UTF8Encoding($true)))
+        (Read-AddinPointer $app).version | Should -Be 'v0.1.9'
+        [IO.File]::WriteAllText($path, '{not json')
+        Read-AddinPointer $app | Should -BeNullOrEmpty
+        [IO.File]::WriteAllText($path, '{"other":1}')
+        Read-AddinPointer $app | Should -BeNullOrEmpty
+        Read-AddinPointer (Join-Path $TestDrive 'no-such-app') | Should -BeNullOrEmpty
+    }
+
+    It 'Install-AddinVersionPayload lays the payload down verbatim under addin\<version>\<year>, touching nothing else' {
+        Install-AddinVersionPayload $payload $app 'v0.1.5' '2027'
+        $dir = Get-AddinVersionDir $app 'v0.1.5' '2027'
+        Get-Content (Join-Path $dir 'MCPBridge.AddIn.dll') -Raw | Should -Be 'addin-v2'
+        Test-Path (Join-Path $dir 'de/Microsoft.CodeAnalysis.resources.dll') | Should -BeTrue
+        Test-Path $addins | Should -BeFalse
+        Read-AddinPointer $app | Should -BeNullOrEmpty
+    }
+
+    It 'Install-AddinShim places the shim + manifest, reports unchanged for the same bytes, and held when a copy is refused' {
+        Install-AddinShim $shim $addins | Should -Be 'placed'
+        Test-ShimAddinInstalled $addins | Should -BeTrue
+        Get-Content (Join-Path $addins 'MCPBridge.addin') -Raw | Should -Be '<shim/>'
+        Install-AddinShim $shim $addins | Should -Be 'unchanged'
+        Set-Content (Join-Path $shim 'MCPBridge.Shim.dll') 'shim-v2' -NoNewline
+        Mock Copy-Item { throw 'The process cannot access the file' } -ParameterFilter { $Destination -like '*MCPBridge.Shim.dll' }
+        Install-AddinShim $shim $addins | Should -Be 'held'
+        Get-Content (Join-Path $addins 'MCPBridge.Shim.dll') -Raw | Should -Be 'shim-bytes'
+    }
+
+    It 'Test-VersionedAddinInstalled needs the shim, the pointer AND the pointed folder for this year; Test-AddinInstalled accepts either layout' {
+        Test-AddinInstalled $app $addins '2027' | Should -BeFalse
+        Install-AddinVersionPayload $payload $app 'v0.1.5' '2027'
+        Test-VersionedAddinInstalled $app $addins '2027' | Should -BeFalse   # no shim, no pointer
+        Install-AddinShim $shim $addins | Out-Null
+        Test-VersionedAddinInstalled $app $addins '2027' | Should -BeFalse   # no pointer
+        Write-AddinPointer $app 'v0.1.5'
+        Test-VersionedAddinInstalled $app $addins '2027' | Should -BeTrue
+        Test-VersionedAddinInstalled $app $addins '2025' | Should -BeFalse   # no 2025 folder under v0.1.5
+        Write-AddinPointer $app 'v0.1.6'
+        Test-VersionedAddinInstalled $app $addins '2027' | Should -BeFalse   # pointer moved on, folder missing
+        Test-AddinInstalled $app $addins '2027' | Should -BeFalse
+
+        # The flat legacy layout counts as installed for the idempotency check.
+        $flat = Join-Path $TestDrive "flat-$([guid]::NewGuid())"
+        New-Payload $flat @{ 'MCPBridge.AddIn.dll' = 'x'; 'MCPBridge.addin' = '<addin/>' }
+        Test-LegacyFlatAddin $flat | Should -BeTrue
+        Test-AddinInstalled (Join-Path $TestDrive 'no-app') $flat '2027' | Should -BeTrue
+    }
+
+    It 'Convert-LegacyAddinToShim (migration §4.7) removes the flat add-in, places the shim, and leaves a foreign file alone' {
+        New-Payload $addins @{ 'MCPBridge.AddIn.dll' = 'old'; 'MCPBridge.addin' = '<addin/>'; 'Microsoft.CodeAnalysis.dll' = 'r'; 'de/Microsoft.CodeAnalysis.resources.dll' = 'de'; 'ThirdParty.dll' = 'theirs' }
+        Test-LegacyFlatAddin $addins | Should -BeTrue
+        Convert-LegacyAddinToShim $addins $shim | Should -BeTrue
+        Test-LegacyFlatAddin $addins | Should -BeFalse
+        Test-ShimAddinInstalled $addins | Should -BeTrue
+        Get-Content (Join-Path $addins 'MCPBridge.addin') -Raw | Should -Be '<shim/>'
+        Test-Path (Join-Path $addins 'Microsoft.CodeAnalysis.dll') | Should -BeFalse
+        Test-Path (Join-Path $addins 'de') | Should -BeFalse
+        Get-Content (Join-Path $addins 'ThirdParty.dll') -Raw | Should -Be 'theirs'
+    }
+    It 'Convert-LegacyAddinToShim removes the whole folder first when every entry is ours, then recreates it with just the shim' {
+        New-Payload $addins @{ 'MCPBridge.AddIn.dll' = 'old'; 'MCPBridge.addin' = '<addin/>'; 'runtimes/win-x64/native/e_sqlite3.dll' = 'n' }
+        Convert-LegacyAddinToShim $addins $shim | Should -BeTrue
+        @(Get-ChildItem $addins | ForEach-Object Name | Sort-Object) | Should -Be @('MCPBridge.addin', 'MCPBridge.Shim.dll')
+    }
+    It 'Convert-LegacyAddinToShim returns false and places nothing when the loaded add-in cannot be removed (a running Revit)' {
+        New-Payload $addins @{ 'MCPBridge.AddIn.dll' = 'old'; 'MCPBridge.addin' = '<addin/>'; 'ThirdParty.dll' = 'theirs' }
+        Mock Remove-Item { } -ParameterFilter { "$Path" -like '*MCPBridge.*' }
+        Convert-LegacyAddinToShim $addins $shim | Should -BeFalse
+        Test-Path (Join-Path $addins 'MCPBridge.Shim.dll') | Should -BeFalse
+        Get-Content (Join-Path $addins 'MCPBridge.addin') -Raw | Should -Be '<addin/>'
+    }
+    It 'Install-AddinFlat (a release without shim-<year>/) refuses to overwrite an installed shim, so a migrated machine is never reverted to the flat layout' {
+        Install-AddinShim $shim $addins | Out-Null
+        Install-AddinFlat $payload $addins | Should -Be 'kept-shim'
+        Get-Content (Join-Path $addins 'MCPBridge.addin') -Raw | Should -Be '<shim/>'
+        Get-Content (Join-Path $addins 'MCPBridge.Shim.dll') -Raw | Should -Be 'shim-bytes'
+        Test-Path (Join-Path $addins 'MCPBridge.AddIn.dll') | Should -BeFalse
+        Test-Path (Join-Path $addins 'Microsoft.CodeAnalysis.dll') | Should -BeFalse
+    }
+    It 'Install-AddinFlat deploys the whole payload into an Addins folder that has no shim (the legacy path)' {
+        Install-AddinFlat $payload $addins | Should -Be 'deployed'
+        Test-LegacyFlatAddin $addins | Should -BeTrue
+        Get-Content (Join-Path $addins 'MCPBridge.addin') -Raw | Should -Be '<addin/>'
+    }
+    It 'Remove-OwnedAddinFiles is a no-op on a folder without our manifest' {
+        New-Payload $addins @{ 'ThirdParty.dll' = 'theirs'; 'Other.addin' = '<o/>' }
+        Remove-OwnedAddinFiles $addins
+        @(Get-ChildItem $addins).Count | Should -Be 2
+    }
+
+    It 'Remove-StaleAddinVersions keeps the current and previous versions, deletes the rest, and skips a folder it cannot rename (mapped by a running Revit)' {
+        foreach ($v in 'v0.1.2', 'v0.1.3', 'v0.1.4', 'v0.1.5', 'local-20260101000000') {
+            New-Payload (Get-AddinVersionDir $app $v '2027') @{ 'MCPBridge.AddIn.dll' = $v }
+        }
+        New-Payload (Join-Path (Join-Path $app 'addin') 'v0.1.1.stale-deadbeef') @{ 'left.dll' = 'over' }
+        Write-AddinPointer $app 'v0.1.4'
+        Write-AddinPointer $app 'v0.1.5'
+        Mock Move-Item { throw 'in use' } -ParameterFilter { $Path -like '*v0.1.3' }
+        Remove-StaleAddinVersions $app
+        $left = @(Get-ChildItem (Join-Path $app 'addin') -Directory | ForEach-Object Name | Sort-Object)
+        $left | Should -Be @('v0.1.3', 'v0.1.4', 'v0.1.5')
+        # The held folder is intact, not half-deleted.
+        Get-Content (Join-Path (Get-AddinVersionDir $app 'v0.1.3' '2027') 'MCPBridge.AddIn.dll') -Raw | Should -Be 'v0.1.3'
+        Test-Path (Get-AddinPointerPath $app) | Should -BeTrue
+    }
+    It 'Remove-StaleAddinVersions does nothing without a pointer, and never throws' {
+        New-Payload (Get-AddinVersionDir $app 'v0.1.2' '2027') @{ 'MCPBridge.AddIn.dll' = 'x' }
+        { Remove-StaleAddinVersions $app } | Should -Not -Throw
+        Test-Path (Get-AddinVersionDir $app 'v0.1.2' '2027') | Should -BeTrue
+        { Remove-StaleAddinVersions (Join-Path $TestDrive 'no-such-app') } | Should -Not -Throw
+    }
+
+    It 'end to end: fresh versioned install, then an update flips the pointer under a running Revit without touching the loaded folder' {
+        # Fresh install: payload, pointer, then shim -- the order the shim needs (it reads the pointer).
+        Install-AddinVersionPayload $payload $app 'v0.1.5' '2027'
+        Write-AddinPointer $app 'v0.1.5'
+        Install-AddinShim $shim $addins | Should -Be 'placed'
+        Test-VersionedAddinInstalled $app $addins '2027' | Should -BeTrue
+
+        # Update: a new version folder beside the running one, pointer flipped, old folder untouched.
+        $payload2 = Join-Path $TestDrive "payload2-$([guid]::NewGuid())"
+        New-Payload $payload2 @{ 'MCPBridge.AddIn.dll' = 'addin-v3'; 'MCPBridge.addin' = '<addin/>' }
+        Install-AddinVersionPayload $payload2 $app 'v0.1.6' '2027'
+        Write-AddinPointer $app 'v0.1.6'
+        Install-AddinShim $shim $addins | Should -Be 'unchanged'
+        (Read-AddinPointer $app).version | Should -Be 'v0.1.6'
+        Get-Content (Join-Path (Get-AddinVersionDir $app 'v0.1.5' '2027') 'MCPBridge.AddIn.dll') -Raw | Should -Be 'addin-v2'
+        Get-Content (Join-Path (Get-AddinVersionDir $app 'v0.1.6' '2027') 'MCPBridge.AddIn.dll') -Raw | Should -Be 'addin-v3'
+        Remove-StaleAddinVersions $app
+        Test-Path (Get-AddinVersionDir $app 'v0.1.5' '2027') | Should -BeTrue   # previous is retained
     }
 }
 

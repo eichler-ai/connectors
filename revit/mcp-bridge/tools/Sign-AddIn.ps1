@@ -1,5 +1,7 @@
-# Signs MCPBridge.AddIn.dll with the local dev signing cert (see New-DevSigningCert.ps1) so Revit's
-# unverified-publisher "Load Once / Always Load / Do Not Load" prompt stops appearing on every rebuild.
+# Signs MCPBridge.AddIn.dll -- and MCPBridge.Shim.dll, the manifest-named assembly Revit's trust prompt
+# actually keys on (self-update-architecture.md §4.6) -- with the local dev signing cert (see
+# New-DevSigningCert.ps1) so Revit's unverified-publisher "Load Once / Always Load / Do Not Load" prompt
+# stops appearing on every rebuild. One cert for both, so the shim inherits the add-in's publisher trust.
 # Dev-only: the cert is trusted solely on this machine. See New-DevSigningCert.ps1's own doc comment for
 # why this is not the PRD §12 production signing plan.
 #

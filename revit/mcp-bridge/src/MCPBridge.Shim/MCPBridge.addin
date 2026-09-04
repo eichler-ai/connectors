@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<RevitAddIns>
+  <AddIn Type="Application">
+    <Name>MCP Bridge</Name>
+    <Assembly>MCPBridge.Shim.dll</Assembly>
+    <AddInId>7C1B8C2E-6C1A-4E3E-9B2A-2B7E3F6A1D40</AddInId>
+    <FullClassName>MCPBridge.Shim.ShimApplication</FullClassName>
+    <VendorId>EICHLER</VendorId>
+    <VendorDescription>Eichler Connectors, https://github.com/eichler/connectors</VendorDescription>
+  </AddIn>
+</RevitAddIns>

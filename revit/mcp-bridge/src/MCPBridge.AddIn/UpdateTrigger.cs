@@ -56,12 +56,17 @@ internal static class UpdateTrigger
     /// present on disk. Matches install.ps1's own Get-AddinsDir / Get-AppDir exactly:
     ///   User scope:     %AppData%\Autodesk\Revit\Addins\&lt;version&gt;  ->  %LocalAppData%\Programs\MCPBridge
     ///   AllUsers scope: C:\Program Files\Autodesk\Revit\Addins\&lt;version&gt;  ->  C:\Program Files\MCPBridge
+    /// Under the shim layout (self-update-architecture.md §4.1) Revit loads MCPBridge.Shim.dll from the
+    /// Addins folder and THIS DLL is LoadFrom'ed out of &lt;app dir&gt;\addin\&lt;version&gt;\&lt;year&gt;\, so the
+    /// all-users signal is the all-users app dir itself; the legacy flat-layout signal is kept for a
+    /// machine that has not migrated yet.
     /// </summary>
     internal static (string Scope, string AppDir) ResolveInstallLocation()
     {
         var executingAssemblyLocation = Assembly.GetExecutingAssembly().Location;
         var scope = executingAssemblyLocation.Contains(
-            @"\Program Files\Autodesk\Revit\Addins\", StringComparison.OrdinalIgnoreCase)
+                @"\Program Files\Autodesk\Revit\Addins\", StringComparison.OrdinalIgnoreCase)
+            || executingAssemblyLocation.StartsWith(@"C:\Program Files\MCPBridge\", StringComparison.OrdinalIgnoreCase)
             ? "AllUsers"
             : "User";
         var appDir = scope == "AllUsers"

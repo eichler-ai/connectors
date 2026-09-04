@@ -169,9 +169,13 @@ jobs:
           # of which step in this job actually failed.
           echo "SIGNING_CERT_THUMBPRINT=$($cert.Thumbprint)" >> $env:GITHUB_ENV
 
+          # The shim is the assembly Revit's trust prompt keys on (self-update-architecture.md §4.6):
+          # it MUST carry the same signature as the add-in, or the shim layout re-introduces the prompt.
           $targets = @(
             "revit\mcp-bridge\src\MCPBridge.AddIn\bin\Release\net10.0-windows\MCPBridge.AddIn.dll",
             "revit\mcp-bridge\src\MCPBridge.AddIn\bin\Release\net8.0-windows\MCPBridge.AddIn.dll",
+            "revit\mcp-bridge\src\MCPBridge.Shim\bin\Release\net10.0-windows\MCPBridge.Shim.dll",
+            "revit\mcp-bridge\src\MCPBridge.Shim\bin\Release\net8.0-windows\MCPBridge.Shim.dll",
             "revit\mcp-server\mcp-server.exe"
           )
           # Mirrors Sign-AddIn.ps1's own per-server retry and post-sign re-verification (see that
@@ -230,8 +234,12 @@ jobs:
 
       # --- Assemble mcpbridge-release.zip, exact layout install.ps1 / quickstart.md expect --------
       # addin-2027/ (net10.0-windows build output + manifest), addin-2025/ (net8.0-windows + manifest),
-      # server/ (the built broker exe) -- all at the zip root. See quickstart.md "3. Assemble the
-      # local package zip" and install.ps1's per-version `addin-$version` extraction.
+      # shim-2027/ and shim-2025/ (MCPBridge.Shim.dll + its manifest -- what install.ps1 puts in
+      # Addins\<year>; the addin-<year>/ payload goes to <app dir>\addin\<version>\<year>\, see
+      # self-update-architecture.md §4.1), server/ (the built broker exe) -- all at the zip root. See
+      # quickstart.md "3. Assemble the local package zip" and install.ps1's per-version extraction.
+      # The addin-<year>/ folders still carry the add-in's own MCPBridge.addin so an OLDER install.ps1
+      # (one without the shim layout) deploys this release flat, exactly as before.
       - name: Assemble release package
         run: |
           $stage = New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\mcpbridge-package"
@@ -243,6 +251,14 @@ jobs:
           $addin2025 = New-Item -ItemType Directory -Force "$($stage.FullName)\addin-2025"
           Copy-Item revit\mcp-bridge\src\MCPBridge.AddIn\bin\Release\net8.0-windows\* $addin2025 -Recurse
           Copy-Item revit\mcp-bridge\src\MCPBridge.AddIn\MCPBridge.addin $addin2025
+
+          $shim2027 = New-Item -ItemType Directory -Force "$($stage.FullName)\shim-2027"
+          Copy-Item revit\mcp-bridge\src\MCPBridge.Shim\bin\Release\net10.0-windows\MCPBridge.Shim.dll $shim2027
+          Copy-Item revit\mcp-bridge\src\MCPBridge.Shim\MCPBridge.addin $shim2027
+
+          $shim2025 = New-Item -ItemType Directory -Force "$($stage.FullName)\shim-2025"
+          Copy-Item revit\mcp-bridge\src\MCPBridge.Shim\bin\Release\net8.0-windows\MCPBridge.Shim.dll $shim2025
+          Copy-Item revit\mcp-bridge\src\MCPBridge.Shim\MCPBridge.addin $shim2025
 
           $server = New-Item -ItemType Directory -Force "$($stage.FullName)\server"
           Copy-Item revit\mcp-server\mcp-server.exe $server

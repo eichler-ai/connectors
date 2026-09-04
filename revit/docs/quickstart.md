@@ -45,17 +45,23 @@ go build -C revit\mcp-server -o mcp-server.exe ./cmd/mcp-server
 
 ## 3. Assemble the local package zip
 
-The installer consumes a zip with `addin-<year>/` and `server/` folders at its root — the
-same layout a real release will use. Each `addin-<year>` folder holds the `.addin` manifest
-next to the matching TFM's build output (the manifest references `MCPBridge.AddIn.dll`
-relatively, so they must sit side by side):
+The installer consumes a zip with `addin-<year>/`, `shim-<year>/` and `server/` folders at its
+root — the same layout a real release uses. Each `addin-<year>` folder holds the real add-in
+(the matching TFM's build output); each `shim-<year>` holds `MCPBridge.Shim.dll` and the shim's
+`.addin` manifest. The installer puts the shim in `Addins\<year>` and the real add-in under
+`%LOCALAPPDATA%\Programs\MCPBridge\addin\<version>\<year>\`, pointed to by `addin\current.json`
+(see `docs/self-update-architecture.md` §4). A zip without `shim-<year>/` is deployed flat into
+`Addins\<year>` the old way, so the add-in's own `MCPBridge.addin` still travels in `addin-<year>/`:
 
 ```powershell
 $stage = New-Item -ItemType Directory -Force "$env:TEMP\mcpbridge-package"
-# Revit 2027 payload (net10.0-windows). Repeat with net8.0-windows + addin-2025 if you have 2025.
+# Revit 2027 payload (net10.0-windows). Repeat with net8.0-windows + addin-2025/shim-2025 if you have 2025.
 $payload = New-Item -ItemType Directory -Force "$($stage.FullName)\addin-2027"
 Copy-Item revit\mcp-bridge\src\MCPBridge.AddIn\bin\Release\net10.0-windows\* $payload -Recurse
 Copy-Item revit\mcp-bridge\src\MCPBridge.AddIn\MCPBridge.addin $payload
+$shim = New-Item -ItemType Directory -Force "$($stage.FullName)\shim-2027"
+Copy-Item revit\mcp-bridge\src\MCPBridge.Shim\bin\Release\net10.0-windows\MCPBridge.Shim.dll $shim
+Copy-Item revit\mcp-bridge\src\MCPBridge.Shim\MCPBridge.addin $shim
 # Broker payload
 $server = New-Item -ItemType Directory -Force "$($stage.FullName)\server"
 Copy-Item revit\mcp-server\mcp-server.exe $server
@@ -73,7 +79,8 @@ Compress-Archive "$($stage.FullName)\*" "$env:TEMP\mcpbridge-release.zip" -Force
 .\revit\install.ps1 -LocalPackagePath "$env:TEMP\mcpbridge-release.zip"
 ```
 
-This deploys the add-in to every detected supported Revit version's Addins folder, puts the
+This deploys the shim to every detected supported Revit version's Addins folder and the real
+add-in to `%LOCALAPPDATA%\Programs\MCPBridge\addin\<version>\<year>\`, puts the
 broker in `%LOCALAPPDATA%\Programs\MCPBridge\`, registers `revit` with Claude Code
 (`claude mcp add revit -- ...\mcp-server.exe --mode local`), and writes a Programs & Features
 uninstall entry. Re-running it is safe — though note the installer's "already up to date"
