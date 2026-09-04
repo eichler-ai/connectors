@@ -43,6 +43,7 @@ func (l *Lock) Release() error {
 	if l == nil || l.f == nil {
 		return nil
 	}
+	l.clearHolder() // election.go: a released lock must not read as a corpse's
 	if err := syscall.Flock(int(l.f.Fd()), syscall.LOCK_UN); err != nil {
 		l.f.Close()
 		return fmt.Errorf("singleton: unlocking: %w", err)

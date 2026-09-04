@@ -157,6 +157,9 @@ func TestElectHonoursContextWhileWaitingForTheMutex(t *testing.T) {
 func TestElectConcurrentCandidatesProduceExactlyOnePrimary(t *testing.T) {
 	dir := t.TempDir()
 	holdAs(t, LockPath(dir), 4242) // corpse on generation 0
+	old := electionMutexWait
+	electionMutexWait = 20 * time.Second // a loaded CI box must not turn contention into a stall
+	defer func() { electionMutexWait = old }()
 	const candidates = 8
 	var wg sync.WaitGroup
 	results := make([]Election, candidates)
@@ -211,6 +214,35 @@ func TestGeneration0WinnerRemovesOnlyUnheldGenerations(t *testing.T) {
 		if _, err := os.Stat(GenerationLockPath(dir, n)); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("generation %d should be gone, stat err = %v", n, err)
 		}
+	}
+}
+
+func TestReleaseClearsTheHolderRecordSoAPreRecordBuildIsNeverSteppedOver(t *testing.T) {
+	// A new build wins broker.lock, records itself, exits normally. A build
+	// that predates the record (stand-in: holdAs with pid 0, which acquires
+	// without the mutex and writes nothing) then wins the same file. If the
+	// old record survived, Elect would judge that live holder dead.
+	dir := t.TempDir()
+	l, got, err := AcquireLock(LockPath(dir))
+	if err != nil || !got {
+		t.Fatalf("first hold: got=%v err=%v", got, err)
+	}
+	if err := l.recordHolder(4242); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Release(); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := readHolder(LockPath(dir)); ok {
+		t.Fatal("a released lock must read as unrecorded")
+	}
+	holdAs(t, LockPath(dir), 0) // pre-#212 build, alive
+	e, err := Elect(context.Background(), dir, dead)
+	if err != nil {
+		t.Fatalf("Elect: %v", err)
+	}
+	if e.Primary {
+		t.Fatalf("stepped over a live pre-record holder: %+v", e)
 	}
 }
 

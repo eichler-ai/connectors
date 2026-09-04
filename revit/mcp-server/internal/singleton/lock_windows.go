@@ -46,6 +46,7 @@ func (l *Lock) Release() error {
 	if l == nil || l.f == nil {
 		return nil
 	}
+	l.clearHolder() // election.go: a released lock must not read as a corpse's
 	h := windows.Handle(l.f.Fd())
 	var overlapped windows.Overlapped
 	if err := windows.UnlockFileEx(h, 0, 1, 0, &overlapped); err != nil {

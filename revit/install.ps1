@@ -807,7 +807,8 @@ if ($Uninstall) {
     # The broker keeps its private app-data root at %LOCALAPPDATA%\Connectors\Revit -- what
     # singleton.AppDataDir() resolves on Windows: the materialized search+how-to ranking models
     # (~24MB, a copy of bytes embedded in the exe being removed), the local how-to corpus, the
-    # discovery cache, and -- in local mode -- the broker.json/broker.lock rendezvous pair. None of it
+    # discovery cache, and -- in local mode -- the broker.json rendezvous file with its lock files
+    # (broker.lock, the broker.lock.<n> generations and broker.election.lock of issue #212). None of it
     # is a record worth keeping: broker.json is a live rendezvous file whose every field (port, pid,
     # token) is minted fresh on the next launch, and the models are re-materialized from the exe.
     #

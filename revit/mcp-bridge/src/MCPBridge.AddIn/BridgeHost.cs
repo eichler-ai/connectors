@@ -908,14 +908,14 @@ internal sealed class BridgeHost
         var authMessage = new AuthMessage(id: 1, token: brokerJson.Token, role: AuthRole.AddIn);
         WriteLine(stream, authMessage.ToJson());
         var documentsTask = documentSnapshotHandler.SnapshotAsync(documentSnapshotEvent);
+        // Every failure path below (auth timeout, auth rejected, the bounded wait giving up) abandons
+        // this task; observe its eventual fault once, here, so an unobserved-exception report never
+        // fires for a connection attempt that already failed for a known reason.
+        documentsTask.ContinueWith(t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted);
 
         var authResponseLine = ReadOneLine(stream, buffer, pendingLines, readBuffer, stopToken);
         if (authResponseLine is null)
         {
-            // The snapshot task was started above and is abandoned on this path; observe its
-            // eventual fault so an unobserved-exception report never fires for a connection
-            // attempt that already failed for a known reason.
-            documentsTask.ContinueWith(t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted);
             throw new IOException($"no auth response from the broker at {address.Host}:{address.Port} within {HandshakeReadTimeoutMs / 1000}s (or it closed the connection first); the next attempt re-reads broker.json, so if a new primary has taken over it is followed there.");
         }
         stream.ReadTimeout = Timeout.Infinite;

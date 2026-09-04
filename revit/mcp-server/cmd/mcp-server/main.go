@@ -486,6 +486,9 @@ func run(mode, bindAddr string, port int, appDataDirOverride, sharedRoot string,
 	// Issue #201: consecutive failures to reach the same primary, across
 	// re-election turns. See PrimaryFailures for the live case this exists for.
 	var primaryFailures selfcheck.PrimaryFailures
+	// Issue #212: consecutive election turns that could not even take the
+	// election mutex. See the ErrElectionInProgress case below.
+	electionStalls := 0
 	// And the executable as it was when this process started: eviction also requires that file
 	// to have been REPLACED since (see selfcheck.ExecutableReplaced for the respawn-loop this avoids).
 	imageAtStart := selfcheck.StampExecutable()
@@ -502,16 +505,28 @@ func run(mode, bindAddr string, port int, appDataDirOverride, sharedRoot string,
 			logger.Printf("dead-primary: every lock generation is held by a process that has exited but whose lock and port the OS has not released (issue #212); reboot to clear them")
 			return fmt.Errorf("%w: every lock generation is held by an exited process; reboot to clear them, then reconnect", errPrimaryUnresponsive)
 		case errors.Is(err, singleton.ErrElectionInProgress):
-			// Either a burst of starters (harmless: proxy through whoever won) or
-			// a process died holding the mutex, in which case the primary it left
-			// is either alive (proxy works) or dead (the primary-unresponsive path
-			// below reports it). Not worth a distinct terminal state.
-			logger.Printf("election mutex still held after waiting; proceeding as secondary")
+			// Once: a burst of starters, harmless -- proxy through whoever won.
+			// Turn after turn: a process died holding the mutex (the same kill
+			// window as #212, on a lock held for microseconds), and no election
+			// can complete until a reboot. Say so instead of looping, since a
+			// clean install with no broker.json yet would otherwise never reach
+			// the primary-unresponsive path (it needs a pid to strike against).
+			electionStalls++
+			if electionStalls >= electionStallLimit {
+				logger.Printf("election-stalled: the election mutex has stayed held across %d turns; a process died holding it and the OS has not released it (issue #212); reboot to clear it", electionStalls)
+				return fmt.Errorf("%w: the election mutex is held by a process that no longer runs; reboot to clear it, then reconnect", errPrimaryUnresponsive)
+			}
+			logger.Printf("election mutex still held after waiting (%d/%d); proceeding as secondary", electionStalls, electionStallLimit)
 			e = singleton.Election{}
 		case ctx.Err() != nil:
+			if e.Lock != nil {
+				e.Lock.Release()
+			}
 			return nil // shutdown signal during the election
 		case err != nil:
 			return fmt.Errorf("electing broker role: %w", err)
+		default:
+			electionStalls = 0
 		}
 		lock, primary := e.Lock, e.Primary
 
@@ -532,27 +547,30 @@ func run(mode, bindAddr string, port int, appDataDirOverride, sharedRoot string,
 			return nil
 		}
 
-		// servePrimary runs this process as primary on the lock it holds, whether
-		// that is the base lock won just above or a generation lock claimed by a
-		// takeover below. This process's own session ending is a real shutdown,
-		// not something to retry, so the caller returns whatever it returns.
-		servePrimary := func(lock *singleton.Lock) error {
-			stop := make(chan struct{})
-			reader := &turnReader{relay: relay, stop: stop}
-			err := runPrimary(ctx, mode, bindAddr, port, rendezvousRoot, privateRoot, imageAtStart, logger, reader)
-			close(stop)
-			lock.Release()
-			return err
-		}
-
 		if primary {
+			bindPort := port
 			if len(e.SkippedDeadHolders) > 0 {
 				logger.Printf("dead-primary-takeover: lock generation(s) below %d are held by exited process(es) %v whose lock and port the OS has not released (issue #212); this process becomes primary on %s", e.Generation, e.SkippedDeadHolders, filepath.Base(singleton.GenerationLockPath(rendezvousRoot, e.Generation)))
+				// The corpse still owns whatever port it bound. With the default
+				// ephemeral port that is no obstacle; a fixed -port would collide
+				// with it and fail the bind with a message that says nothing about
+				// #212, so a takeover always takes an ephemeral port and says so.
+				if bindPort != 0 {
+					logger.Printf("dead-primary-takeover: ignoring the configured port %d, which the exited process may still hold; binding an ephemeral port (broker.json carries it)", bindPort)
+					bindPort = 0
+				}
 			}
 			if e.CleanedGenerations > 0 {
 				logger.Printf("primary: removed %d stale lock generation file(s) left by an earlier dead-primary takeover (issue #212)", e.CleanedGenerations)
 			}
-			return servePrimary(lock)
+			// This process's own session ending is a real shutdown, not something
+			// to retry: return whatever runPrimary returns.
+			stop := make(chan struct{})
+			reader := &turnReader{relay: relay, stop: stop}
+			err := runPrimary(ctx, mode, bindAddr, bindPort, rendezvousRoot, privateRoot, imageAtStart, logger, reader)
+			close(stop)
+			lock.Release()
+			return err
 		}
 
 		stop := make(chan struct{})
@@ -639,11 +657,19 @@ func brokerPID(rendezvousRoot string) int {
 	return info.PID
 }
 
-// errPrimaryUnresponsive is terminal like errSchemaMismatch: the primary named
-// in broker.json holds the lock and the port but never completes the auth
-// handshake (issue #201's live case was a dead process whose listener and lock
-// were still held). Retrying re-dials the same corpse; the recovery is a human
-// ending that process or rebooting, so say so once and exit.
+// electionStallLimit is how many consecutive turns the election mutex may
+// stay held before this process reports it as dead (issue #212). Three,
+// matching the three-strike shape of PrimaryFailures.
+const electionStallLimit = 3
+
+// errPrimaryUnresponsive is terminal like errSchemaMismatch: nothing this
+// process can reach will ever serve it, and a human has to end something or
+// reboot. Two shapes share it: the primary named in broker.json holds the lock
+// and the port but never completes the auth handshake (issue #201, a live but
+// wedged process, or a corpse that predates the holder record), and the #212
+// cases where every lock generation, or the election mutex itself, is held by
+// a process that has exited. Retrying would re-dial or re-try the same corpse,
+// so say so once and exit.
 var errPrimaryUnresponsive = errors.New("primary broker unresponsive")
 
 // isPrimaryUnreachable classifies a runSecondary error as "could not reach or

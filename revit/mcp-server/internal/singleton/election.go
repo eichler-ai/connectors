@@ -35,9 +35,14 @@ import (
 // never belong to a live process. broker.json plays no part in the decision;
 // it stays what it was, the primary's advertisement of its port and token.
 //
-// A lock file written by a build that predates this scheme records no pid and
-// is treated as held by a live process (never skipped), so mixed versions stay
-// safe; the price is that a corpse from such a build is not recovered.
+// A lock whose file records no pid is treated as held by a live process (never
+// skipped): a build that predates this scheme writes nothing, and Release
+// blanks the record, so only a lock whose holder never released it -- a corpse
+// -- carries a pid. That keeps mixed versions safe; the price is that a corpse
+// from a pre-#212 build is not recovered. Residual gap: a new build that is
+// hard-killed cleanly (the OS DID release its lock) leaves a stale record, and
+// if a pre-#212 build then wins that lock before any new build does, its live
+// hold would be misread as dead. It closes once no pre-#212 builds remain.
 //
 // Discovery is unchanged: whoever is primary writes broker.json with its own
 // pid and port, and secondaries and the add-in follow that file. A primary
@@ -179,13 +184,24 @@ func acquireElectionMutex(ctx context.Context, dir string) (*Lock, error) {
 }
 
 // recordHolder writes pid into the lock file this process holds, fixed-width
-// so a shorter pid fully overwrites a longer predecessor's.
+// so a shorter pid fully overwrites a longer predecessor's. No fsync: readers
+// see the write through the page cache at once, and a crash that loses it
+// loses the lock too. (An fsync here would sit inside the election mutex.)
 func (l *Lock) recordHolder(pid int) error {
 	rec := fmt.Sprintf("%-*d\n", holderWidth-1, pid)
-	if _, err := l.f.WriteAt([]byte(rec), holderOffset); err != nil {
-		return err
-	}
-	return l.f.Sync()
+	_, err := l.f.WriteAt([]byte(rec), holderOffset)
+	return err
+}
+
+// clearHolder blanks the record before a voluntary Release, so a lock this
+// process gives up never carries a stale pid. This is the asymmetry the whole
+// scheme rests on: a corpse never runs Release, so its record survives and
+// Elect can step over it, while a released lock reads as unrecorded -- and an
+// unrecorded held lock is treated as live. Without this, a build that predates
+// the record (which acquires without the mutex and writes nothing) could win a
+// lock still carrying a dead predecessor's pid and be stepped over while alive.
+func (l *Lock) clearHolder() {
+	_, _ = l.f.WriteAt(make([]byte, holderWidth), holderOffset)
 }
 
 // readHolder reads the pid recorded in the lock file at path. recorded is
