@@ -53,8 +53,14 @@ import (
 // e2eID is the id submit_howto derives from the title (a kebab slug); triage
 // keeps it, as it would for a lineage the maintainer does not rename.
 const (
-	e2eID    = "set-the-project-name-and-number-in-project-information"
-	e2eTitle = "Set the project name and number in Project Information"
+	// Deliberately a synthetic "e2e-harness-smoke-" id, not a real feature
+	// slug: a real how-to with the same id would trip the precondition at
+	// line ~169 ("needs an id no seed document has"). It did -- issue #176's
+	// project-information submission landed on the natural slug this test used
+	// to borrow, so the id was reserved for the harness instead. Slug(e2eTitle)
+	// must equal e2eID.
+	e2eID    = "e2e-harness-smoke-set-the-project-name-and-number"
+	e2eTitle = "E2E harness smoke set the project name and number"
 	e2eTask  = "Read and set the project's Name and Number through Document.ProjectInformation (a ProjectInfo element every project has) inside one Connector.WithTransaction block, and return the values read back after the commit."
 	e2eQuery = "set the project name and number"
 )
@@ -148,7 +154,7 @@ func callSubmitHowTo(t *testing.T, c *mcpclient.Client, args map[string]any) e2e
 
 func TestHowToEndToEnd(t *testing.T) {
 	c, instances := startClient(t)
-	inst := instances.Instances[0]
+	inst := pickInstance(t, instances)
 	mainDoc := ""
 	for _, d := range inst.Documents {
 		if d.Active {
