@@ -61,9 +61,10 @@ public static class UpdateAvailability
     /// says a NEW Revit would load, against the version THIS process actually loaded, with the one-line
     /// remedy only when they differ. Under the shim an add-in update is a pointer flip that closes
     /// nothing, so a running Revit keeps the previous add-in until it is restarted -- this line is how
-    /// the user learns that. Degrades to the single running value when there is no pointer (a legacy
-    /// flat install, or the file is unreadable), when the two agree, or when the running build is the
-    /// unreleased "dev" sentinel (which cannot be compared with anything, as in <see cref="IsAvailable"/>).
+    /// the user learns that. Degrades to the single running value when the two agree, when the running
+    /// build is the unreleased "dev" sentinel (which cannot be compared with anything, as in
+    /// <see cref="IsAvailable"/>), or -- defensively; the shim is the only layout, so a shim-loaded
+    /// add-in always has a pointer -- when the pointer could not be read.
     /// </summary>
     public static string AddInStatusLine(string? runningVersion, string? installedPointerVersion)
     {
@@ -92,26 +93,6 @@ public static class UpdateAvailability
         }
 
         return $"{installedTag} installed · running {runningTag} — restart Revit to load it";
-    }
-
-    /// <summary>
-    /// Whether an add-in loaded from <paramref name="assemblyLocation"/> came out of the shim's versioned
-    /// tree <c>&lt;appDir&gt;\addin\</c> (self-update-architecture.md §4.1) -- so an add-in update is a
-    /// pointer flip that closes nothing -- rather than flat out of Revit's own Addins folder, where the
-    /// next update still has to replace the loaded DLL and asks Revit to close. The two answers drive
-    /// contradictory promises to the user (UpdateTrigger's dialog), which is why the decision is a pure
-    /// function here rather than inlined beside the reflection that supplies its inputs. Case-insensitive,
-    /// and anchored on the trailing separator so <c>...\addin-old\</c> is not mistaken for the tree.
-    /// </summary>
-    public static bool IsVersionedAddinLocation(string? assemblyLocation, string appDir)
-    {
-        if (string.IsNullOrEmpty(assemblyLocation) || string.IsNullOrEmpty(appDir))
-        {
-            return false;
-        }
-
-        var root = appDir.TrimEnd('\\', '/') + "\\addin\\";
-        return assemblyLocation!.StartsWith(root, StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>

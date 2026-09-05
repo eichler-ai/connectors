@@ -180,19 +180,16 @@ server's GitHub latest-release check **now** (the same code path as the 6-hourly
 the two cannot disagree), records the result in `broker.json` — which the add-in's Status window
 re-reads on every click — and returns the picture: `latest`; `server.running` (this process),
 `server.installed` (the installer's version marker; differs from running after a staged swap until the
-MCP client reconnects) and `server.update_available`; `addin_layout` (`shim` when
-`addin\current.json` exists — Revit loads a stable shim that loads the add-in the pointer names, so
-an add-in update flips the pointer and closes nothing; `flat` on a legacy install not yet migrated,
-where the loaded DLL has to be replaced in place); and `revit[]`, one entry per Revit version the
-installer tracks (`state`: `deployed` / `deferred` while that Revit was running on the flat layout /
-`skipped` when the release shipped no payload for it; `unknown` for a connected version the marker
-does not list) with `addin_installed` (what a Revit of that version loads at its next start: the
-pointer's version on the shim layout, the marker's on the flat one), `connected_instances` (from the
-registry), `update_available`, and a `note` where a connected Revit has something left to do — on the
-shim layout, only when an update is available or this call just applied one: a Revit that is open when
-the add-in is installed keeps the previous add-in until it is restarted (the registry does not know
-which add-in version an instance runs; that Revit's own Status window shows `installed · running`); a
-`deferred` one is applied when that Revit exits. Multiple Revit versions are first-class. Notices: `server-restart-pending`
+MCP client reconnects) and `server.update_available`; and `revit[]`, one entry per Revit version the
+installer tracks (`state`: `deployed` / `skipped` when the release shipped no payload for it; `unknown`
+for a connected version the marker does not list) with `addin_installed` (what a Revit of that version
+loads at its next start — the version `addin\current.json` names: Revit loads a stable shim that loads
+the add-in the pointer names, so an add-in update flips the pointer and closes nothing),
+`connected_instances` (from the registry), `update_available`, and a `note` where a connected Revit has
+something left to do — only when an update is available or this call just applied one: a Revit that is
+open when the add-in is installed keeps the previous add-in until it is restarted (the registry does not
+know which add-in version an instance runs; that Revit's own Status window shows
+`installed · running`). Multiple Revit versions are first-class. Notices: `server-restart-pending`
 when the new release is installed but this process is still the old one — it steps aside on its own
 within about a minute (a running server re-reads the installer's version marker every 30 s and exits
 once the release on disk differs *and* its own executable has been replaced, waiting first for any
@@ -207,16 +204,13 @@ and becomes primary there, rewriting `broker.json`. It exits with a reboot-to-cl
 every generation is in that state.
 
 With `apply: true` **and** `confirm_lifecycle_actions: true` it also starts the installed updater
-(`install.ps1 -Update -Silent -Scope <User|AllUsers>`, detached) when anything is behind. What that
-does to a running Revit follows `addin_layout`, and the `update-started` notice says which: on the
-`shim` layout **nothing is closed** — the new add-in is installed beside the running one, each Revit
-keeps its current add-in until the user restarts it, and the agent should tell the user "update
-installed; restart Revit when convenient to load the new add-in, and reconnect the `revit` server if
-the server changed" (apply and load are two separate, user-controlled steps; never restart Revit for
-them). On the legacy `flat` layout every running Revit of an affected version is asked to close (Revit
-prompts to save unsaved work; a Revit kept open is updated when it is next closed) — that is also how
-the one-time migration onto the shim goes. Either way nothing is relaunched, and this server keeps
-serving the old version until the client reconnects (`already-current` when there is nothing to do).
+(`install.ps1 -Update -Silent -Scope <User|AllUsers>`, detached) when anything is behind.
+**Nothing is closed** — the new add-in is installed beside the running one, each Revit keeps its
+current add-in until the user restarts it, and the agent should tell the user "update installed;
+restart Revit when convenient to load the new add-in, and reconnect the `revit` server if the server
+changed" (apply and load are two separate, user-controlled steps; never restart Revit for them). Nothing
+is relaunched, and this server keeps serving the old version until the client reconnects
+(`already-current` when there is nothing to do).
 Refusals: `update-requires-confirmation` (apply without the confirmation — the same gating shape as
 `execute_script`'s lifecycle actions; ask the user first), `update-not-available-in-remote-mode` (the
 installer lives on the Revit machine, not where a remote-mode server runs; the check still works),

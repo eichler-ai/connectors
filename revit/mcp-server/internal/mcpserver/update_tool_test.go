@@ -43,7 +43,7 @@ func TestUpdateConnectorCheckReportsEveryRevitVersionSeparately(t *testing.T) {
 	reg := registry.New()
 	reg.Register(&registry.Instance{InstanceID: "a", RevitVersion: "2027", PID: 1}, time.Now())
 	reg.Register(&registry.Instance{InstanceID: "b", RevitVersion: "2027", PID: 2}, time.Now())
-	marker := &InstalledMarker{Version: "v0.1.2", Deployed: []string{"2025", "2027"}, Deferred: []string{"2026"}}
+	marker := &InstalledMarker{Version: "v0.1.2", Deployed: []string{"2025", "2027"}, Skipped: []string{"2026"}}
 	deps, launches := updateDepsForTest(t, "local", marker, "v0.1.3", nil)
 	deps.Registry = reg
 
@@ -68,8 +68,8 @@ func TestUpdateConnectorCheckReportsEveryRevitVersionSeparately(t *testing.T) {
 	if r := byVersion["2025"]; r.State != "deployed" || r.ConnectedInstances != 0 || !r.UpdateAvailable {
 		t.Errorf("2025: %+v", r)
 	}
-	if r := byVersion["2026"]; r.State != "deferred" || !r.UpdateAvailable {
-		t.Errorf("2026: %+v", r)
+	if r := byVersion["2026"]; r.State != "skipped" || r.UpdateAvailable {
+		t.Errorf("2026 (no payload shipped for it): %+v", r)
 	}
 	if out.Applied || len(*launches) != 0 {
 		t.Errorf("a check must not launch anything: applied=%v launches=%v", out.Applied, *launches)
@@ -199,7 +199,7 @@ func TestUpdateConnectorApplyWithoutASelfCopyNamesTheOneLiner(t *testing.T) {
 }
 
 func TestUpdateConnectorCheckFailureStillReportsWhatIsKnown(t *testing.T) {
-	deps, _ := updateDepsForTest(t, "local", &InstalledMarker{Version: "v0.1.2", Deployed: []string{"2027"}, Deferred: []string{"2025"}}, "", errors.New("dial tcp: no route"))
+	deps, _ := updateDepsForTest(t, "local", &InstalledMarker{Version: "v0.1.2", Deployed: []string{"2027"}, Skipped: []string{"2025"}}, "", errors.New("dial tcp: no route"))
 
 	out := updateConnector(context.Background(), deps, UpdateConnectorIn{})
 
@@ -210,8 +210,8 @@ func TestUpdateConnectorCheckFailureStillReportsWhatIsKnown(t *testing.T) {
 		t.Fatalf("marker-derived facts should still be reported: %+v", out)
 	}
 	for _, r := range out.Revit {
-		// With no latest known, nothing can honestly be called "behind" -- not even a deferred version
-		// (review of #200: it used to be asserted unconditionally).
+		// With no latest known, nothing can honestly be called "behind" (review of #200: it used to
+		// be asserted unconditionally).
 		if r.UpdateAvailable {
 			t.Errorf("%s: update_available must be false when the check failed: %+v", r.Version, r)
 		}
@@ -251,11 +251,11 @@ func TestVersionBehind(t *testing.T) {
 func TestReadMarkerParsesInstallPs1Shape(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "installed-version.json")
-	os.WriteFile(path, []byte(`{"components":{"server":"abc"},"version":"v0.1.2","deployed":["2025","2027"],"deferred":[],"skipped":[],"howto_corpus":{"documents":23}}`), 0o644)
+	os.WriteFile(path, []byte(`{"components":{"server":"abc"},"version":"v0.1.2","deployed":["2025","2027"],"skipped":[],"howto_corpus":{"documents":23}}`), 0o644)
 
 	m := readMarker(path)
 
-	if m == nil || m.Version != "v0.1.2" || len(m.Deployed) != 2 || len(m.Deferred) != 0 {
+	if m == nil || m.Version != "v0.1.2" || len(m.Deployed) != 2 || len(m.Skipped) != 0 {
 		t.Fatalf("marker parsed wrong: %+v", m)
 	}
 	if readMarker(filepath.Join(dir, "missing.json")) != nil {
@@ -267,9 +267,9 @@ func TestReadMarkerParsesInstallPs1Shape(t *testing.T) {
 	}
 }
 
-// The shim layout (self-update-architecture.md §4, §6.2): addin\current.json names what a Revit
-// loads at its next start, and a Revit already open keeps the previous add-in until restarted.
-func TestUpdateConnectorShimLayoutReportsThePointerAndARestartNoteOnlyWhenARestartResolvesSomething(t *testing.T) {
+// The shim (self-update-architecture.md §4, §6.2): addin\current.json names what a Revit loads at
+// its next start, and a Revit already open keeps the previous add-in until restarted.
+func TestUpdateConnectorReportsThePointerAndARestartNoteOnlyWhenARestartResolvesSomething(t *testing.T) {
 	byVersion := func(out UpdateConnectorOut) map[string]UpdateRevitStatus {
 		m := map[string]UpdateRevitStatus{}
 		for _, r := range out.Revit {
@@ -290,9 +290,6 @@ func TestUpdateConnectorShimLayoutReportsThePointerAndARestartNoteOnlyWhenAResta
 	t.Run("steady state: installed == latest, nothing applied -> no note (review of #219: it used to tell users to restart for nothing)", func(t *testing.T) {
 		out := updateConnector(context.Background(), newDeps(t, "v0.1.3"), UpdateConnectorIn{})
 
-		if out.AddinLayout != AddinLayoutShim {
-			t.Fatalf("pointer present must report the shim layout, got %q", out.AddinLayout)
-		}
 		if r := byVersion(out)["2027"]; r.AddinInstalled != "v0.1.3" || r.UpdateAvailable || r.Note != "" {
 			t.Errorf("current, connected: installed from the pointer and NO note; got %+v", r)
 		}
@@ -327,8 +324,8 @@ func TestUpdateConnectorShimLayoutReportsThePointerAndARestartNoteOnlyWhenAResta
 }
 
 func TestUpdateConnectorShimPointerIsWhatANewRevitLoads(t *testing.T) {
-	// A deferred shim migration writes the payload and pointer before the marker catches up: the
-	// pointer, not the marker, is what a Revit started now loads, and the behind-ness follows it.
+	// The pointer, not the marker, is what a Revit started now loads, and the behind-ness follows it
+	// (the marker is the whole install's record; the pointer is the add-in's own apply step).
 	marker := &InstalledMarker{Version: "v0.1.2", Deployed: []string{"2027"}}
 	deps, _ := updateDepsForTest(t, "local", marker, "v0.1.3", nil)
 	deps.ReadAddinPointer = func(string) string { return "v0.1.3" }
@@ -340,89 +337,51 @@ func TestUpdateConnectorShimPointerIsWhatANewRevitLoads(t *testing.T) {
 	}
 }
 
-func TestUpdateConnectorFlatLayoutKeepsTheDeferredStateAndItsCloseWording(t *testing.T) {
-	// No pointer: the legacy flat layout (or a machine not yet migrated). The deferred state is still
-	// real there -- the loaded DLL must be replaced, so a running Revit's update waits for it to exit.
-	reg := registry.New()
-	reg.Register(&registry.Instance{InstanceID: "a", RevitVersion: "2027", PID: 1}, time.Now())
-	marker := &InstalledMarker{Version: "v0.1.3", Deployed: []string{"2027"}, Deferred: []string{"2025"}}
-	deps, _ := updateDepsForTest(t, "local", marker, "v0.1.3", nil)
-	deps.Registry = reg
-
-	out := updateConnector(context.Background(), deps, UpdateConnectorIn{})
-
-	if out.AddinLayout != AddinLayoutFlat {
-		t.Fatalf("no pointer must report the flat layout, got %q", out.AddinLayout)
-	}
-	byVersion := map[string]UpdateRevitStatus{}
-	for _, r := range out.Revit {
-		byVersion[r.Version] = r
-	}
-	if r := byVersion["2027"]; r.State != "deployed" || r.AddinInstalled != "v0.1.3" || r.Note != "" {
-		t.Errorf("a flat deployed version carries the marker version and no restart note (the flat layout replaced the DLL in place): %+v", r)
-	}
-	if r := byVersion["2025"]; r.State != "deferred" || !r.UpdateAvailable || !strings.Contains(r.Note, "exits") {
-		t.Errorf("deferred must survive with its exit-to-apply note: %+v", r)
-	}
-}
-
-func TestUpdateConnectorApplyWordingFollowsTheAddinLayout(t *testing.T) {
-	cases := []struct {
-		name       string
-		pointer    string
-		layout     string
-		mustSay    []string
-		mustNotSay []string
-	}{
-		{
-			name: "shim: nothing closes, the user restarts", pointer: "v0.1.2", layout: AddinLayoutShim,
-			mustSay:    []string{"closes nothing", "restart"},
-			mustNotSay: []string{"asked to close"},
-		},
-		{
-			name: "flat: the legacy close/defer path", pointer: "", layout: AddinLayoutFlat,
-			mustSay:    []string{"asked to close", "next closed"},
-			mustNotSay: []string{"closes nothing"},
-		},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
+func TestUpdateConnectorApplyWordingNeverAsksRevitToClose(t *testing.T) {
+	// The shim is the only add-in layout: an apply flips a pointer and closes nothing, and the wording
+	// says so whether or not the pointer could be read (an unreadable pointer is a degraded read, not a
+	// different layout with a different promise).
+	for _, pointer := range []string{"v0.1.2", ""} {
+		t.Run("pointer="+pointer, func(t *testing.T) {
 			deps, launches := updateDepsForTest(t, "local", &InstalledMarker{Version: "v0.1.2", Deployed: []string{"2027"}}, "v0.1.3", nil)
-			deps.ReadAddinPointer = func(string) string { return c.pointer }
+			deps.ReadAddinPointer = func(string) string { return pointer }
 
 			out := updateConnector(context.Background(), deps, UpdateConnectorIn{Apply: true, ConfirmLifecycleActions: true})
 
-			if out.Error != nil || !out.Applied || len(*launches) != 1 || out.AddinLayout != c.layout {
-				t.Fatalf("expected one launch on the %s layout: %+v launches=%v", c.layout, out, *launches)
+			if out.Error != nil || !out.Applied || len(*launches) != 1 {
+				t.Fatalf("expected one launch: %+v launches=%v", out, *launches)
 			}
 			if len(out.Notices) != 1 || out.Notices[0].Code != "update-started" {
 				t.Fatalf("expected update-started, got %+v", out.Notices)
 			}
 			text := out.Notices[0].Message + " " + strings.Join(out.Notices[0].Remedy, " ")
-			for _, s := range c.mustSay {
+			for _, s := range []string{"closes nothing", "restart"} {
 				if !strings.Contains(text, s) {
-					t.Errorf("update-started on the %s layout must say %q: %s", c.layout, s, text)
+					t.Errorf("update-started must say %q: %s", s, text)
 				}
 			}
-			for _, s := range c.mustNotSay {
+			for _, s := range []string{"asked to close", "flat", "deferred"} {
 				if strings.Contains(text, s) {
-					t.Errorf("update-started on the %s layout must not say %q: %s", c.layout, s, text)
+					t.Errorf("update-started must not say %q: %s", s, text)
 				}
 			}
 		})
 	}
 }
 
-func TestUpdateConnectorConfirmationGateDescribesBothLayouts(t *testing.T) {
-	// The gate runs before the pointer is read (a refused apply does no filesystem work), so it
-	// cannot know the layout and must be true for both.
+func TestUpdateConnectorConfirmationGateSaysNothingIsClosed(t *testing.T) {
 	deps, _ := updateDepsForTest(t, "local", &InstalledMarker{Version: "v0.1.2", Deployed: []string{"2027"}}, "v0.1.3", nil)
 
 	out := updateConnector(context.Background(), deps, UpdateConnectorIn{Apply: true})
 
-	for _, s := range []string{"nothing is closed", "next restart", "asked to close"} {
+	for _, s := range []string{"nothing is closed", "next restart"} {
 		if !strings.Contains(out.Error.Message, s) {
 			t.Errorf("gate must mention %q: %s", s, out.Error.Message)
+		}
+	}
+	for _, s := range []string{"asked to close", "flat"} {
+		if strings.Contains(out.Error.Message, s) {
+			t.Errorf("gate must not mention %q: %s", s, out.Error.Message)
 		}
 	}
 }
@@ -430,7 +389,7 @@ func TestUpdateConnectorConfirmationGateDescribesBothLayouts(t *testing.T) {
 func TestReadAddinPointerParsesTheShimPointer(t *testing.T) {
 	dir := t.TempDir()
 	if readAddinPointer(dir) != "" {
-		t.Fatal("no addin\\current.json must read as the flat layout (empty)")
+		t.Fatal("no addin\\current.json must read as empty (the caller falls back to the marker)")
 	}
 	if err := os.MkdirAll(filepath.Join(dir, "addin"), 0o755); err != nil {
 		t.Fatal(err)
@@ -446,7 +405,7 @@ func TestReadAddinPointerParsesTheShimPointer(t *testing.T) {
 	}
 	os.WriteFile(path, []byte("{not json"), 0o644)
 	if readAddinPointer(dir) != "" {
-		t.Fatal("a corrupt pointer must degrade to the flat layout's wording, not crash or invent a version")
+		t.Fatal("a corrupt pointer must read as empty, not crash or invent a version")
 	}
 }
 

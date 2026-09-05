@@ -11,7 +11,7 @@
 # as it does for the Windows-native target deployment.
 #
 # Deliberately short, per PRD §12's own framing ("not a redesign of anything above"): no
-# self-upgrade/deferred-update machinery (that's an add-in-update concern, Windows-side only), no
+# self-upgrade machinery (that's an add-in-update concern, Windows-side only), no
 # release-artifact download+checksum verification (PRD §12's own "Known gap" -- no release
 # pipeline exists yet; install.ps1 has the same -LocalPackagePath escape hatch for the same
 # reason). This script builds the broker directly from this checked-out source instead, which is

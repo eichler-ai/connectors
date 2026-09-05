@@ -54,10 +54,8 @@ is reported and cleaned up by a second run.
   `Update available (vX.Y.Z)` with an **Update Now** button. After you confirm, it runs the installed
   updater silently. Nothing is closed: the new add-in is installed beside the one Revit is running,
   and Revit loads it the next time you start it — until then Status reads
-  `MCP Bridge (add-in): vX.Y.Z installed · running vX.Y.W — restart Revit to load it`. (An install
-  still on the older flat add-in layout is asked to close Revit once, to switch to the new layout;
-  Revit prompts you to save unsaved work first, and a Revit you keep open switches the next time you
-  close it.) If only the MCP Server changed, the update takes effect the next time your MCP client starts
+  `MCP Bridge (add-in): vX.Y.Z installed · running vX.Y.W — restart Revit to load it`.
+  If only the MCP Server changed, the update takes effect the next time your MCP client starts
   the server. Running server processes notice the new release on disk and step aside on their own
   within about a minute, so the next call from any client starts the new one; if a Status check still
   shows the old server after that, reconnect the `revit` server (e.g. `/mcp` in Claude Code). Until
