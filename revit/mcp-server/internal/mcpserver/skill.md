@@ -347,7 +347,7 @@ Pick one from `candidates` and pass its `instance_id`. Every discovery response 
 absent. For the why, a human can click **MCP Bridge → Status** on the Revit ribbon. If the user asks
 whether the connector is current, `update_connector` (no arguments) checks GitHub now and reports the
 server and each Revit version's add-in; only apply it when they say so, and never restart Revit for
-them — the result says what to tell them to restart (on a legacy `flat` layout it closes Revit).
+them — nothing is closed by an update; the result says what to tell them to restart.
 
 | Symptom | Most likely cause | What to do |
 |---|---|---|

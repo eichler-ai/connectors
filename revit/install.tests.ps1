@@ -1,7 +1,7 @@
 # Pester (v5) tests for install.ps1's pure parts: the release manifest, per-component change
 # detection and the broker stage-and-swap (howto-seed-plan.md §1, step 5). Runs anywhere pwsh runs
 # (CI's ubuntu job, a Mac with PowerShell, the VM), because these functions touch only the paths
-# they are given. The deploy loop, Revit detection and the scheduled-task watcher stay live-only.
+# they are given. The deploy loop and Revit detection stay live-only.
 #
 #   pwsh -NoProfile -Command "Invoke-Pester -Path revit/install.tests.ps1 -Output Detailed"
 
@@ -221,7 +221,7 @@ Describe 'Install-BrokerStaged' {
     }
 }
 
-Describe 'Versioned add-in layout (self-update-architecture.md §4): pointer, version folders, shim, migration' {
+Describe 'Versioned add-in layout (self-update-architecture.md §4): pointer, version folders, shim' {
     BeforeEach {
         $script:app = Join-Path $TestDrive "app-$([guid]::NewGuid())"
         $script:addins = Join-Path $TestDrive "addins-$([guid]::NewGuid())"
@@ -283,8 +283,8 @@ Describe 'Versioned add-in layout (self-update-architecture.md §4): pointer, ve
         Get-Content (Join-Path $addins 'MCPBridge.Shim.dll') -Raw | Should -Be 'shim-bytes'
     }
 
-    It 'Test-VersionedAddinInstalled needs the shim, the pointer AND the pointed folder for this year; Test-AddinInstalled accepts either layout' {
-        Test-AddinInstalled $app $addins '2027' | Should -BeFalse
+    It 'Test-VersionedAddinInstalled needs the shim, the pointer AND the pointed folder for this year' {
+        Test-VersionedAddinInstalled $app $addins '2027' | Should -BeFalse
         Install-AddinVersionPayload $payload $app 'v0.1.5' '2027'
         Test-VersionedAddinInstalled $app $addins '2027' | Should -BeFalse   # no shim, no pointer
         Install-AddinShim $shim $addins | Out-Null
@@ -294,55 +294,39 @@ Describe 'Versioned add-in layout (self-update-architecture.md §4): pointer, ve
         Test-VersionedAddinInstalled $app $addins '2025' | Should -BeFalse   # no 2025 folder under v0.1.5
         Write-AddinPointer $app 'v0.1.6'
         Test-VersionedAddinInstalled $app $addins '2027' | Should -BeFalse   # pointer moved on, folder missing
-        Test-AddinInstalled $app $addins '2027' | Should -BeFalse
-
-        # The flat legacy layout counts as installed for the idempotency check.
-        $flat = Join-Path $TestDrive "flat-$([guid]::NewGuid())"
-        New-Payload $flat @{ 'MCPBridge.AddIn.dll' = 'x'; 'MCPBridge.addin' = '<addin/>' }
-        Test-LegacyFlatAddin $flat | Should -BeTrue
-        Test-AddinInstalled (Join-Path $TestDrive 'no-app') $flat '2027' | Should -BeTrue
     }
 
-    It 'Convert-LegacyAddinToShim (migration §4.7) removes the flat add-in, places the shim, and leaves a foreign file alone' {
-        New-Payload $addins @{ 'MCPBridge.AddIn.dll' = 'old'; 'MCPBridge.addin' = '<addin/>'; 'Microsoft.CodeAnalysis.dll' = 'r'; 'de/Microsoft.CodeAnalysis.resources.dll' = 'de'; 'ThirdParty.dll' = 'theirs' }
-        Test-LegacyFlatAddin $addins | Should -BeTrue
-        Convert-LegacyAddinToShim $addins $shim | Should -BeTrue
-        Test-LegacyFlatAddin $addins | Should -BeFalse
-        Test-ShimAddinInstalled $addins | Should -BeTrue
-        Get-Content (Join-Path $addins 'MCPBridge.addin') -Raw | Should -Be '<shim/>'
-        Test-Path (Join-Path $addins 'Microsoft.CodeAnalysis.dll') | Should -BeFalse
-        Test-Path (Join-Path $addins 'de') | Should -BeFalse
-        Get-Content (Join-Path $addins 'ThirdParty.dll') -Raw | Should -Be 'theirs'
-    }
-    It 'Convert-LegacyAddinToShim removes the whole folder first when every entry is ours, then recreates it with just the shim' {
-        New-Payload $addins @{ 'MCPBridge.AddIn.dll' = 'old'; 'MCPBridge.addin' = '<addin/>'; 'runtimes/win-x64/native/e_sqlite3.dll' = 'n' }
-        Convert-LegacyAddinToShim $addins $shim | Should -BeTrue
-        @(Get-ChildItem $addins | ForEach-Object Name | Sort-Object) | Should -Be @('MCPBridge.addin', 'MCPBridge.Shim.dll')
-    }
-    It 'Convert-LegacyAddinToShim returns false and places nothing when the loaded add-in cannot be removed (a running Revit)' {
-        New-Payload $addins @{ 'MCPBridge.AddIn.dll' = 'old'; 'MCPBridge.addin' = '<addin/>'; 'ThirdParty.dll' = 'theirs' }
-        Mock Remove-Item { } -ParameterFilter { "$Path" -like '*MCPBridge.*' }
-        Convert-LegacyAddinToShim $addins $shim | Should -BeFalse
-        Test-Path (Join-Path $addins 'MCPBridge.Shim.dll') | Should -BeFalse
-        Get-Content (Join-Path $addins 'MCPBridge.addin') -Raw | Should -Be '<addin/>'
-    }
-    It 'Install-AddinFlat (a release without shim-<year>/) refuses to overwrite an installed shim, so a migrated machine is never reverted to the flat layout' {
+    It 'Remove-OwnedAddinFiles (uninstall) takes the shim + manifest and the folder they leave empty' {
         Install-AddinShim $shim $addins | Out-Null
-        Install-AddinFlat $payload $addins | Should -Be 'kept-shim'
-        Get-Content (Join-Path $addins 'MCPBridge.addin') -Raw | Should -Be '<shim/>'
-        Get-Content (Join-Path $addins 'MCPBridge.Shim.dll') -Raw | Should -Be 'shim-bytes'
-        Test-Path (Join-Path $addins 'MCPBridge.AddIn.dll') | Should -BeFalse
-        Test-Path (Join-Path $addins 'Microsoft.CodeAnalysis.dll') | Should -BeFalse
+        Remove-OwnedAddinFiles $addins
+        Test-Path $addins | Should -BeFalse
     }
-    It 'Install-AddinFlat deploys the whole payload into an Addins folder that has no shim (the legacy path)' {
-        Install-AddinFlat $payload $addins | Should -Be 'deployed'
-        Test-LegacyFlatAddin $addins | Should -BeTrue
-        Get-Content (Join-Path $addins 'MCPBridge.addin') -Raw | Should -Be '<addin/>'
+    It 'Remove-OwnedAddinFiles leaves a foreign file, and the folder holding it, alone' {
+        Install-AddinShim $shim $addins | Out-Null
+        New-Payload $addins @{ 'ThirdParty.dll' = 'theirs' }
+        Remove-OwnedAddinFiles $addins
+        Test-ShimAddinInstalled $addins | Should -BeFalse
+        Test-Path (Join-Path $addins 'MCPBridge.Shim.dll') | Should -BeFalse
+        Get-Content (Join-Path $addins 'ThirdParty.dll') -Raw | Should -Be 'theirs'
     }
     It 'Remove-OwnedAddinFiles is a no-op on a folder without our manifest' {
         New-Payload $addins @{ 'ThirdParty.dll' = 'theirs'; 'Other.addin' = '<o/>' }
         Remove-OwnedAddinFiles $addins
         @(Get-ChildItem $addins).Count | Should -Be 2
+    }
+    It 'Remove-OwnedAddinFiles leaves a held shim DLL in place (a running Revit) so uninstall can report it' {
+        Install-AddinShim $shim $addins | Out-Null
+        Mock Remove-Item { } -ParameterFilter { "$Path" -like '*MCPBridge.Shim.dll' }
+        Remove-OwnedAddinFiles $addins
+        Test-Path (Join-Path $addins 'MCPBridge.Shim.dll') | Should -BeTrue
+        Test-Path (Join-Path $addins 'MCPBridge.addin') | Should -BeFalse
+    }
+    It 'Remove-OwnedAddinFiles on the second run (Revit closed) removes the orphaned shim DLL and its folder, so uninstall can finish (review of #223)' {
+        # The state a first uninstall under a running Revit leaves: manifest gone, DLL still there.
+        New-Payload $addins @{ 'MCPBridge.Shim.dll' = 'shim-bytes' }
+        Remove-OwnedAddinFiles $addins
+        Test-Path (Join-Path $addins 'MCPBridge.Shim.dll') | Should -BeFalse   # the uninstall leftover signal is clear
+        Test-Path $addins | Should -BeFalse
     }
 
     It 'Remove-StaleAddinVersions keeps the current and previous versions, deletes the rest, and skips a folder it cannot rename (mapped by a running Revit)' {

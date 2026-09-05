@@ -25,14 +25,10 @@ param(
 
     [switch]$Uninstall,
 
-    # The ribbon's self-update click passes this: no interactive prompts (a running Revit is closed
-    # automatically rather than asked about), no "already up to date" chatter on the common no-op case.
+    # The ribbon's self-update click passes this: no interactive prompts (an uninstall closes a running
+    # Revit rather than asking), no "already up to date" chatter on the common no-op case. An add-in
+    # UPDATE never closes anything in either mode (see "Versioned add-in layout" below).
     [switch]$Silent,
-
-    # Internal -- invoked by the scheduled task a deferred update registers (see "Deferred updates"
-    # below), never by a user directly. Checks whether any Revit version with a staged update has
-    # since closed, and if so applies it; re-arms itself (by leaving the task running) otherwise.
-    [switch]$ApplyPendingUpdate,
 
     # Testing/offline escape hatch: exercise the deploy mechanics (path resolution, per-version
     # detection, idempotency, registry writes, MCP registration) against a hand-built local zip in
@@ -60,7 +56,7 @@ $RepoSlug = 'eichler-ai/connectors'
 # Review finding: $PSCommandPath is empty/null under the script's own PRIMARY documented invocation
 # (irm https://raw.githubusercontent.com/eichler-ai/connectors/main/revit/install.ps1 | iex, PRD §12) -- there's no file on disk to point at. Every downstream use
 # of "this script's own path" (elevation re-invoke, the self-copy used for the uninstall string and
-# for the deferred-update watcher task) goes through $ScriptPath instead, which is always a real
+# for the ribbon's Update Now) goes through $ScriptPath instead, which is always a real
 # file: materialize our own source to one when piped, since $MyInvocation.MyCommand.Definition inside
 # an iex'd scriptblock still holds the literal source text even though $PSCommandPath doesn't.
 # $BootstrapCreated tracks whether we own that temp file, so it gets cleaned up on exit either way --
@@ -72,8 +68,8 @@ $RepoSlug = 'eichler-ai/connectors'
 # `<text> | iex` it holds the CALLER's command line -- for the documented one-liner, literally
 # "irm https://.../install.ps1 | iex" -- not the script text (reproduced with pwsh; see the issue).
 # So every piped install wrote a 93-byte stub as its self-copy, and everything that later ran that
-# copy with arguments (the ribbon's Update Now with -Update -Silent, the deferred-update watcher with
-# -ApplyPendingUpdate, Apps & Features' -Uninstall) lost them: Update Now ran an interactive install in a
+# copy with arguments (the ribbon's Update Now with -Update -Silent, Apps & Features' -Uninstall) lost
+# them: Update Now ran an interactive install in a
 # hidden window and hung on Read-Host. Found live on the first Update Now against a real release.
 # Get-InstallerSourceForBootstrap now uses the definition only if it IS the full script, and otherwise
 # fetches the canonical script from the raw URL (what the stub did anyway, minus the argument loss),
@@ -155,30 +151,25 @@ function Get-InstalledRevitVersions {
     }
 }
 
-# Review finding: the original per-process-name check couldn't tell 2026's Revit.exe apart from
-# 2027's, so "is Revit running" force-closed EVERY installed version whenever ANY one of them
-# triggered an update -- directly contradicting PRD §12's "must not force-close every open Revit
-# across every installed version" requirement. Match on the process's own exe path instead, which
-# does encode the version (it's literally the per-version install directory). Review finding: .Path
-# resolves via MainModule and can throw for a bitness-mismatched process -- guarded per-item so one
-# inaccessible process doesn't abort the whole check for every other running Revit.
+# Per-version, by the process's own exe path (which encodes the year), not by process name -- a
+# name-based check cannot tell 2026's Revit.exe from 2027's. Used to say which Revit years are still
+# running the previous add-in after an update (they are never closed for it), to decide whether to
+# launch Revit after a fresh install, and by uninstall. Review finding: .Path resolves via MainModule
+# and can throw for a bitness-mismatched process -- guarded per-item so one inaccessible process
+# doesn't abort the whole check for every other running Revit.
 function Get-RevitProcess([string]$RevitVersion) {
     Get-Process -Name 'Revit' -ErrorAction SilentlyContinue | Where-Object {
         try { $_.Path -like "*\Revit $RevitVersion\Revit.exe" } catch { $false }
     }
 }
 
-# Returns $true only if every passed process is ACTUALLY gone afterwards. The return value matters:
-# CloseMainWindow() is a request, not a kill, and it routinely fails to close Revit -- the user hits
-# Cancel on a "save changes?" prompt, a modal dialog owns the UI thread, or the process simply has no
-# main window to send WM_CLOSE to (CloseMainWindow returns false and Wait-Process then just burns its
-# full timeout). This used to return nothing and every caller assumed success, so a failed close fell
-# straight through to Copy-Item over a still-running Revit's own loaded DLLs: either an abort partway
-# through the deploy (files are locked, and $ErrorActionPreference='Stop'), or -- worse, when nothing
-# happened to be locked -- a cheerful "installed for Revit <version>" for a version that is still
-# running the OLD code and will keep doing so until it restarts. Confirmed live: a -Silent install
-# reported success for a running 2027 whose process was untouched. Callers must now check this and
-# route a failure into the deferred-update path below, which exists for exactly this situation.
+# UNINSTALL ONLY. An add-in update never closes Revit (the versioned layout below deploys beside the
+# running add-in and flips a pointer); uninstall is the one operation that has to remove a DLL a
+# running Revit may have mapped, so it asks that Revit to close first. Returns $true only if every
+# passed process is ACTUALLY gone afterwards: CloseMainWindow() is a request, not a kill, and it
+# routinely fails -- the user hits Cancel on a "save changes?" prompt, a modal dialog owns the UI
+# thread, or there is no main window to send WM_CLOSE to. Uninstall does not rely on this value; it
+# tests what survived removal and reports it for a second run.
 function Stop-RevitProcessGracefully($Process) {
     # CloseMainWindow() THROWS ("Process has exited, so the requested information is not available")
     # if the process is already gone -- a real race, since the user is perfectly likely to close Revit
@@ -196,70 +187,16 @@ function Stop-RevitProcessGracefully($Process) {
     return $true
 }
 
-# --- Deferred updates -------------------------------------------------------------------------------
-# When a running Revit version's update is deferred (user declined to close it now, or it's simply
-# still open), the update it would have received is staged to $appDir\pending-update\addin-<version>\
-# and a small repeating Scheduled Task is registered to watch for that specific version's Revit.exe
-# actually exiting -- applying the staged files (and un-registering itself) the moment it does, rather
-# than requiring the user to remember to re-run this script by hand. This is what makes "it'll finish
-# updating once you close it" (the message shown when deferring) an actually-true claim rather than
-# an aspirational one -- see PRD §12 "Self-upgrade" and this PR's own review history for why this
-# needed to be a real mechanism, not just corrected copy.
-function Get-PendingUpdateDir([string]$InstallScope) { Join-Path (Get-AppDir $InstallScope) 'pending-update' }
-function Get-PendingUpdateManifestPath([string]$InstallScope) { Join-Path (Get-PendingUpdateDir $InstallScope) 'manifest.json' }
-function Get-PendingUpdateTaskName([string]$InstallScope) { "MCPBridge-PendingUpdate-$InstallScope" }
-
-function Register-PendingUpdateWatcher([string]$InstallScope, [string]$SelfPath, [int[]]$RevitProcessIds) {
-    # Immediate path: block on the specific running process(es) actually exiting -- event-driven via
-    # Wait-Process (Process.WaitForExit under the hood), not polling -- so the update applies the
-    # instant Revit closes, not up to N minutes later. Considered and rejected: a periodic-poll
-    # Scheduled Task (simple, but adds real latency for no benefit -- Wait-Process is the established
-    # pattern precisely because Windows already tells you the moment a process exits, no need to ask
-    # repeatedly) and MOVEFILE_DELAY_UNTIL_REBOOT (the mechanism Windows Update/most installers use
-    # for locked files -- doesn't fit: it stages a swap for the next *system reboot*, not "next time
-    # this one process closes," which is both too coarse and unnecessary here -- Revit itself is the
-    # only thing holding the lock, so the file is already free the moment Revit exits).
-    if ($RevitProcessIds.Count -gt 0) {
-        $idList = $RevitProcessIds -join ','
-        # Found via live testing, not just review: this call originally omitted -ExecutionPolicy
-        # Bypass (unlike the Scheduled Task action below, which already had it) -- on any machine with
-        # the default Restricted/AllSigned execution policy (most end-user machines, not just dev
-        # boxes with Bypass already configured), the background watcher would fail immediately with
-        # "running scripts is disabled on this system," silently never applying the deferred update.
-        Start-Process powershell -WindowStyle Hidden -ArgumentList @(
-            '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command',
-            "Wait-Process -Id $idList -ErrorAction SilentlyContinue; & `"$SelfPath`" -ApplyPendingUpdate -Scope $InstallScope"
-        ) | Out-Null
-    }
-
-    # Durability fallback: the background waiter above dies if the machine reboots or the user logs
-    # off before Revit closes. A one-shot-per-logon Scheduled Task re-checks at every subsequent
-    # logon -- ApplyPendingUpdate is itself idempotent (a no-op if nothing's pending or Revit's still
-    # running), so it's safe to leave this registered and firing at every logon indefinitely.
-    $taskName = Get-PendingUpdateTaskName $InstallScope
-    if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) { return }
-    $action = New-ScheduledTaskAction -Execute 'powershell.exe' `
-        -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$SelfPath`" -ApplyPendingUpdate -Scope $InstallScope"
-    $trigger = New-ScheduledTaskTrigger -AtLogOn
-    $principal = if ($InstallScope -eq 'AllUsers') {
-        New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
-    } else {
-        New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
-    }
-    Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Force | Out-Null
-}
-
 # Only copies $ScriptPath onto $selfCopyPath when they aren't already the same file -- review
 # finding: when this script IS the deployed copy re-invoking itself (the ribbon's -Update -Silent
-# self-update path, or this watcher task), $PSCommandPath and $selfCopyPath resolve to the identical
+# self-update path), $PSCommandPath and $selfCopyPath resolve to the identical
 # file, and Copy-Item onto itself is a terminating error under $ErrorActionPreference = 'Stop',
 # silently aborting everything after it (MCP re-registration, the registry version bump, relaunching
 # Revit) while still having already deployed the new files and written the version marker.
 #
-# Issue #192: refuses a source that is not the full installer. The self-copy is what Update Now, the
-# deferred-update watcher and Apps & Features all run WITH ARGUMENTS, so a stub here (the one-liner,
-# which is what a piped run's $MyInvocation.MyCommand.Definition actually is) breaks all three at once
-# and silently. Guarding at the point of the write means no invocation path can regress this again.
+# Issue #192: refuses a source that is not the full installer. The self-copy is what Update Now and
+# Apps & Features both run WITH ARGUMENTS, so a stub here (the one-liner, which is what a piped run's
+# $MyInvocation.MyCommand.Definition actually is) breaks both at once and silently. Guarding at the point of the write means no invocation path can regress this again.
 # Deletes install scratch (the extracted payload, the downloaded zip) without ever throwing: a few
 # short retries for a transient lock (antivirus scanning a just-written exe), then give up quietly.
 # See the deploy block's finally for the failure this replaced.
@@ -277,7 +214,7 @@ function Remove-ScratchBestEffort([string]$Path, [switch]$Recurse) {
 
 function Copy-SelfIfNeeded([string]$Source, [string]$Destination) {
     if (-not (Test-IsFullInstallerScript (Get-Content $Source -Raw))) {
-        throw "Refusing to install '$Source' as the installer's own copy at '$Destination': it is not the full install.ps1 (issue #192). Update Now, deferred updates and uninstall would all lose their arguments."
+        throw "Refusing to install '$Source' as the installer's own copy at '$Destination': it is not the full install.ps1 (issue #192). Update Now and uninstall would both lose their arguments."
     }
     $resolvedSource = (Resolve-Path $Source).Path
     $resolvedDest = if (Test-Path $Destination) { (Resolve-Path $Destination).Path } else { $null }
@@ -372,8 +309,8 @@ function Install-BrokerStaged([string]$ServerPayloadDir, [string]$AppDir) {
     #               path, so the running broker keeps serving the old code until the MCP client
     #               next starts it; broker.json -- and the ribbon's "update available" -- clear then.
     #   pending  -- the rename was refused (an AV scan, a non-Windows lock): the new exe waits as
-    #               mcp-server.exe.new and the next run of this script (or the watcher) completes
-    #               the swap once nothing holds the file.
+    #               mcp-server.exe.new and the next run of this script completes the swap once
+    #               nothing holds the file.
     New-Item -ItemType Directory -Force -Path $AppDir | Out-Null
     $exe = Join-Path $AppDir 'mcp-server.exe'
     $new = "$exe.new"
@@ -488,13 +425,11 @@ function Complete-PendingBrokerSwap([string]$AppDir) {
 # <app dir>\addin\current.json and Assembly.LoadFrom's the real add-in out of addin\<version>\<year>\.
 # An add-in update is therefore: stage the new version folder beside whatever a running Revit has
 # mapped, then flip the pointer -- atomically, last, with nothing asked to close. A running Revit keeps
-# its version until its next start. The one exception is the migration off today's flat layout (§4.7),
-# which replaces the loaded MCPBridge.AddIn.dll in Addins\<year> and so still goes through the existing
-# close/defer machinery above, exactly once per machine.
-#
-# A release without shim-<year>/ in its zip (every release before the shim shipped) is still deployed
-# flat into Addins\<year> by the legacy branch of the deploy loop, so this installer keeps working
-# against the release that is current when it is served.
+# its version until its next start. This is the ONLY add-in layout: every release ships shim-<year>/
+# beside addin-<year>/, and a payload without its shim is a packaging error the deploy loop refuses,
+# not a case it falls back from (the pre-shim flat deploy, the flat->shim migration and the
+# close/defer machinery they needed were deleted while the project had no installs to migrate --
+# docs/http-transport-rfc.md §4c).
 
 function Get-AddinVersionsRoot([string]$AppDir) { Join-Path $AppDir 'addin' }
 function Get-AddinPointerPath([string]$AppDir) { Join-Path (Get-AddinVersionsRoot $AppDir) 'current.json' }
@@ -546,41 +481,18 @@ function Write-AddinPointer([string]$AppDir, [string]$Version) {
     }
 }
 
-function Install-AddinFlat([string]$PayloadDir, [string]$AddinsDir) {
-    # The legacy deploy: the whole addin-<year>/ payload straight into Addins\<year> (a release without
-    # shim-<year>/). Refuses -- 'kept-shim' -- when that folder already holds the shim: the payload's own
-    # MCPBridge.addin would overwrite the shim's manifest and the flat DLLs would sit beside it, silently
-    # reverting a migrated machine to the close-Revit-to-update layout and orphaning the addin\ tree
-    # (independent review of #218). The installed shim keeps serving whatever current.json names.
-    if (Test-Path (Join-Path $AddinsDir 'MCPBridge.Shim.dll')) { return 'kept-shim' }
-    New-Item -ItemType Directory -Force -Path $AddinsDir | Out-Null
-    Copy-Item "$PayloadDir\*" $AddinsDir -Force -Recurse
-    return 'deployed'
-}
-
 function Test-ShimAddinInstalled([string]$AddinsDir) {
     (Test-Path (Join-Path $AddinsDir 'MCPBridge.Shim.dll')) -and (Test-Path (Join-Path $AddinsDir 'MCPBridge.addin'))
 }
 
-function Test-LegacyFlatAddin([string]$AddinsDir) {
-    # Today's flat layout -- the real add-in sits in Addins\<year> itself. This is the §4.7 migration
-    # signal: "the Addins folder holds MCPBridge.AddIn.dll directly rather than MCPBridge.Shim.dll".
-    Test-Path (Join-Path $AddinsDir 'MCPBridge.AddIn.dll')
-}
-
 function Test-VersionedAddinInstalled([string]$AppDir, [string]$AddinsDir, [string]$RevitVersion) {
     # Complete for this Revit year when the shim + its manifest are in Addins\<year>, the pointer reads,
-    # and the folder it points at holds this year's real add-in.
+    # and the folder it points at holds this year's real add-in. This is "the add-in is on disk for
+    # this year" -- what the idempotency check asks.
     if (-not (Test-ShimAddinInstalled $AddinsDir)) { return $false }
     $p = Read-AddinPointer $AppDir
     if (-not $p) { return $false }
     Test-Path (Join-Path (Get-AddinVersionDir $AppDir ([string]$p.version) $RevitVersion) 'MCPBridge.AddIn.dll')
-}
-
-function Test-AddinInstalled([string]$AppDir, [string]$AddinsDir, [string]$RevitVersion) {
-    # "The add-in is on disk for this year" in EITHER layout -- what the idempotency check asks before
-    # it knows whether the release it is about to download carries the shim.
-    (Test-VersionedAddinInstalled $AppDir $AddinsDir $RevitVersion) -or (Test-LegacyFlatAddin $AddinsDir)
 }
 
 function Install-AddinVersionPayload([string]$PayloadDir, [string]$AppDir, [string]$Version, [string]$RevitVersion) {
@@ -619,57 +531,23 @@ function Install-AddinShim([string]$ShimDir, [string]$AddinsDir) {
 }
 
 function Remove-OwnedAddinFiles([string]$AddinsDir) {
-    # Removes everything this installer ever put in Addins\<year>, in either layout, and nothing else.
-    # The flat layout is a self-contained payload STRAIGHT into Addins\<year>: the .addin manifest,
-    # MCPBridge.* (which now also covers MCPBridge.Shim.dll) and Roslyn, plus Eichler.Connectors.Revit.*,
-    # the SQLite stack, System.Data.Common, the localization satellite folders and runtimes\. A
-    # self-contained payload OWNS the folder, so remove the whole folder -- but only when every entry
-    # in it is demonstrably ours. A bare "our .addin is the only manifest here" test is NOT sufficient:
-    # a third-party add-in whose manifest lives in the all-users Addins location can still drop its
-    # DLLs into this per-user folder, leaving no foreign *.addin here, and whole-folder removal would
-    # then delete their files. So require that EVERY top-level entry matches our payload before
-    # removing the folder; otherwise remove only our own members (satellite resource DLLs and
-    # runtimes\ included) and leave anything foreign untouched. Silent on a file a running Revit holds:
-    # callers test what survived (Test-LegacyFlatAddin / Test-ShimAddinInstalled) to find that out.
-    if (-not (Test-Path (Join-Path $AddinsDir 'MCPBridge.addin'))) { return }
-    $ownedPatterns = @('MCPBridge.*', 'Eichler.Connectors.Revit.*', 'Microsoft.CodeAnalysis*',
-                       'Microsoft.Data.Sqlite.dll', 'e_sqlite3.dll', 'SQLitePCLRaw.*',
-                       'System.Data.Common.dll', 'runtimes')
-    $oursOnly = $true
-    foreach ($e in @(Get-ChildItem $AddinsDir -ErrorAction SilentlyContinue)) {
-        $matched = $false
-        foreach ($p in $ownedPatterns) { if ($e.Name -like $p) { $matched = $true; break } }
-        # A locale satellite dir (de\, pt-BR\, zh-Hans\, ...) holding only *.resources.dll is ours
-        # (Roslyn's localized resources), so it doesn't disqualify the folder.
-        if (-not $matched -and $e.PSIsContainer -and $e.Name -match '^[A-Za-z]{2}(-[A-Za-z]+)?$') {
-            $inner = @(Get-ChildItem $e.FullName -File -ErrorAction SilentlyContinue)
-            if ($inner.Count -gt 0 -and -not ($inner | Where-Object { $_.Name -notlike '*.resources.dll' })) { $matched = $true }
-        }
-        if (-not $matched) { $oursOnly = $false; break }
+    # Removes what this installer puts in Addins\<year> -- the shim (MCPBridge.Shim.dll) and its
+    # MCPBridge.addin manifest -- and nothing else; the versioned payloads live under $appDir\addin\ and
+    # go with the app dir. The folder itself goes only when that leaves it empty: a third-party add-in
+    # whose manifest lives in the all-users Addins location can still drop its DLLs into this per-user
+    # folder, and whole-folder removal would delete them. Silent on a file a running Revit holds:
+    # callers test what survived (the shim DLL) to find that out. Guard on EITHER file being present,
+    # not the manifest alone (review of #223): a first uninstall under a running Revit removes the
+    # manifest but not the mapped DLL, so the second run -- the "close Revit and re-run" the summary
+    # promises -- must still find and remove the orphaned MCPBridge.Shim.dll.
+    $shimDll = Join-Path $AddinsDir 'MCPBridge.Shim.dll'
+    if (-not (Test-Path (Join-Path $AddinsDir 'MCPBridge.addin')) -and -not (Test-Path $shimDll)) { return }
+    foreach ($name in 'MCPBridge.Shim.dll', 'MCPBridge.addin') {
+        Remove-Item (Join-Path $AddinsDir $name) -Force -ErrorAction SilentlyContinue
     }
-    if ($oursOnly) {
-        Remove-Item $AddinsDir -Recurse -Force -ErrorAction SilentlyContinue
-        return
+    if (-not @(Get-ChildItem $AddinsDir -Force -ErrorAction SilentlyContinue)) {
+        Remove-Item $AddinsDir -Force -ErrorAction SilentlyContinue
     }
-    foreach ($pat in $ownedPatterns) { Remove-Item (Join-Path $AddinsDir $pat) -Force -Recurse -ErrorAction SilentlyContinue }
-    # Roslyn's localized resource DLLs sit inside locale subfolders; remove just those (and any
-    # locale folder they leave empty), so a third party's resources in the same folder survive.
-    foreach ($sub in @(Get-ChildItem $AddinsDir -Directory -ErrorAction SilentlyContinue)) {
-        Remove-Item (Join-Path $sub.FullName 'Microsoft.CodeAnalysis*.resources.dll') -Force -ErrorAction SilentlyContinue
-        if (-not @(Get-ChildItem $sub.FullName -Force -ErrorAction SilentlyContinue)) { Remove-Item $sub.FullName -Force -ErrorAction SilentlyContinue }
-    }
-}
-
-function Convert-LegacyAddinToShim([string]$AddinsDir, [string]$ShimDir) {
-    # §4.7: replaces the flat Addins\<year>\MCPBridge.* with the shim + its manifest. The caller has
-    # already staged the versioned payload and flipped the pointer, so the next Revit start loads
-    # through the shim. Needs no Revit of this year running (its mapped DLLs cannot be removed): $false
-    # when the flat add-in survived removal, in which case nothing else is changed and the caller
-    # keeps this year pending.
-    Remove-OwnedAddinFiles $AddinsDir
-    if (Test-LegacyFlatAddin $AddinsDir) { return $false }
-    Install-AddinShim $ShimDir $AddinsDir | Out-Null
-    return (Test-ShimAddinInstalled $AddinsDir)
 }
 
 function Remove-StaleAddinVersions([string]$AppDir) {
@@ -695,19 +573,6 @@ function Remove-StaleAddinVersions([string]$AppDir) {
         }
         try { Remove-Item $aside -Recurse -Force -ErrorAction Stop } catch { }
     }
-}
-
-function Request-RevitClose([string]$RevitVersion, $Process, [string]$Question, [bool]$IsSilent) {
-    # The existing close-or-defer decision, shared by the legacy flat deploy and the one-time shim
-    # migration: $true when this version's Revit is gone afterwards (so its files can be replaced),
-    # $false when it must be deferred -- the user declined, or a -Silent/accepted close did not take
-    # (see Stop-RevitProcessGracefully for why that return value must be checked).
-    if ($IsSilent) { return (Stop-RevitProcessGracefully $Process) }
-    $answer = Read-Host $Question
-    if ($answer -eq 'n') { return $false }
-    $closed = Stop-RevitProcessGracefully $Process
-    if (-not $closed) { Write-Host "Revit $RevitVersion didn't close -- it may have an unsaved-changes prompt or another dialog open." }
-    return $closed
 }
 
 # --- Claude client MCP registration -----------------------------------------------------------------
@@ -877,7 +742,6 @@ if ($Scope -eq 'AllUsers' -and -not $currentPrincipal.IsInRole([Security.Princip
     if ($Update) { $forwardArgs += '-Update' }
     if ($Uninstall) { $forwardArgs += '-Uninstall' }
     if ($Silent) { $forwardArgs += '-Silent' }
-    if ($ApplyPendingUpdate) { $forwardArgs += '-ApplyPendingUpdate' }
     if ($LocalPackagePath) { $forwardArgs += @('-LocalPackagePath', "`"$LocalPackagePath`"") }
 
     # Review finding: Start-Process does not set $LASTEXITCODE (that only reflects a native-exe
@@ -898,93 +762,12 @@ $uninstallKeyPath = if ($Scope -eq 'User') {
     'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\MCPBridge'
 }
 
-# --- Apply a previously-deferred update, if this is the watcher task invoking us ------------------
-if ($ApplyPendingUpdate) {
-    $manifestPath = Get-PendingUpdateManifestPath $Scope
-    if (-not (Test-Path $manifestPath)) {
-        Unregister-ScheduledTask -TaskName (Get-PendingUpdateTaskName $Scope) -Confirm:$false -ErrorAction SilentlyContinue
-        return
-    }
-    $manifest = Get-Content $manifestPath | ConvertFrom-Json
-    $brokerSwapped = Complete-PendingBrokerSwap $appDir
-    if ($brokerSwapped) { Complete-PendingServerMarker $appDir $versionMarkerPath }
-    $serverStillPending = $manifest.PSObject.Properties['components'] -and $manifest.components -and
-        $manifest.components.PSObject.Properties['server'] -and -not $brokerSwapped -and
-        (Test-Path (Join-Path $appDir 'mcp-server.exe.new'))
-    $stillPending = @()
-    foreach ($version in $manifest.versions) {
-        if (Get-RevitProcess $version) { $stillPending += $version; continue }
-        $dir = Get-AddinsDir $version $Scope
-        # The one-time shim migration (§4.7) that was deferred because this Revit was running: the
-        # versioned payload and the pointer were laid down at stage time; only the Addins\<year> swap
-        # (flat MCPBridge.* out, shim + manifest in) waited for the process to exit.
-        $shimPendingDir = Join-Path (Get-PendingUpdateDir $Scope) "shim-$version"
-        if (Test-Path $shimPendingDir) {
-            if (-not (Convert-LegacyAddinToShim $dir $shimPendingDir)) { $stillPending += $version; continue }
-            Remove-Item $shimPendingDir -Recurse -Force -ErrorAction SilentlyContinue
-        }
-        # Legacy flat deploy (a release without shim-<year>/), deferred the same way. Install-AddinFlat
-        # refuses to overwrite a shim that landed in the meantime; the stale staging is dropped either way.
-        $payloadDir = Join-Path (Get-PendingUpdateDir $Scope) "addin-$version"
-        if (Test-Path $payloadDir) {
-            Install-AddinFlat $payloadDir $dir | Out-Null
-            Remove-Item $payloadDir -Recurse -Force -ErrorAction SilentlyContinue
-        }
-    }
-    if ($stillPending.Count -gt 0) {
-        @{ version = $manifest.version; versions = $stillPending } | ConvertTo-Json | Out-File $manifestPath -Encoding utf8
-    } else {
-        # Carry `deployed`/`skipped` forward (see the idempotency check and the marker write further
-        # down). This path completes an install whose deferred half has now landed, so the versions it
-        # just applied join `deployed` -- they now genuinely have files on disk, which is exactly what
-        # that field is asked about. Dropping these fields would silently send the next run back to the
-        # old check-every-detected-version behaviour.
-        $priorMarker = if (Test-Path $versionMarkerPath) { Get-Content $versionMarkerPath | ConvertFrom-Json } else { $null }
-        # @( ) OUTSIDE the if: assigning an if-expression's output unrolls a one-element array into
-        # a scalar, and a string + array is string concatenation -- found live (step 5): a marker
-        # read back as "2027" plus the pending "2027" recorded `deployed: "20272027"`, after which
-        # every later run treated 2027 as never installed.
-        $priorDeployed = @(if ($priorMarker -and $priorMarker.PSObject.Properties['deployed']) { $priorMarker.deployed })
-        $priorSkipped = @(if ($priorMarker -and $priorMarker.PSObject.Properties['skipped']) { $priorMarker.skipped })
-        $priorDeferred = @(if ($priorMarker -and $priorMarker.PSObject.Properties['deferred']) { $priorMarker.deferred })
-        $nowDeployed = @($priorDeployed + @($manifest.versions) | Sort-Object -Unique)
-        # The staged payloads' component hashes were parked in the pending manifest at stage time
-        # (they must not be recorded as installed until the files are actually on disk).
-        $components = @{}
-        if ($priorMarker -and $priorMarker.PSObject.Properties['components'] -and $priorMarker.components) {
-            foreach ($prop in $priorMarker.components.PSObject.Properties) { $components[$prop.Name] = $prop.Value }
-        }
-        if ($manifest.PSObject.Properties['components'] -and $manifest.components) {
-            foreach ($prop in $manifest.components.PSObject.Properties) {
-                # The server hash is recorded only when the swap really happened; a broker still
-                # running from the old image keeps the .new waiting, and the next run's
-                # Complete-PendingBrokerSwap (before the idempotency check) finishes it.
-                if ($prop.Name -eq 'server' -and $serverStillPending) { continue }
-                $components[$prop.Name] = $prop.Value
-            }
-        }
-        @{
-            version  = $manifest.version
-            deployed = $nowDeployed
-            # A version can be in exactly one list; anything just applied leaves the other two.
-            skipped  = @($priorSkipped | Where-Object { $nowDeployed -notcontains $_ } | Sort-Object -Unique)
-            deferred = @($priorDeferred | Where-Object { $nowDeployed -notcontains $_ } | Sort-Object -Unique)
-            components = $components
-            # Carried from the prior marker: an all-deferred run only happens when the server was
-            # unchanged (a server change is accounted on its own), so the corpus is the prior one.
-            howto_corpus = if ($priorMarker -and $priorMarker.PSObject.Properties['howto_corpus']) { $priorMarker.howto_corpus } else { $null }
-        } | ConvertTo-Json | Out-File $versionMarkerPath -Encoding utf8
-        Remove-Item (Get-PendingUpdateDir $Scope) -Recurse -Force -ErrorAction SilentlyContinue
-        Unregister-ScheduledTask -TaskName (Get-PendingUpdateTaskName $Scope) -Confirm:$false -ErrorAction SilentlyContinue
-    }
-    return
-}
-
 # --- Uninstall ------------------------------------------------------------------------------------
 if ($Uninstall) {
     # Review finding: the original version deleted files unconditionally and reported "uninstalled"
-    # even when a running Revit had one of them locked, silently leaving it behind. Same
-    # stop-if-running treatment Install gives each version, not a separate weaker path.
+    # even when a running Revit had one of them locked, silently leaving it behind. Uninstall is the
+    # ONE operation that asks a running Revit to close: it has to remove the shim DLL that Revit has
+    # mapped (an update never does -- it deploys beside the running add-in and flips a pointer).
     $leftoverVersions = @()
     foreach ($version in $SupportedRevitVersions) {
         $proc = Get-RevitProcess $version
@@ -997,16 +780,14 @@ if ($Uninstall) {
             }
         }
         $dir = Get-AddinsDir $version $Scope
-        # Either layout: the flat self-contained payload, or the shim + its manifest (the versioned
-        # payloads live under $appDir\addin\ and go with the app dir below). See Remove-OwnedAddinFiles
-        # for why the whole folder goes only when every entry in it is demonstrably ours.
+        # The shim + its manifest; the versioned payloads live under $appDir\addin\ and go with the app
+        # dir below. See Remove-OwnedAddinFiles for why the folder itself goes only when that empties it.
         Remove-OwnedAddinFiles $dir
-        # A DLL surviving removal means a running Revit held it locked -- the "close it and re-run" case
-        # below. Revit doesn't hold the .addin manifest open, so the loaded DLL (the shim's, or the flat
-        # add-in's) is the reliable signal.
-        if ((Test-Path (Join-Path $dir 'MCPBridge.AddIn.dll')) -or (Test-Path (Join-Path $dir 'MCPBridge.Shim.dll'))) { $leftoverVersions += $version }
+        # The shim DLL surviving removal means a running Revit held it locked -- the "close it and
+        # re-run" case below. Revit doesn't hold the .addin manifest open, so the loaded DLL is the
+        # reliable signal.
+        if (Test-Path (Join-Path $dir 'MCPBridge.Shim.dll')) { $leftoverVersions += $version }
     }
-    Unregister-ScheduledTask -TaskName (Get-PendingUpdateTaskName $Scope) -Confirm:$false -ErrorAction SilentlyContinue
     # Takes the whole addin\<version>\<year>\ tree and current.json with it. A running Revit's mapped
     # version folder survives (silently) and is reported via $leftoverVersions' shim signal above.
     Remove-Item $appDir -Recurse -Force -ErrorAction SilentlyContinue
@@ -1099,10 +880,9 @@ if ($completedEarly -and -not $Silent) {
 # is wrong whenever a release ships no `addin-<year>/` payload for one of them: the deploy loop below
 # skips such a version by design, so its DLL never appears, so this check could never become true, so
 # the "already up to date" short-circuit below could never fire. Every subsequent run would then
-# re-download the release and re-enter the deploy loop -- which for a running Revit prompts the user
-# or, under -Silent, force-closes it. PRD §12's self-upgrade path would be interrupting a perfectly
-# healthy install on every invocation. A release shipping 2027-only while 2025 is also installed is
-# a realistic encounter.
+# re-download the release and re-enter the deploy loop. PRD §12's self-upgrade path would be
+# re-installing a perfectly healthy install on every invocation. A release shipping 2027-only while
+# 2025 is also installed is a realistic encounter.
 #
 # TWO SEPARATE QUESTIONS, so two separate sets. Conflating them into one `covered` list was the
 # first attempt at this fix and it did not work at all: a SKIPPED version has, by definition, no DLL,
@@ -1117,12 +897,6 @@ if ($completedEarly -and -not $Silent) {
 # than wrongly skipping work.
 $deployedBefore = if ($marker -and $marker.PSObject.Properties['deployed']) { @($marker.deployed) } else { $null }
 $skippedBefore = if ($marker -and $marker.PSObject.Properties['skipped']) { @($marker.skipped) } else { @() }
-# Deferred versions are ACCOUNTED FOR but do NOT need a DLL: the release had a payload for them and
-# staged it, but that version's Revit was still running, so the watcher task applies it once that
-# Revit exits. Leaving them out of both lists made them look new-since-last-install, so every run
-# while an update was pending re-downloaded the release and re-entered the deploy loop -- a bounded
-# dose of the same symptom this whole check exists to prevent.
-$deferredBefore = if ($marker -and $marker.PSObject.Properties['deferred']) { @($marker.deferred) } else { @() }
 
 if ($null -eq $deployedBefore) {
     $versionsNeedingDll = $detectedVersions
@@ -1130,14 +904,14 @@ if ($null -eq $deployedBefore) {
 } else {
     $versionsNeedingDll = @($detectedVersions | Where-Object { $deployedBefore -contains $_ })
     $unaccountedVersions = @($detectedVersions | Where-Object {
-        ($deployedBefore -notcontains $_) -and ($skippedBefore -notcontains $_) -and ($deferredBefore -notcontains $_)
+        ($deployedBefore -notcontains $_) -and ($skippedBefore -notcontains $_)
     })
 }
 
 $allDllsPresent =
     ($unaccountedVersions.Count -eq 0) -and
     -not ($versionsNeedingDll | Where-Object {
-        -not (Test-AddinInstalled $appDir (Get-AddinsDir $_ $Scope) $_)
+        -not (Test-VersionedAddinInstalled $appDir (Get-AddinsDir $_ $Scope) $_)
     })
 
 if (-not $LocalPackagePath -and $installed -eq $releaseTag -and $allDllsPresent) {
@@ -1160,8 +934,6 @@ if ($installed -eq $releaseTag -and -not $allDllsPresent -and -not $LocalPackage
 $zipDownloaded = $false
 $extractDir = $null
 $deployedVersions = @()
-$deferredVersions = @()
-$deferredProcessIds = @()
 try {
     if (-not $LocalPackagePath) {
         $asset = $release.assets | Where-Object name -eq 'mcpbridge-release.zip'
@@ -1190,21 +962,16 @@ try {
     $extractDir = Join-Path $env:TEMP "mcpbridge-extract-$([guid]::NewGuid())"
     Expand-Archive $zipPath -DestinationPath $extractDir -Force
 
-    # --- Deploy, per detected+supported version, only closing/redeploying versions actually running.
-    # PRD §12 "Multi-version installs": don't force-close every open Revit across every installed
-    # version just because one of them triggered this -- only touch a version whose Revit isn't
-    # running, OR whose running instance the user (or -Silent) explicitly agreed to close now. A
-    # version left running gets its update staged and finishes automatically once it's closed (see
-    # "Deferred updates" above), not left to sit as a broken promise.
+    # --- Deploy, per detected+supported version. No Revit is closed, asked, or waited on (PRD §12
+    # "Multi-version installs", self-update-architecture.md §4.4): each year's payload lands in a
+    # version folder nothing has mapped, the pointer flips once, and a running Revit keeps its current
+    # add-in until its own next start -- the summary names the years that still need that restart.
     $packageManifest = Read-PackageManifest $extractDir
     if ($LocalPackagePath -and $packageManifest -and $packageManifest.PSObject.Properties['version'] -and $packageManifest.version) {
         # A local package that carries a manifest names its own version; the timestamp tag is only
         # for hand-built zips without one.
         $releaseTag = [string]$packageManifest.version
     }
-    # The pending manifest parks the hashes of staged (deferred) add-in payloads, so the version
-    # marker records them only once ApplyPendingUpdate has put the files on disk.
-    $pendingComponents = @{}
     $installedComponents = @{}
     # Prior hashes carry forward only when this package has a manifest to compare them against. A
     # package without one redeploys every component, so a hash it cannot vouch for must not survive
@@ -1217,11 +984,27 @@ try {
     $unchangedVersions = @()
     $restartVersions = @()
     $shimHeldVersions = @()
-    $keptShimVersions = @()
-    # Versioned-layout years (the release carries shim-<year>/): pass 1 below stages their payloads
-    # under $appDir\addin\<tag>\<year>\ and flips the pointer; pass 2 finishes the Addins\<year> side.
+    # Pass 1 below stages each year's payload under $appDir\addin\<tag>\<year>\ and flips the pointer;
+    # pass 2 refreshes the shim in Addins\<year>.
     $shimYears = [ordered]@{}
     $flipPointer = $false
+    # Refusals first, for EVERY year, before anything is staged -- so a throw here never leaves a
+    # half-staged addin\<tag>\ folder behind with the pointer unflipped (review of #223).
+    foreach ($version in $detectedVersions) {
+        if (-not (Test-Path (Join-Path $extractDir "addin-$version"))) { continue }
+        # Every release carries shim-<year>/ beside addin-<year>/ (release.yml). A payload without its
+        # shim cannot be deployed at all -- there is no flat fallback -- so it is a packaging error.
+        if (-not (Test-Path (Join-Path (Join-Path $extractDir "shim-$version") 'MCPBridge.Shim.dll'))) {
+            throw "The package has an addin-$version payload but no shim-$version\MCPBridge.Shim.dll beside it. Every release ships the shim for each add-in it carries; this is a packaging bug -- do not work around it by deploying the add-in into Revit's Addins folder."
+        }
+        # The real add-in sitting in Addins\<year> itself is a pre-shim deploy (or a dev deploy-and-verify
+        # run): Revit would load it directly, beside or instead of the shim. Nothing here migrates that;
+        # say so and stop before touching anything.
+        $addinsDir = Get-AddinsDir $version $Scope
+        if (Test-Path (Join-Path $addinsDir 'MCPBridge.AddIn.dll')) {
+            throw "Revit $version's add-ins folder ($addinsDir) holds MCPBridge.AddIn.dll directly -- a pre-shim add-in deploy this installer no longer manages. Close Revit $version, remove that folder's MCPBridge.* files, and re-run."
+        }
+    }
     foreach ($version in $detectedVersions) {
         $payloadDir = Join-Path $extractDir "addin-$version"
         if (-not (Test-Path $payloadDir)) {
@@ -1229,14 +1012,11 @@ try {
             continue
         }
         $shimPayloadDir = Join-Path $extractDir "shim-$version"
-        $useShim = Test-Path (Join-Path $shimPayloadDir 'MCPBridge.Shim.dll')
         $addinsDir = Get-AddinsDir $version $Scope
-        $dllPresent = if ($useShim) { Test-VersionedAddinInstalled $appDir $addinsDir $version } else { Test-Path (Join-Path $addinsDir 'MCPBridge.AddIn.dll') }
-        if (Test-ComponentUnchanged $packageManifest $marker "addin-$version" $dllPresent) {
-            # Same bytes as what is installed: nothing to deploy, and -- the point of the manifest --
-            # no reason to touch a running Revit for this version.
+        if (Test-ComponentUnchanged $packageManifest $marker "addin-$version" (Test-VersionedAddinInstalled $appDir $addinsDir $version)) {
+            # Same bytes as what is installed: nothing to deploy.
             $unchangedVersions += $version
-            if ($useShim) { $shimYears[$version] = @{ Payload = $payloadDir; Shim = $shimPayloadDir; Changed = $false } }
+            $shimYears[$version] = @{ Payload = $payloadDir; Shim = $shimPayloadDir; Changed = $false }
             continue
         }
 
@@ -1255,55 +1035,13 @@ try {
             throw "The Revit $version payload has Eichler.Connectors.Revit.dll but no matching .xml doc sidecar. Installing it would make the connector's own API discoverable with empty summaries. This is a packaging bug -- do not work around it by deleting the DLL."
         }
 
-        if ($useShim) {
-            # Versioned layout (§4.4): the payload lands in a folder nothing has mapped, so no Revit is
-            # touched, asked, or closed here. The pointer flips after this loop; the Addins\<year> side
-            # (shim refresh, or the one-time migration) is pass 2.
-            Install-AddinVersionPayload $payloadDir $appDir $releaseTag $version
-            $h = Get-ManifestComponentHash $packageManifest "addin-$version"
-            if ($h) { $installedComponents["addin-$version"] = $h }
-            $shimYears[$version] = @{ Payload = $payloadDir; Shim = $shimPayloadDir; Changed = $true }
-            $flipPointer = $true
-            continue
-        }
-
-        # Legacy flat deploy -- this release predates the shim. Kept so the installer served from main
-        # keeps working against whatever release is current; goes when every supported release carries
-        # shim-<year>/ (follow-up to #211). On a machine ALREADY on the shim layout this release has
-        # nothing it can safely deploy (see Install-AddinFlat): keep the shim, ask nothing of Revit.
-        if (Test-Path (Join-Path $addinsDir 'MCPBridge.Shim.dll')) {
-            Write-Host "This release predates the shim add-in layout; keeping the installed shim add-in for Revit $version (its add-in is left as is)."
-            $unchangedVersions += $version
-            $keptShimVersions += $version
-            continue
-        }
-        $proc = Get-RevitProcess $version
-        if ($proc) {
-            # Three ways this version can end up still running, all of which must reach the SAME
-            # deferred-update path: the user declines to close it, a -Silent force-close fails, or an
-            # accepted interactive close fails. Only the first was handled before, so a failed close
-            # fell through to the deploy below and either aborted on locked DLLs or reported success
-            # for a version still running the old code. See Stop-RevitProcessGracefully's own comment.
-            $defer = -not (Request-RevitClose $version $proc "Revit $version is running and must close to update it. Close it now? [Y/n]" ([bool]$Silent))
-            if ($defer) {
-                $pendingDir = Join-Path (Get-PendingUpdateDir $Scope) "addin-$version"
-                New-Item -ItemType Directory -Force -Path $pendingDir | Out-Null
-                Copy-Item "$payloadDir\*" $pendingDir -Force -Recurse
-                if (-not $Silent) {
-                    Write-Host "Revit $version is still running -- it'll finish updating automatically as soon as you close it."
-                }
-                $deferredVersions += $version
-                $deferredProcessIds += @($proc | ForEach-Object { $_.Id })
-                $h = Get-ManifestComponentHash $packageManifest "addin-$version"
-                if ($h) { $pendingComponents["addin-$version"] = $h }
-                continue
-            }
-        }
-
-        Install-AddinFlat $payloadDir $addinsDir | Out-Null
-        $deployedVersions += $version
+        # §4.4: the payload lands in a folder nothing has mapped, so no Revit is touched, asked, or
+        # closed here. The pointer flips after this loop; the Addins\<year> shim refresh is pass 2.
+        Install-AddinVersionPayload $payloadDir $appDir $releaseTag $version
         $h = Get-ManifestComponentHash $packageManifest "addin-$version"
         if ($h) { $installedComponents["addin-$version"] = $h }
+        $shimYears[$version] = @{ Payload = $payloadDir; Shim = $shimPayloadDir; Changed = $true }
+        $flipPointer = $true
     }
 
     # --- Pointer flip: the atomic "apply" for the versioned layout (§4.4). ---------------------------
@@ -1322,51 +1060,18 @@ try {
         Remove-StaleAddinVersions $appDir
     }
 
-    # --- Pass 2: the Addins\<year> side of the versioned layout. ------------------------------------
+    # --- Pass 2: the Addins\<year> side -- place or refresh the shim. --------------------------------
     foreach ($version in @($shimYears.Keys)) {
         $entry = $shimYears[$version]
         $dir = Get-AddinsDir $version $Scope
-        if (Test-LegacyFlatAddin $dir) {
-            # §4.7 -- this machine is still on the flat layout, so Addins\<year> holds the add-in a
-            # running Revit has loaded, and swapping it for the shim is the ONE add-in update that still
-            # needs Revit closed. Same close/defer machinery as the legacy deploy; the deferred half is
-            # the shim files alone (the payload and pointer are already in place), staged under
-            # pending-update\shim-<year>\ for ApplyPendingUpdate.
-            $proc = Get-RevitProcess $version
-            $defer = $false
-            if ($proc) {
-                $defer = -not (Request-RevitClose $version $proc "Revit $version is running and must close once to switch to the new add-in layout (later updates won't need this). Close it now? [Y/n]" ([bool]$Silent))
-            }
-            if (-not $defer -and -not (Convert-LegacyAddinToShim $dir $entry.Shim)) {
-                # Revit is gone but the files were still refused (an AV scan, a straggling process):
-                # defer rather than leave Addins\<year> half-converted.
-                $defer = $true
-            }
-            if ($defer) {
-                $pendingDir = Join-Path (Get-PendingUpdateDir $Scope) "shim-$version"
-                New-Item -ItemType Directory -Force -Path $pendingDir | Out-Null
-                Copy-Item "$($entry.Shim)\*" $pendingDir -Force -Recurse
-                if (-not $Silent) {
-                    Write-Host "Revit $version is still running -- it'll switch to the new add-in automatically as soon as you close it."
-                }
-                $deferredVersions += $version
-                $deferredProcessIds += @($proc | ForEach-Object { $_.Id })
-                $h = Get-ManifestComponentHash $packageManifest "shim-$version"
-                if ($h) { $pendingComponents["shim-$version"] = $h }
-                continue
-            }
+        # Refresh the shim only if its bytes changed -- never blocking on a running Revit: a held shim
+        # keeps working (it still reads the pointer) and is retried next run.
+        $shimOutcome = Install-AddinShim $entry.Shim $dir
+        if ($shimOutcome -eq 'held') {
+            $shimHeldVersions += $version
+        } else {
             $h = Get-ManifestComponentHash $packageManifest "shim-$version"
             if ($h) { $installedComponents["shim-$version"] = $h }
-        } else {
-            # Already on the shim (or a fresh install). Refresh the shim only if its bytes changed --
-            # never blocking on a running Revit: a held shim keeps working and is retried next run.
-            $shimOutcome = Install-AddinShim $entry.Shim $dir
-            if ($shimOutcome -eq 'held') {
-                $shimHeldVersions += $version
-            } else {
-                $h = Get-ManifestComponentHash $packageManifest "shim-$version"
-                if ($h) { $installedComponents["shim-$version"] = $h }
-            }
         }
         if ($entry.Changed) {
             $deployedVersions += $version
@@ -1380,7 +1085,7 @@ try {
     # "Doesn't support any of them" means NO payload existed for any detected version -- not that
     # every payload was already installed (review of the seed plan: the old check threw on the
     # nothing-changed case too, which a corpus-only release makes the common case).
-    if ($deployedVersions.Count -eq 0 -and $deferredVersions.Count -eq 0 -and $unchangedVersions.Count -eq 0) {
+    if ($deployedVersions.Count -eq 0 -and $unchangedVersions.Count -eq 0) {
         throw "Found Revit $($detectedVersions -join ', ') on this machine, but this release doesn't support any of them yet. Check for a newer release or contact support."
     }
 
@@ -1398,7 +1103,6 @@ try {
             $h = Get-ManifestComponentHash $packageManifest 'server'
             if ($h) {
                 if ($brokerOutcome -eq 'pending') {
-                    $pendingComponents['server'] = $h
                     # Remembered beside the parked image so the run that finally completes the swap
                     # (possibly the "already up to date" short-circuit of a later run, which never
                     # reaches this block) can record the hash in the marker -- review of #196: without
@@ -1420,37 +1124,26 @@ try {
     New-Item -ItemType Directory -Force -Path "$env:LocalAppData\Connectors\Revit" | Out-Null
 
     Copy-SelfIfNeeded $ScriptPath $selfCopyPath
-    # The marker is written whenever this run accounted for the release: something deployed, or
-    # everything was already current (which must still move `version` forward, or the next run
-    # would download the same release again -- the re-download-forever path the seed plan's review
-    # named). A run where every add-in was deferred and nothing else changed is the exception: the
-    # release is not installed yet, it is pending, and the watcher writes the marker when it lands.
-    $accounted = ($deployedVersions.Count -gt 0) -or ($unchangedVersions.Count -gt 0) -or ($brokerOutcome -eq 'swapped') -or ($brokerOutcome -eq 'staged')
-    if ($accounted) {
-        # Recorded SEPARATELY, not merged: the idempotency check above needs `deployed` to know which
-        # versions must have a DLL on disk, and `deployed` + `skipped` to know which versions this
-        # release accounted for at all. Merging them into one list is what made the first attempt at
-        # this fix a no-op -- see the comment there. Unchanged versions have their DLL on disk, so
-        # they belong in `deployed`.
-        $howtoCorpus = if ($packageManifest -and $packageManifest.PSObject.Properties['howto_corpus']) { $packageManifest.howto_corpus } else { $null }
-        @{
-            version  = $releaseTag
-            deployed = @(@($deployedVersions) + @($unchangedVersions) | Sort-Object -Unique)
-            skipped  = @($skippedVersions | Sort-Object -Unique)
-            # Staged but not yet applied; the watcher task finishes these. Recorded so they don't
-            # read as new-since-last-install on every subsequent run.
-            deferred = @($deferredVersions | Sort-Object -Unique)
-            # Per-component content hashes actually on disk (manifest.json's), so the next run can
-            # skip what did not change. Absent for a package without a manifest.
-            components = $installedComponents
-            howto_corpus = $howtoCorpus
-        } | ConvertTo-Json | Out-File $versionMarkerPath -Encoding utf8
-    }
-    if ($deferredVersions.Count -gt 0) {
-        $manifestPath = Get-PendingUpdateManifestPath $Scope
-        @{ version = $releaseTag; versions = $deferredVersions; components = $pendingComponents } | ConvertTo-Json | Out-File $manifestPath -Encoding utf8
-        Register-PendingUpdateWatcher $Scope $selfCopyPath $deferredProcessIds
-    }
+    # The marker is written on every run that gets here: something deployed, or everything was already
+    # current (which must still move `version` forward, or the next run would download the same
+    # release again -- the re-download-forever path the seed plan's review named). Nothing is ever
+    # pending on the add-in side: the pointer flip above IS the install.
+    #
+    # `deployed` and `skipped` are recorded SEPARATELY, not merged: the idempotency check above needs
+    # `deployed` to know which versions must have a DLL on disk, and `deployed` + `skipped` to know
+    # which versions this release accounted for at all. Merging them into one list is what made the
+    # first attempt at this fix a no-op -- see the comment there. Unchanged versions have their DLL on
+    # disk, so they belong in `deployed`.
+    $howtoCorpus = if ($packageManifest -and $packageManifest.PSObject.Properties['howto_corpus']) { $packageManifest.howto_corpus } else { $null }
+    @{
+        version  = $releaseTag
+        deployed = @(@($deployedVersions) + @($unchangedVersions) | Sort-Object -Unique)
+        skipped  = @($skippedVersions | Sort-Object -Unique)
+        # Per-component content hashes actually on disk (manifest.json's), so the next run can
+        # skip what did not change. Absent for a package without a manifest.
+        components = $installedComponents
+        howto_corpus = $howtoCorpus
+    } | ConvertTo-Json | Out-File $versionMarkerPath -Encoding utf8
 } finally {
     # Best-effort for real (issue #192's live test): Remove-Item -Recurse on a directory whose file is
     # still open -- here, the freshly extracted 86 MB mcp-server.exe under an antivirus scan -- throws a
@@ -1461,12 +1154,6 @@ try {
     # right now is a leak of a few files in %TEMP%, never a reason to fail the install.
     Remove-ScratchBestEffort $extractDir -Recurse
     if ($zipDownloaded) { Remove-ScratchBestEffort $zipPath }
-}
-
-if (-not $accounted) {
-    # Every detected+shippable version was deferred (still running, user declined to close it now)
-    # and nothing else changed -- the watcher task takes it from here; nothing more to do this run.
-    return
 }
 
 # --- Register the MCP Server with the user's Claude clients -----------------------------------------
@@ -1505,9 +1192,9 @@ Set-ItemProperty $uninstallKeyPath DisplayName 'Revit MCP Bridge'
 Set-ItemProperty $uninstallKeyPath DisplayVersion $releaseTag
 Set-ItemProperty $uninstallKeyPath UninstallString "powershell -NoProfile -ExecutionPolicy Bypass -File `"$selfCopyPath`" -Uninstall -Scope $Scope"
 
-# Start Revit for the user after an install that left none of the deployed versions running: a fresh
-# install, or one we closed for the legacy/migration paths. Never when a Revit is already up -- the
-# versioned layout deploys UNDER a running Revit and a second instance is not what anyone asked for.
+# Start Revit for the user after an install that deployed to a version none of whose Revit is running
+# (a fresh install). Never when a Revit is already up -- the versioned layout deploys UNDER a running
+# Revit and a second instance is not what anyone asked for.
 $launchVersion = @($deployedVersions | Where-Object { -not (Get-RevitProcess $_) } | Select-Object -First 1)
 if (-not $Silent -and $launchVersion.Count -gt 0) {
     Start-Process "C:\Program Files\Autodesk\Revit $($launchVersion[0])\Revit.exe"
@@ -1515,16 +1202,11 @@ if (-not $Silent -and $launchVersion.Count -gt 0) {
 
 $parts = @()
 if ($deployedVersions.Count -gt 0) { $parts += "installed for Revit $($deployedVersions -join ', ')" }
-if ($unchangedVersions.Count -gt 0) {
-    $plainUnchanged = @($unchangedVersions | Where-Object { $keptShimVersions -notcontains $_ })
-    if ($plainUnchanged.Count -gt 0) { $parts += "add-in already current for Revit $($plainUnchanged -join ', ') (left untouched)" }
-    if ($keptShimVersions.Count -gt 0) { $parts += "kept the installed shim add-in for Revit $($keptShimVersions -join ', ') (this release predates the shim layout)" }
-}
+if ($unchangedVersions.Count -gt 0) { $parts += "add-in already current for Revit $($unchangedVersions -join ', ') (left untouched)" }
 $summary = "Revit MCP Bridge $releaseTag"
 if ($parts.Count -gt 0) { $summary += ": $($parts -join '; ')" }
 $summary += "."
 if ($restartVersions.Count -gt 0) { $summary += " Revit $($restartVersions -join ', ') is still running the previous add-in -- restart it to load the new one." }
-if ($deferredVersions.Count -gt 0) { $summary += " Revit $($deferredVersions -join ', ') will update automatically once you close it." }
 if ($shimHeldVersions.Count -gt 0) { $summary += " The MCP Bridge shim for Revit $($shimHeldVersions -join ', ') changed in this release but is in use; it is refreshed the next time this installer runs with that Revit closed (the add-in itself is already updated)." }
 switch ($brokerOutcome) {
     'swapped'   { $summary += " MCP Server updated." }

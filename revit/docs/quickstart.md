@@ -50,8 +50,9 @@ root — the same layout a real release uses. Each `addin-<year>` folder holds t
 (the matching TFM's build output); each `shim-<year>` holds `MCPBridge.Shim.dll` and the shim's
 `.addin` manifest. The installer puts the shim in `Addins\<year>` and the real add-in under
 `%LOCALAPPDATA%\Programs\MCPBridge\addin\<version>\<year>\`, pointed to by `addin\current.json`
-(see `docs/self-update-architecture.md` §4). A zip without `shim-<year>/` is deployed flat into
-`Addins\<year>` the old way, so the add-in's own `MCPBridge.addin` still travels in `addin-<year>/`:
+(see `docs/self-update-architecture.md` §4). This is the only layout: a zip with an `addin-<year>/`
+but no matching `shim-<year>/` is refused as a packaging error. The add-in's own `MCPBridge.addin`
+still travels in `addin-<year>/` (it is the build output, verbatim; Revit reads the shim's manifest):
 
 ```powershell
 $stage = New-Item -ItemType Directory -Force "$env:TEMP\mcpbridge-package"

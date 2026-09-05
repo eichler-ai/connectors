@@ -238,10 +238,17 @@ jobs:
       # Addins\<year>; the addin-<year>/ payload goes to <app dir>\addin\<version>\<year>\, see
       # self-update-architecture.md §4.1), server/ (the built broker exe) -- all at the zip root. See
       # quickstart.md "3. Assemble the local package zip" and install.ps1's per-version extraction.
-      # The addin-<year>/ folders still carry the add-in's own MCPBridge.addin so an OLDER install.ps1
-      # (one without the shim layout) deploys this release flat, exactly as before.
+      # The shim layout is the ONLY layout install.ps1 deploys: it refuses an addin-<year>/ without its
+      # shim-<year>/, so both shim folders are asserted below before anything is zipped. The
+      # addin-<year>/ folders still carry the add-in's own MCPBridge.addin (the build output, verbatim;
+      # it lands in the versioned folder and Revit reads the shim's manifest instead).
       - name: Assemble release package
         run: |
+          foreach ($tfm in 'net10.0-windows', 'net8.0-windows') {
+            if (-not (Test-Path "revit\mcp-bridge\src\MCPBridge.Shim\bin\Release\$tfm\MCPBridge.Shim.dll")) {
+              throw "release cannot ship without the $tfm shim: install.ps1 has no flat fallback"
+            }
+          }
           $stage = New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\mcpbridge-package"
 
           $addin2027 = New-Item -ItemType Directory -Force "$($stage.FullName)\addin-2027"

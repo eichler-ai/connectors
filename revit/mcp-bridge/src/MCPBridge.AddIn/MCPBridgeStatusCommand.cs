@@ -127,8 +127,8 @@ public sealed class MCPBridgeStatusCommand : IExternalCommand
         // what addin\current.json says a NEW Revit would load, and what THIS process actually loaded.
         // An add-in update flips that pointer without closing anything, so after one the two differ
         // until the user restarts Revit, and this line is where they learn that. It is the version
-        // this assembly carries -- not the marker, not the pointer -- that is "running"; with no
-        // pointer (a legacy flat install) the line is the single value it always was.
+        // this assembly carries -- not the marker, not the pointer -- that is "running"; should the
+        // pointer be unreadable the line degrades to that single value.
         var addInLine = UpdateAvailability.AddInStatusLine(addInVersion, UpdateTrigger.TryReadAddinPointerVersion());
 
         var brokerVersion = host?.BrokerVersion;

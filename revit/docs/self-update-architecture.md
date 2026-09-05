@@ -205,14 +205,20 @@ AddInManager model plus the project's existing signing, so §9.1 no longer gates
 shim signed with the existing certificate and the prompt is a non-issue**, the same as the add-in is
 today.
 
-### 4.7 Migration (today's flat layout → shim)
+### 4.7 Migration (today's flat layout → shim) — **removed, never shipped to a user**
 
-The first install carrying the shim replaces today's flat `Addins\<year>\MCPBridge.*` with the shim +
-manifest, and lays down `addin\<version>\<year>\`. Because it replaces the currently-loaded
-`MCPBridge.AddIn.dll`, **this one install still needs Revit closed** — handled by the *existing*
-close/defer machinery, which then retires. After it, no add-in update ever closes Revit again. The
-migration is detected by "the Addins folder holds `MCPBridge.AddIn.dll` directly rather than
-`MCPBridge.Shim.dll`".
+This section originally specified a one-time migration: the first shim-carrying install would replace
+the flat `Addins\<year>\MCPBridge.*` with the shim + manifest, and because that replaced the loaded
+`MCPBridge.AddIn.dll` it would need Revit closed once, via the existing close/defer machinery.
+
+It was built (#218) and then **deleted** under [`http-transport-rfc.md`](./http-transport-rfc.md) §4c:
+the project is in dev mode with no installs in the wild, so there is nothing to migrate and no reason to
+carry the close/defer machinery for it. `install.ps1` now deploys the shim layout **only** — a release
+without `shim-<year>/` is a packaging error, and an `Addins\<year>` folder that holds
+`MCPBridge.AddIn.dll` directly (a pre-shim or dev-tooling deploy) is refused with a remedy, not
+migrated. The `deferred` state, the pending-update manifest, the process watcher, the logon task and
+`-ApplyPendingUpdate` went with it (§11). Uninstall is the one operation that still asks a running Revit
+to close, because it has to remove the shim DLL Revit has mapped.
 
 ---
 
@@ -446,8 +452,11 @@ Server (Part B):
    add-in pointer flips (no Revit close); Status shows `installed · running` correctly for both.
 
 Migration:
-9. A machine on today's flat layout takes the first shim install (one Revit close via the existing
-   machinery), then a subsequent add-in update with Revit running (no close).
+9. ~~A machine on today's flat layout takes the first shim install (one Revit close via the existing
+   machinery), then a subsequent add-in update with Revit running (no close).~~ Dropped with §4.7: a
+   flat `Addins\<year>` is refused, not migrated. Replace with: a fresh shim install, then an add-in
+   update with Revit running (no close), then uninstall with Revit running (asked to close; leftovers
+   reported and removed by a second run).
 
 Zombie regression:
 10. The #212 dead-holder takeover still fires when the host is absent and a client-primary is a corpse.
@@ -491,13 +500,20 @@ UX and independent of both parts).
 
 ## 11. What gets deleted when this lands
 
-- **Installer:** `Stop-RevitProcessGracefully` and the 30 s close wait; the deferred-update watcher, its
-  logon task, the pending-update manifest and `-ApplyPendingUpdate`; the `deployed`/`deferred`/`skipped`
-  per-version state machine (add-in becomes a pointer flip; server becomes swap + host restart).
-- **Add-in:** the Status window's multi-state deferred wording (#209); the "will Revit close?"
-  confirmation text.
-- **Server:** nothing is deleted — the #212 election becomes the documented fallback beneath the hosted
-  primary rather than the primary path.
+**Part A's deletions are done** (the shim-only cleanup PR, per [`http-transport-rfc.md`](./http-transport-rfc.md) §4c):
+
+- **Installer:** the deferred-update watcher, its logon task, the pending-update manifest and
+  `-ApplyPendingUpdate`; the `deferred` per-version state and the flat-deploy / flat→shim-migration
+  branches (`Install-AddinFlat`, `Convert-LegacyAddinToShim`, `Request-RevitClose`). The add-in is a
+  pointer flip. `Stop-RevitProcessGracefully` **stays, for uninstall only** — removing the mapped shim
+  DLL genuinely needs that Revit closed. `deployed`/`skipped` stay: they drive the idempotency check
+  (which years must have a DLL on disk; which the release accounted for), not any close/defer decision.
+- **Add-in:** the flat-vs-shim branch in Update Now (`IsLoadedFromVersionedFolder` /
+  `UpdateAvailability.IsVersionedAddinLocation`) and the "Revit will close" confirmation and on-started
+  texts. The Status line's `installed · running` shape (#209/#219) stays.
+- **Server (`update_connector`):** `addin_layout`, the `deferred` state and the "asked to close" wording.
+  The stdio-singleton election (#205/#212/#220) is untouched — the hosted primary of §5 is shelved by the
+  RFC, so nothing here is "the fallback beneath" anything.
 
 The net is a smaller installer, one update lifecycle, one Status vocabulary, and no path in which a user
 is left with a silently stuck update.
