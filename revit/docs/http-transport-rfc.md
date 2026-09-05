@@ -1,28 +1,30 @@
-# RFC: HTTP transport — a single user-space MCP server, and the networked connector it enables
+# RFC: MCP transport direction — what local can be, and where HTTP actually pays off
 
-Status: **proposed / north-star.** Not scheduled. This RFC names the intended long-term architecture
-so we stop investing in machinery a transport change would retire, and so incremental work can be
-steered toward it. It supersedes the "hosted primary" half of
-[`self-update-architecture.md`](./self-update-architecture.md) §5 (see §8 below) and reframes PRD §05
-("Broker singleton & port contention").
+Status: **proposed / north-star.** Revised after a client-capability check (§3) reversed the original
+thesis. This RFC names the intended transport direction so we stop chasing an unavailable local
+design and steer effort correctly. It supersedes the "hosted primary" half of
+[`self-update-architecture.md`](./self-update-architecture.md) §5, and reframes PRD §05 ("Broker
+singleton").
 
-Companion issues: #202 (hosted primary — **shelved by this RFC**), #211 (add-in shim — **kept, it is
-correct either way**). The add-in shim + versioned-folder work (PRs #218/#219) is orthogonal to the
-transport and survives unchanged.
+Companion issues: #202 (hosted primary — **shelved**), #211 (add-in shim — **kept**). The add-in shim
++ versioned-folder work (#218/#219) is orthogonal to transport and survives unchanged.
+
+**Context that shapes every recommendation: the project is in dev, with no users but us.** There is no
+in-the-wild install to protect, so backward-compat, migration paths, and release-gating are NOT
+constraints. We can delete and rebuild freely and should optimize for the right end-state, not for a
+smooth upgrade from the current one.
 
 ---
 
-## 1. Problem: the complexity is emergent, not essential
+## 1. The complexity is a stdio tax (unchanged from the first draft)
 
-The connector today uses the **stdio** MCP transport. Each Claude app (Desktop, Code, Cowork) *spawns
-its own copy* of `mcp-server` as a subprocess and talks to it over stdin/stdout. That yields **N
-server processes for one Revit**, and since only one can own the Revit connection, those processes
-must coordinate: elect one **primary** to hold the lock + TCP port, make the rest **secondaries** that
-proxy their stdio through it, handle the primary dying, dying-but-not-releasing, being replaced by an
-update, and keeping a client's session alive across all of that.
+The connector uses the **stdio** MCP transport: each Claude app (Desktop, Code, Cowork) *spawns its
+own copy* of `mcp-server` as a subprocess over stdin/stdout. That yields **N server processes for one
+Revit**, and since only one can own the Revit connection they must coordinate — elect a **primary**,
+proxy the rest as **secondaries**, survive the primary dying / not releasing / being replaced, and keep
+each client's session alive across all of it.
 
-Every hard, review-heavy thing we have built recently exists **only** to referee that "N self-spawned
-processes, one Revit" situation:
+Every hard, review-heavy thing built recently exists **only** to referee that situation:
 
 | Machinery | Issue/PR | Exists because… |
 |---|---|---|
@@ -32,153 +34,117 @@ processes, one Revit" situation:
 | Session-continuity replay | #220 | the client's session breaks when *its* primary changes |
 | Hosted primary + cooperative yield | #202/#221 | no process is *designated*, so nothing is restartable |
 
-None of this is essential to the connector's job. It is all a tax on the transport choice. Change the
-transport and the tax — and the whole bug class it generates — goes away.
+The first draft of this RFC proposed erasing that tax by replacing local stdio with **one local HTTP
+server** every client connects to. A capability check killed that premise.
 
-## 2. Proposal
+## 2. The hard constraint (why the first draft's local plan is dead)
 
-**Run one long-lived MCP server, in user space, listening on local HTTP; every Claude app connects to
-its URL instead of spawning a copy; a tiny per-user supervisor keeps it alive and applies updates.**
+**Claude clients cannot connect to a *local* HTTP MCP server.** Verified against current docs (§3):
+Claude Desktop and Claude Code are **stdio-only for local servers**; HTTP transport is **remote-only**
+(a hosted URL added as a connector). A `http://127.0.0.1:PORT` server is not a client-configurable
+local server for either.
 
-Four pieces:
+So **the client always spawns a local stdio process** — that is fixed and outside our control. Any
+local architecture therefore has ≥1 client-spawned stdio process; the only freedom is *what that
+process does* and *how several of them share one Revit*. "One local HTTP server everyone connects to
+directly" is not an option the platform offers.
 
-1. **A single local HTTP MCP server.** Bind `127.0.0.1:<ephemeral>` (unprivileged — no admin, the same
-   loopback listen the broker already does). Serve MCP over Streamable HTTP. All Claude apps connect to
-   the one URL; none spawns a server. There is structurally **one** server, so there is nothing to
-   elect and no one to yield to.
+## 3. Client transport support (the finding, with sources)
 
-2. **A tiny per-user supervisor.** Launched at logon via an **HKCU Run key** (or Startup shortcut /
-   per-user scheduled task — all no-admin, all run *as the user, in the user's session*). Its only jobs:
-   keep the server process running (restart it if it exits), and apply staged updates (swap the
-   versioned server payload, restart it). It is small and rarely changes — the stable anchor for the
-   server, exactly mirroring the add-in shim.
+Checked against the MCP spec and the Claude client docs (client capabilities evolve; this is *true
+today*, not forever):
 
-3. **The Revit add-in connects once to the stable server and stays.** The add-in has always been a
-   *network client* of the server over its own socket (not a stdio subprocess); it was never part of
-   the singleton dance. With one non-churning server, `broker.json`/discovery stops changing and the
-   add-in's reconnect machinery goes from routine to rare fallback. **No changes are forced on the
-   add-in** for the local case.
+- **MCP transports.** The spec defines **stdio** (local subprocess) and **Streamable HTTP** (the
+  current HTTP transport; the older HTTP+SSE is deprecated), plus WebSocket. Streamable HTTP is aimed
+  at **remote** servers, with loopback-bind + `Origin` validation + auth expected when local.
+- **Claude Code (CLI):** HTTP transport is **remote-only** — `claude mcp add --transport http <name>
+  <url>` expects a hosted URL; local servers must use `--transport stdio`. A `http://127.0.0.1` URL is
+  not accepted for a local server.
+- **Claude Desktop:** local servers in `claude_desktop_config.json` are **stdio only** (`command` +
+  `args`); there is no local HTTP/URL server entry. HTTP servers appear only as remote **connectors**
+  (a hosted URL in the connectors UI).
+- **Claude.ai / Cowork:** remote connectors (hosted HTTP) yes; local HTTP no.
 
-4. **Self-update by shim + versioned payloads for both halves.** The add-in shim loads
-   `addin/<version>/<year>/` behind an atomic `current.json` (PR #218, correct as-is); the supervisor
-   loads `server/<version>/` the same way. An update is *stage new version → flip pointer → restart the
-   payload*. Nothing closes except the one unavoidable "restart Revit to load the new add-in," clearly
-   messaged.
+Sources: MCP transports spec (`modelcontextprotocol.io/specification/.../basic/transports`),
+Claude Code MCP reference (`code.claude.com/docs/en/mcp.md`), MCP local-server quickstart
+(`modelcontextprotocol.io/docs/develop/connect-local-servers`).
 
-## 3. Why it wins on UX, robustness, and maintainability
+**Why it's stdio-only splits by client, and the split matters.** For **cloud/hosted clients**
+(claude.ai web, Cowork) the reason is hard and permanent: they run in Anthropic's infrastructure and
+*cannot reach your machine's* `127.0.0.1` at all, so a local server must be stdio-spawned or exposed as
+a remote hosted URL. For the **local apps** (Desktop, Code) reachability is *not* the reason — they run
+on your machine and could open a loopback port; stdio-only there is a design choice (clean spawn/kill
+lifecycle, and a private parent-child pipe instead of a locally-reachable port that any process could
+hit and that would need auth + `Origin` checks). So local HTTP is *not physically impossible* for the
+local apps — it is simply not offered today and could change — whereas the cloud clients will never see
+your localhost. That permanent cloud constraint is exactly what points HTTP at the **remote** hub (§4b):
+a hosted server both the cloud clients and off-machine Revit instances can reach.
 
-- **Robustness — it deletes a bug class rather than managing it.** The zombie-primary, dead-holder
-  takeover, election race, and session-continuity failures (#201/#205/#212/#220) all stem from the
-  multi-process model. One supervised server has simple, local failure modes: server crashes →
-  supervisor restarts; Revit closes → add-in reconnects; update → atomic pointer + restart. No
-  cross-process coordination, no lock hand-off, no split brain.
+## 4. Corrected direction
 
-- **UX — the server becomes a real, nameable, restartable thing.** "MCP Server: running v0.1.7, up
-  since 09:14." Updates are deterministic ("the server was restarted"), not today's hedgy "it steps
-  aside within a minute, and if it's still there, reconnect the revit server in your client." That
-  crispness is exactly what the hosted primary reached for — here it is free, because there is
-  genuinely one server.
+### 4a. Local — keep the stdio-singleton design; it *is* the right local answer
 
-- **Maintainability — a large deletion.** The singleton / election / primary-secondary / proxy /
-  continuity / hosted-primary code is the most intricate, most reviewed code in the project. It
-  collapses to "one server, one supervisor." The shim + versioned-payload pattern becomes uniform
-  across both components.
+Given clients must spawn stdio and cannot reach a local HTTP server, the alternatives to today's design
+are:
 
-## 4. The larger prize: a networked, multi-instance connector
+- **Current (A):** each spawned process is a full server; they elect one primary, the rest proxy. Works,
+  self-heals (#205/#212/#220), needs no supervisor and no fallback gap.
+- **Dedicated server + thin stdio proxies (B):** a supervisor keeps one real server alive; each
+  client-spawned process is a thin stdio→server proxy that never elects. Removes the election — but adds
+  a supervisor, a "server not up / just restarted" reconnect path (which still needs #220-style replay),
+  and a fallback gap (server down + not yet restarted ⇒ clients stuck). It is the hosted primary's
+  tradeoff by another route, with no clear win now that the clean-HTTP version is unavailable.
 
-HTTP is not just a cleaner way to do the same job — it unlocks a strictly larger product that the
-stdio-localhost design *forecloses*:
+So **A is the pragmatic best local design.** The singleton machinery is the price of stdio's
+multi-process model, and with the self-healing pieces already merged it is a *manageable, working* price
+— not worth trading for B's supervisor + fallback gap. This is also why **the hosted primary (#221) is
+shelved**: the one thing that would have made a dedicated-server design clearly better (direct local
+HTTP) does not exist.
 
-- **Two-way, networked, multi-party.** stdio is already bidirectional, but only with the single parent
-  process that spawned it, on one machine. Streamable HTTP (server → client over SSE) gives one server
-  live two-way conversations with *many independent, networked* clients that never spawned it.
-- **Remote and multiple Revit instances through one server.** The server becomes a hub: Revit
-  instances — this machine, other workstations, eventually a hosted server — register with the one
-  server; Claude clients connect to the same server; Claude can address any registered instance. The
-  connector is **already leaning this way** — `list_instances`, per-instance IDs, and the existing
-  "remote mode" all reach toward multi-instance. HTTP is the transport that lets that reach across
-  machines cleanly instead of being penned into one box. A team's Revit fleet, or a hosted broker,
-  behind one connector, becomes possible.
+### 4b. HTTP's real payoff is *remote* — a future feature, not a local migration
 
-This is the reason to treat HTTP as the north star rather than a refactor: it changes what the product
-can be.
+Where HTTP genuinely earns its place is exactly where clients *do* support it: **remote**. A hosted /
+networked HTTP MCP server that fronts **multiple Revit instances** — this machine, other workstations,
+eventually a server — is a strictly larger product the stdio-localhost design forecloses, and the
+connector already leans that way (`list_instances`, per-instance IDs, "remote mode"). This is
+client-supported (remote connectors) and is the honest home for the HTTP investment. It is a **new
+capability to design on its own**, not a replacement for the local path, and it carries its own
+network-security/governance work on the add-in link (TLS/WSS, auth, instance routing).
 
-## 5. The two links (what changes, what does not)
+### 4c. Because we have no users, clean up *now*
 
-The connector has **two** links; conflating them is the main source of confusion.
+Dev-mode removes the constraints that were deferring the cleanup:
 
-```
-Link 1  Claude app  ⇄  MCP server        stdio today  →  local HTTP (this RFC)
-Link 2  MCP server  ⇄  Revit add-in      TCP + NDJSON + token (unchanged for local)
-```
+- **Delete the legacy flat-deploy branch and the flat→shim *migration*** in `install.ps1` — there are
+  no flat installs in the wild to migrate. Make the shim + versioned layout the *only* add-in layout.
+- **Delete the deferred-update / close / pending-manifest machinery** (the old "Part 3"), no longer
+  gated on a shim release, since no user needs a compatible upgrade path.
+- No release is needed to unlock any of this; there is no one to release to yet.
 
-- **Link 1 → HTTP.** This is the whole change for the local case. The client config moves from "spawn
-  this exe" to "connect to this URL," and the URL's server is kept up by the supervisor.
-- **Link 2 stays as-is for local.** The single HTTP server also runs the existing TCP listener the
-  add-in dials — one process, two listeners. The add-in is untouched and *more stable*.
-- **Link 2 → network-grade for remote (§4, future).** Reaching a Revit on another machine means Link 2
-  gains TLS/WSS, real auth, and instance routing — the same treatment HTTPS gives Link 1. Well-understood
-  work, but it is on the add-in link, and it is what makes remote Revit real.
+This is the "clean up the code before the final version" the local design actually calls for — and it
+is a large, safe simplification precisely because there is nothing to be backward-compatible with.
 
-## 6. Supervision and security in user space (no admin)
+## 5. What survives, what goes
 
-- **User-space throughout.** Binding loopback and creating an HKCU Run-key / per-user task need no
-  elevation and run as the user with the user's `%LOCALAPPDATA%` and token. The one thing given up vs a
-  Windows **service** is OS-managed auto-restart on crash — coverable by a small watchdog, a
-  relaunch-on-exit wrapper, or accepting recovery at next logon (the server is stable and rarely dies).
-  A service remains an optional AllUsers variant, with its known elevation + cross-user token/ACL cost.
-- **Local auth.** A loopback HTTP port is reachable by any local process, so it needs a token +
-  origin/bearer check — cleaner in user space (token in the user's own `%LOCALAPPDATA%`, no cross-user
-  ACL) than a service would be.
-- **Remote auth/governance (future).** Off-machine access raises "who may drive a firm's Revit models
-  remotely" — auth scoping, per-instance authorization, audit. A design axis localhost never had; a
-  gate on §4, not on the local single-server move.
+- **Keep:** the add-in shim + versioned folders and Status wording (#218/#219) — correct regardless of
+  transport. And the stdio-singleton server design (§4a).
+- **Delete now (dev-mode, §4c):** the legacy flat branch, the flat→shim migration, and the
+  deferred/close/pending machinery.
+- **Shelved:** the hosted primary (#202/#221) — the clean version needs local HTTP, which does not exist.
+- **Future, separately scoped:** the remote/multi-instance HTTP hub (§4b).
+- **`self-update-architecture.md` §5** (hosted primary) is superseded; §4 (add-in shim) stands.
 
-## 7. Open questions to verify BEFORE committing (feasibility gates)
+## 6. Open questions
 
-1. **Local HTTP MCP support in the clients — Claude Desktop especially.** Claude Code supports HTTP
-   transport; whether Desktop cleanly drives a *local* HTTP MCP server (vs stdio for local, HTTP only
-   for remote connectors) is make-or-break for the local single-server move. **Verify against current
-   client docs — do not assume.** If Desktop won't, stdio-with-singleton stays the pragmatic local
-   reality and this RFC applies only to the remote direction.
-2. **Remote connector support (for §4).** Clients connecting to a *networked* HTTP MCP server (remote
-   connectors) is the better-trodden path and may be more feasible than local-HTTP; confirm the setup
-   and auth model for each client.
-3. **Supervisor shape.** The smallest reliable per-user "keep it running + apply updates" mechanism on
-   Windows without reinventing a fragile init system.
-4. **Link-2 transport for remote.** TLS/WSS + auth + instance routing for the add-in link; whether to
-   keep TCP/NDJSON+TLS or move the add-in onto WebSocket against the same HTTP server.
+1. **Remote-hub design (when prioritized):** the Link-2 (server↔add-in) transport for remote — TCP+TLS
+   vs WebSocket against the HTTP server — plus auth, instance routing, and the governance model for
+   off-machine access to a firm's models.
+2. **Re-check client local-HTTP support periodically** — if Desktop/Code ever support local HTTP
+   servers, §4a's calculus changes and a dedicated local server becomes clean again.
+3. Whether any part of §4c's cleanup should wait for the first real user (default: no — do it now).
 
-## 8. Relationship to the current codebase
+## 7. Non-goals
 
-- **Keep, correct either way:** the add-in shim + versioned-folder layout and its Status wording
-  (#218/#219). Not legacy; the right update pattern regardless of transport.
-- **Retired by the target design:** the singleton/election machinery and everything built to tame it —
-  stale-image eviction (#205), dead-holder takeover (#212), session-continuity replay (#220), and the
-  hosted primary (#202/#221). They remain correct and valuable *for as long as stdio is the transport*;
-  the point is not to build *more* of that class (which is why **#221 is shelved**, see below), and to
-  delete it if/when Link 1 becomes HTTP.
-- **`self-update-architecture.md` §5 (hosted primary) is superseded** by this RFC. §4 (add-in shim) of
-  that doc stands.
-
-## 9. Migration is incremental, not a rewrite
-
-This need not be a big-bang. A plausible order once §7.1 is confirmed:
-
-1. Add an HTTP transport listener to the existing server (alongside stdio) — the server already has the
-   MCP handlers; this is a transport addition, not a rewrite.
-2. Introduce the per-user supervisor + versioned server payload; register **Claude Code** (which
-   supports HTTP) against the local URL as the first client, stdio still working for others.
-3. Once Desktop local-HTTP is confirmed, move it too; then the singleton machinery has no callers and
-   is deleted.
-4. Separately and later, pursue §4 (remote/multi-instance) by upgrading Link 2.
-
-Each step is shippable and reversible; stdio stays as the fallback until the last client is moved.
-
-## 10. Non-goals
-
-- Not a mandate to migrate now — this is the target, gated on §7.1.
-- Not the remote/multi-instance feature itself (§4) — that is the *destination* this transport makes
-  reachable, scoped separately with its own security/governance work.
-- Not a Windows service (admin) as the default — user space is the baseline; a service is an optional
-  AllUsers variant.
+- Not migrating the local transport (the platform does not allow it).
+- Not building the remote hub here (it is the destination §4b names, scoped separately).
+- Not preserving any upgrade path from the current on-disk layout (no users).
