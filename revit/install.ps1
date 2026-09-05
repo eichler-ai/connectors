@@ -300,6 +300,53 @@ function Get-BrokerProcess([string]$AppDir) {
     }
 }
 
+# --- Uninstall reporting (issue #215) --------------------------------------------------------------
+# Uninstall removes the app dir and the broker's app-data root with -ErrorAction SilentlyContinue: a
+# file an MCP client's running server holds (the exe image itself, broker.lock) simply survives, and
+# the old unconditional "uninstalled." line hid that. The paths that were meant to go but are still
+# there are the honest signal, and the running server explains WHY -- both feed the final line.
+function Get-SurvivingPaths([string[]]$Paths) {
+    @($Paths | Where-Object { $_ -and (Test-Path $_) })
+}
+
+function Format-UninstallResult([string[]]$LeftoverVersions, [int]$RunningServerCount, [string[]]$SurvivingPaths) {
+    $parts = @()
+    if ($LeftoverVersions.Count -gt 0) {
+        $parts += "Revit $($LeftoverVersions -join ', ') still has some files locked -- close it and re-run this uninstaller to finish cleaning up."
+    }
+    if ($RunningServerCount -gt 0) {
+        # Never killed here: each server belongs to a live MCP client session (see Get-BrokerProcess).
+        # Closing Claude Desktop's window leaves the app -- and its servers -- running in the tray,
+        # which is exactly how #215 was hit.
+        $parts += "Claude Desktop / your MCP client still has the Revit MCP server running ($RunningServerCount process$(if ($RunningServerCount -ne 1) { 'es' })), so some files could not be removed -- quit the client fully (Claude Desktop: tray icon -> Quit; closing its window is not enough) and re-run this uninstaller to finish."
+    } elseif ($SurvivingPaths.Count -gt 0) {
+        # No holder we can name (a transient antivirus lock, most likely); the re-run still finishes it.
+        $parts += "Some files could not be removed -- re-run this uninstaller to finish cleaning up."
+    }
+    if ($SurvivingPaths.Count -gt 0) {
+        $parts += "Still on disk: $($SurvivingPaths -join '; ')"
+    }
+    if ($parts.Count -eq 0) { return 'Revit MCP Bridge uninstalled.' }
+    return "Revit MCP Bridge is not fully uninstalled yet. $($parts -join ' ')"
+}
+
+# --- Download progress lines (issue #216) ----------------------------------------------------------
+# $ProgressPreference is SilentlyContinue for the whole script (PS 5.1's progress bar throttles the
+# transfer), so a 126 MB Invoke-WebRequest shows nothing for minutes and reads as a hang. A plain
+# line naming what is being fetched, and how big it is, is the fix -- not a progress bar.
+function Format-DownloadAnnouncement($Asset, [string]$Tag) {
+    $sizeNote = ''
+    if ($Asset -and $Asset.PSObject.Properties['size'] -and [int64]$Asset.size -gt 0) {
+        $sizeNote = " ($([math]::Round([int64]$Asset.size / 1MB)) MB)"
+    }
+    "Downloading Revit MCP Bridge $Tag$sizeNote from GitHub..."
+}
+
+function Format-Duration([timespan]$Elapsed) {
+    $s = [int][math]::Round($Elapsed.TotalSeconds)
+    if ($s -ge 60) { "$([math]::Floor($s / 60))m$('{0:00}' -f ($s % 60))s" } else { "${s}s" }
+}
+
 function Install-BrokerStaged([string]$ServerPayloadDir, [string]$AppDir) {
     # Stage-and-swap for mcp-server.exe (seed plan §1 item 2). Never overwrites a locked file and
     # never stops a broker. Returns one of:
@@ -788,6 +835,10 @@ if ($Uninstall) {
         # reliable signal.
         if (Test-Path (Join-Path $dir 'MCPBridge.Shim.dll')) { $leftoverVersions += $version }
     }
+    # Servers an MCP client still runs from this install (issue #215): the exe image and broker.lock
+    # they hold will survive the removals below. Counted BEFORE removing, while their .Path still
+    # resolves cleanly; never stopped -- they belong to a live client session (Get-BrokerProcess).
+    $runningServers = @(Get-BrokerProcess $appDir)
     # Takes the whole addin\<version>\<year>\ tree and current.json with it. A running Revit's mapped
     # version folder survives (silently) and is reported via $leftoverVersions' shim signal above.
     Remove-Item $appDir -Recurse -Force -ErrorAction SilentlyContinue
@@ -808,11 +859,18 @@ if ($Uninstall) {
     # the %LOCALAPPDATA% of whoever runs this uninstaller -- so under -Scope AllUsers other users'
     # copies (and, if UAC was answered with a different admin account, the invoking user's own) stay
     # behind, the same per-account scoping the claude-mcp deregistration below already has.
+    $dataRoot = "$env:LocalAppData\Connectors\Revit"
     if ($leftoverVersions.Count -eq 0) {
-        Remove-Item "$env:LocalAppData\Connectors\Revit" -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item $dataRoot -Recurse -Force -ErrorAction SilentlyContinue
     } else {
-        Remove-Item "$env:LocalAppData\Connectors\Revit\models" -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item "$dataRoot\models" -Recurse -Force -ErrorAction SilentlyContinue
     }
+    # What was meant to go but is still here (#215). The data root counts only when this run tried to
+    # remove all of it; with a Revit leftover it is deliberately kept for the broker that Revit may
+    # still be talking to, and the Revit sentence already covers the re-run.
+    $removedRoots = @($appDir)
+    if ($leftoverVersions.Count -eq 0) { $removedRoots += $dataRoot }
+    $survivingPaths = Get-SurvivingPaths $removedRoots
     Remove-Item $uninstallKeyPath -Recurse -Force -ErrorAction SilentlyContinue
     # Deregister from the Claude clients install registered it with -- CLI at the same user scope, and
     # Claude Desktop's config (Cowork reads the same file), leaving any other MCP servers there intact.
@@ -820,11 +878,10 @@ if ($Uninstall) {
         & claude mcp remove revit --scope user 2>$null | Out-Null
     }
     try { Remove-DesktopMcpServer (Get-DesktopConfigPath) 'revit' | Out-Null } catch { }
-    if ($leftoverVersions.Count -gt 0) {
-        Write-Host "Revit MCP Bridge uninstalled. Revit $($leftoverVersions -join ', ') still has some files locked -- close it and re-run this uninstaller to finish cleaning up."
-    } else {
-        Write-Host 'Revit MCP Bridge uninstalled.'
-    }
+    # One honest line: clean, or exactly which holder (Revit, a client's server, or nothing nameable)
+    # kept which paths, and that a re-run finishes it -- a second run with the holders gone finds no
+    # server, removes what is left, and reports clean.
+    Write-Host (Format-UninstallResult $leftoverVersions $runningServers.Count $survivingPaths)
     return
 }
 
@@ -944,8 +1001,13 @@ try {
         # finally block below removes this run's file; any orphaned partials are named uniquely and get
         # swept by Windows' normal %TEMP% cleanup.
         $zipPath = Join-Path $env:TEMP ("mcpbridge-release-$([guid]::NewGuid()).zip")
+        # Issue #216: name the download and its size first -- with the progress bar off this is the
+        # only sign of life for the minutes a 126 MB zip takes on a slow night.
+        if (-not $Silent) { Write-Host (Format-DownloadAnnouncement $asset $releaseTag) }
+        $downloadTimer = [Diagnostics.Stopwatch]::StartNew()
         Invoke-WebRequest $asset.browser_download_url -OutFile $zipPath
         $zipDownloaded = $true
+        if (-not $Silent) { Write-Host "Downloaded in $(Format-Duration $downloadTimer.Elapsed); verifying checksum..." }
 
         $checksumsAsset = $release.assets | Where-Object name -eq 'checksums.txt'
         if (-not $checksumsAsset) { throw "The latest release ($releaseTag) is missing its checksum file, so the download can't be verified. Installation stopped for your safety -- please contact support." }
@@ -960,6 +1022,8 @@ try {
     }
 
     $extractDir = Join-Path $env:TEMP "mcpbridge-extract-$([guid]::NewGuid())"
+    # Expand-Archive is slow under Windows PowerShell 5.1 -- the second silent stretch of #216.
+    if (-not $Silent) { Write-Host 'Extracting...' }
     Expand-Archive $zipPath -DestinationPath $extractDir -Force
 
     # --- Deploy, per detected+supported version. No Revit is closed, asked, or waited on (PRD §12

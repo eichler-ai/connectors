@@ -588,3 +588,69 @@ Describe 'Self-copy source (issue #192): the installed install.ps1 must be the f
         (Get-Content $dst -Raw) | Should -Be $fullScript
     }
 }
+
+Describe 'Uninstall result (issue #215): a running MCP client server is reported, never hidden behind "uninstalled."' {
+    BeforeAll {
+        $script:app = Join-Path $TestDrive 'MCPBridge'
+        $script:data = Join-Path $TestDrive 'Connectors\Revit'
+    }
+    It 'Get-BrokerProcess finds only mcp-server processes running from the install dir' {
+        Mock Get-Process {
+            @(
+                [pscustomobject]@{ Id = 11; Name = 'mcp-server'; Path = (Join-Path $app 'mcp-server.exe') },
+                [pscustomobject]@{ Id = 12; Name = 'mcp-server'; Path = 'C:\elsewhere\mcp-server.exe' },
+                [pscustomobject]@{ Id = 13; Name = 'mcp-server'; Path = (Join-Path $app 'mcp-server.exe.old') }
+            )
+        } -ParameterFilter { $Name -eq 'mcp-server*' }
+        @(Get-BrokerProcess $app).Id | Should -Be @(11, 13)
+    }
+    It 'Get-SurvivingPaths keeps only the roots still on disk after the removal attempt' {
+        New-Item -ItemType Directory -Force -Path $app | Out-Null
+        Get-SurvivingPaths @($app, $data) | Should -Be @($app)
+        Remove-Item $app -Recurse -Force
+        @(Get-SurvivingPaths @($app, $data)).Count | Should -Be 0
+    }
+    It 'reports clean when nothing is running and nothing survived' {
+        Format-UninstallResult @() 0 @() | Should -Be 'Revit MCP Bridge uninstalled.'
+    }
+    It 'names the running client server, the quit-fully recovery and the surviving paths; does NOT claim a clean uninstall' {
+        $msg = Format-UninstallResult @() 3 @($app, $data)
+        $msg | Should -Not -Match 'Bridge uninstalled\.'
+        $msg | Should -Match 'still has the Revit MCP server running \(3 processes\)'
+        $msg | Should -Match 'quit the client fully'
+        $msg | Should -Match 'tray icon -> Quit'
+        $msg | Should -Match 're-run this uninstaller'
+        $msg | Should -Match ([regex]::Escape($app))
+        $msg | Should -Match ([regex]::Escape($data))
+    }
+    It 'singular for one server process' {
+        Format-UninstallResult @() 1 @($app) | Should -Match '\(1 process\)'
+    }
+    It 'a surviving path with no nameable holder (e.g. a transient AV lock) still asks for a re-run instead of claiming success' {
+        $msg = Format-UninstallResult @() 0 @($app)
+        $msg | Should -Not -Match 'Bridge uninstalled\.'
+        $msg | Should -Match 'Some files could not be removed'
+        $msg | Should -Match ([regex]::Escape($app))
+    }
+    It 'keeps the Revit add-in leftover sentence and combines it with the server one' {
+        $msg = Format-UninstallResult @('2027') 1 @($app)
+        $msg | Should -Match 'Revit 2027 still has some files locked'
+        $msg | Should -Match 'still has the Revit MCP server running'
+    }
+}
+
+Describe 'Download progress lines (issue #216)' {
+    It 'names the release and its size in MB from the asset object' {
+        Format-DownloadAnnouncement ([pscustomobject]@{ name = 'mcpbridge-release.zip'; size = 132120576 }) 'v0.1.5' |
+            Should -Be 'Downloading Revit MCP Bridge v0.1.5 (126 MB) from GitHub...'
+    }
+    It 'omits the size when the asset does not carry one' {
+        Format-DownloadAnnouncement ([pscustomobject]@{ name = 'mcpbridge-release.zip' }) 'v0.1.5' |
+            Should -Be 'Downloading Revit MCP Bridge v0.1.5 from GitHub...'
+    }
+    It 'Format-Duration reads as seconds under a minute and m/ss above' {
+        Format-Duration ([timespan]::FromSeconds(42)) | Should -Be '42s'
+        Format-Duration ([timespan]::FromSeconds(252)) | Should -Be '4m12s'
+        Format-Duration ([timespan]::FromSeconds(605)) | Should -Be '10m05s'
+    }
+}
