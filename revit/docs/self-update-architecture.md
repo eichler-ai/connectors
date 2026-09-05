@@ -218,6 +218,16 @@ migration is detected by "the Addins folder holds `MCPBridge.AddIn.dll` directly
 
 ## 5. Part B — Server: hosted primary (#202)
 
+> **SUPERSEDED / SHELVED (see [`http-transport-rfc.md`](./http-transport-rfc.md)).** This section
+> designed a "hosted primary" to give the stdio-singleton model one designated, restartable server.
+> That was evaluated and shelved: the hosted primary is additive machinery over a server-update flow
+> the merged self-eviction (#205) + dead-holder takeover (#212) + session continuity (#220) already
+> make seamless, and its cooperative-yield mechanism (draft PR #221) adds concurrency for a mostly-UX
+> benefit. The clean way to get a single, nameable, restartable server is an **HTTP transport** (one
+> long-lived user-space server every client connects to), which also unlocks remote/multi Revit
+> instances — a strictly larger product the stdio design forecloses. The rest of this section is kept
+> for context; the intended direction is the HTTP RFC. §4 (the add-in shim) stands and is unaffected.
+
 ### 5.1 The hosted primary
 
 A single designated process runs continuously:
