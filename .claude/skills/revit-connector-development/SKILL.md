@@ -168,8 +168,12 @@ These are the rules that generalize. Each one exists because violating it cost r
 - **Never put a destructive command after `;`** in a chain whose earlier `&&` parts can fail; the `;`
   part runs anyway. In `zsh`, an unmatched glob is a hard error that breaks `&&` chains.
 - **Commit or stash before any mutation-test or restore dance** — a reflexive `git checkout <file>`
-  destroys uncommitted work. Fetch before branching: a stale local `main` silently reverts merged
-  work. Delete a PR branch only after `gh pr view` says MERGED.
+  destroys uncommitted work. **Never `git checkout <ref> -- <path>` or `git restore --source` to
+  *read* a file from another ref, either: it stages that ref's content into the checkout, and on the
+  VM-bound shared checkout that silently left local `main` behind `origin` with a staged diff,
+  costing a `reset --hard` to unwind. Read another ref with `git show <ref>:<path>`, `gh pr diff`, or
+  a worktree.** Fetch before branching: a stale local `main` silently reverts merged work. Delete a
+  PR branch only after `gh pr view` says MERGED.
 - **A brief scoped to one component doesn't bound the change.** Before calling a feature done, check
   whether a *different* component encodes assumptions about the one you changed — the Go broker's
   structs once silently dropped every field of the add-in's new response shape, with each side
