@@ -89,7 +89,7 @@ Signals, by file extension; content is the payload:
 | `*.close` | ignored | graceful `CloseMainWindow`, then force-kills whatever is still up |
 | `*.launch` | empty, or 1–3 lines | line 1 = alternate Revit exe (optional), line 2 = pristine source `.rvt`, line 3 = working copy actually opened. With all three it re-copies 2 → 3 every launch, and **aborts** rather than opening a possibly-tainted working copy. Empty means "launch with no document" |
 | `*.startbroker` | optional exe path | starts the broker inside the agent's own session |
-| `*.runexe` | exe path | runs it **blocking** (`Start-Process -Wait`), draining any pending reconnect first |
+| `*.runexe` | line 1 = exe path, line 2 (optional) = one argument string | runs it **blocking** (`Start-Process -Wait`) in the interactive session, draining any pending reconnect first. Stdout/stderr → `C:\dev\runexe-{out,err}.log`, exit code → `C:\dev\runexe-exit.txt` when done (poll for that file); files overwritten each run, one in flight at a time |
 
 `*.close` is handled before `*.launch` each tick, so a launch-then-close pair dropped moments apart
 can't land in the wrong order.
@@ -129,7 +129,10 @@ can't land in the wrong order.
   pollutes the returned value — live, that turned a timeout into a spurious PASS. Use
   `[Console]::Out.WriteLine` for progress from inside such a function.
 - **Assume Windows PowerShell 5.1** on this VM — PowerShell 7+ cmdlets (`Join-String`) fail as
-  *non-terminating* errors, silently producing empty output rather than erroring.
+  *non-terminating* errors, silently producing empty output rather than erroring. And
+  `Out-File`/`Set-Content -Encoding utf8` here writes a **UTF-8 BOM**, which then trips any strict
+  downstream reader (`ConvertFrom-Json`, a Go `json.Unmarshal`) — strip the leading BOM before
+  parsing; the installer's config JSON was bitten by exactly this.
 - **UI automation is a dead end here.** `EnumWindows`/`SendKeys` find zero top-level windows anywhere,
   even from the agent's own session; `CloseMainWindow()` returns false though the window resolves.
   Don't spend time on it — use a journal replay or ask the user for the click.
@@ -208,6 +211,29 @@ so Revit stops prompting "unverified publisher" on every rebuild. One-time setup
 `powershell -ExecutionPolicy Bypass -File tools\New-DevSigningCert.ps1`. Use `LocalMachine` cert
 stores, not `CurrentUser` — builds run as SYSTEM while Revit runs as the interactive user. Opt out
 with `-p:MCPBridgeSignDevBuild=false`. Not the PRD §12 production signing plan.
+
+## Testing the installer live
+
+`install.ps1` and its uninstaller ship in every release, so they need real VM testing before a tag —
+and driving them has traps separate from add-in deployment:
+
+- **Feed it a local package; the GitHub-download path hangs here.** Without `-LocalPackagePath`,
+  `install.ps1` resolves the latest GitHub release, and that API lookup hung indefinitely on this VM.
+  Build a package dir matching the release layout — `shim-<year>/`, `addin-<year>/`, `server/`, and
+  `manifest.json` (with the `version`) — and pass `-LocalPackagePath <dir>`.
+- **Run it through `*.runexe`, not a fresh scheduled task.** The installer must run as the
+  interactive user (a bare `prlctl exec` is SYSTEM, whose profile Revit and the add-in never read).
+  Drop a `*.runexe` signal with line 1 = the `powershell.exe` path and line 2 =
+  `-ExecutionPolicy Bypass -File <...>\install.ps1 -LocalPackagePath <dir>`; read
+  `C:\dev\runexe-out.log` and poll `C:\dev\runexe-exit.txt` for the code. **Ad-hoc per-user
+  `ScheduledTask`s (`New-ScheduledTaskPrincipal -LogonType Interactive`) created to run the installer
+  vanished or were killed erratically on this VM — a dead end; use `*.runexe`.**
+- **When the installed uninstaller is broken, reset by manual purge.** A crashing uninstaller (a real
+  one shipped, exit `-196608`) leaves no clean slate. Delete the pieces directly via `prlctl exec`
+  (SYSTEM is fine for deletes): `...\Autodesk\Revit\Addins\<year>\MCPBridge*` (shim + any legacy
+  flat), `%LOCALAPPDATA%\Programs\MCPBridge` (versioned add-in payloads), `%LOCALAPPDATA%\Connectors\Revit`,
+  and the `HKU\<sid>\...\Uninstall\` MCPBridge key — spelling the interactive user's paths out in
+  full, since SYSTEM's `%LOCALAPPDATA%` and `HKCU` are the wrong hive — then fresh-install.
 
 ## Assembly loading under Revit's plugin model
 
