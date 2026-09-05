@@ -536,8 +536,12 @@ function Remove-OwnedAddinFiles([string]$AddinsDir) {
     # go with the app dir. The folder itself goes only when that leaves it empty: a third-party add-in
     # whose manifest lives in the all-users Addins location can still drop its DLLs into this per-user
     # folder, and whole-folder removal would delete them. Silent on a file a running Revit holds:
-    # callers test what survived (Test-ShimAddinInstalled) to find that out.
-    if (-not (Test-Path (Join-Path $AddinsDir 'MCPBridge.addin'))) { return }
+    # callers test what survived (the shim DLL) to find that out. Guard on EITHER file being present,
+    # not the manifest alone (review of #223): a first uninstall under a running Revit removes the
+    # manifest but not the mapped DLL, so the second run -- the "close Revit and re-run" the summary
+    # promises -- must still find and remove the orphaned MCPBridge.Shim.dll.
+    $shimDll = Join-Path $AddinsDir 'MCPBridge.Shim.dll'
+    if (-not (Test-Path (Join-Path $AddinsDir 'MCPBridge.addin')) -and -not (Test-Path $shimDll)) { return }
     foreach ($name in 'MCPBridge.Shim.dll', 'MCPBridge.addin') {
         Remove-Item (Join-Path $AddinsDir $name) -Force -ErrorAction SilentlyContinue
     }
@@ -984,25 +988,31 @@ try {
     # pass 2 refreshes the shim in Addins\<year>.
     $shimYears = [ordered]@{}
     $flipPointer = $false
+    # Refusals first, for EVERY year, before anything is staged -- so a throw here never leaves a
+    # half-staged addin\<tag>\ folder behind with the pointer unflipped (review of #223).
+    foreach ($version in $detectedVersions) {
+        if (-not (Test-Path (Join-Path $extractDir "addin-$version"))) { continue }
+        # Every release carries shim-<year>/ beside addin-<year>/ (release.yml). A payload without its
+        # shim cannot be deployed at all -- there is no flat fallback -- so it is a packaging error.
+        if (-not (Test-Path (Join-Path (Join-Path $extractDir "shim-$version") 'MCPBridge.Shim.dll'))) {
+            throw "The package has an addin-$version payload but no shim-$version\MCPBridge.Shim.dll beside it. Every release ships the shim for each add-in it carries; this is a packaging bug -- do not work around it by deploying the add-in into Revit's Addins folder."
+        }
+        # The real add-in sitting in Addins\<year> itself is a pre-shim deploy (or a dev deploy-and-verify
+        # run): Revit would load it directly, beside or instead of the shim. Nothing here migrates that;
+        # say so and stop before touching anything.
+        $addinsDir = Get-AddinsDir $version $Scope
+        if (Test-Path (Join-Path $addinsDir 'MCPBridge.AddIn.dll')) {
+            throw "Revit $version's add-ins folder ($addinsDir) holds MCPBridge.AddIn.dll directly -- a pre-shim add-in deploy this installer no longer manages. Close Revit $version, remove that folder's MCPBridge.* files, and re-run."
+        }
+    }
     foreach ($version in $detectedVersions) {
         $payloadDir = Join-Path $extractDir "addin-$version"
         if (-not (Test-Path $payloadDir)) {
             $skippedVersions += $version
             continue
         }
-        # Every release carries shim-<year>/ beside addin-<year>/ (release.yml). A payload without its
-        # shim cannot be deployed at all -- there is no flat fallback -- so it is a packaging error.
         $shimPayloadDir = Join-Path $extractDir "shim-$version"
-        if (-not (Test-Path (Join-Path $shimPayloadDir 'MCPBridge.Shim.dll'))) {
-            throw "The package has an addin-$version payload but no shim-$version\MCPBridge.Shim.dll beside it. Every release ships the shim for each add-in it carries; this is a packaging bug -- do not work around it by deploying the add-in into Revit's Addins folder."
-        }
         $addinsDir = Get-AddinsDir $version $Scope
-        # The real add-in sitting in Addins\<year> itself is a pre-shim deploy (or a dev deploy-and-verify
-        # run): Revit would load it directly, beside or instead of the shim. Nothing here migrates that;
-        # say so and stop before touching anything.
-        if (Test-Path (Join-Path $addinsDir 'MCPBridge.AddIn.dll')) {
-            throw "Revit $version's add-ins folder ($addinsDir) holds MCPBridge.AddIn.dll directly -- a pre-shim add-in deploy this installer no longer manages. Close Revit $version, remove that folder's MCPBridge.* files, and re-run."
-        }
         if (Test-ComponentUnchanged $packageManifest $marker "addin-$version" (Test-VersionedAddinInstalled $appDir $addinsDir $version)) {
             # Same bytes as what is installed: nothing to deploy.
             $unchangedVersions += $version

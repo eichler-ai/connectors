@@ -321,6 +321,13 @@ Describe 'Versioned add-in layout (self-update-architecture.md §4): pointer, ve
         Test-Path (Join-Path $addins 'MCPBridge.Shim.dll') | Should -BeTrue
         Test-Path (Join-Path $addins 'MCPBridge.addin') | Should -BeFalse
     }
+    It 'Remove-OwnedAddinFiles on the second run (Revit closed) removes the orphaned shim DLL and its folder, so uninstall can finish (review of #223)' {
+        # The state a first uninstall under a running Revit leaves: manifest gone, DLL still there.
+        New-Payload $addins @{ 'MCPBridge.Shim.dll' = 'shim-bytes' }
+        Remove-OwnedAddinFiles $addins
+        Test-Path (Join-Path $addins 'MCPBridge.Shim.dll') | Should -BeFalse   # the uninstall leftover signal is clear
+        Test-Path $addins | Should -BeFalse
+    }
 
     It 'Remove-StaleAddinVersions keeps the current and previous versions, deletes the rest, and skips a folder it cannot rename (mapped by a running Revit)' {
         foreach ($v in 'v0.1.2', 'v0.1.3', 'v0.1.4', 'v0.1.5', 'local-20260101000000') {
