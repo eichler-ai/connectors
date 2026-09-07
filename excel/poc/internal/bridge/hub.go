@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -100,9 +101,16 @@ func (h *Hub) Serve(ws *websocket.Conn) {
 	h.mu.Unlock()
 	log.Printf("ws: add-in connected: %s %s v%s workbook=%q", hi.Host, hi.Platform, hi.Version, hi.Workbook)
 
+	// x/net/websocket's Codec.Receive returns a single frame, and Chrome fragments large messages
+	// (a multi-MB export arrives as many frames), so decode from the connection's byte stream instead:
+	// Conn.Read chains frames, and JSON objects are self-delimiting.
+	dec := json.NewDecoder(ws)
 	for {
 		var resp Response
-		if err := websocket.JSON.Receive(ws, &resp); err != nil {
+		if err := dec.Decode(&resp); err != nil {
+			if !errors.Is(err, io.EOF) {
+				log.Printf("ws: receive: %v", err)
+			}
 			break
 		}
 		h.mu.Lock()

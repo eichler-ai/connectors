@@ -63,6 +63,25 @@ the pane replaces it.
    | `05-office-error.js` | what an Office.js error object carries |
    | `06-requirement-sets.js` | which API sets the web host supports; failure mode of an unsupported call |
    | `07-return-proxy.js` | what happens when a script returns a proxy object instead of data |
+   | `08-csv-export.js` (`-out x.csv`) | CSV built from the used range's display text |
+   | `09-xlsx-export.js` (`-out x.xlsx`) | whole document via the File API, Open XML |
+   | `10-pdf-export.js` (`-out x.pdf`) | whole document via the File API, PDF |
+
+## Findings so far (Excel for the web, Chrome, 2026-09-07)
+
+- The task pane connects to `wss://localhost:3000` from inside the Office iframe with no Chrome
+  prompt and no mixed-content issue. Host reports `ExcelApi 1.20`.
+- Simple scripts round-trip in ~80 ms. A 10k-cell read is ~260 ms and ~60 KB.
+- Office.js errors arrive with `code`, the failing statement and its neighbours, and a stack.
+- A busy-loop script blocks the pane until it ends; the bridge times out and the pane recovers on
+  its own afterwards. Nothing can interrupt it from outside.
+- `getFileAsync` works for both `Compressed` (xlsx, ~0.7 s for 400 KB) and `Pdf` (~9 s for a
+  194-page, 4.9 MB render). Excel for the web supports PDF here even though the docs only promise
+  it for Word and PowerPoint.
+- `golang.org/x/net/websocket`'s codec returns one *frame* per receive and Chrome fragments large
+  messages, so replies over ~128 KB were truncated until the hub switched to a stream JSON decoder.
+- Scripts default to the active sheet. The first live run overwrote cells in a real workbook; the
+  connector must surface the target workbook and sheet before any write.
 
 ## Things to watch for during the live test
 

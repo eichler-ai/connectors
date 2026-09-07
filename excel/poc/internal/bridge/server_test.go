@@ -173,6 +173,30 @@ func TestReplacementConnectionWins(t *testing.T) {
 	}
 }
 
+// Chrome splits a large message into ~128 KiB frames. x/net/websocket's Codec reads one frame per
+// Receive, which silently truncated exports until the hub switched to a stream decoder.
+func TestFragmentedLargeReply(t *testing.T) {
+	srv, hub := newServer(t)
+	big := strings.Repeat("x", 3<<20)
+	var ws *websocket.Conn
+	ws = fakeAddin(t, srv, srv.URL, func(r Request) *Response {
+		// Answer in many small frames like a browser would: Message.Send writes one frame per call.
+		msg, _ := json.Marshal(Response{ID: r.ID, OK: true, Result: json.RawMessage(`"` + big + `"`)})
+		for len(msg) > 0 {
+			n := min(len(msg), 128<<10)
+			_ = websocket.Message.Send(ws, string(msg[:n]))
+			msg = msg[n:]
+		}
+		return nil
+	})
+	defer ws.Close()
+	waitConnected(t, hub)
+	code, res := exec(t, srv, "export", 0)
+	if code != 200 || !res.OK || len(res.Result) != len(big)+2 {
+		t.Errorf("code=%d ok=%v len=%d bridgeErr=%q", code, res.OK, len(res.Result), res.BridgeError)
+	}
+}
+
 func TestStaticFiles(t *testing.T) {
 	srv, _ := newServer(t)
 	resp, err := srv.Client().Get(srv.URL + "/taskpane.html")

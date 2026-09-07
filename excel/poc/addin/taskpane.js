@@ -7,7 +7,7 @@
   "use strict";
 
   var WS_URL = "wss://" + location.host + "/ws";
-  var MAX_RESULT_BYTES = 1 << 20; // 1 MiB; larger results are truncated and flagged
+  var MAX_RESULT_BYTES = 16 << 20; // 16 MiB so a whole-document export fits; larger results are truncated and flagged
   var RECONNECT_MS = 2000;
 
   var statusEl = document.getElementById("status");
