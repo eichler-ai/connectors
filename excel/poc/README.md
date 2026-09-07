@@ -66,6 +66,8 @@ the pane replaces it.
    | `08-csv-export.js` (`-out x.csv`) | CSV built from the used range's display text |
    | `09-xlsx-export.js` (`-out x.xlsx`) | whole document via the File API, Open XML |
    | `10-pdf-export.js` (`-out x.pdf`) | whole document via the File API, PDF |
+   | `11-formatting-write.js` | fonts, fills, borders, number/date formats, merge, alignment, widths, conditional formats, validation, freeze panes |
+   | `12-formatting-read.js` | reads all of the above back, per-cell via `getCellProperties` |
 
 ## Findings so far (Excel for the web, Chrome, 2026-09-07)
 
@@ -80,6 +82,11 @@ the pane replaces it.
   it for Word and PowerPoint.
 - `golang.org/x/net/websocket`'s codec returns one *frame* per receive and Chrome fragments large
   messages, so replies over ~128 KB were truncated until the hub switched to a stream JSON decoder.
+- Formatting: everything in script 11 applied in one ~200 ms sync and rendered correctly in the PDF
+  export. `getCellProperties` reads a range's full formatting in one round trip (sides are named
+  `top/bottom/left/right` there, `EdgeTop…` in `BorderCollection`; no fill reads back as `""`).
+  `getMergedAreas` on the web reported the merged title `A1:E1` as just `A1`, though the merge
+  itself rendered correctly.
 - Scripts default to the active sheet. The first live run overwrote cells in a real workbook; the
   connector must surface the target workbook and sheet before any write.
 
