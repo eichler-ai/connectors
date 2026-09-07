@@ -68,6 +68,7 @@ the pane replaces it.
    | `10-pdf-export.js` (`-out x.pdf`) | whole document via the File API, PDF |
    | `11-formatting-write.js` | fonts, fills, borders, number/date formats, merge, alignment, widths, conditional formats, validation, freeze panes |
    | `12-formatting-read.js` | reads all of the above back, per-cell via `getCellProperties` |
+   | `13-chart-pivot.js` | column + line charts with titles/labels/formatting, a pivot table with two data fields, readback |
 
 ## Findings so far (Excel for the web, Chrome, 2026-09-07)
 
@@ -87,6 +88,10 @@ the pane replaces it.
   `top/bottom/left/right` there, `EdgeTop…` in `BorderCollection`; no fill reads back as `""`).
   `getMergedAreas` on the web reported the merged title `A1:E1` as just `A1`, though the merge
   itself rendered correctly.
+- Charts and pivot tables work (~500 ms for two charts + a pivot). Neither `getRange` nor
+  `charts.add` accept a multi-area address like `A3:A7,D3:D7`; build the chart from one column and
+  attach categories with `series.setXAxisValues`. `chart.getImage()` returns a PNG, which is a cheap
+  way for an agent to see what it built without a whole-document PDF export.
 - Scripts default to the active sheet. The first live run overwrote cells in a real workbook; the
   connector must surface the target workbook and sheet before any write.
 
