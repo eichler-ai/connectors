@@ -71,6 +71,20 @@ the pane replaces it.
    | `14-insert-from-base64.js` (template) | "upload": copy sheets from an xlsx into the open workbook |
    | `13-chart-pivot.js` | column + line charts with titles/labels/formatting, a pivot table with two data fields, readback |
 
+## Script Lab as the host (no manifest of our own)
+
+Microsoft's store-listed Script Lab add-in can run the same client as a snippet, so the only thing
+to install is Script Lab. Import `addin/scriptlab-snippet-inline.yaml` (Code → Import → paste the
+YAML; a localhost URL is refused) and Run it; keep the runner open. Start the bridge with
+`-origins https://script-lab.public.cdn.office.net`, the runner's origin. Verified 2026-09-07: every
+acceptance script, chart image and xlsx/PDF export works through it. `addin/scriptlab-probe.yaml`
+is a four-line "does the script run / can it open the socket" check for when it doesn't.
+
+Caveats: the runner will not load a library from localhost (the `libraries:` route silently did
+nothing), so the client is inlined and must be re-imported after every change; the user has to open
+Script Lab and press Run each session; Script Lab may spawn a second runner instance, which is why
+an evicted client now stands down instead of reconnecting (newest connection wins).
+
 ## Findings so far (Excel for the web, Chrome, 2026-09-07)
 
 - The task pane connects to `wss://localhost:3000` from inside the Office iframe with no Chrome
@@ -98,6 +112,9 @@ the pane replaces it.
   `Excel.createWorkbook(base64)` opens a new workbook from one. Whole-file replacement is a
   OneDrive/Graph operation outside Excel. Base64 travels inside the script, so the bridge's request
   cap bounds the file size; a real connector would carry files out of band.
+- Excel for the web keeps a "closed" task pane alive: after the pane's X was clicked, the page stayed
+  connected and kept answering scripts (`document.visibilityState === "hidden"`) until the workbook
+  tab was closed.
 - Scripts default to the active sheet. The first live run overwrote cells in a real workbook; the
   connector must surface the target workbook and sheet before any write.
 

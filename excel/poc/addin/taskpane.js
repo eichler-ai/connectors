@@ -6,6 +6,25 @@
 (function () {
   "use strict";
 
+  // Script Lab loads libraries before the template body exists; wait for the DOM in that case.
+  function start() {
+    try {
+      main();
+    } catch (e) {
+      // Surface a startup failure in the page instead of dying silently (Script Lab hides the console).
+      var el = document.getElementById("status") || document.body;
+      el.textContent = "bridge client failed to start: " + e.message + "\n" + (e.stack || "");
+      throw e;
+    }
+  }
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", start);
+  } else {
+    start();
+  }
+
+  function main() {
+
   // Same origin as the page by default; a host page (e.g. a Script Lab snippet) can point elsewhere.
   var WS_URL = window.BRIDGE_WS_URL || "wss://" + location.host + "/ws";
   var MAX_RESULT_BYTES = 16 << 20; // 16 MiB so a whole-document export fits; larger results are truncated and flagged
@@ -17,6 +36,7 @@
   var ws = null;
   var reconnectTimer = null;
   var workbookName = "";
+  var replaced = false;
 
   function log(msg, cls) {
     var line = document.createElement("div");
@@ -68,11 +88,19 @@
     ws.onmessage = function (ev) {
       var req;
       try { req = JSON.parse(ev.data); } catch (e) { log("bad message: " + ev.data, "err"); return; }
+      if (req.type === "replaced") {
+        // A newer instance of this page connected; stand down instead of fighting it for the bridge.
+        replaced = true;
+        setStatus("Replaced by a newer connection. Click Reconnect to take over.", "bad");
+        log("replaced by a newer connection; not reconnecting");
+        return;
+      }
       runScript(req);
     };
   }
 
   function scheduleReconnect() {
+    if (replaced) return;
     if (!reconnectTimer) reconnectTimer = setTimeout(function () { reconnectTimer = null; connect(); }, RECONNECT_MS);
   }
 
@@ -139,7 +167,7 @@
     else log("reply for " + obj.id + " dropped: socket not open", "err");
   }
 
-  var btn = document.getElementById("reconnect"); if (btn) btn.onclick = function () { if (ws) ws.close(); connect(); };
+  var btn = document.getElementById("reconnect"); if (btn) btn.onclick = function () { replaced = false; if (ws) ws.close(); connect(); };
   btn = document.getElementById("clear"); if (btn) btn.onclick = function () { logEl.textContent = ""; };
 
   var readyFired = false;
@@ -175,5 +203,6 @@
       if (req.isSetSupported("ExcelApi", versions[i])) best = versions[i];
     }
     return best;
+  }
   }
 })();

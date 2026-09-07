@@ -94,7 +94,10 @@ func (h *Hub) Serve(ws *websocket.Conn) {
 	}
 	h.mu.Lock()
 	if old := h.conn; old != nil {
+		// Tell the evicted client why, so it does not reconnect and evict us back (two live runner
+		// instances otherwise ping-pong forever, and in-flight replies go down the wrong socket).
 		log.Printf("ws: replacing previous add-in connection")
+		_ = websocket.JSON.Send(old, map[string]string{"type": "replaced"})
 		old.Close()
 	}
 	h.conn, h.info = ws, hi

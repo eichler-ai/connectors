@@ -87,7 +87,11 @@ func Handler(h *Hub, addin fs.FS, extraOrigins ...string) http.Handler {
 			time.Since(start).Round(time.Millisecond), len(resp.Result))
 		writeJSON(w, http.StatusOK, ExecResult{Response: resp})
 	})
-	mux.Handle("/", http.FileServerFS(addin))
+	files := http.FileServerFS(addin)
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("static: %s %s referer=%q origin=%q", r.Method, r.URL.Path, r.Referer(), r.Header.Get("Origin"))
+		files.ServeHTTP(w, r)
+	})
 	return mux
 }
 
