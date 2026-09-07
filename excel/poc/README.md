@@ -68,6 +68,7 @@ the pane replaces it.
    | `10-pdf-export.js` (`-out x.pdf`) | whole document via the File API, PDF |
    | `11-formatting-write.js` | fonts, fills, borders, number/date formats, merge, alignment, widths, conditional formats, validation, freeze panes |
    | `12-formatting-read.js` | reads all of the above back, per-cell via `getCellProperties` |
+   | `14-insert-from-base64.js` (template) | "upload": copy sheets from an xlsx into the open workbook |
    | `13-chart-pivot.js` | column + line charts with titles/labels/formatting, a pivot table with two data fields, readback |
 
 ## Findings so far (Excel for the web, Chrome, 2026-09-07)
@@ -92,6 +93,11 @@ the pane replaces it.
   `charts.add` accept a multi-area address like `A3:A7,D3:D7`; build the chart from one column and
   attach categories with `series.setXAxisValues`. `chart.getImage()` returns a PNG, which is a cheap
   way for an agent to see what it built without a whole-document PDF export.
+- Uploading a file: no API replaces the open workbook. `insertWorksheetsFromBase64` copies chosen
+  sheets from a supplied xlsx (~2 s for a 418 KB file, formatting preserved) and
+  `Excel.createWorkbook(base64)` opens a new workbook from one. Whole-file replacement is a
+  OneDrive/Graph operation outside Excel. Base64 travels inside the script, so the bridge's request
+  cap bounds the file size; a real connector would carry files out of band.
 - Scripts default to the active sheet. The first live run overwrote cells in a real workbook; the
   connector must surface the target workbook and sheet before any write.
 
