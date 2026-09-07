@@ -1,5 +1,8 @@
 // Round-trip: write values and a formula, read them back with the formula evaluated.
-const sheet = context.workbook.worksheets.getActiveWorksheet();
+// Writes are confined to a BridgeDemo sheet so a real workbook is never touched.
+let sheet = context.workbook.worksheets.getItemOrNullObject("BridgeDemo");
+await context.sync();
+if (sheet.isNullObject) sheet = context.workbook.worksheets.add("BridgeDemo");
 const r = sheet.getRange("A1:C2");
 r.values = [["Item", "Qty", "Total"], ["Widget", 3, null]];
 sheet.getRange("C2").formulas = [["=B2*10"]];
