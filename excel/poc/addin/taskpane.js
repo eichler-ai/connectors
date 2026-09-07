@@ -6,13 +6,14 @@
 (function () {
   "use strict";
 
-  var WS_URL = "wss://" + location.host + "/ws";
+  // Same origin as the page by default; a host page (e.g. a Script Lab snippet) can point elsewhere.
+  var WS_URL = window.BRIDGE_WS_URL || "wss://" + location.host + "/ws";
   var MAX_RESULT_BYTES = 16 << 20; // 16 MiB so a whole-document export fits; larger results are truncated and flagged
   var RECONNECT_MS = 2000;
 
-  var statusEl = document.getElementById("status");
-  var envEl = document.getElementById("env");
-  var logEl = document.getElementById("log");
+  var statusEl = document.getElementById("status") || document.body.appendChild(document.createElement("div"));
+  var envEl = document.getElementById("env") || document.body.appendChild(document.createElement("div"));
+  var logEl = document.getElementById("log") || document.body.appendChild(document.createElement("pre"));
   var ws = null;
   var reconnectTimer = null;
   var workbookName = "";
@@ -138,8 +139,8 @@
     else log("reply for " + obj.id + " dropped: socket not open", "err");
   }
 
-  document.getElementById("reconnect").onclick = function () { if (ws) ws.close(); connect(); };
-  document.getElementById("clear").onclick = function () { logEl.textContent = ""; };
+  var btn = document.getElementById("reconnect"); if (btn) btn.onclick = function () { if (ws) ws.close(); connect(); };
+  btn = document.getElementById("clear"); if (btn) btn.onclick = function () { logEl.textContent = ""; };
 
   var readyFired = false;
   // Outside a host (plain tab, headless probe) Office.onReady may never fire; still bring the socket up.

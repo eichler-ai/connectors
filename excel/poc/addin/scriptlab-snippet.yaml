@@ -1,0 +1,29 @@
+name: Excel Bridge client
+description: Connects this Excel session to a local excel-bridge so scripts can be pushed in. Keep the runner open.
+host: EXCEL
+api_set: {}
+script:
+  content: |
+    // The bridge client is loaded from the bridge itself (see libraries); it only needs to know where
+    // the socket is. Everything else is identical to the task-pane add-in.
+    window.BRIDGE_WS_URL = "wss://localhost:3000/ws";
+  language: javascript
+template:
+  content: |
+    <div id="status">Loading…</div>
+    <div id="env"></div>
+    <button id="reconnect">Reconnect</button> <button id="clear">Clear log</button>
+    <pre id="log"></pre>
+  language: html
+style:
+  content: |
+    body { font: 13px system-ui, sans-serif; }
+    #status { padding: 6px; background: #eee; }
+    #status.ok { background: #dff5dd; }
+    #status.bad { background: #fde2e2; }
+    #log { font-size: 11px; white-space: pre-wrap; max-height: 60vh; overflow: auto; }
+    .err { color: #b00020; }
+  language: css
+libraries: |
+  https://appsforoffice.microsoft.com/lib/1/hosted/office.js
+  https://localhost:3000/taskpane.js

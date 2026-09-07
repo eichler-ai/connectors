@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"slices"
 	"time"
 
 	"golang.org/x/net/websocket"
@@ -32,14 +33,16 @@ const (
 )
 
 // Handler builds the bridge mux. addin is the directory of static add-in files served at /.
-func Handler(h *Hub, addin fs.FS) http.Handler {
+// extraOrigins are additional browser origins allowed to open /ws besides the bridge's own
+// (e.g. Script Lab's runner when the client runs as a snippet there).
+func Handler(h *Hub, addin fs.FS, extraOrigins ...string) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/ws", websocket.Server{
 		// Office loads the task pane from this same origin, so a same-origin check is enough; a
 		// nil Handshake would accept any Origin, which we do not want even for a POC.
 		Handshake: func(cfg *websocket.Config, r *http.Request) error {
 			origin := r.Header.Get("Origin")
-			if origin != "https://"+r.Host {
+			if origin != "https://"+r.Host && !slices.Contains(extraOrigins, origin) && !slices.Contains(extraOrigins, "*") {
 				log.Printf("ws: rejected origin %q (host %s)", origin, r.Host)
 				return errors.New("origin not allowed")
 			}
