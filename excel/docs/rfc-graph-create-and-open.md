@@ -104,6 +104,21 @@ which future bridge instance is *this* file.
   `create_workbook`, with a matching title, is the target — good enough to prompt, not to
   auto-write. **This is the main open technical question (§6).**
 
+**Spike result — pane side (live, 2026-09-08).** The only identity the web pane can read is
+`Office.context.document.url` (also all that `getFilePropertiesAsync` returns), and for a personal
+OneDrive file it is `https://d.docs.live.net/<CID>/<filename>.xlsx` — the account CID
+(`953169F03C1B112C` in the test) plus the **bare filename, no folder path**. No Graph item id is
+exposed to the pane. Proposed exact join (option b, refined): `create_workbook` picks a **unique
+filename** (embed a short random token), uploads via Graph, reads the driveItem's CID (the segment
+before `!` in `id`, i.e. `parentReference.driveId`), and returns `doc_key` =
+`https://d.docs.live.net/<CID>/<name>.xlsx` — constructed to match exactly what the pane will
+register. The unique name sidesteps the caveat that the d.docs URL carries no folder, so two
+same-named files in different folders would otherwise be indistinguishable to the pane. **Still to
+confirm with Graph (the Graph half of the spike, first task of the build):** that the d.docs URL is
+always `<CID>/<name>` regardless of folder, and that Graph's `id`/`parentReference.driveId` yields
+that CID verbatim. If the format varies by folder, fall back to unique-name + the recency/title
+heuristic above.
+
 ### 3.5 Existing-file capabilities (unlocked by the broad scope)
 With `Files.ReadWrite` over the whole OneDrive, two more tools become possible on the same
 plumbing; specced here, scheduled after create-and-open:
