@@ -1,4 +1,7 @@
-# Installs, updates, or removes the Revit MCP Bridge add-in + MCP Server broker (PRD §12).
+# Installs, updates, or removes the Revit MCP Connector: the Revit add-in (the MCP Bridge component)
+# + the MCP Server broker (PRD §12). "Revit MCP Connector" is the product name shown to the user;
+# "Bridge"/"MCPBridge" stays the add-in component's name in identifiers (DLLs, the .addin, the app
+# dir, the uninstall registry key) -- those are the install contract and must not be renamed.
 #
 # Deliberately a script, not a packaged GUI installer -- see PRD §12 "Installation UX" for the full
 # reasoning. The short version: the add-in is a single signed, compiled DLL (no pyRevit-style
@@ -326,20 +329,86 @@ function Format-UninstallResult([string[]]$LeftoverVersions, [int]$RunningServer
     if ($SurvivingPaths.Count -gt 0) {
         $parts += "Still on disk: $($SurvivingPaths -join '; ')"
     }
-    if ($parts.Count -eq 0) { return 'Revit MCP Bridge uninstalled.' }
-    return "Revit MCP Bridge is not fully uninstalled yet. $($parts -join ' ')"
+    if ($parts.Count -eq 0) { return 'Revit MCP Connector uninstalled.' }
+    return "The Revit MCP Connector is not fully uninstalled yet. $($parts -join ' ')"
 }
 
-# --- Download progress lines (issue #216) ----------------------------------------------------------
-# $ProgressPreference is SilentlyContinue for the whole script (PS 5.1's progress bar throttles the
-# transfer), so a 126 MB Invoke-WebRequest shows nothing for minutes and reads as a hang. A plain
-# line naming what is being fetched, and how big it is, is the fix -- not a progress bar.
+# --- Streaming download with live progress (supersedes issue #216's announcement-only line) --------
+# The whole script runs with $ProgressPreference = 'SilentlyContinue' because Invoke-WebRequest's
+# native progress bar throttles the transfer to a crawl on Windows PowerShell 5.1 (the version Revit
+# machines ship). Issue #216's stop-gap was a single "Downloading... (126 MB)" line, but the 126 MB
+# zip then shows NOTHING for minutes and reads as a hang. Instead we stream the response ourselves:
+# faster than Invoke-WebRequest here (no per-request buffering overhead) and free to print our OWN
+# throttled progress line, which never touches the native bar. Format-DownloadProgress is a pure
+# function so the percentage/rate maths can be unit-tested off-Windows (revit/install.tests.ps1).
+function Format-DownloadProgress([int64]$Read, [int64]$Total, [timespan]$Elapsed) {
+    $mb = '{0:0.0}' -f ($Read / 1MB)
+    $rate = if ($Elapsed.TotalSeconds -gt 0) { '{0:0.0} MB/s' -f ($Read / 1MB / $Elapsed.TotalSeconds) } else { '--' }
+    if ($Total -gt 0) {
+        $pct = [math]::Floor($Read * 100 / $Total)
+        "$pct% - $mb of $([math]::Round($Total / 1MB)) MB - $rate"
+    } else {
+        # No Content-Length (a proxy stripped it): show bytes so far, never a fabricated percentage.
+        "$mb MB - $rate"
+    }
+}
+
+# What is being fetched, from where, and how long it can take -- so the wait below reads as work, not
+# a hang. The moment-to-moment signal is the progress line Save-DownloadWithProgress prints under it.
 function Format-DownloadAnnouncement($Asset, [string]$Tag) {
     $sizeNote = ''
     if ($Asset -and $Asset.PSObject.Properties['size'] -and [int64]$Asset.size -gt 0) {
         $sizeNote = " ($([math]::Round([int64]$Asset.size / 1MB)) MB)"
     }
-    "Downloading Revit MCP Bridge $Tag$sizeNote from GitHub..."
+    "Downloading the Revit MCP Connector $Tag$sizeNote from GitHub. This is the largest step -- on a slow connection it can take a few minutes; live progress is shown below."
+}
+
+# Streams $Url to $OutFile in 1 MB chunks, printing an in-place progress line at most every
+# $ProgressIntervalMs. Returns nothing; throws on a transport error (caught by the main try/catch,
+# which maps it to a friendly hint). $ShowProgress is off under -Silent (the ribbon's Update Now runs
+# in a hidden window with nowhere to draw).
+function Save-DownloadWithProgress {
+    param(
+        [Parameter(Mandatory)][string]$Url,
+        [Parameter(Mandatory)][string]$OutFile,
+        [int64]$ExpectedSize = 0,
+        [bool]$ShowProgress = $true,
+        [int]$ProgressIntervalMs = 1000
+    )
+    # TLS 1.2: Windows PowerShell 5.1's default protocol set can omit it, and GitHub refuses older ones.
+    try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch { }
+    $req = [System.Net.HttpWebRequest]::Create($Url)
+    $req.UserAgent = 'MCPBridge-Installer'
+    $req.AllowAutoRedirect = $true   # a GitHub release asset URL 302s to its CDN
+    $req.Timeout = 60000             # connect + response-header wait; the streaming read below is not bound by it
+    $resp = $req.GetResponse()
+    try {
+        $total = if ($ExpectedSize -gt 0) { $ExpectedSize } elseif ($resp.ContentLength -gt 0) { [int64]$resp.ContentLength } else { 0 }
+        $stream = $resp.GetResponseStream()
+        $file = [System.IO.File]::Create($OutFile)
+        try {
+            $buffer = New-Object byte[] (1MB)
+            [int64]$read = 0
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            [int64]$lastPrint = -1000   # negative: force the first progress line on the very first chunk
+            $printed = $false
+            while (($n = $stream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                $file.Write($buffer, 0, $n)
+                $read += $n
+                if ($ShowProgress -and ($sw.ElapsedMilliseconds - $lastPrint) -ge $ProgressIntervalMs) {
+                    # Carriage-return + PadRight overwrites the previous line in place (and clears a
+                    # longer prior one) on an interactive console; -NoNewline keeps it one live line.
+                    Write-Host ("`r  " + (Format-DownloadProgress $read $total $sw.Elapsed).PadRight(48)) -NoNewline
+                    $lastPrint = $sw.ElapsedMilliseconds
+                    $printed = $true
+                }
+            }
+            # Final 100%/total line, terminated with a newline so the next message starts cleanly.
+            if ($ShowProgress -and $printed) {
+                Write-Host ("`r  " + (Format-DownloadProgress $read $total $sw.Elapsed).PadRight(48))
+            }
+        } finally { $file.Dispose() }
+    } finally { $resp.Dispose() }
 }
 
 function Format-Duration([timespan]$Elapsed) {
@@ -767,7 +836,7 @@ function Register-McpServer([string]$ServerExe, [switch]$OnlyIfMissing) {
     if ($didWork -or $todo.Count -gt 0) {
         Write-Host ''
         Write-Host "It runs as: `"$ServerExe`" --mode local"
-        Write-Host 'Restart any Claude client that was open when this ran, so it reloads its MCP config.'
+        Write-Host 'Restart any Claude client that was open when this ran so it reloads its MCP config -- the "revit" server will not appear in an already-open client until you do.'
     }
 }
 
@@ -893,7 +962,7 @@ if ($detectedVersions.Count -eq 0) {
     throw "No supported Revit version found on this machine (checked for: $($SupportedRevitVersions -join ', ')). Install Revit first, then re-run this installer."
 }
 
-if (-not $Silent) { Write-Host 'Installing Revit MCP Bridge -- checking for the latest release...' }
+if (-not $Silent) { Write-Host 'Installing the Revit MCP Connector. Checking GitHub for the latest release...' }
 
 # --- Resolve target release ------------------------------------------------------------------------
 if ($LocalPackagePath) {
@@ -972,7 +1041,7 @@ $allDllsPresent =
     })
 
 if (-not $LocalPackagePath -and $installed -eq $releaseTag -and $allDllsPresent) {
-    if (-not $Silent) { Write-Host "Revit MCP Bridge is already up to date ($installed)." }
+    if (-not $Silent) { Write-Host "The Revit MCP Connector is already up to date ($installed)." }
     # The add-in is current, but a prior run may have deployed it without ever reaching MCP
     # registration (interrupted, or an older installer that didn't register). Ensure the wiring is
     # present before returning -- idempotent, and -OnlyIfMissing keeps a healthy re-run silent. Best
@@ -1001,13 +1070,15 @@ try {
         # finally block below removes this run's file; any orphaned partials are named uniquely and get
         # swept by Windows' normal %TEMP% cleanup.
         $zipPath = Join-Path $env:TEMP ("mcpbridge-release-$([guid]::NewGuid()).zip")
-        # Issue #216: name the download and its size first -- with the progress bar off this is the
-        # only sign of life for the minutes a 126 MB zip takes on a slow night.
+        # Name the download, its size and its expected duration first, then stream it with a live
+        # progress line underneath (Save-DownloadWithProgress) so the minutes a 126 MB zip takes read
+        # as work, not a hang -- and faster than Invoke-WebRequest here (issue #216 / the streaming rework).
         if (-not $Silent) { Write-Host (Format-DownloadAnnouncement $asset $releaseTag) }
         $downloadTimer = [Diagnostics.Stopwatch]::StartNew()
-        Invoke-WebRequest $asset.browser_download_url -OutFile $zipPath
+        $expectedBytes = if ($asset.PSObject.Properties['size']) { [int64]$asset.size } else { 0 }
+        Save-DownloadWithProgress -Url $asset.browser_download_url -OutFile $zipPath -ExpectedSize $expectedBytes -ShowProgress (-not $Silent)
         $zipDownloaded = $true
-        if (-not $Silent) { Write-Host "Downloaded in $(Format-Duration $downloadTimer.Elapsed); verifying checksum..." }
+        if (-not $Silent) { Write-Host "Downloaded in $(Format-Duration $downloadTimer.Elapsed). Verifying the download's checksum (a quick integrity and tamper check)..." }
 
         $checksumsAsset = $release.assets | Where-Object name -eq 'checksums.txt'
         if (-not $checksumsAsset) { throw "The latest release ($releaseTag) is missing its checksum file, so the download can't be verified. Installation stopped for your safety -- please contact support." }
@@ -1023,7 +1094,7 @@ try {
 
     $extractDir = Join-Path $env:TEMP "mcpbridge-extract-$([guid]::NewGuid())"
     # Expand-Archive is slow under Windows PowerShell 5.1 -- the second silent stretch of #216.
-    if (-not $Silent) { Write-Host 'Extracting...' }
+    if (-not $Silent) { Write-Host 'Extracting the package (a few seconds)...' }
     Expand-Archive $zipPath -DestinationPath $extractDir -Force
 
     # --- Deploy, per detected+supported version. No Revit is closed, asked, or waited on (PRD §12
@@ -1252,7 +1323,7 @@ if (Test-Path $serverExe) {
 # The one thing a raw script doesn't get for free vs. a real installer -- write it ourselves so
 # uninstall is discoverable the normal Windows way, not "hunt down this script again."
 New-Item -Force $uninstallKeyPath | Out-Null
-Set-ItemProperty $uninstallKeyPath DisplayName 'Revit MCP Bridge'
+Set-ItemProperty $uninstallKeyPath DisplayName 'Revit MCP Connector'
 Set-ItemProperty $uninstallKeyPath DisplayVersion $releaseTag
 Set-ItemProperty $uninstallKeyPath UninstallString "powershell -NoProfile -ExecutionPolicy Bypass -File `"$selfCopyPath`" -Uninstall -Scope $Scope"
 
@@ -1267,7 +1338,7 @@ if (-not $Silent -and $launchVersion.Count -gt 0) {
 $parts = @()
 if ($deployedVersions.Count -gt 0) { $parts += "installed for Revit $($deployedVersions -join ', ')" }
 if ($unchangedVersions.Count -gt 0) { $parts += "add-in already current for Revit $($unchangedVersions -join ', ') (left untouched)" }
-$summary = "Revit MCP Bridge $releaseTag"
+$summary = "Revit MCP Connector $releaseTag"
 if ($parts.Count -gt 0) { $summary += ": $($parts -join '; ')" }
 $summary += "."
 if ($restartVersions.Count -gt 0) { $summary += " Revit $($restartVersions -join ', ') is still running the previous add-in -- restart it to load the new one." }
@@ -1306,7 +1377,7 @@ Write-Host $summary
     # console has already closed. Best-effort: a logging failure must not mask the real one.
     $where = try { $_.InvocationInfo.PositionMessage } catch { '' }
     Write-Host ''
-    Write-Host "Revit MCP Bridge install did not complete: $msg$hint"
+    Write-Host "Revit MCP Connector install did not complete: $msg$hint"
     if ($where) { Write-Host "  Failed at:$where" }
     try {
         $errorLog = Join-Path $env:LocalAppData 'Connectors\Revit\install-errors.log'
