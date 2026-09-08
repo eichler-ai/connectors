@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Excel MCP Bridge add-in manifest. Every URL is written against the hub's -dev origin
+     (https://localhost:8443); the hub rewrites them to its public origin when it serves this file
+     at /excel/manifest.xml, so the same manifest sideloads against a laptop and the hosted hub.
+     The Id is the production add-in's identity: stable across versions, distinct from the POC's. -->
+<OfficeApp xmlns="http://schemas.microsoft.com/office/appforoffice/1.1"
+           xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+           xmlns:bt="http://schemas.microsoft.com/office/officeappbasictypes/1.0"
+           xmlns:ov="http://schemas.microsoft.com/office/taskpaneappversionoverrides"
+           xsi:type="TaskPaneApp">
+  <Id>d9cd8bd0-fb31-48f1-bbbd-997f15140cc4</Id>
+  <Version>0.1.0</Version>
+  <ProviderName>Eichler</ProviderName>
+  <DefaultLocale>en-US</DefaultLocale>
+  <DisplayName DefaultValue="Excel MCP Bridge"/>
+  <Description DefaultValue="Lets Claude and other agents run scripts in this workbook through Eichler Connectors. Scripts come from your own AI session."/>
+  <IconUrl DefaultValue="https://localhost:8443/excel/addin/icon-32.png"/>
+  <HighResolutionIconUrl DefaultValue="https://localhost:8443/excel/addin/icon-64.png"/>
+  <SupportUrl DefaultValue="https://github.com/eichler-ai/connectors"/>
+  <AppDomains>
+    <AppDomain>https://localhost:8443</AppDomain>
+  </AppDomains>
+  <Hosts>
+    <Host Name="Workbook"/>
+  </Hosts>
+  <DefaultSettings>
+    <SourceLocation DefaultValue="https://localhost:8443/excel/addin/taskpane.html"/>
+  </DefaultSettings>
+  <Permissions>ReadWriteDocument</Permissions>
+  <VersionOverrides xmlns="http://schemas.microsoft.com/office/taskpaneappversionoverrides" xsi:type="VersionOverridesV1_0">
+    <Hosts>
+      <Host xsi:type="Workbook">
+        <DesktopFormFactor>
+          <ExtensionPoint xsi:type="PrimaryCommandSurface">
+            <OfficeTab id="TabHome">
+              <Group id="Bridge.Group">
+                <Label resid="Bridge.Group.Label"/>
+                <Icon>
+                  <bt:Image size="16" resid="Bridge.Icon.16"/>
+                  <bt:Image size="32" resid="Bridge.Icon.32"/>
+                  <bt:Image size="80" resid="Bridge.Icon.80"/>
+                </Icon>
+                <Control xsi:type="Button" id="Bridge.Open">
+                  <Label resid="Bridge.Open.Label"/>
+                  <Supertip>
+                    <Title resid="Bridge.Open.Label"/>
+                    <Description resid="Bridge.Open.Tip"/>
+                  </Supertip>
+                  <Icon>
+                    <bt:Image size="16" resid="Bridge.Icon.16"/>
+                    <bt:Image size="32" resid="Bridge.Icon.32"/>
+                    <bt:Image size="80" resid="Bridge.Icon.80"/>
+                  </Icon>
+                  <Action xsi:type="ShowTaskpane">
+                    <TaskpaneId>Bridge.Pane</TaskpaneId>
+                    <SourceLocation resid="Bridge.Url"/>
+                  </Action>
+                </Control>
+              </Group>
+            </OfficeTab>
+          </ExtensionPoint>
+        </DesktopFormFactor>
+      </Host>
+    </Hosts>
+    <Resources>
+      <bt:Images>
+        <bt:Image id="Bridge.Icon.16" DefaultValue="https://localhost:8443/excel/addin/icon-16.png"/>
+        <bt:Image id="Bridge.Icon.32" DefaultValue="https://localhost:8443/excel/addin/icon-32.png"/>
+        <bt:Image id="Bridge.Icon.80" DefaultValue="https://localhost:8443/excel/addin/icon-80.png"/>
+      </bt:Images>
+      <bt:Urls>
+        <bt:Url id="Bridge.Url" DefaultValue="https://localhost:8443/excel/addin/taskpane.html"/>
+      </bt:Urls>
+      <bt:ShortStrings>
+        <bt:String id="Bridge.Group.Label" DefaultValue="MCP Bridge"/>
+        <bt:String id="Bridge.Open.Label" DefaultValue="Open MCP Bridge"/>
+      </bt:ShortStrings>
+      <bt:LongStrings>
+        <bt:String id="Bridge.Open.Tip" DefaultValue="Open the MCP Bridge pane so your AI session can run scripts in this workbook."/>
+      </bt:LongStrings>
+    </Resources>
+  </VersionOverrides>
+</OfficeApp>

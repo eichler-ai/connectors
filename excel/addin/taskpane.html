@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <title>Excel MCP Bridge</title>
+  <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+  <style>
+    body { font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; margin: 0; padding: 12px; color: #222; }
+    h1 { font-size: 15px; margin: 0 0 8px; }
+    #status { padding: 6px 8px; border-radius: 4px; background: #eee; margin-bottom: 8px; }
+    #status.ok { background: #dff5dd; }
+    #status.bad { background: #fde2e2; }
+    #env { color: #666; font-size: 12px; margin-bottom: 8px; white-space: pre-wrap; }
+    #token-row { margin-bottom: 8px; }
+    #token { width: 60%; font-size: 12px; }
+    #log { font: 11px/1.35 ui-monospace, Menlo, monospace; white-space: pre-wrap; background: #fafafa;
+           border: 1px solid #ddd; padding: 6px; max-height: 55vh; overflow: auto; }
+    .err { color: #b00020; }
+    button { font-size: 12px; margin-right: 6px; }
+  </style>
+</head>
+<body>
+  <h1>Excel MCP Bridge</h1>
+  <div id="status">Loading Office.js…</div>
+  <div id="env"></div>
+  <!-- Phase-0 sign-in stand-in: the hub's dev token, kept in this origin's localStorage. Phase 1
+       replaces this row with a sign-in button that stores a bridge token the same way. -->
+  <div id="token-row">
+    <input id="token" type="password" placeholder="MCP Server token" autocomplete="off">
+    <button id="save-token">Save</button>
+  </div>
+  <div>
+    <button id="reconnect">Reconnect</button>
+    <button id="clear">Clear log</button>
+  </div>
+  <p id="log"></p>
+  <script src="taskpane.js"></script>
+</body>
+</html>

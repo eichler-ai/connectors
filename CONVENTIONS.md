@@ -24,6 +24,24 @@ There is no umbrella product name distinct from the connector itself. Refer to t
 
 "The broker" and "the add-in" are acceptable internal/engineering shorthand for the MCP Server and MCP Bridge respectively, used freely in code comments and design docs once the full names are established — they refer to the same components, not sub-parts of them. **User-facing text never uses the shorthand**: ribbon labels, tooltips, dialogs, status windows, and installer output say "MCP Server" and "MCP Bridge" — a Revit user has no idea what "the broker" is (PR #187's ribbon toggle was renamed from "Broker: Local" to "MCP Server: Local" for exactly this reason). Log lines and diagnostics read by developers may keep the shorthand.
 
+### Hosted connectors: the hub
+
+Browser-hosted applications (Excel for the web, Figma, Google Sheets) cannot run a local MCP Server, so
+their connectors are served by the **hub** — the one hosted service at `connectors.eichler.ai`
+(`hub/docs/PRD.md`). The Bridge + Server split still holds: the extension is the `<App> MCP Bridge`,
+and the hub hosts that app's `MCP Server` at `/<slug>/mcp`. Naming follows the table above without
+change:
+
+- In Claude's client config the connector is its lowercase slug (`excel`), exactly as for a local server.
+- User-facing text says "MCP Server" and "MCP Bridge", never "hub" or "broker". The task pane, the
+  manifest and the store listing call the pane "MCP Bridge"; sign-in and consent screens present the
+  service as **Eichler Connectors**.
+- "Hub" is the engineering name for the hosted service — in the PRD, in code, in the repo (`hub/`),
+  in log lines — and is acceptable shorthand wherever "the broker" would be.
+
+The wire protocol between any bridge and the hub (`hub/protocol`) is the same one a desktop
+connector's local server speaks over TCP, so "the bridge protocol" means one thing repo-wide.
+
 ## App-data layout
 
 Every connector's local state lives under a per-connector namespaced root, never a shared unnamespaced one:

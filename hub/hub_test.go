@@ -1,0 +1,313 @@
+package hub_test
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"io/fs"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"testing/fstest"
+	"time"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/eichler-ai/connectors/hub"
+	"github.com/eichler-ai/connectors/hub/bridgetest"
+	"github.com/eichler-ai/connectors/hub/internal/bridge"
+	"github.com/eichler-ai/connectors/hub/protocol"
+	"github.com/eichler-ai/connectors/internal/auth"
+)
+
+const token = "hub-test-token-0123456789"
+
+// stub is the smallest connector that exercises every hub seam.
+type stub struct{ validateErr error }
+
+func (*stub) Slug() string { return "stub" }
+func (*stub) Capabilities() hub.Capabilities {
+	return hub.Capabilities{Bridge: true, Languages: []string{"js"}}
+}
+func (*stub) Tools(reg *hub.ToolRegistry)                  {}
+func (*stub) Skill() []byte                                { return []byte("# stub skill\n") }
+func (s *stub) Validate(context.Context, hub.Script) error { return s.validateErr }
+func (*stub) Static() fs.FS {
+	return fstest.MapFS{
+		"manifest.xml":  {Data: []byte(`<Source>` + hub.DevPublicURL + `/stub/addin/pane.html</Source>`)},
+		"pane.html":     {Data: []byte("<p>pane</p>")},
+		"taskpane.html": {Data: []byte("<p>pane</p>")},
+	}
+}
+
+type fixture struct {
+	srv  *hub.Server
+	http *httptest.Server
+	uid  string
+	stub *stub
+}
+
+func newFixture(t *testing.T, publicURL string) *fixture {
+	t.Helper()
+	a, err := auth.NewDevToken(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, _ := a.VerifyAccessToken(context.Background(), token)
+	st := &stub{}
+	srv, err := hub.NewServer(hub.Options{
+		PublicURL:  publicURL,
+		Auth:       a,
+		Connectors: []hub.Connector{st},
+		Logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Bridge:     bridge.Options{HelloTimeout: time.Second},
+		// Tools driven over the in-memory transport have no bearer token; act
+		// as the dev user, the same identity the bridge hello resolves to.
+		UserOf: func(*mcp.CallToolRequest) (string, bool) { return p.UserID, true },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hs := httptest.NewServer(srv.Handler())
+	t.Cleanup(hs.Close)
+	return &fixture{srv: srv, http: hs, uid: p.UserID, stub: st}
+}
+
+func (f *fixture) dial(t *testing.T, instance string, docs ...protocol.Document) *bridgetest.Fake {
+	t.Helper()
+	fake := bridgetest.Dial(t, bridgetest.WSURL(f.http.URL, "/stub/bridge"), bridgetest.Options{Connector: "stub", Token: token, InstanceID: instance, Documents: docs})
+	deadline := time.Now().Add(5 * time.Second)
+	for len(f.srv.Host().Instances(f.uid, "stub")) < 1 || !hasInstance(f.srv.Host().Instances(f.uid, "stub"), instance) {
+		if time.Now().After(deadline) {
+			t.Fatalf("instance %s never registered", instance)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return fake
+}
+
+func hasInstance(list []hub.Instance, id string) bool {
+	for _, i := range list {
+		if i.InstanceID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func (f *fixture) inMemoryClient(t *testing.T) *mcp.ClientSession {
+	t.Helper()
+	ct, st := mcp.NewInMemoryTransports()
+	ctx := context.Background()
+	if _, err := f.srv.MCPServer("stub").Connect(ctx, st, nil); err != nil {
+		t.Fatal(err)
+	}
+	cs, err := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "0"}, nil).Connect(ctx, ct, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { cs.Close() })
+	return cs
+}
+
+func TestHealthzAndStatic(t *testing.T) {
+	f := newFixture(t, "https://connectors.example")
+	resp, err := http.Get(f.http.URL + "/healthz")
+	if err != nil || resp.StatusCode != 200 {
+		t.Fatalf("healthz: %v %v", err, resp)
+	}
+	resp.Body.Close()
+
+	resp, err = http.Get(f.http.URL + "/stub/manifest.xml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.Header.Get("Content-Type") != "application/xml" || string(body) != `<Source>https://connectors.example/stub/addin/pane.html</Source>` {
+		t.Fatalf("manifest: %s (%s)", body, resp.Header.Get("Content-Type"))
+	}
+
+	resp, err = http.Get(f.http.URL + "/stub/addin/pane.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(body) != "<p>pane</p>" {
+		t.Fatalf("static: %s", body)
+	}
+}
+
+func TestManifestUnchangedInDevMode(t *testing.T) {
+	f := newFixture(t, "")
+	resp, _ := http.Get(f.http.URL + "/stub/manifest.xml")
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !strings.Contains(string(body), hub.DevPublicURL) {
+		t.Fatalf("dev manifest was rewritten: %s", body)
+	}
+}
+
+type bearer struct{ token string }
+
+func (b bearer) RoundTrip(r *http.Request) (*http.Response, error) {
+	if b.token != "" {
+		r.Header.Set("Authorization", "Bearer "+b.token)
+	}
+	return http.DefaultTransport.RoundTrip(r)
+}
+
+func TestMCPEndpointRequiresBearer(t *testing.T) {
+	f := newFixture(t, "")
+	for _, tok := range []string{"", "wrong-token-000000000"} {
+		tr := &mcp.StreamableClientTransport{Endpoint: f.http.URL + "/stub/mcp", HTTPClient: &http.Client{Transport: bearer{tok}}}
+		_, err := mcp.NewClient(&mcp.Implementation{Name: "c", Version: "0"}, nil).Connect(context.Background(), tr, nil)
+		if err == nil || !strings.Contains(err.Error(), "Unauthorized") {
+			t.Fatalf("token %q: connect err %v, want Unauthorized", tok, err)
+		}
+	}
+	tr := &mcp.StreamableClientTransport{Endpoint: f.http.URL + "/stub/mcp", HTTPClient: &http.Client{Transport: bearer{token}}}
+	cs, err := mcp.NewClient(&mcp.Implementation{Name: "c", Version: "0"}, nil).Connect(context.Background(), tr, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+	tools, err := cs.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, tl := range tools.Tools {
+		names = append(names, tl.Name)
+	}
+	if strings.Join(names, ",") != "get_skills,list_instances" {
+		t.Fatalf("tools: %v", names)
+	}
+	// Over HTTP the user comes from the token, not the test override: the
+	// bridge that hello'd with the same token must be visible.
+	f.dial(t, "http-inst")
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "list_instances", Arguments: map[string]any{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out hub.ListInstancesOut
+	json.Unmarshal(mustJSON(res.StructuredContent), &out)
+	if len(out.Instances) != 1 || out.Instances[0].InstanceID != "http-inst" {
+		t.Fatalf("list_instances over HTTP: %+v (isError=%v)", out, res.IsError)
+	}
+}
+
+func mustJSON(v any) []byte {
+	b, _ := json.Marshal(v)
+	return b
+}
+
+func TestGenericToolsInMemory(t *testing.T) {
+	f := newFixture(t, "")
+	cs := f.inMemoryClient(t)
+	ctx := context.Background()
+
+	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "get_skills", Arguments: map[string]any{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if txt := res.Content[0].(*mcp.TextContent).Text; txt != "# stub skill\n" {
+		t.Fatalf("get_skills text: %q", txt)
+	}
+	var sk hub.GetSkillsOut
+	json.Unmarshal(mustJSON(res.StructuredContent), &sk)
+	if sk.Connector != "stub" || sk.HubVersion != "dev" {
+		t.Fatalf("get_skills structured: %+v", sk)
+	}
+
+	res, _ = cs.CallTool(ctx, &mcp.CallToolParams{Name: "list_instances", Arguments: map[string]any{}})
+	var out hub.ListInstancesOut
+	json.Unmarshal(mustJSON(res.StructuredContent), &out)
+	if len(out.Instances) != 0 || res.IsError {
+		t.Fatalf("empty registry: %+v", out)
+	}
+
+	f.dial(t, "i1", protocol.Document{ID: "d", Title: "Doc", Active: true, Detail: map[string]any{"sheet": "S"}})
+	res, _ = cs.CallTool(ctx, &mcp.CallToolParams{Name: "list_instances", Arguments: map[string]any{}})
+	json.Unmarshal(mustJSON(res.StructuredContent), &out)
+	if len(out.Instances) != 1 || out.Instances[0].InstanceID != "i1" || out.Instances[0].Host.App != "Excel" ||
+		len(out.Instances[0].Documents) != 1 || out.Instances[0].Documents[0].Detail["sheet"] != "S" {
+		t.Fatalf("list_instances: %s", mustJSON(out))
+	}
+}
+
+func TestExecResolution(t *testing.T) {
+	f := newFixture(t, "")
+	h := f.srv.Host()
+	ctx := context.Background()
+	script := hub.Script{Language: "js", Source: "x", Timeout: time.Second}
+
+	if _, rec := h.Exec(ctx, f.uid, f.stub, hub.Target{}, script); rec == nil || rec.Code != "no-bridge" {
+		t.Fatalf("no bridge: %+v", rec)
+	}
+	a := f.dial(t, "a", protocol.Document{ID: "d1", Active: true})
+	res, rec := h.Exec(ctx, f.uid, f.stub, hub.Target{}, script)
+	if rec != nil || string(res.Reply.Result) != `"x"` || res.Instance.InstanceID != "a" || res.Document.ID != "d1" {
+		t.Fatalf("single bridge: %+v %+v", res, rec)
+	}
+	if _, rec := h.Exec(ctx, f.uid, f.stub, hub.Target{DocumentID: "nope"}, script); rec == nil || rec.Code != "unknown-document" {
+		t.Fatalf("unknown document: %+v", rec)
+	}
+	if _, rec := h.Exec(ctx, f.uid, f.stub, hub.Target{InstanceID: "zzz"}, script); rec == nil || rec.Code != "unknown-instance" {
+		t.Fatalf("unknown instance: %+v", rec)
+	}
+	f.dial(t, "b")
+	if _, rec := h.Exec(ctx, f.uid, f.stub, hub.Target{}, script); rec == nil || rec.Code != "ambiguous-instance" {
+		t.Fatalf("two bridges: %+v", rec)
+	}
+	if _, rec := h.Exec(ctx, f.uid, f.stub, hub.Target{InstanceID: "b"}, script); rec != nil {
+		t.Fatalf("explicit instance: %+v", rec)
+	}
+	// Another user sees none of them.
+	if _, rec := h.Exec(ctx, "someone-else", f.stub, hub.Target{}, script); rec == nil || rec.Code != "no-bridge" {
+		t.Fatalf("other user: %+v", rec)
+	}
+
+	f.stub.validateErr = errors.New("too big")
+	if _, rec := h.Exec(ctx, f.uid, f.stub, hub.Target{InstanceID: "a"}, script); rec == nil || rec.Code != "invalid-script" {
+		t.Fatalf("validate: %+v", rec)
+	}
+	f.stub.validateErr = nil
+	if _, rec := h.Exec(ctx, f.uid, f.stub, hub.Target{InstanceID: "a"}, hub.Script{Source: "x", Timeout: time.Hour}); rec == nil || rec.Code != "invalid-timeout" {
+		t.Fatalf("timeout cap: %+v", rec)
+	}
+
+	a.Handle = bridgetest.NoReply
+	_, rec = h.Exec(ctx, f.uid, f.stub, hub.Target{InstanceID: "a"}, hub.Script{Source: "hang", Timeout: 50 * time.Millisecond})
+	if rec == nil || rec.Code != "timeout" || rec.Detail["timeout_ms"] != int64(50) {
+		t.Fatalf("timeout: %+v", rec)
+	}
+	a.Close()
+	deadline := time.Now().Add(5 * time.Second)
+	for hasInstance(h.Instances(f.uid, "stub"), "a") && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if _, rec := h.Exec(ctx, f.uid, f.stub, hub.Target{InstanceID: "a"}, script); rec == nil || rec.Code != "unknown-instance" {
+		t.Fatalf("after disconnect: %+v", rec)
+	}
+}
+
+func TestNewServerValidation(t *testing.T) {
+	a, _ := auth.NewDevToken(token)
+	if _, err := hub.NewServer(hub.Options{Connectors: []hub.Connector{&stub{}}}); err == nil {
+		t.Fatal("no auth accepted")
+	}
+	if _, err := hub.NewServer(hub.Options{Auth: a}); err == nil {
+		t.Fatal("no connectors accepted")
+	}
+	if _, err := hub.NewServer(hub.Options{Auth: a, Connectors: []hub.Connector{&stub{}, &stub{}}}); err == nil {
+		t.Fatal("duplicate slug accepted")
+	}
+	if _, err := hub.NewServer(hub.Options{Auth: a, Connectors: []hub.Connector{&stub{}}, PublicURL: "connectors.example"}); err == nil {
+		t.Fatal("relative public URL accepted")
+	}
+}
