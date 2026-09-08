@@ -259,6 +259,58 @@ function New-PackageManifest([string]$StageDir, [string]$Version, $HowToCorpus) 
     $manifest
 }
 
+function Split-AddinSharedPayload([string]$StageDir) {
+    # Download-size dedup (issue B1): a file byte-identical (same relative path AND SHA256) across EVERY
+    # addin-<year>/ folder is shipped ONCE in addin-shared/ and removed from each year folder. At deploy
+    # time Install-AddinVersionPayload copies addin-shared/ + addin-<year>/ back together, so the on-disk
+    # layout -- and therefore the shim/deps.json resolution -- is byte-for-byte what it was; only the zip
+    # shrinks. Measured on v0.1.6: 68 of 69.8 MB per year is identical (Roslyn, SQLite, locale
+    # satellites, runtimes/); only the project's own DLLs + deps.json differ. Call it on the release
+    # stage BEFORE New-PackageManifest, which then hashes addin-shared as a component automatically.
+    # A no-op (returns $null) unless at least two addin-<year>/ folders exist -- a single-year release
+    # has nothing to share, and everything downstream treats addin-shared as optional.
+    $yearDirs = @(Get-ChildItem $StageDir -Directory | Where-Object { $_.Name -match '^addin-\d{4}$' } | Sort-Object Name)
+    if ($yearDirs.Count -lt 2) { return $null }
+
+    # relpath -> sha256 per year; a file is shareable when present in every year with the same hash.
+    $perYear = [ordered]@{}
+    foreach ($d in $yearDirs) {
+        $m = @{}
+        Get-ChildItem $d.FullName -Recurse -File | ForEach-Object {
+            $rel = $_.FullName.Substring($d.FullName.Length).TrimStart('\', '/').Replace('\', '/')
+            $m[$rel] = (Get-FileHash $_.FullName -Algorithm SHA256).Hash
+        }
+        $perYear[$d.Name] = $m
+    }
+    $first = $perYear[$yearDirs[0].Name]
+    $shareable = @($first.Keys | Where-Object {
+        $rel = $_; $h = $first[$rel]
+        @($yearDirs | Where-Object { $perYear[$_.Name][$rel] -ne $h }).Count -eq 0
+    })
+    if ($shareable.Count -eq 0) { return $null }
+
+    $sharedDir = Join-Path $StageDir 'addin-shared'
+    New-Item -ItemType Directory -Force -Path $sharedDir | Out-Null
+    foreach ($rel in $shareable) {
+        # $rel keeps forward slashes (as Get-DirectoryContentHash uses); Join-Path/Move-Item accept them
+        # on Windows too, and on the Linux CI leg a backslash would be a literal filename char, not a
+        # separator -- so never convert.
+        $dst = Join-Path $sharedDir $rel
+        New-Item -ItemType Directory -Force -Path (Split-Path $dst) | Out-Null
+        Move-Item (Join-Path $yearDirs[0].FullName $rel) $dst -Force
+        for ($i = 1; $i -lt $yearDirs.Count; $i++) {
+            Remove-Item (Join-Path $yearDirs[$i].FullName $rel) -Force -ErrorAction SilentlyContinue
+        }
+    }
+    # Prune subfolders the moves left empty (runtimes\, locale folders), deepest first.
+    foreach ($d in $yearDirs) {
+        Get-ChildItem $d.FullName -Recurse -Directory | Sort-Object { $_.FullName.Length } -Descending | ForEach-Object {
+            if (-not (Get-ChildItem $_.FullName -Force -ErrorAction SilentlyContinue)) { Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue }
+        }
+    }
+    [pscustomobject]@{ SharedDir = $sharedDir; FileCount = $shareable.Count }
+}
+
 function Read-PackageManifest([string]$ExtractDir) {
     $path = Join-Path $ExtractDir 'manifest.json'
     if (-not (Test-Path $path)) { return $null }
@@ -542,15 +594,23 @@ function Test-VersionedAddinInstalled([string]$AppDir, [string]$AddinsDir, [stri
     Test-Path (Join-Path (Get-AddinVersionDir $AppDir ([string]$p.version) $RevitVersion) 'MCPBridge.AddIn.dll')
 }
 
-function Install-AddinVersionPayload([string]$PayloadDir, [string]$AppDir, [string]$Version, [string]$RevitVersion) {
+function Install-AddinVersionPayload([string]$PayloadDir, [string]$AppDir, [string]$Version, [string]$RevitVersion, [string]$SharedDir) {
     # Lays down addin\<Version>\<year>\ from the release's addin-<year>/ payload, verbatim. Touches
     # neither Addins\<year> nor the pointer, so a running Revit is never contended -- a NEW version
     # always lands in a folder nothing has mapped. Only re-staging the SAME version while a Revit runs it
     # (a dev -LocalPackagePath zip whose manifest names a fixed version; never a release, whose tag is
     # new each time) hits the mapped files, and that is reported for what it is.
+    #
+    # $SharedDir is the release's addin-shared/ (Split-AddinSharedPayload, issue B1) -- the deps shared
+    # across years, shipped once. It is copied FIRST, then the year payload on top, reconstituting the
+    # full year folder that pre-dedup releases shipped whole. Optional: a single-year release (or an
+    # old-style local package) has no addin-shared/, and the year payload is already complete.
     $dest = Get-AddinVersionDir $AppDir $Version $RevitVersion
     New-Item -ItemType Directory -Force -Path $dest | Out-Null
     try {
+        if ($SharedDir -and (Test-Path $SharedDir)) {
+            Copy-Item "$SharedDir\*" $dest -Force -Recurse -ErrorAction Stop
+        }
         Copy-Item "$PayloadDir\*" $dest -Force -Recurse -ErrorAction Stop
     } catch {
         throw "Could not write the Revit $RevitVersion add-in into $dest ($($_.Exception.Message)). A running Revit $RevitVersion is loaded from that same version folder; close it and re-run, or give the package a new version."
@@ -1076,11 +1136,17 @@ try {
             continue
         }
         $shimPayloadDir = Join-Path $extractDir "shim-$version"
+        $sharedDir = Join-Path $extractDir 'addin-shared'
         $addinsDir = Get-AddinsDir $version $Scope
-        if (Test-ComponentUnchanged $packageManifest $marker "addin-$version" (Test-VersionedAddinInstalled $appDir $addinsDir $version)) {
+        $yearInstalled = Test-VersionedAddinInstalled $appDir $addinsDir $version
+        # "Unchanged" has to cover the shared deps too (issue B1): the year payload now holds only the
+        # project's own DLLs, so a shared-only change (a Roslyn bump, say) would otherwise read as
+        # unchanged and never redeploy. addin-shared is optional -- a single-year release has none.
+        $sharedUnchanged = (-not (Test-Path $sharedDir)) -or (Test-ComponentUnchanged $packageManifest $marker 'addin-shared' $yearInstalled)
+        if ((Test-ComponentUnchanged $packageManifest $marker "addin-$version" $yearInstalled) -and $sharedUnchanged) {
             # Same bytes as what is installed: nothing to deploy.
             $unchangedVersions += $version
-            $shimYears[$version] = @{ Payload = $payloadDir; Shim = $shimPayloadDir; Changed = $false }
+            $shimYears[$version] = @{ Payload = $payloadDir; Shim = $shimPayloadDir; Shared = $sharedDir; Changed = $false }
             continue
         }
 
@@ -1093,18 +1159,23 @@ try {
         # Today the .xml arrives via MSBuild's default related-file copying for a transitive
         # ProjectReference. That is exactly the kind of default that changes silently under a toolchain
         # upgrade, so it is asserted here rather than assumed. Fails the install loudly instead.
+        # The sidecar may live in the year payload or, when it is identical across years (it is -- same
+        # source), in addin-shared/ (issue B1). Look in both before declaring it missing.
         $connectorDll = Join-Path $payloadDir 'Eichler.Connectors.Revit.dll'
-        $connectorXml = Join-Path $payloadDir 'Eichler.Connectors.Revit.xml'
-        if ((Test-Path $connectorDll) -and -not (Test-Path $connectorXml)) {
+        $xmlInYear = Test-Path (Join-Path $payloadDir 'Eichler.Connectors.Revit.xml')
+        $xmlInShared = (Test-Path $sharedDir) -and (Test-Path (Join-Path $sharedDir 'Eichler.Connectors.Revit.xml'))
+        if ((Test-Path $connectorDll) -and -not $xmlInYear -and -not $xmlInShared) {
             throw "The Revit $version payload has Eichler.Connectors.Revit.dll but no matching .xml doc sidecar. Installing it would make the connector's own API discoverable with empty summaries. This is a packaging bug -- do not work around it by deleting the DLL."
         }
 
         # §4.4: the payload lands in a folder nothing has mapped, so no Revit is touched, asked, or
         # closed here. The pointer flips after this loop; the Addins\<year> shim refresh is pass 2.
-        Install-AddinVersionPayload $payloadDir $appDir $releaseTag $version
+        Install-AddinVersionPayload $payloadDir $appDir $releaseTag $version $sharedDir
         $h = Get-ManifestComponentHash $packageManifest "addin-$version"
         if ($h) { $installedComponents["addin-$version"] = $h }
-        $shimYears[$version] = @{ Payload = $payloadDir; Shim = $shimPayloadDir; Changed = $true }
+        $sharedHash = Get-ManifestComponentHash $packageManifest 'addin-shared'
+        if ($sharedHash) { $installedComponents['addin-shared'] = $sharedHash }
+        $shimYears[$version] = @{ Payload = $payloadDir; Shim = $shimPayloadDir; Shared = $sharedDir; Changed = $true }
         $flipPointer = $true
     }
 
@@ -1117,7 +1188,7 @@ try {
         foreach ($version in @($shimYears.Keys)) {
             if ($shimYears[$version].Changed) { continue }
             if (-not (Test-Path (Join-Path (Get-AddinVersionDir $appDir $releaseTag $version) 'MCPBridge.AddIn.dll'))) {
-                Install-AddinVersionPayload $shimYears[$version].Payload $appDir $releaseTag $version
+                Install-AddinVersionPayload $shimYears[$version].Payload $appDir $releaseTag $version $shimYears[$version].Shared
             }
         }
         Write-AddinPointer $appDir $releaseTag

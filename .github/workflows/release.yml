@@ -277,6 +277,12 @@ jobs:
           $buildInfo = (& revit\mcp-server\mcp-server.exe -build-info) | ConvertFrom-Json
           if (-not $buildInfo.howto_corpus) { throw "the release broker reports no how-to corpus: $($buildInfo.howto_corpus_error)" }
           . .\revit\install.ps1 -LoadFunctionsOnly
+          # Issue B1: dedup the per-year add-in payloads into addin-shared/ before hashing, so the zip
+          # ships the ~68 MB of deps common to every Revit year ONCE instead of per year. install.ps1
+          # copies addin-shared/ + addin-<year>/ back together at deploy time, so the on-disk layout is
+          # unchanged. New-PackageManifest below then hashes addin-shared as its own component.
+          $split = Split-AddinSharedPayload $stage.FullName
+          if ($split) { Write-Host "addin-shared: $($split.FileCount) files shared across years" }
           $manifest = New-PackageManifest $stage.FullName $env:RELEASE_TAG $buildInfo.howto_corpus
           $manifest | ConvertTo-Json -Depth 5 | Out-File "$($stage.FullName)\manifest.json" -Encoding utf8
           Get-Content "$($stage.FullName)\manifest.json" | Write-Host
