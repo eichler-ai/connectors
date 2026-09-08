@@ -1,14 +1,14 @@
-module github.com/eichler-ai/connectors/hub
+module github.com/eichler-ai/connectors/excel
 
 go 1.25.0
 
 require (
-	github.com/coder/websocket v1.8.14
-	github.com/eichler-ai/connectors/excel v0.0.0
+	github.com/eichler-ai/connectors/hub v0.0.0
 	github.com/modelcontextprotocol/go-sdk v1.7.0
 )
 
 require (
+	github.com/coder/websocket v1.8.14 // indirect
 	github.com/google/jsonschema-go v0.4.3 // indirect
 	github.com/segmentio/asm v1.1.3 // indirect
 	github.com/segmentio/encoding v0.5.4 // indirect
@@ -19,5 +19,7 @@ require (
 	golang.org/x/time v0.15.0 // indirect
 )
 
-// See excel/go.mod: the connector and the hub are one program in two modules.
-replace github.com/eichler-ai/connectors/excel => ../excel
+// The hub and its connectors are one program in two modules: the connector
+// implements the hub's interface and the hub's binary links the connector.
+// Both sides point at the sibling directory; neither is published on its own.
+replace github.com/eichler-ai/connectors/hub => ../hub
