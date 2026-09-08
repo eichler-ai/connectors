@@ -611,11 +611,11 @@ Describe 'Uninstall result (issue #215): a running MCP client server is reported
         @(Get-SurvivingPaths @($app, $data)).Count | Should -Be 0
     }
     It 'reports clean when nothing is running and nothing survived' {
-        Format-UninstallResult @() 0 @() | Should -Be 'Revit MCP Bridge uninstalled.'
+        Format-UninstallResult @() 0 @() | Should -Be 'Revit MCP Connector uninstalled.'
     }
     It 'names the running client server, the quit-fully recovery and the surviving paths; does NOT claim a clean uninstall' {
         $msg = Format-UninstallResult @() 3 @($app, $data)
-        $msg | Should -Not -Match 'Bridge uninstalled\.'
+        $msg | Should -Not -Match 'Connector uninstalled\.'
         $msg | Should -Match 'still has the Revit MCP server running \(3 processes\)'
         $msg | Should -Match 'quit the client fully'
         $msg | Should -Match 'tray icon -> Quit'
@@ -628,7 +628,7 @@ Describe 'Uninstall result (issue #215): a running MCP client server is reported
     }
     It 'a surviving path with no nameable holder (e.g. a transient AV lock) still asks for a re-run instead of claiming success' {
         $msg = Format-UninstallResult @() 0 @($app)
-        $msg | Should -Not -Match 'Bridge uninstalled\.'
+        $msg | Should -Not -Match 'Connector uninstalled\.'
         $msg | Should -Match 'Some files could not be removed'
         $msg | Should -Match ([regex]::Escape($app))
     }
@@ -639,14 +639,32 @@ Describe 'Uninstall result (issue #215): a running MCP client server is reported
     }
 }
 
-Describe 'Download progress lines (issue #216)' {
-    It 'names the release and its size in MB from the asset object' {
+Describe 'Download announcement, progress and duration' {
+    It 'names the release and its size in MB, and sets the timing expectation' {
         Format-DownloadAnnouncement ([pscustomobject]@{ name = 'mcpbridge-release.zip'; size = 132120576 }) 'v0.1.5' |
-            Should -Be 'Downloading Revit MCP Bridge v0.1.5 (126 MB) from GitHub...'
+            Should -Be 'Downloading the Revit MCP Connector v0.1.5 (126 MB) from GitHub. This is the largest step -- on a slow connection it can take a few minutes; live progress is shown below.'
     }
     It 'omits the size when the asset does not carry one' {
         Format-DownloadAnnouncement ([pscustomobject]@{ name = 'mcpbridge-release.zip' }) 'v0.1.5' |
-            Should -Be 'Downloading Revit MCP Bridge v0.1.5 from GitHub...'
+            Should -Be 'Downloading the Revit MCP Connector v0.1.5 from GitHub. This is the largest step -- on a slow connection it can take a few minutes; live progress is shown below.'
+    }
+    It 'Format-DownloadProgress shows floored percent, MB read of total, and rate' {
+        # 63 MB of 126 MB in 10s -> 50% - 63.0 of 126 MB - 6.3 MB/s
+        Format-DownloadProgress (66060288) (132120576) ([timespan]::FromSeconds(10)) |
+            Should -Be '50% - 63.0 of 126 MB - 6.3 MB/s'
+    }
+    It 'Format-DownloadProgress floors the percentage rather than rounding up' {
+        # 1 byte short of 100% must not read as 100%
+        Format-DownloadProgress (132120575) (132120576) ([timespan]::FromSeconds(20)) |
+            Should -Match '^99% - '
+    }
+    It 'Format-DownloadProgress omits the percentage when the total size is unknown' {
+        Format-DownloadProgress (10485760) 0 ([timespan]::FromSeconds(5)) |
+            Should -Be '10.0 MB - 2.0 MB/s'
+    }
+    It 'Format-DownloadProgress does not divide by zero before any time has elapsed' {
+        Format-DownloadProgress (1048576) (132120576) ([timespan]::Zero) |
+            Should -Be '0% - 1.0 of 126 MB - --'
     }
     It 'Format-Duration reads as seconds under a minute and m/ss above' {
         Format-Duration ([timespan]::FromSeconds(42)) | Should -Be '42s'
