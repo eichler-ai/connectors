@@ -74,6 +74,44 @@ func TestExportEnvelopeRoundTrip(t *testing.T) {
 	}
 }
 
+func TestImportEnvelopeRoundTrip(t *testing.T) {
+	msg := New(MethodImport, Import{ID: "m1", URL: "https://files.example/staged.xlsx", DocumentID: "wb1",
+		Options: ImportOptions{SheetNamesToInsert: []string{"Data"}, PositionType: "End"}})
+	data, err := json.Marshal(msg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire map[string]json.RawMessage
+	if err := json.Unmarshal(data, &wire); err != nil {
+		t.Fatal(err)
+	}
+	if string(wire["jsonrpc"]) != `"2.0"` || string(wire["method"]) != `"import"` || wire["params"] == nil {
+		t.Fatalf("wire shape: %s", data)
+	}
+	var back Message
+	if err := json.Unmarshal(data, &back); err != nil {
+		t.Fatal(err)
+	}
+	var im Import
+	if err := back.Decode(&im); err != nil {
+		t.Fatal(err)
+	}
+	if im.ID != "m1" || im.URL != "https://files.example/staged.xlsx" || im.DocumentID != "wb1" ||
+		len(im.Options.SheetNamesToInsert) != 1 || im.Options.SheetNamesToInsert[0] != "Data" || im.Options.PositionType != "End" {
+		t.Fatalf("decoded: %+v", im)
+	}
+	// document_id is omitempty: importing into the active document names
+	// none. options is always present (a struct value is never "empty" to
+	// encoding/json) — the hub always fills it with a concrete default.
+	data, _ = json.Marshal(Import{ID: "m2", URL: "https://files.example/x.xlsx"})
+	if strings.Contains(string(data), "document_id") {
+		t.Fatalf("empty document_id was not omitted: %s", data)
+	}
+	if !strings.Contains(string(data), `"options":{}`) {
+		t.Fatalf("options was unexpectedly omitted: %s", data)
+	}
+}
+
 func TestFieldNamesAreSnakeCase(t *testing.T) {
 	// §08 names fields in snake_case; a stray Go-style name would silently
 	// break the JavaScript side.

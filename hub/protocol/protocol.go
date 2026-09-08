@@ -225,10 +225,14 @@ type ImportOptions struct {
 // GCS → signed URL → client). ID correlates the eventual `result` exactly
 // like Exec's; DocumentID selects a document as in Exec.
 type Import struct {
-	ID         string        `json:"id"`
-	DocumentID string        `json:"document_id,omitempty"`
-	URL        string        `json:"url"`
-	Options    ImportOptions `json:"options,omitempty"`
+	ID         string `json:"id"`
+	DocumentID string `json:"document_id,omitempty"`
+	URL        string `json:"url"`
+	// Options is always sent, never omitted: encoding/json's omitempty does
+	// not apply to a struct value, and the hub always fills PositionType with
+	// a concrete default (§10 reversed: "after the last existing sheet") so
+	// there is no meaningful "absent options" to distinguish from "defaults".
+	Options ImportOptions `json:"options"`
 }
 
 // Cancel asks the bridge to abandon a running exec. Best effort: a bridge that
