@@ -504,6 +504,61 @@ func TestExportTimeoutDropsLateUpload(t *testing.T) {
 	}
 }
 
+// TestImportRoundTrip: import has no upload leg to correlate — the hub
+// already staged the bytes before sending `import` — so the pane's own
+// `result` (as if it fetched the signed URL and inserted the sheets) is
+// what completes the wait, exactly like Exec's.
+func TestImportRoundTrip(t *testing.T) {
+	f := newFixture(t, bridge.Options{})
+	fake := bridgetest.Dial(t, f.url, bridgetest.Options{Token: token, InstanceID: "a"})
+	done := make(chan struct{})
+	go func() {
+		msgs := fake.WaitFor(protocol.MethodImport, 1, 2*time.Second)
+		var im protocol.Import
+		if err := msgs[0].Decode(&im); err != nil {
+			t.Error(err)
+			return
+		}
+		if im.URL != "https://files.example/staged.xlsx" || im.Options.PositionType != "End" {
+			t.Errorf("import fields: %+v", im)
+		}
+		fake.Send(protocol.New(protocol.MethodResult, protocol.Result{ID: im.ID, OK: true,
+			Result: json.RawMessage(`{"added_sheets":["Data"],"all_sheets":["Sheet1","Data"]}`), DurationMs: 5}))
+		close(done)
+	}()
+	b := f.waitRegistered(t, "a")
+	res, err := f.svc.Import(context.Background(), b, bridge.ImportRequest{URL: "https://files.example/staged.xlsx", Options: protocol.ImportOptions{PositionType: "End"}, Timeout: 2 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-done
+	if !res.OK || string(res.Result) != `{"added_sheets":["Data"],"all_sheets":["Sheet1","Data"]}` {
+		t.Fatalf("import result: %+v", res)
+	}
+}
+
+// TestImportBridgeErrorPropagates: the pane's error result (fetch failed, or
+// Office.js rejected the file) reaches Import exactly like a failed exec.
+func TestImportBridgeErrorPropagates(t *testing.T) {
+	f := newFixture(t, bridge.Options{})
+	fake := bridgetest.Dial(t, f.url, bridgetest.Options{Token: token, InstanceID: "a"})
+	go func() {
+		msgs := fake.WaitFor(protocol.MethodImport, 1, 2*time.Second)
+		var im protocol.Import
+		msgs[0].Decode(&im)
+		fake.Send(protocol.New(protocol.MethodResult, protocol.Result{ID: im.ID, OK: false,
+			Error: &protocol.ScriptError{Name: "RichApi.Error", Code: "InvalidArgument", Message: "the file is not valid"}}))
+	}()
+	b := f.waitRegistered(t, "a")
+	res, err := f.svc.Import(context.Background(), b, bridge.ImportRequest{URL: "https://files.example/staged.xlsx", Timeout: 2 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.OK || res.Error == nil || res.Error.Code != "InvalidArgument" {
+		t.Fatalf("bridge error not propagated: %+v", res)
+	}
+}
+
 func TestNoticeAttachesToInFlightExec(t *testing.T) {
 	f := newFixture(t, bridge.Options{})
 	fake := bridgetest.Dial(t, f.url, bridgetest.Options{Token: token, InstanceID: "a"})

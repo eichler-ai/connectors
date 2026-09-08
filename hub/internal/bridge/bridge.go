@@ -420,7 +420,33 @@ func (s *Service) Export(ctx context.Context, b *registry.Bridge, req ExportRequ
 	return s.roundTrip(ctx, b, id, msg, req.Timeout, req.Format)
 }
 
-// roundTrip is Exec and Export's shared send-and-wait: register a pending
+// ImportRequest is what a connector asks the hub to have the bridge insert
+// into the open workbook (§10/§11, reversed): a signed URL into the file
+// store the hub already staged the bytes at, and the Office insert options.
+type ImportRequest struct {
+	DocumentID string
+	URL        string
+	Options    protocol.ImportOptions
+	Timeout    time.Duration
+}
+
+// Import sends `import` to b and waits for its outcome: the pane's own
+// `result` — ok with the resulting sheet names, or an error such as a failed
+// fetch or a malformed xlsx Office.js rejected — the timeout, or ctx. Unlike
+// Export there is no upload leg to correlate: the hub already has the bytes
+// staged before this is ever sent, so an import id is a plain roundTrip like
+// Exec's (format is empty; UploadAuthorize's format check exists only for
+// export ids and never sees this one).
+func (s *Service) Import(ctx context.Context, b *registry.Bridge, req ImportRequest) (protocol.Result, error) {
+	if req.Timeout <= 0 {
+		req.Timeout = defaultExecTimeout
+	}
+	id := fmt.Sprintf("m%d", s.seq.Add(1))
+	msg := protocol.New(protocol.MethodImport, protocol.Import{ID: id, DocumentID: req.DocumentID, URL: req.URL, Options: req.Options})
+	return s.roundTrip(ctx, b, id, msg, req.Timeout, "")
+}
+
+// roundTrip is Exec, Export and Import's shared send-and-wait: register a pending
 // entry, send msg, and wait for its result channel, timeout, or ctx. format
 // is empty for an exec (UploadAuthorize refuses any pending entry with no
 // format, so an exec id can never be mistaken for an export's).

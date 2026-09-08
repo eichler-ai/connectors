@@ -3,12 +3,14 @@ package connector
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"regexp"
 	"strings"
 	"sync"
@@ -311,7 +313,7 @@ func TestToolSurface(t *testing.T) {
 	for _, tl := range tools.Tools {
 		names = append(names, tl.Name)
 	}
-	if got := strings.Join(names, ","); got != "execute_script,export_file,get_skills,get_status,list_instances" {
+	if got := strings.Join(names, ","); got != "execute_script,export_file,get_skills,get_status,import_workbook,list_instances" {
 		t.Fatalf("tools: %s", got)
 	}
 }
@@ -453,6 +455,167 @@ func TestExportFileNoBridge(t *testing.T) {
 	json.Unmarshal(b, &out)
 	if !res.IsError || out.Error == nil || out.Error.Code != "no-bridge" {
 		t.Fatalf("no bridge: isError=%v %+v", res.IsError, out)
+	}
+}
+
+// sampleXLSX is a genuine, minimal but well-formed xlsx fixture (one sheet
+// "Data") — insertWorksheetsFromBase64 rejects a hand-assembled or truncated
+// zip with InvalidArgument (live-verified 2026-09-08), so import_workbook's
+// tests exercise a real file, not a fake ZIP signature.
+func sampleXLSX(t *testing.T) []byte {
+	t.Helper()
+	b, err := os.ReadFile("testdata/sample.xlsx")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// importOutOf reads a CallTool result's structured content as
+// ImportWorkbookOut, the same shape f.call uses for execute_script's own type.
+func importOutOf(t *testing.T, res *mcp.CallToolResult) ImportWorkbookOut {
+	t.Helper()
+	var out ImportWorkbookOut
+	b, _ := json.Marshal(res.StructuredContent)
+	if err := json.Unmarshal(b, &out); err != nil {
+		t.Fatalf("import_workbook structured output: %v (%s)", err, b)
+	}
+	return out
+}
+
+// runImport plays the pane's half of one import in its own goroutine (the
+// import_workbook call it races against blocks until the reply lands):
+// waits for the `import` message, downloads the signed URL to prove the
+// hub actually staged the bytes there, then replies as if it had inserted
+// added into the workbook's existing sheets.
+func runImport(t *testing.T, f *fixture, fake *bridgetest.Fake, wantBytes []byte, added []string, existing []string) {
+	t.Helper()
+	msgs := fake.WaitFor(protocol.MethodImport, 1, 5*time.Second)
+	var im protocol.Import
+	if err := msgs[len(msgs)-1].Decode(&im); err != nil {
+		t.Errorf("decode import: %v", err)
+		return
+	}
+	resp, err := http.Get(im.URL)
+	if err != nil {
+		t.Errorf("fetch signed url: %v", err)
+		return
+	}
+	got, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(got) != string(wantBytes) {
+		t.Errorf("staged bytes: got %d bytes, want %d", len(got), len(wantBytes))
+	}
+	all := append(append([]string(nil), existing...), added...)
+	payload, _ := json.Marshal(map[string]any{"added_sheets": added, "all_sheets": all})
+	fake.Send(protocol.New(protocol.MethodResult, protocol.Result{ID: im.ID, OK: true, Result: payload}))
+}
+
+func TestImportWorkbookRoundTrip(t *testing.T) {
+	f := newFixture(t)
+	fake := f.connect(t, &miniExcel{workbook: "Book1.xlsx", sheet: "Sheet1"})
+	xlsx := sampleXLSX(t)
+	content := base64.StdEncoding.EncodeToString(xlsx)
+	go runImport(t, f, fake, xlsx, []string{"Data"}, []string{"Sheet1"})
+
+	res, err := f.cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "import_workbook", Arguments: map[string]any{"content_base64": content}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := importOutOf(t, res)
+	if res.IsError || out.Status != "ok" || out.Bytes != int64(len(xlsx)) || out.InstanceID != "pane-1" {
+		t.Fatalf("import_workbook: isError=%v %+v", res.IsError, out)
+	}
+	if len(out.AddedSheets) != 1 || out.AddedSheets[0] != "Data" || len(out.AllSheets) != 2 {
+		t.Fatalf("sheets: %+v", out)
+	}
+}
+
+func TestImportWorkbookNotXLSX(t *testing.T) {
+	f := newFixture(t)
+	f.connect(t, &miniExcel{workbook: "Book1.xlsx", sheet: "Sheet1"})
+	res, err := f.cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "import_workbook",
+		Arguments: map[string]any{"content_base64": base64.StdEncoding.EncodeToString([]byte("not a real xlsx"))}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := importOutOf(t, res)
+	if !res.IsError || out.Error == nil || out.Error.Code != "not-an-xlsx" {
+		t.Fatalf("not-an-xlsx: isError=%v %+v", res.IsError, out)
+	}
+}
+
+func TestImportWorkbookOversize(t *testing.T) {
+	f := newFixture(t)
+	f.connect(t, &miniExcel{workbook: "Book1.xlsx", sheet: "Sheet1"})
+	big := base64.StdEncoding.EncodeToString(make([]byte, 11<<20))
+	res, err := f.cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "import_workbook", Arguments: map[string]any{"content_base64": big}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := importOutOf(t, res)
+	if !res.IsError || out.Error == nil || out.Error.Code != "too-large" {
+		t.Fatalf("oversize: isError=%v %+v", res.IsError, out)
+	}
+}
+
+// TestImportWorkbookExpectMismatchFailsBeforeInsert: expect.workbook is
+// checked before the source is even decoded/staged — no `import` message is
+// ever sent to the fake bridge, so WaitFor on the fake would hang forever if
+// this regressed; a short deadline on Received proves nothing arrived.
+func TestImportWorkbookExpectMismatchFailsBeforeInsert(t *testing.T) {
+	f := newFixture(t)
+	fake := f.connect(t, &miniExcel{workbook: "Book1.xlsx", sheet: "Sheet1"})
+	xlsx := sampleXLSX(t)
+	res, err := f.cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "import_workbook",
+		Arguments: map[string]any{"content_base64": base64.StdEncoding.EncodeToString(xlsx), "expect": map[string]any{"workbook": "Other.xlsx"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := importOutOf(t, res)
+	if !res.IsError || out.Error == nil || out.Error.Code != "expect-mismatch" {
+		t.Fatalf("expect mismatch: isError=%v %+v", res.IsError, out)
+	}
+	if got := fake.Received(protocol.MethodImport); len(got) != 0 {
+		t.Fatalf("import sent despite expect mismatch: %+v", got)
+	}
+}
+
+func TestImportWorkbookNoBridge(t *testing.T) {
+	f := newFixture(t)
+	res, err := f.cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "import_workbook",
+		Arguments: map[string]any{"content_base64": base64.StdEncoding.EncodeToString(sampleXLSX(t))}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := importOutOf(t, res)
+	if !res.IsError || out.Error == nil || out.Error.Code != "no-bridge" {
+		t.Fatalf("no bridge: isError=%v %+v", res.IsError, out)
+	}
+}
+
+func TestImportWorkbookInvalidPosition(t *testing.T) {
+	f := newFixture(t)
+	f.connect(t, &miniExcel{workbook: "Book1.xlsx", sheet: "Sheet1"})
+	for _, tc := range []struct {
+		name string
+		opts map[string]any
+		code string
+	}{
+		{"unknown position", map[string]any{"position": "middle"}, "invalid-position"},
+		{"before without relative_to_sheet", map[string]any{"position": "before"}, "invalid-position"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res, err := f.cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "import_workbook",
+				Arguments: map[string]any{"content_base64": base64.StdEncoding.EncodeToString(sampleXLSX(t)), "options": tc.opts}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			out := importOutOf(t, res)
+			if !res.IsError || out.Error == nil || out.Error.Code != tc.code {
+				t.Fatalf("%s: isError=%v %+v", tc.name, res.IsError, out)
+			}
+		})
 	}
 }
 

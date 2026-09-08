@@ -29,11 +29,15 @@
 # with production. TTL policies on expires_at keep auth_codes, login_states,
 # refresh_tokens and bridge_tokens from accumulating.
 #
-# Cloud Storage (PRD §11, phase 2 unit A): one bucket per environment for the
-# file exchange (export_file's bytes), created here with a 7-day
-# lifecycle-delete rule, uniform bucket-level access, and the runtime service
-# account granted both object read/write and — for V4 signed URLs with no
-# private key on hand — roles/iam.serviceAccountTokenCreator on itself.
+# Cloud Storage (PRD §11, phase 2 units A and B): one bucket per environment
+# for the file exchange (export_file's and import_workbook's bytes), created
+# here with a 7-day lifecycle-delete rule, uniform bucket-level access, a
+# CORS rule letting the task pane's origin GET an object directly
+# (import_workbook: the pane fetches its signed URL cross-origin, which
+# export_file never needed since it only ever POSTs to the hub's own origin),
+# and the runtime service account granted both object read/write and — for
+# V4 signed URLs with no private key on hand — roles/iam.serviceAccountTokenCreator
+# on itself.
 set -euo pipefail
 
 usage() {
@@ -204,6 +208,22 @@ else
   PROJECT_NUMBER="$(gcloud projects describe "$PROJECT" --format='value(projectNumber)')"
   PUBLIC_URL="https://${SERVICE}-${PROJECT_NUMBER}.${REGION}.run.app"
 fi
+
+# --- Bucket CORS: import_workbook's pane fetch (PRD §10/§11, reversed). ----
+# export_file never needed this — the pane uploads to the hub's own origin,
+# same-origin by definition. import_workbook is the first thing that fetches
+# straight off the bucket from inside the task pane, and that GET is
+# cross-origin (the pane's origin is PUBLIC_URL; the object lives at
+# storage.googleapis.com), so without a CORS rule naming PUBLIC_URL the
+# browser blocks the response body from JavaScript even though the request
+# itself succeeds. Re-applied every run (idempotent) since PUBLIC_URL is
+# fixed per environment.
+cat >/tmp/hub-files-cors.json <<EOF
+[{"origin": ["${PUBLIC_URL}"], "method": ["GET"], "responseHeader": ["Content-Type"], "maxAgeSeconds": 3600}]
+EOF
+gcloud storage buckets update "gs://${FILES_BUCKET}" --project="$PROJECT" \
+  --cors-file=/tmp/hub-files-cors.json >/dev/null
+rm -f /tmp/hub-files-cors.json
 
 deploy_revision() {
   local -a args=(
