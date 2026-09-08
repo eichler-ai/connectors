@@ -38,11 +38,28 @@ func (s *Server) resolveClient(ctx context.Context, id string) (client, error) {
 	return client{ID: c.ID, Name: c.Name, RedirectURIs: c.RedirectURIs, Stored: true}, nil
 }
 
-// allowedRedirect reports whether the request's redirect_uri exactly matches
-// one the client registered (OAuth 2.1 §4.1.1: exact string comparison).
+// allowedRedirect reports whether the request's redirect_uri matches one the
+// client registered: exact string comparison (OAuth 2.1 §4.1.1), except that
+// a registered plain-http loopback URI matches any port (RFC 8252 §7.3),
+// since a native client such as Claude Code listens on whatever port is
+// free and registers http://localhost/callback. Scheme, host and path must
+// still be identical; only the port may differ.
 func (c client) allowedRedirect(uri string) bool {
 	for _, r := range c.RedirectURIs {
 		if r == uri {
+			return true
+		}
+	}
+	req, err := url.Parse(uri)
+	if err != nil || req.Scheme != "http" || !isLoopbackHost(req.Hostname()) || req.Fragment != "" || req.User != nil {
+		return false
+	}
+	for _, r := range c.RedirectURIs {
+		reg, err := url.Parse(r)
+		if err != nil || reg.Scheme != "http" || !isLoopbackHost(reg.Hostname()) {
+			continue
+		}
+		if reg.Hostname() == req.Hostname() && reg.Path == req.Path && reg.RawQuery == req.RawQuery {
 			return true
 		}
 	}

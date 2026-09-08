@@ -786,8 +786,9 @@ func TestClientIDMetadataDocument(t *testing.T) {
 	if fetches != 2 {
 		t.Fatalf("document fetched %d times after max-age, want 2", fetches)
 	}
-	// Redirect not in the document.
-	resp = f.get(f.srv.URL + "/oauth/authorize?" + f.authorizeParams(good, "http://localhost:3001/cb", p).Encode())
+	// Redirect not in the document (a different port alone would be fine,
+	// RFC 8252 §7.3; a different path is not).
+	resp = f.get(f.srv.URL + "/oauth/authorize?" + f.authorizeParams(good, "http://localhost:3001/other", p).Encode())
 	if body(t, resp); resp.StatusCode != 400 {
 		t.Fatalf("unregistered redirect for CIMD client: %d", resp.StatusCode)
 	}
@@ -835,5 +836,75 @@ func TestSSRFGuard(t *testing.T) {
 	mux.ServeHTTP(rr, req)
 	if rr.Code != 400 || !strings.Contains(rr.Body.String(), "Unknown client") {
 		t.Fatalf("loopback client_id: %d %s", rr.Code, rr.Body.String())
+	}
+}
+
+// TestLoopbackRedirectAnyPort: RFC 8252 §7.3 — a registered plain-http
+// loopback redirect matches any port (Claude Code registers
+// http://localhost/callback and listens wherever it can), scheme/host/path
+// stay exact, and an https registration still needs an exact match.
+func TestLoopbackRedirectAnyPort(t *testing.T) {
+	f := newFixture(t)
+	clientID := f.register("http://localhost/callback", "http://127.0.0.1/callback", "https://app.example/cb")
+	p := newPKCE()
+	accepted := []string{"http://localhost:3118/callback", "http://localhost/callback", "http://127.0.0.1:4000/callback", "https://app.example/cb"}
+	rejected := []string{"http://localhost:3118/other", "https://localhost:3118/callback", "http://evil.localhost:3118/callback",
+		"https://app.example:8443/cb", "https://app.example/cb/", "http://[::1]:3118/callback", "http://localhost:3118/callback?x=1"}
+	for _, uri := range accepted {
+		resp := f.get(f.srv.URL + "/oauth/authorize?" + f.authorizeParams(clientID, uri, p).Encode())
+		if page := body(t, resp); resp.StatusCode != 200 || !strings.Contains(page, "Sign in") {
+			t.Fatalf("%s: %d, want the sign-in page", uri, resp.StatusCode)
+		}
+	}
+	for _, uri := range rejected {
+		resp := f.get(f.srv.URL + "/oauth/authorize?" + f.authorizeParams(clientID, uri, p).Encode())
+		if page := body(t, resp); resp.StatusCode != 400 || !strings.Contains(page, "Redirect not allowed") {
+			t.Fatalf("%s: %d, want Redirect not allowed", uri, resp.StatusCode)
+		}
+	}
+	// The code is bound to the port the request used: the exchange must
+	// repeat http://localhost:3118/callback, not the registered form.
+	redirect := "http://localhost:3118/callback"
+	ls := f.signIn(f.authorizeParams(clientID, redirect, p))
+	code, _ := f.approve(ls, redirect)
+	if status, tr := f.token(url.Values{"grant_type": {"authorization_code"}, "code": {code}, "client_id": {clientID},
+		"redirect_uri": {"http://localhost/callback"}, "code_verifier": {p.verifier}}); status != 400 || tr.Error != "invalid_grant" {
+		t.Fatalf("exchange with the registered form: %d %+v", status, tr)
+	}
+	f.signOut()
+	ls = f.signIn(f.authorizeParams(clientID, redirect, p))
+	code, _ = f.approve(ls, redirect)
+	if status, tr := f.exchange(clientID, redirect, code, p); status != 200 || tr.AccessToken == "" {
+		t.Fatalf("exchange with the request's URI: %d %+v", status, tr)
+	}
+}
+
+// TestOfflineAccessScope: "excel offline_access" (what Claude Code sends) is
+// accepted, offline_access is not echoed as a granted scope, and a refresh
+// token is issued regardless.
+func TestOfflineAccessScope(t *testing.T) {
+	f := newFixture(t)
+	redirect := "http://localhost/callback"
+	clientID := f.register(redirect)
+	p := newPKCE()
+	v := f.authorizeParams(clientID, redirect, p)
+	v.Set("scope", "excel offline_access")
+	ls := f.signIn(v)
+	code, _ := f.approve(ls, redirect)
+	status, tr := f.exchange(clientID, redirect, code, p)
+	if status != 200 || tr.Scope != "excel" || tr.RefreshToken == "" {
+		t.Fatalf("offline_access: %d %+v", status, tr)
+	}
+	pr, err := f.as.Verifier().VerifyAccessToken(context.Background(), tr.AccessToken)
+	if err != nil || strings.Join(pr.Scopes, " ") != "excel" {
+		t.Fatalf("token scopes: %v %v", err, pr.Scopes)
+	}
+	// Alone, it means "the default scopes plus a refresh token".
+	f.signOut()
+	v.Set("scope", "offline_access")
+	ls = f.signIn(v)
+	code, _ = f.approve(ls, redirect)
+	if status, tr := f.exchange(clientID, redirect, code, p); status != 200 || tr.Scope != "excel" || tr.RefreshToken == "" {
+		t.Fatalf("offline_access alone: %d %+v", status, tr)
 	}
 }
