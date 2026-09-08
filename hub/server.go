@@ -16,6 +16,7 @@ import (
 
 	"github.com/eichler-ai/connectors/hub/internal/bridge"
 	"github.com/eichler-ai/connectors/hub/internal/registry"
+	"github.com/eichler-ai/connectors/hub/wellknown"
 	"github.com/eichler-ai/connectors/internal/auth"
 )
 
@@ -108,6 +109,10 @@ func NewServer(opts Options) (*Server, error) {
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
 		_, _ = w.Write([]byte("ok\n"))
+	})
+	mux.HandleFunc("GET /.well-known/microsoft-identity-association.json", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(wellknown.MicrosoftIdentityAssociation)
 	})
 	s := &Server{opts: opts, host: host, handler: mux, servers: map[string]*mcp.Server{}}
 	requireBearer := auth.RequireBearer(opts.Auth)
