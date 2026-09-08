@@ -1,10 +1,10 @@
-# Connectors Platform
+# Connectors Hub
 
 **Product & Technical Design — Draft for review (2026-09-07)**
 
 One hosted hub at `connectors.eichler.ai` that many connectors plug into — Excel first, then Figma,
 Google Sheets, Rhino, and Revit's remote mode — plus the per-connector pieces each host application
-needs. This document is the platform design; each connector gets its own chapter or PRD that refers
+needs. This document is the hub design; each connector gets its own chapter or PRD that refers
 back here. It replaces the "what's next" of the Excel proof of concept (`excel/poc/`), which is
 retired as of this draft and kept only as a reference for the live findings recorded in its README.
 
@@ -45,14 +45,14 @@ scripts, a **Server** speaks MCP to Claude, and discovery tools plus a how-to co
 scripts good on the first try. The Excel proof of concept showed the same shape works for a browser
 add-in with no code on the user's machine at all, provided the server is hosted.
 
-The platform generalises that. Goals for v1:
+The hub generalises that. Goals for v1:
 
 - **One sign-in, many connectors.** A user authorises "Eichler Connectors" in Claude once and every
   connector they have installed works. One issuer, one identity record, one place to revoke.
 - **Zero-install for browser-hosted apps.** Excel, Sheets and Figma extensions come from their own
   stores and talk to the hub; nothing runs on the user's machine.
 - **Same core for desktop apps.** Revit and Rhino keep their local stdio mode and gain a remote mode
-  by speaking the platform's bridge protocol to the hub — the "remote hub" the Revit transport RFC
+  by speaking the hub's bridge protocol to the hub — the "remote hub" the Revit transport RFC
   (`revit/docs/http-transport-rfc.md` §4b) already earmarked.
 - **Shared services built once:** authorization server, session registry, bridge protocol, file
   exchange, audit trail, how-to corpus store, discovery tooling, update feed.
@@ -94,7 +94,7 @@ Live against Excel for the web in Chrome, 2026-09-07 (details and scripts in `ex
                                  │  MCP over Streamable HTTP + OAuth
                                  ▼
    ┌──────────────────────── connectors.eichler.ai ─────────────────────────┐
-   │  auth server   session registry   file exchange   audit   corpus/docs  │  platform
+   │  auth server   session registry   file exchange   audit   corpus/docs  │  hub
    │  ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐          │
    │  │ /excel  │ │ /figma  │ │ /sheets │ │ /rhino  │ │ /revit  │  …       │  connectors
    │  └────┬────┘ └────┬────┘ └────┬────┘ └────┬────┘ └────┬────┘          │
@@ -169,7 +169,7 @@ enterprise SSO/SCIM demand arrives before we want to build it (§18).
 - Client registration: dynamic client registration (RFC 7591) *and* Client ID Metadata Document,
   which the MCP spec added in November 2025 and Claude clients are adopting. Registration is
   rate-limited and registrations that never complete an authorization are garbage-collected.
-- Access tokens: short-lived signed JWTs (15 min), one audience for the whole platform, scopes per
+- Access tokens: short-lived signed JWTs (15 min), one audience for the whole hub, scopes per
   connector (`excel`, `figma`, …) granted from what the user has installed. One Claude
   authorization therefore covers every connector.
 - Login: no passwords. `/login` offers Microsoft (personal + work via a multi-tenant Entra app) and
@@ -240,7 +240,7 @@ A connector is a Go package registered with the hub at build time (single binary
 type Connector interface {
     Slug() string                                  // "excel"
     Capabilities() Capabilities                    // Bridge, API, or both; supported languages
-    Tools(reg *ToolRegistry)                       // MCP tools; most wrap platform.Exec
+    Tools(reg *ToolRegistry)                       // MCP tools; most wrap hub.Exec
     Static() fs.FS                                 // manifest + extension files, may be nil
     Skill() []byte                                 // skill file served by get_skills
     Docs() DiscoverySource                         // optional; nil when a connector has no discovery tools
@@ -369,7 +369,7 @@ excel/
   docs/                 Excel chapter, live test matrix
 figma/ sheets/ rhino/   same shape, later
 revit/                  unchanged; gains connector/ for remote mode when scheduled
-CONVENTIONS.md          extended with the platform vocabulary above
+CONVENTIONS.md          extended with the hub vocabulary above
 ```
 
 One binary links every connector. Splitting into services behind a router later is a routing change
@@ -379,7 +379,7 @@ the path layout already permits.
 
 | phase | scope | done when |
 |---|---|---|
-| 0 — Foundations (1–2 wks) | `platform/` skeleton, bridge protocol v1, registry, Firestore, Cloud Run + staging, CI | POC add-in pointed at `/excel/bridge` runs a script via a temporary token-authed tool |
+| 0 — Foundations (1–2 wks) | `hub/` skeleton, bridge protocol v1, registry, Firestore, Cloud Run + staging, CI | POC add-in pointed at `/excel/bridge` runs a script via a temporary token-authed tool |
 | 1 — Auth (2 wks) | authorization server, Microsoft + Google login, MCP endpoint with `RequireBearerToken`, pairing via pane sign-in | Claude Desktop/Code/claude.ai add "Eichler Connectors", sign in, run `execute_script` in Excel for the web; Partner Center registration started |
 | 2 — Excel v1 (2 wks) | tools in §10, skill file, safety notices, file exchange, audit; shared-runtime manifest | live test matrix green on Excel web (Chrome, Edge) and desktop (Win, Mac); threat model written; external review scheduled |
 | 3 — Distribution (calendar-bound) | AppSource submission, admin-deployment guide, docs site page, status page | first external user installed without our help |
