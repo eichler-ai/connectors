@@ -1,0 +1,26 @@
+name: Bridge probe (plain ws to localhost)
+description: Can an https page (Script Lab's runner) open ws://localhost:3001 with no TLS?
+host: EXCEL
+api_set: {}
+script:
+  content: |
+    var out = document.getElementById("out");
+    out.textContent = "script ran; origin=" + location.origin + "\n";
+    try {
+      var ws = new WebSocket("ws://localhost:3001/ws");
+      ws.onopen = function () { out.textContent += "PLAIN socket OPEN\n"; ws.send(JSON.stringify({ type: "hello", host: "ScriptLab", platform: "plain-ws-probe", version: "0", workbook: "" })); };
+      ws.onerror = function () { out.textContent += "socket ERROR\n"; };
+      ws.onclose = function (e) { out.textContent += "socket CLOSED code=" + e.code + "\n"; };
+    } catch (e) {
+      out.textContent += "WebSocket constructor threw: " + e.name + ": " + e.message + "\n";
+    }
+  language: javascript
+template:
+  content: |
+    <pre id="out">template rendered, script not run yet</pre>
+  language: html
+style:
+  content: ""
+  language: css
+libraries: |
+  https://appsforoffice.microsoft.com/lib/1/hosted/office.js
