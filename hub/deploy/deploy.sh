@@ -14,8 +14,8 @@
 # deploys to Cloud Run with the settings the excel-bridge POC used (single
 # instance, session affinity, 60-minute request timeout, WebSockets).
 #
-# Reads the Cloud Run runtime URL from the service itself where the caller
-# hasn't fixed one (staging), and pulls the environment's secrets from
+# Uses the custom domain (prod) or the deterministic Cloud Run URL (staging)
+# as the public URL, and pulls the environment's secrets from
 # Secret Manager: HUB_DEV_TOKEN (the bridge hello token until pane sign-in
 # lands) and the JWT signing key, both created with fresh random values the
 # first time this runs for an environment, plus the Entra client secret,
@@ -42,7 +42,7 @@ case "$ENV" in
     SECRET=hub-staging-dev-token
     JWT_SECRET=hub-staging-jwt-signing-key
     FIRESTORE_DB=hub-staging
-    FIXED_PUBLIC_URL=""   # discovered from the service's own run.app URL below
+    FIXED_PUBLIC_URL=""   # the deterministic run.app URL, computed below
     ;;
   prod)
     SERVICE=hub
@@ -149,21 +149,21 @@ for col in auth_codes login_states refresh_tokens; do
     --enable-ttl --project="$PROJECT" --async >/dev/null 2>&1 || true
 done
 
-# --- HUB_PUBLIC_URL: fixed for prod, discovered for staging. ---------------
-# A brand-new staging service doesn't have a URL until it exists, so the
-# first deploy for a fresh environment goes out with the DevPublicURL
-# fallback (the hub still serves fine; only the manifest URL is briefly
-# wrong), then a second deploy corrects it once the run.app URL is known.
-# On every later run the service already exists, so this happens once.
+# --- HUB_PUBLIC_URL: the custom domain for prod, the deterministic Cloud Run
+# URL for staging. A service answers on two run.app URLs: a random-suffix one
+# (status.url) and https://<service>-<project number>.<region>.run.app, which
+# is stable across deleting and recreating the service. The public URL is
+# the OAuth issuer and the Entra redirect URI (exact match), so it must be
+# the stable one — and being computable up front, a fresh environment needs
+# only one deploy.
 if [ -n "$FIXED_PUBLIC_URL" ]; then
   PUBLIC_URL="$FIXED_PUBLIC_URL"
 else
-  PUBLIC_URL="$(gcloud run services describe "$SERVICE" --project="$PROJECT" --region="$REGION" \
-    --format='value(status.url)' 2>/dev/null || true)"
+  PROJECT_NUMBER="$(gcloud projects describe "$PROJECT" --format='value(projectNumber)')"
+  PUBLIC_URL="https://${SERVICE}-${PROJECT_NUMBER}.${REGION}.run.app"
 fi
 
 deploy_revision() {
-  local url="$1"
   local -a args=(
     "$SERVICE"
     --project="$PROJECT"
@@ -183,23 +183,12 @@ deploy_revision() {
   # which keys a sideloaded add-in by manifest Id, never conflates them.
   # "^@^" makes @ the list delimiter for gcloud, since the default comma is
   # a legal character in some of these values.
-  local env_vars="^@^HUB_ENV=${ENV}@HUB_FIRESTORE_PROJECT=${PROJECT}@HUB_FIRESTORE_DATABASE=${FIRESTORE_DB}@HUB_MS_CLIENT_ID=${MS_CLIENT_ID}"
-  if [ -n "$url" ]; then
-    env_vars="${env_vars}@HUB_PUBLIC_URL=${url}"
-  fi
-  args+=(--set-env-vars="$env_vars")
+  args+=(--set-env-vars="^@^HUB_ENV=${ENV}@HUB_PUBLIC_URL=${PUBLIC_URL}@HUB_FIRESTORE_PROJECT=${PROJECT}@HUB_FIRESTORE_DATABASE=${FIRESTORE_DB}@HUB_MS_CLIENT_ID=${MS_CLIENT_ID}")
   gcloud run deploy "${args[@]}"
 }
 
 echo "==> [$ENV] deploying ${SERVICE}"
-deploy_revision "$PUBLIC_URL"
-
-if [ -z "$PUBLIC_URL" ]; then
-  PUBLIC_URL="$(gcloud run services describe "$SERVICE" --project="$PROJECT" --region="$REGION" \
-    --format='value(status.url)')"
-  echo "==> [$ENV] discovered ${SERVICE}'s URL (${PUBLIC_URL}); redeploying with HUB_PUBLIC_URL set"
-  deploy_revision "$PUBLIC_URL"
-fi
+deploy_revision
 
 # --- Verify: liveness, discovery documents, the 401 challenge. -------------
 # This is the check an operator would run by hand; catches a broken deploy

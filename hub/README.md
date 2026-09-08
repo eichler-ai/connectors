@@ -170,9 +170,10 @@ gcloud secrets versions access latest --secret=hub-staging-dev-token --project=e
 To point Excel at the hosted hub instead of a local one, download the manifest from
 `https://connectors.eichler.ai/excel/manifest.xml` (or the staging equivalent) and sideload it as
 in "Sideload the add-in in Excel for the web" above, then paste the token from Secret Manager into
-the pane. Staging's issuer is the URL `gcloud run services describe hub-staging` reports as
-`status.url`; a Cloud Run service also answers on its deterministic `*.run.app` URL, but tokens and
-discovery are bound to the configured one, so add the staging server under that exact URL. Excel for the web keys a sideloaded add-in by the manifest `<Id>`, so dev, staging and
+the pane. Staging's public URL (and OAuth issuer, and the Entra redirect URI) is the deterministic
+`https://hub-staging-<project number>.us-central1.run.app`; the service also answers on a
+random-suffix `*.run.app` URL, but tokens and discovery are bound to the configured one, so add
+the staging server under the deterministic URL only. Excel for the web keys a sideloaded add-in by the manifest `<Id>`, so dev, staging and
 prod each serve a distinct one: prod serves the manifest file's Id and name unchanged (that's what
 the Store submission carries), while dev and staging get a deterministic Id derived from the
 environment and public URL and a `DisplayName` suffixed with `(dev)`/`(staging)`, so all three can
