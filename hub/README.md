@@ -25,7 +25,8 @@ stderr; they carry ids and outcomes, never scripts, results or tokens.
 
 Environment: `PORT` (default 8443 in `-dev`, 8080 otherwise), `HUB_PUBLIC_URL` (external origin,
 rewritten into served manifests; defaults to the local one), `HUB_ALLOWED_ORIGINS` (extra browser
-origins for the bridge socket, comma-separated), `HUB_DEV_TOKEN` (required).
+origins for the bridge socket, comma-separated), `HUB_DEV_TOKEN` (required), `HUB_ENV` (`prod`,
+`staging` or `dev`; default `dev`, and `-dev` always forces `dev` regardless of this variable).
 
 ## Sideload the add-in in Excel for the web
 
@@ -80,9 +81,11 @@ gcloud secrets versions access latest --secret=hub-staging-dev-token --project=e
 To point Excel at the hosted hub instead of a local one, download the manifest from
 `https://connectors.eichler.ai/excel/manifest.xml` (or the staging equivalent) and sideload it as
 in "Sideload the add-in in Excel for the web" above, then paste the token from Secret Manager into
-the pane. **Staging and prod manifests share the same add-in Id** (there's no per-environment
-override), so Excel treats them as the same add-in — only one can be sideloaded at a time in a given
-Excel account.
+the pane. Excel for the web keys a sideloaded add-in by the manifest `<Id>`, so dev, staging and
+prod each serve a distinct one: prod serves the manifest file's Id and name unchanged (that's what
+the Store submission carries), while dev and staging get a deterministic Id derived from the
+environment and public URL and a `DisplayName` suffixed with `(dev)`/`(staging)`, so all three can
+be sideloaded side by side without one silently replacing another.
 
 ## Tests
 

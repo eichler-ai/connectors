@@ -14,6 +14,8 @@
 //	HUB_DEV_TOKEN        phase-0 shared secret, required: bearer token on /<c>/mcp and the
 //	                     token in a bridge hello. Never logged.
 //	HUB_ALLOWED_ORIGINS  comma-separated extra browser origins allowed on /<c>/bridge
+//	HUB_ENV              "prod", "staging" or "dev" (default; -dev always forces "dev"
+//	                     regardless of this variable); see hub.Options.Environment
 package main
 
 import (
@@ -103,12 +105,23 @@ func run() error {
 		origins = strings.Split(v, ",")
 	}
 
+	environment := strings.TrimSpace(os.Getenv("HUB_ENV"))
+	if environment == "" {
+		environment = "dev"
+	}
+	if *dev {
+		// A -dev hub is always "dev" regardless of what's in the environment,
+		// since it's never the production or staging deployment.
+		environment = "dev"
+	}
+
 	srv, err := hub.NewServer(hub.Options{
 		PublicURL:      publicURL,
 		Auth:           authn,
 		AllowedOrigins: origins,
 		Connectors:     []hub.Connector{excel.New()},
 		Version:        version(),
+		Environment:    environment,
 		Logger:         logger,
 	})
 	if err != nil {

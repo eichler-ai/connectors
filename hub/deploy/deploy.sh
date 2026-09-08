@@ -128,9 +128,14 @@ deploy_revision() {
     --set-secrets="HUB_DEV_TOKEN=${SECRET}:latest"
     --quiet
   )
+  # HUB_ENV distinguishes this deployment's add-in Id/DisplayName from the
+  # other environment's (see hub.Options.Environment) so Excel for the web,
+  # which keys a sideloaded add-in by manifest Id, never conflates them.
+  local env_vars="HUB_ENV=${ENV}"
   if [ -n "$url" ]; then
-    args+=(--set-env-vars="HUB_PUBLIC_URL=${url}")
+    env_vars="${env_vars},HUB_PUBLIC_URL=${url}"
   fi
+  args+=(--set-env-vars="$env_vars")
   gcloud run deploy "${args[@]}"
 }
 
