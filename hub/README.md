@@ -84,11 +84,6 @@ the pane. **Staging and prod manifests share the same add-in Id** (there's no pe
 override), so Excel treats them as the same add-in — only one can be sideloaded at a time in a given
 Excel account.
 
-Note: Cloud Run's own frontend intercepts the exact path `/healthz` before it reaches the
-container (a platform quirk, not specific to this service); `curl .../healthz` gets a generic
-Google 404 instead of the app's response even though the service is healthy. `/excel/manifest.xml`
-or any other app path confirms liveness instead.
-
 ## Tests
 
 ```sh

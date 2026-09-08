@@ -83,7 +83,10 @@ if ! gcloud secrets describe "$SECRET" --project="$PROJECT" >/dev/null 2>&1; the
 fi
 if [ -z "$(gcloud secrets versions list "$SECRET" --project="$PROJECT" --format='value(name)' 2>/dev/null)" ]; then
   echo "==> [$ENV] seeding ${SECRET} with a fresh random value (this only happens once)"
-  openssl rand -hex 24 | gcloud secrets versions add "$SECRET" --project="$PROJECT" --data-file=- >/dev/null
+  # tr -d '\n': --data-file=- takes the pipe's bytes verbatim, and openssl's
+  # output ends in a newline, which would become part of the token and never
+  # match a bearer header again.
+  openssl rand -hex 24 | tr -d '\n' | gcloud secrets versions add "$SECRET" --project="$PROJECT" --data-file=- >/dev/null
 fi
 
 # --- Runtime service account needs access to the secret. -------------------
@@ -141,5 +144,24 @@ if [ -z "$PUBLIC_URL" ]; then
   deploy_revision "$PUBLIC_URL"
 fi
 
-echo "==> [$ENV] done: ${SERVICE} at ${PUBLIC_URL} (image ${IMAGE})"
+# --- Verify: liveness, then a real MCP call through the deployed token. ----
+# This is the check an operator would run by hand; catches a broken deploy
+# (or a mangled secret, see the tr -d '\n' above) here instead of at the next
+# real client connection.
+echo "==> [$ENV] verifying /health"
+HEALTH_CODE="$(curl -s -o /dev/null -w '%{http_code}' "${PUBLIC_URL}/health")"
+if [ "$HEALTH_CODE" != "200" ]; then
+  echo "verify: GET ${PUBLIC_URL}/health -> ${HEALTH_CODE}, want 200" >&2
+  exit 1
+fi
+
+echo "==> [$ENV] verifying get_skills over the deployed MCP endpoint"
+TOKEN="$(gcloud secrets versions access latest --secret="$SECRET" --project="$PROJECT")"
+GOT_VERSION="$(HUB_DEV_TOKEN="$TOKEN" go run ./hub/deploy/verify "${PUBLIC_URL}/excel/mcp")"
+if [ "$GOT_VERSION" != "$REV" ]; then
+  echo "verify: get_skills hub_version=${GOT_VERSION}, want the deployed revision ${REV}" >&2
+  exit 1
+fi
+
+echo "==> [$ENV] done: ${SERVICE} at ${PUBLIC_URL} (image ${IMAGE}, hub_version ${GOT_VERSION})"
 echo "    read the dev token:  gcloud secrets versions access latest --secret=${SECRET} --project=${PROJECT}"

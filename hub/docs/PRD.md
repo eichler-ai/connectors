@@ -145,7 +145,7 @@ manifests exist, so they are fixed here.
 | `/<connector>/bridge` | WebSocket the extension/plugin dials |
 | `/<connector>/addin/…`, `/<connector>/manifest.xml` | static extension files where the app loads them from a URL |
 | `/files/…` | signed-URL redirects into the file store (§11) |
-| `/healthz` | liveness |
+| `/health` | liveness (not `/healthz`, which Cloud Run's frontend answers itself) |
 
 Naming follows `CONVENTIONS.md`: in Claude's client config a connector is its lowercase slug
 (`excel`); user-facing text says "MCP Server" and "MCP Bridge", never "hub" or "broker". "Hub" is
@@ -304,7 +304,7 @@ Adopt the Revit diagnostic record unchanged (Revit PRD §01: `{severity, code, s
 …}`) for `notices[]` on results, error `data`, and log lines. Every `exec` writes an audit row:
 `{user, connector, instance, document, script_hash, script (bounded), ok, code, duration,
 result_bytes, client}`. The hub never logs tokens or script results. Cloud Logging + an uptime
-check on `/healthz` + alert on 5xx rate and on "no bridge connected for N minutes while execs
+check on `/health` + alert on 5xx rate and on "no bridge connected for N minutes while execs
 requested".
 
 ## 13. Security model

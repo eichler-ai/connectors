@@ -70,7 +70,10 @@ func run() error {
 	logger := slog.New(handler)
 	slog.SetDefault(logger)
 
-	devToken := os.Getenv("HUB_DEV_TOKEN")
+	// TrimSpace: Secret Manager values written via `gcloud secrets versions add
+	// --data-file=-` from a shell pipeline often carry a trailing newline, which
+	// would otherwise become part of the token and never match a bearer header.
+	devToken := strings.TrimSpace(os.Getenv("HUB_DEV_TOKEN"))
 	if devToken == "" {
 		return errors.New("HUB_DEV_TOKEN is required (phase-0 auth); set it to a random string of 16+ characters")
 	}

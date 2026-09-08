@@ -86,7 +86,9 @@ func NewServer(opts Options) (*Server, error) {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
+	// Not /healthz: Cloud Run's frontend answers that exact path itself
+	// (a platform quirk) before it ever reaches this container.
+	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
 		_, _ = w.Write([]byte("ok\n"))
 	})
