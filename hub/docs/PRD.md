@@ -386,16 +386,18 @@ the path layout already permits.
 | 4 — Second connector (Figma) | prove the connector interface; plugin UI dials `/figma/bridge` | Figma plugin runs generated scripts through the same sign-in |
 | 5 — Options | local hybrid for Excel (v1.1), Revit remote mode, Sheets API path, multi-instance hub, Excel discovery tools + how-to corpus if skill-file guidance proves insufficient | as demand dictates |
 
-## 18. Decisions needed
+## 18. Decisions (resolved 2026-09-07)
 
-1. **Identity providers at launch.** Microsoft + Google as proposed, or Microsoft only for Excel v1?
-2. **Pairing default.** Pane sign-in (recommended) vs pairing code first.
-3. **Scopes.** One audience with per-connector scopes (recommended) vs per-connector audiences.
-4. **Excel desktop in v1.** Declare Mac/Windows desktop in the first Store listing, or web only
-   until the desktop live tests pass?
-5. **Local hybrid.** Keep as v1.1 option (recommended) or drop until a customer needs offline/local.
-6. **Staging environment** as a second Cloud Run service now, or after phase 1.
-7. **Revit remote mode** scheduling — phase 5 as written, or pulled forward to validate the
-   desktop-family path earlier.
-8. **Shared bridge token lifetime** (proposed 90 days, revocable) and whether extensions must
-   re-authenticate on a new machine.
+1. **Identity providers at launch:** Microsoft only. Google is added later; it changes nothing in
+   the token format or the identity record.
+2. **Pairing default:** sign-in inside the pane; pairing code kept as the fallback.
+3. **Scopes:** one audience for the hub with per-connector scopes.
+4. **Excel hosts in the first Store listing:** Excel for the web only; desktop declared after the
+   Windows/Mac live tests pass.
+5. **Local hybrid:** kept as a v1.1 option, not built in v1.
+6. **Staging:** a second Cloud Run service from phase 0.
+7. **Revit remote mode:** phase 5 as written.
+8. **Bridge token lifetime:** 90 days, revocable; a new machine signs in again.
+9. **Merge policy:** PR to `main`, CI green, orchestrator review, orchestrator merges.
+10. **WebSocket library for the hub:** `github.com/coder/websocket` — the POC's
+    `golang.org/x/net/websocket` returns one frame per receive, which is a footgun with browsers.
