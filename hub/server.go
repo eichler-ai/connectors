@@ -176,17 +176,25 @@ func (s *Server) manifestHandler(static fs.FS) http.HandlerFunc {
 var (
 	manifestIDPattern          = regexp.MustCompile(`<Id>[^<]*</Id>`)
 	manifestDisplayNamePattern = regexp.MustCompile(`(<DisplayName DefaultValue=")([^"]*)("\s*/>)`)
+	// The ribbon shows these two resource strings (excel/addin/manifest.xml's
+	// bt:ShortStrings), not DisplayName — Office reads DisplayName only for
+	// My Add-ins/the store listing. Without also suffixing them, dev, staging
+	// and prod sideloads look identical in the Home tab.
+	manifestRibbonLabelPattern = regexp.MustCompile(`(<bt:String id="Bridge\.(?:Group|Open)\.Label" DefaultValue=")([^"]*)("\s*/>)`)
 )
 
 // rewriteManifestIdentity replaces a non-production manifest's <Id> with a
 // deterministic per-environment UUID and appends " (<environment>)" to its
-// DisplayName, so Excel for the web — which keys a sideloaded add-in by Id —
-// never conflates a dev or staging add-in with production, or with each
-// other, and a user can tell them apart in the ribbon and My Add-ins.
+// DisplayName and ribbon group/button labels, so Excel for the web — which
+// keys a sideloaded add-in by Id — never conflates a dev or staging add-in
+// with production, or with each other, and a user can tell them apart both
+// in My Add-ins and on the ribbon itself.
 func rewriteManifestIdentity(b []byte, environment, publicURL string) []byte {
 	id := manifestID(environment, publicURL)
+	suffix := []byte(` (` + environment + `)${3}`)
 	b = manifestIDPattern.ReplaceAll(b, []byte("<Id>"+id+"</Id>"))
-	b = manifestDisplayNamePattern.ReplaceAll(b, []byte(`${1}${2} (`+environment+`)${3}`))
+	b = manifestDisplayNamePattern.ReplaceAll(b, append([]byte(`${1}${2}`), suffix...))
+	b = manifestRibbonLabelPattern.ReplaceAll(b, append([]byte(`${1}${2}`), suffix...))
 	return b
 }
 

@@ -38,7 +38,9 @@ func (*stub) Skill() []byte                                { return []byte("# st
 func (s *stub) Validate(context.Context, hub.Script) error { return s.validateErr }
 func (*stub) Static() fs.FS {
 	return fstest.MapFS{
-		"manifest.xml":  {Data: []byte(`<Id>d9cd8bd0-fb31-48f1-bbbd-997f15140cc4</Id><DisplayName DefaultValue="Stub Connector"/><Source>` + hub.DevPublicURL + `/stub/addin/pane.html</Source>`)},
+		"manifest.xml": {Data: []byte(`<Id>d9cd8bd0-fb31-48f1-bbbd-997f15140cc4</Id><DisplayName DefaultValue="Stub Connector"/>` +
+			`<bt:String id="Bridge.Group.Label" DefaultValue="MCP Bridge"/><bt:String id="Bridge.Open.Label" DefaultValue="Open MCP Bridge"/>` +
+			`<Source>` + hub.DevPublicURL + `/stub/addin/pane.html</Source>`)},
 		"pane.html":     {Data: []byte("<p>pane</p>")},
 		"taskpane.html": {Data: []byte("<p>pane</p>")},
 	}
@@ -138,7 +140,10 @@ func TestHealthAndStatic(t *testing.T) {
 	}
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	if resp.Header.Get("Content-Type") != "application/xml" || string(body) != `<Id>d9cd8bd0-fb31-48f1-bbbd-997f15140cc4</Id><DisplayName DefaultValue="Stub Connector"/><Source>https://connectors.example/stub/addin/pane.html</Source>` {
+	want := `<Id>d9cd8bd0-fb31-48f1-bbbd-997f15140cc4</Id><DisplayName DefaultValue="Stub Connector"/>` +
+		`<bt:String id="Bridge.Group.Label" DefaultValue="MCP Bridge"/><bt:String id="Bridge.Open.Label" DefaultValue="Open MCP Bridge"/>` +
+		`<Source>https://connectors.example/stub/addin/pane.html</Source>`
+	if resp.Header.Get("Content-Type") != "application/xml" || string(body) != want {
 		t.Fatalf("manifest: %s (%s)", body, resp.Header.Get("Content-Type"))
 	}
 
@@ -168,78 +173,101 @@ var (
 	manifestNameRe = regexp.MustCompile(`<DisplayName DefaultValue="([^"]*)"`)
 )
 
-func manifestIdentity(t *testing.T, body []byte) (id, name string) {
+var (
+	manifestGroupLabelRe = regexp.MustCompile(`<bt:String id="Bridge\.Group\.Label" DefaultValue="([^"]*)"`)
+	manifestOpenLabelRe  = regexp.MustCompile(`<bt:String id="Bridge\.Open\.Label" DefaultValue="([^"]*)"`)
+)
+
+type manifestFields struct {
+	id, displayName, groupLabel, openLabel string
+}
+
+func readManifestFields(t *testing.T, body []byte) manifestFields {
 	t.Helper()
-	m := manifestIDRe.FindSubmatch(body)
-	n := manifestNameRe.FindSubmatch(body)
-	if m == nil || n == nil {
-		t.Fatalf("manifest missing Id or DisplayName: %s", body)
+	id := manifestIDRe.FindSubmatch(body)
+	name := manifestNameRe.FindSubmatch(body)
+	group := manifestGroupLabelRe.FindSubmatch(body)
+	open := manifestOpenLabelRe.FindSubmatch(body)
+	if id == nil || name == nil || group == nil || open == nil {
+		t.Fatalf("manifest missing Id, DisplayName or a ribbon label: %s", body)
 	}
-	return string(m[1]), string(n[1])
+	return manifestFields{id: string(id[1]), displayName: string(name[1]), groupLabel: string(group[1]), openLabel: string(open[1])}
 }
 
 var uuidRe = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 
 // TestManifestIdentity covers the fix for a live bug: Excel for the web keys
-// a sideloaded add-in by manifest <Id>, so serving the same Id for dev,
-// staging and prod meant uploading the hosted manifest could silently
-// re-launch a stale dev registration. Production must keep the manifest
-// file's own Id and DisplayName (that's what the Store submission carries);
-// every other environment gets a deterministic, distinct one.
+// a sideloaded add-in by manifest <Id>, and shows the ribbon group/button
+// labels from the manifest's resource strings (not DisplayName). Serving the
+// same Id (and identical-looking ribbon labels) for dev, staging and prod
+// meant uploading the hosted manifest could silently re-launch a stale dev
+// registration, and two sideloads looked identical in the ribbon. Production
+// must keep the manifest file's own Id, DisplayName and labels (that's what
+// the Store submission carries); every other environment gets a
+// deterministic, distinct Id and a " (<environment>)" suffix on the name and
+// both ribbon labels.
 func TestManifestIdentity(t *testing.T) {
 	const fileID = "d9cd8bd0-fb31-48f1-bbbd-997f15140cc4"
 	const fileName = "Stub Connector"
+	const fileGroupLabel = "MCP Bridge"
+	const fileOpenLabel = "Open MCP Bridge"
 	const publicURL = "https://connectors.example"
 
-	fProd := newFixtureEnv(t, publicURL, "prod")
-	respProd, _ := http.Get(fProd.http.URL + "/stub/manifest.xml")
-	bodyProd, _ := io.ReadAll(respProd.Body)
-	respProd.Body.Close()
-	idProd, nameProd := manifestIdentity(t, bodyProd)
-	if idProd != fileID || nameProd != fileName {
-		t.Fatalf("prod manifest identity changed: id=%s name=%q", idProd, nameProd)
+	fetch := func(env string) manifestFields {
+		f := newFixtureEnv(t, publicURL, env)
+		resp, err := http.Get(f.http.URL + "/stub/manifest.xml")
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		return readManifestFields(t, body)
 	}
 
-	fStaging := newFixtureEnv(t, publicURL, "staging")
-	respStaging, _ := http.Get(fStaging.http.URL + "/stub/manifest.xml")
-	bodyStaging, _ := io.ReadAll(respStaging.Body)
-	respStaging.Body.Close()
-	idStaging, nameStaging := manifestIdentity(t, bodyStaging)
-	if idStaging == idProd {
-		t.Fatalf("staging Id matches prod: %s", idStaging)
-	}
-	if !uuidRe.MatchString(idStaging) {
-		t.Fatalf("staging Id is not a valid v4-shaped UUID: %s", idStaging)
-	}
-	if nameStaging != fileName+" (staging)" {
-		t.Fatalf("staging DisplayName = %q, want suffix ' (staging)'", nameStaging)
+	tests := []struct {
+		env               string
+		wantID            string // "" means "anything but the file Id or another environment's"
+		wantSuffix        string // appended to DisplayName and both ribbon labels; "" means file value unchanged
+		wantDeterministic bool   // Id must be a valid v4-shaped UUID
+	}{
+		{env: "prod", wantID: fileID, wantSuffix: ""},
+		{env: "staging", wantSuffix: " (staging)", wantDeterministic: true},
+		{env: "dev", wantSuffix: " (dev)", wantDeterministic: true},
 	}
 
-	fDev := newFixtureEnv(t, publicURL, "dev")
-	respDev, _ := http.Get(fDev.http.URL + "/stub/manifest.xml")
-	bodyDev, _ := io.ReadAll(respDev.Body)
-	respDev.Body.Close()
-	idDev, nameDev := manifestIdentity(t, bodyDev)
-	if idDev == idProd || idDev == idStaging {
-		t.Fatalf("dev Id collides: dev=%s staging=%s prod=%s", idDev, idStaging, idProd)
+	got := map[string]manifestFields{}
+	for _, tt := range tests {
+		t.Run(tt.env, func(t *testing.T) {
+			f := fetch(tt.env)
+			got[tt.env] = f
+			if tt.wantID != "" && f.id != tt.wantID {
+				t.Errorf("id = %s, want unchanged file Id %s", f.id, tt.wantID)
+			}
+			if tt.wantDeterministic && !uuidRe.MatchString(f.id) {
+				t.Errorf("id %s is not a valid v4-shaped UUID", f.id)
+			}
+			if f.displayName != fileName+tt.wantSuffix {
+				t.Errorf("displayName = %q, want %q", f.displayName, fileName+tt.wantSuffix)
+			}
+			if f.groupLabel != fileGroupLabel+tt.wantSuffix {
+				t.Errorf("groupLabel = %q, want %q", f.groupLabel, fileGroupLabel+tt.wantSuffix)
+			}
+			if f.openLabel != fileOpenLabel+tt.wantSuffix {
+				t.Errorf("openLabel = %q, want %q", f.openLabel, fileOpenLabel+tt.wantSuffix)
+			}
+		})
 	}
-	if !uuidRe.MatchString(idDev) {
-		t.Fatalf("dev Id is not a valid v4-shaped UUID: %s", idDev)
-	}
-	if nameDev != fileName+" (dev)" {
-		t.Fatalf("dev DisplayName = %q, want suffix ' (dev)'", nameDev)
+
+	if got["dev"].id == got["prod"].id || got["dev"].id == got["staging"].id || got["staging"].id == got["prod"].id {
+		t.Fatalf("environments do not have distinct Ids: prod=%s staging=%s dev=%s", got["prod"].id, got["staging"].id, got["dev"].id)
 	}
 
 	// Same environment + PublicURL is stable across calls (and servers): a
 	// redeploy of the same environment must not churn the add-in's identity
 	// and force every user to re-sideload it.
-	fDev2 := newFixtureEnv(t, publicURL, "dev")
-	respDev2, _ := http.Get(fDev2.http.URL + "/stub/manifest.xml")
-	bodyDev2, _ := io.ReadAll(respDev2.Body)
-	respDev2.Body.Close()
-	idDev2, nameDev2 := manifestIdentity(t, bodyDev2)
-	if idDev2 != idDev || nameDev2 != nameDev {
-		t.Fatalf("dev identity not stable: (%s,%q) vs (%s,%q)", idDev, nameDev, idDev2, nameDev2)
+	again := fetch("dev")
+	if again != got["dev"] {
+		t.Fatalf("dev identity not stable: %+v vs %+v", got["dev"], again)
 	}
 }
 
