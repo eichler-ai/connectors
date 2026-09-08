@@ -17,10 +17,10 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/eichler-ai/connectors/hub"
-	"github.com/eichler-ai/connectors/hub/auth"
 	"github.com/eichler-ai/connectors/hub/bridgetest"
 	"github.com/eichler-ai/connectors/hub/internal/bridge"
 	"github.com/eichler-ai/connectors/hub/protocol"
+	"github.com/eichler-ai/connectors/internal/auth"
 )
 
 const token = "hub-test-token-0123456789"

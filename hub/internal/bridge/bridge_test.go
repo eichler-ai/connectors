@@ -14,12 +14,12 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/eichler-ai/connectors/hub/auth"
 	"github.com/eichler-ai/connectors/hub/bridgetest"
 	"github.com/eichler-ai/connectors/hub/diag"
 	"github.com/eichler-ai/connectors/hub/internal/bridge"
 	"github.com/eichler-ai/connectors/hub/internal/registry"
 	"github.com/eichler-ai/connectors/hub/protocol"
+	"github.com/eichler-ai/connectors/internal/auth"
 )
 
 const token = "test-token-0123456789"

@@ -41,9 +41,21 @@
   var logEl = document.getElementById("log");
   var tokenEl = document.getElementById("token");
 
-  // Stable for this pane load: a reconnect presents the same id and the hub treats it as the same
-  // bridge coming back rather than a second instance.
-  var instanceId = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : "pane-" + Date.now() + "-" + Math.random().toString(16).slice(2);
+  // Stable for this pane: a reconnect presents the same id and the hub treats it as the same bridge
+  // coming back rather than a second instance. Kept in sessionStorage so a pane reload — Excel
+  // keeps "closed" panes alive, and reloads them freely — replaces the old connection instead of
+  // registering a duplicate beside it.
+  var instanceId = storedInstanceId();
+  function storedInstanceId() {
+    var key = "hub.instance_id";
+    var id = null;
+    try { id = sessionStorage.getItem(key); } catch (e) { /* storage blocked: fall through */ }
+    if (!id) {
+      id = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : "pane-" + Date.now() + "-" + Math.random().toString(16).slice(2);
+      try { sessionStorage.setItem(key, id); } catch (e) { /* not persisted; still unique for this load */ }
+    }
+    return id;
+  }
   var ws = null;
   var reconnectTimer = null;
   var reconnectDelay = RECONNECT_MIN_MS;

@@ -20,9 +20,9 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/eichler-ai/connectors/hub/auth"
 	"github.com/eichler-ai/connectors/hub/internal/registry"
 	"github.com/eichler-ai/connectors/hub/protocol"
+	"github.com/eichler-ai/connectors/internal/auth"
 )
 
 // Options tune the service; zero values take the defaults below.

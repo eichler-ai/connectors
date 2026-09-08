@@ -12,9 +12,9 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/eichler-ai/connectors/hub/auth"
 	"github.com/eichler-ai/connectors/hub/internal/bridge"
 	"github.com/eichler-ai/connectors/hub/internal/registry"
+	"github.com/eichler-ai/connectors/internal/auth"
 )
 
 // DevPublicURL is the origin the hub serves in -dev mode and the one every

@@ -34,8 +34,8 @@ import (
 
 	excel "github.com/eichler-ai/connectors/excel/connector"
 	"github.com/eichler-ai/connectors/hub"
-	"github.com/eichler-ai/connectors/hub/auth"
 	"github.com/eichler-ai/connectors/hub/internal/devcert"
+	"github.com/eichler-ai/connectors/internal/auth"
 )
 
 func main() {

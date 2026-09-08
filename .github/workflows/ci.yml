@@ -7,10 +7,10 @@
 #     while these runners are Linux.
 #   - Test harness (Go): type-check only, including its `harness`-tagged test files. The tests
 #     themselves need a live Revit + broker stack by design (tier 2) and are never run in CI.
-#   - Hub (Go): the same tier-1 discipline for hub/ and excel/ (the Excel connector module the hub
-#     links; excel/poc is a retired, separate module and is not built). Everything here is pure
-#     logic over sockets and a fake bridge; the one thing CI cannot do is drive Excel for the web,
-#     which stays a live test against a running hub (hub/README.md).
+#   - Hub (Go): the same tier-1 discipline for the root module — hub/ plus every connector it links
+#     (excel/); the Revit modules and excel/poc have their own go.mod and are excluded. Everything
+#     here is pure logic over sockets and a fake bridge; the one thing CI cannot do is drive Excel
+#     for the web, which stays a live test against a running hub (hub/README.md).
 #   - MCP Bridge (C#): NOT built here at all — every project hard-references RevitAPI.dll /
 #     RevitAPIUI.dll from a real Revit install, which GitHub runners don't have. Running the
 #     tier-1 C# suites in CI via NuGet-packaged Revit API references is tracked as
@@ -125,31 +125,25 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version-file: hub/go.mod
-          cache-dependency-path: |
-            hub/go.sum
-            excel/go.sum
-      # Two modules, checked the same way. `go test ./...` in excel/ does not descend into
-      # excel/poc (its own module), which is intended: the POC is reference material, not code.
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      # The root module: hub/, excel/connector, excel/addin, internal/. `./...` does not descend
+      # into revit/* or excel/poc (their own go.mod), which is intended.
       - name: gofmt
         run: |
-          unformatted="$(gofmt -l hub excel/connector excel/addin)"
+          unformatted="$(gofmt -l hub excel/connector excel/addin internal)"
           if [ -n "$unformatted" ]; then
             echo "gofmt needed on:" && echo "$unformatted" && exit 1
           fi
       - name: go vet
-        run: |
-          (cd hub && go vet ./...)
-          (cd excel && go vet ./...)
+        run: go vet ./...
       - name: go test -race
-        run: |
-          (cd hub && go test -race ./...)
-          (cd excel && go test -race ./...)
+        run: go test -race ./...
       # Same reason as the Revit job's headroom step: a passing package's t.Logf is discarded,
       # so the budget line is only visible when the test is re-run verbosely.
       - name: skill.md budget headroom
-        run: cd excel && go test -v -run TestSkillFileStaysWithinItsBudget ./connector/
+        run: go test -v -run TestSkillFileStaysWithinItsBudget ./excel/connector/
       # The image build is a plain static build with the same flags as hub/Dockerfile; asserting
-      # it here catches a CGO or replace-directive regression without needing Docker.
+      # it here catches a CGO regression without needing Docker.
       - name: go build (static, as the Dockerfile does)
-        run: cd hub && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /tmp/hub ./cmd/hub
+        run: CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /tmp/hub ./hub/cmd/hub

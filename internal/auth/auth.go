@@ -1,8 +1,11 @@
 // Package auth is the seam between "who is this" and everything else. The
 // bridge handler and the MCP endpoints only ever see an Authenticator and a
 // Principal; phase 1's OAuth authorization server (PRD §06) replaces the
-// implementation here without either of them changing. It is exported (not
-// internal/) only so a connector module's tests can build a hub.
+// implementation here without either of them changing.
+//
+// It sits at the repository's internal/ rather than hub/internal/ because a
+// connector package's tests build a hub with the dev token, and Go's internal
+// rule would keep hub/internal/auth out of excel/.
 package auth
 
 import (

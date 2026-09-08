@@ -10,15 +10,16 @@ for sign-in. OAuth, Firestore, file exchange and Cloud Run deployment follow.
 
 ## Run locally (`-dev`)
 
+From the repository root (the Go module lives there and links `hub/` and every connector):
+
 ```sh
-cd hub
 export HUB_DEV_TOKEN="$(openssl rand -hex 16)"   # 16+ characters; used by the pane and the MCP client
-go run ./cmd/hub -dev
+go run ./hub/cmd/hub -dev
 ```
 
 That serves `https://localhost:8443` with a self-signed certificate written to
 `~/Library/Application Support/Connectors/Hub/` (or the platform equivalent). The browser has to
-trust it once — `go run ./cmd/hub -trust-cert` prints the command — then restart the browser and
+trust it once — `go run ./hub/cmd/hub -trust-cert` prints the command — then restart the browser and
 check `https://localhost:8443/excel/addin/taskpane.html` loads without a warning. Text logs go to
 stderr; they carry ids and outcomes, never scripts, results or tokens.
 
@@ -57,8 +58,7 @@ Tools and the script contract are documented for the agent in
 ## Tests
 
 ```sh
-(cd hub && gofmt -l . && go vet ./... && go test -race ./...)
-(cd excel && gofmt -l connector addin && go vet ./... && go test -race ./...)
+gofmt -l hub excel/connector excel/addin internal && go vet ./... && go test -race ./...
 ```
 
 Everything is unit-tested over real sockets against a fake bridge (`hub/bridgetest`): hello
@@ -70,12 +70,17 @@ the `expect`/target prelude run only inside Office — so a change to `excel/add
 
 ## Layout
 
+One Go module at the repository root (`github.com/eichler-ai/connectors`); the Revit modules and
+`excel/poc` keep their own `go.mod` and are excluded.
+
 ```
+go.mod                the module
+internal/auth/        Authenticator/Principal seam; the phase-0 dev token (repo-level internal so
+                      connector tests can build a hub)
 hub/
   cmd/hub/            entrypoint
   protocol/           bridge protocol v1 message types (importable by a local-mode server)
   diag/               the shared diagnostic record
-  auth/               Authenticator/Principal seam; the phase-0 dev token
   bridgetest/         fake bridge for tests
   internal/registry/  live bridges keyed by {user, connector, instance}; Send is the routing seam
   internal/bridge/    the WebSocket handler and exec/result correlation
