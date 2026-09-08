@@ -85,6 +85,14 @@ nothing), so the client is inlined and must be re-imported after every change; t
 Script Lab and press Run each session; Script Lab may spawn a second runner instance, which is why
 an evicted client now stands down instead of reconnecting (newest connection wins).
 
+## Hosted deployment
+
+`Dockerfile` + `gcloud run deploy excel-bridge --source .` (project `eichler-ai`, us-central1, one
+always-on instance) serves the same binary at https://mcp.eichler.ai/excel with `BRIDGE_PREFIX`,
+`BRIDGE_PUBLIC_URL` and `BRIDGE_TOKEN` in the environment. `/exec` and `/status` require
+`Authorization: Bearer $BRIDGE_TOKEN`; the manifest is rewritten to the public URL with its own Id.
+CLI: `BRIDGE_TOKEN=... excel-bridge run -url https://mcp.eichler.ai/excel script.js`.
+
 ## Findings so far (Excel for the web, Chrome, 2026-09-07)
 
 - The task pane connects to `wss://localhost:3000` from inside the Office iframe with no Chrome
@@ -115,6 +123,11 @@ an evicted client now stands down instead of reconnecting (newest connection win
 - Excel for the web keeps a "closed" task pane alive: after the pane's X was clicked, the page stayed
   connected and kept answering scripts (`document.visibilityState === "hidden"`) until the workbook
   tab was closed.
+- **Hybrid topology works in Chrome:** an https page in the Office iframe (Script Lab's runner,
+  origin `script-lab.public.cdn.office.net`) opened a plain `ws://localhost:3001` socket to the
+  bridge with no TLS and no browser prompt. So the add-in can be hosted (store-listed, static) while
+  the server stays local and certificate-free. Untested: Excel desktop on Mac (WebKit) and Windows
+  (WebView2).
 - Scripts default to the active sheet. The first live run overwrote cells in a real workbook; the
   connector must surface the target workbook and sheet before any write.
 
