@@ -134,6 +134,21 @@ func TestHealthAndStatic(t *testing.T) {
 	}
 	resp.Body.Close()
 
+	// Entra's publisher-domain check fetches this exact path on the apex domain.
+	resp, err = http.Get(f.http.URL + "/.well-known/microsoft-identity-association.json")
+	if err != nil || resp.StatusCode != 200 {
+		t.Fatalf("identity association: %v %v", err, resp)
+	}
+	var assoc struct {
+		Apps []struct {
+			ID string `json:"applicationId"`
+		} `json:"associatedApplications"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&assoc); err != nil || len(assoc.Apps) != 1 || assoc.Apps[0].ID == "" {
+		t.Fatalf("identity association body: err=%v parsed=%+v", err, assoc)
+	}
+	resp.Body.Close()
+
 	resp, err = http.Get(f.http.URL + "/stub/manifest.xml")
 	if err != nil {
 		t.Fatal(err)
