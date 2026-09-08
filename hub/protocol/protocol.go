@@ -37,6 +37,7 @@ const (
 	MethodExec     = "exec"     // hub → bridge
 	MethodResult   = "result"   // bridge → hub
 	MethodExport   = "export"   // hub → bridge, ask for a file (§10/§11)
+	MethodImport   = "import"   // hub → bridge, insert sheets from a signed URL (§10/§11, reversed)
 	MethodCancel   = "cancel"   // hub → bridge, best effort
 	MethodNotice   = "notice"   // either direction, out-of-band diagnostic
 	MethodReplaced = "replaced" // hub → bridge, connection superseded
@@ -196,6 +197,38 @@ type Export struct {
 	ID         string `json:"id"`
 	Format     string `json:"format"`
 	DocumentID string `json:"document_id,omitempty"`
+}
+
+// ImportOptions maps to Office.js Excel.InsertWorksheetOptions, the options
+// argument of `workbook.insertWorksheetsFromBase64` (excel/poc/scripts/
+// 14-insert-from-base64.js). RelativeToSheet is a sheet name, not an object
+// reference — the wire protocol carries no object references, so the bridge
+// resolves it locally with worksheets.getItem before calling insert.
+type ImportOptions struct {
+	// SheetNamesToInsert selects which sheets of the source file to bring in;
+	// empty means every sheet.
+	SheetNamesToInsert []string `json:"sheet_names_to_insert,omitempty"`
+	// PositionType is one of Office.js's Excel.WorksheetPositionType string
+	// values (None, Before, After, Beginning, End); empty defaults to End on
+	// the bridge side (§10 reversed: "after the last existing sheet").
+	PositionType string `json:"position_type,omitempty"`
+	// RelativeToSheet names the sheet Before/After is relative to; required
+	// only for those two PositionType values.
+	RelativeToSheet string `json:"relative_to_sheet,omitempty"`
+}
+
+// Import asks the bridge to fetch url — a short-lived signed URL into the
+// hub's file store, never the bytes themselves over the socket — and insert
+// its worksheets into the currently open workbook via
+// `workbook.insertWorksheetsFromBase64` (§10/§11, the export flow reversed:
+// bytes → hub → GCS → signed URL → pane → Office, instead of pane → hub →
+// GCS → signed URL → client). ID correlates the eventual `result` exactly
+// like Exec's; DocumentID selects a document as in Exec.
+type Import struct {
+	ID         string        `json:"id"`
+	DocumentID string        `json:"document_id,omitempty"`
+	URL        string        `json:"url"`
+	Options    ImportOptions `json:"options,omitempty"`
 }
 
 // Cancel asks the bridge to abandon a running exec. Best effort: a bridge that

@@ -319,6 +319,7 @@
       switch (msg.method) {
         case "exec": runScript(p); break;
         case "export": runExport(p); break;
+        case "import": runImport(p); break;
         case "cancel":
           // A task pane cannot interrupt a running script (single JavaScript thread; Excel.run has no
           // abort). Say so rather than silently ignoring the cancel.
@@ -488,6 +489,76 @@
         if (resp.ok) return;
         return resp.text().then(function (t) { throw new Error("upload HTTP " + resp.status + ": " + t); });
       });
+  }
+
+  // --- Import (import_workbook, hub PRD §10/§11 reversed) -----------------------------------
+  // The hub stages the xlsx bytes in its file store and hands the pane a signed URL instead of
+  // sending the bytes over the WebSocket (mirrors export in reverse). The pane fetches it, converts
+  // to base64 (Office.js's insertWorksheetsFromBase64 takes base64, not a Blob/ArrayBuffer — the
+  // one place base64 is unavoidable, and it happens here, never in a user script or a tool argument
+  // that isn't explicitly the file content), and inserts the sheets into the CURRENTLY OPEN
+  // workbook. The signed URL is a cross-origin GET to storage.googleapis.com; if that fetch fails in
+  // a way that looks like CORS (a TypeError with no HTTP status — fetch cannot distinguish a CORS
+  // rejection from a network error), the pane reports a clear error rather than a bare "Failed to
+  // fetch" so the failure is diagnosable from the tool result. There is no base64-in-message
+  // fallback: the same-origin signed-URL path is live-verified against the staging bucket (see the
+  // PR), and building a second wire shape for a fallback that live testing shows unnecessary would be
+  // exactly the speculative complexity CONVENTIONS.md asks not to carry.
+  function runImport(req) {
+    var id = req.id;
+    log("import " + id + ": url=" + req.url);
+    fetchAndInsert(req).then(function (sheets) {
+      log("import " + id + ": inserted, added [" + sheets.added.join(", ") + "]");
+      send("result", { id: id, ok: true, result: { added_sheets: sheets.added, all_sheets: sheets.all }, duration_ms: sheets.ms });
+    }).catch(function (e) {
+      log("import " + id + " failed: " + (e && e.message), "err");
+      send("result", { id: id, ok: false, error: serializeError(e), duration_ms: 0 });
+    });
+  }
+
+  function arrayBufferToBase64(buf) {
+    var bytes = new Uint8Array(buf);
+    var chunk = 0x8000; // one string-from-char-code call per chunk; avoids a stack-limit crash on a large file
+    var chars = [];
+    for (var i = 0; i < bytes.length; i += chunk) {
+      chars.push(String.fromCharCode.apply(null, bytes.subarray(i, i + chunk)));
+    }
+    return btoa(chars.join(""));
+  }
+
+  function fetchAndInsert(req) {
+    if (typeof Excel === "undefined") return Promise.reject(new Error("the task pane is not running inside Excel"));
+    var t0 = performance.now();
+    return fetch(req.url).then(function (resp) {
+      if (!resp.ok) throw new Error("fetch of the signed URL failed: HTTP " + resp.status);
+      return resp.arrayBuffer();
+    }, function (e) {
+      // fetch() rejects with a plain TypeError for a network error and for a CORS rejection alike;
+      // this is the pane's one chance to say which is likely before the generic error propagates.
+      throw new Error("fetch of the signed URL failed (network error or CORS): " + (e && e.message));
+    }).then(function (buf) {
+      var b64 = arrayBufferToBase64(buf);
+      return Excel.run(function (context) {
+        var before = context.workbook.worksheets;
+        before.load("items/name");
+        return context.sync().then(function () {
+          var beforeNames = before.items.map(function (s) { return s.name; });
+          var opts = req.options || {};
+          var insertOpts = {};
+          if (opts.sheet_names_to_insert && opts.sheet_names_to_insert.length) insertOpts.sheetNamesToInsert = opts.sheet_names_to_insert;
+          insertOpts.positionType = opts.position_type || "End";
+          if (opts.relative_to_sheet) insertOpts.relativeTo = context.workbook.worksheets.getItem(opts.relative_to_sheet);
+          context.workbook.insertWorksheetsFromBase64(b64, insertOpts);
+          var after = context.workbook.worksheets;
+          after.load("items/name");
+          return context.sync().then(function () {
+            var afterNames = after.items.map(function (s) { return s.name; });
+            var added = afterNames.filter(function (n) { return beforeNames.indexOf(n) === -1; });
+            return { added: added, all: afterNames, ms: performance.now() - t0 };
+          });
+        });
+      });
+    });
   }
 
   // documents[]: Excel for the web has one workbook per pane, so this is one entry. Office.js has

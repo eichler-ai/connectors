@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -13,8 +14,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -23,6 +26,7 @@ import (
 
 	"github.com/eichler-ai/connectors/hub"
 	"github.com/eichler-ai/connectors/hub/bridgetest"
+	"github.com/eichler-ai/connectors/hub/diag"
 	"github.com/eichler-ai/connectors/hub/internal/authserver"
 	"github.com/eichler-ai/connectors/hub/internal/bridge"
 	"github.com/eichler-ai/connectors/hub/internal/files"
@@ -588,6 +592,114 @@ func TestExportUploadRoundTrip(t *testing.T) {
 	}
 	if string(got) != string(body) {
 		t.Fatalf("downloaded %q, want %q", got, body)
+	}
+}
+
+// sampleXLSX is a genuine, minimal but well-formed xlsx (one sheet "Data",
+// a couple of cells) — insertWorksheetsFromBase64 rejects a hand-assembled
+// or truncated zip with InvalidArgument (live-verified 2026-09-08), so every
+// test that needs "a real xlsx" reads this fixture rather than typing a
+// fake ZIP signature.
+var sampleXLSX = sync.OnceValues(func() ([]byte, error) {
+	return os.ReadFile("../excel/connector/testdata/sample.xlsx")
+})
+
+// TestImportRoundTrip is Import's mirror of TestExportUploadRoundTrip: the
+// hub stages a real xlsx in the file store, sends `import` with the signed
+// URL, the fake bridge plays the pane's part (as if it fetched the URL and
+// inserted the sheets) and replies with the resulting sheet names.
+func TestImportRoundTrip(t *testing.T) {
+	f := newFixture(t, "")
+	fake := f.dial(t, "imp1", protocol.Document{ID: "d1", Title: "Doc.xlsx", Active: true})
+	xlsx, err := sampleXLSX()
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := base64.StdEncoding.EncodeToString(xlsx)
+
+	done := make(chan struct{})
+	go func() {
+		msgs := fake.WaitFor(protocol.MethodImport, 1, 5*time.Second)
+		var im protocol.Import
+		if err := msgs[0].Decode(&im); err != nil {
+			t.Error(err)
+			return
+		}
+		// The URL is downloadable and carries exactly the staged bytes — the
+		// pane's half of "hub stages bytes, signs, hands the pane a URL".
+		resp, err := http.Get(f.http.URL + mustPath(t, im.URL))
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		got, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if string(got) != string(xlsx) {
+			t.Errorf("staged bytes mismatch: got %d bytes, want %d", len(got), len(xlsx))
+		}
+		fake.Send(protocol.New(protocol.MethodResult, protocol.Result{ID: im.ID, OK: true,
+			Result: json.RawMessage(`{"added_sheets":["Data"],"all_sheets":["Sheet1","Data"]}`)}))
+		close(done)
+	}()
+
+	res, rec := f.srv.Host().Import(context.Background(), f.uid, f.stub, hub.Target{InstanceID: "imp1"},
+		hub.ImportRequest{Source: hub.ImportSource{ContentBase64: content}, Timeout: 5 * time.Second})
+	if rec != nil {
+		t.Fatalf("import: %+v", rec)
+	}
+	<-done
+	if res.Bytes != int64(len(xlsx)) || res.Document.ID != "d1" || len(res.AddedSheets) != 1 || res.AddedSheets[0] != "Data" || len(res.AllSheets) != 2 {
+		t.Fatalf("import result: %+v", res)
+	}
+}
+
+func mustPath(t *testing.T, rawURL string) string {
+	t.Helper()
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return u.Path
+}
+
+// TestImportSourceValidation covers the "get bytes into the hub" step
+// (§10/§11 reversed) without needing a bridge at all: not-xlsx, oversize,
+// both-sources and no-source are all refused before anything is staged or
+// sent.
+func TestImportSourceValidation(t *testing.T) {
+	f := newFixture(t, "")
+	f.dial(t, "imp2")
+	ctx := context.Background()
+	call := func(src hub.ImportSource) *diag.Record {
+		_, rec := f.srv.Host().Import(ctx, f.uid, f.stub, hub.Target{InstanceID: "imp2"}, hub.ImportRequest{Source: src, Timeout: time.Second})
+		return rec
+	}
+
+	if rec := call(hub.ImportSource{ContentBase64: base64.StdEncoding.EncodeToString([]byte("not a zip"))}); rec == nil || rec.Code != "not-an-xlsx" {
+		t.Fatalf("non-xlsx: %+v", rec)
+	}
+	if rec := call(hub.ImportSource{ContentBase64: "not valid base64!!"}); rec == nil || rec.Code != "invalid-source" {
+		t.Fatalf("bad base64: %+v", rec)
+	}
+	big := base64.StdEncoding.EncodeToString(make([]byte, 11<<20))
+	if rec := call(hub.ImportSource{ContentBase64: big}); rec == nil || rec.Code != "too-large" {
+		t.Fatalf("oversize: %+v", rec)
+	}
+	if rec := call(hub.ImportSource{}); rec == nil || rec.Code != "invalid-source" {
+		t.Fatalf("no source: %+v", rec)
+	}
+	if rec := call(hub.ImportSource{ContentBase64: "eA==", SourceURL: "https://example.com/x.xlsx"}); rec == nil || rec.Code != "invalid-source" {
+		t.Fatalf("both sources: %+v", rec)
+	}
+	// source_url is fetched server-side and refuses a private/loopback
+	// address (SSRF guard, hub/internal/fetch, same pattern as the
+	// authorization server's CIMD fetcher).
+	local := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("fetched a loopback source_url")
+	}))
+	defer local.Close()
+	if rec := call(hub.ImportSource{SourceURL: local.URL + "/x.xlsx"}); rec == nil || rec.Code != "fetch-failed" {
+		t.Fatalf("private source_url: %+v", rec)
 	}
 }
 

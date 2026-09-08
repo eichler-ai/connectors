@@ -42,12 +42,12 @@ func TestSkillFileMatchesTheToolSurface(t *testing.T) {
 	doc := string(skill)
 	for _, want := range []string{"`get_skills`", "`list_instances`", "`get_status`", "`execute_script`",
 		"`expect: {workbook, sheet}`", "`target-implicit`", "`expect-mismatch`", "16 MiB", "30 s", "600 s",
-		"`export_file`", "csv", "xlsx", "pdf"} {
+		"`export_file`", "csv", "xlsx", "pdf", "`import_workbook`", "not-an-xlsx", "10 MiB"} {
 		if !strings.Contains(doc, want) {
 			t.Errorf("skill.md does not mention %s", want)
 		}
 	}
-	for _, stale := range []string{"import_workbook", "`pair`"} {
+	for _, stale := range []string{"`pair`"} {
 		if strings.Contains(doc, stale) {
 			t.Errorf("skill.md mentions %s, which is not in this release", stale)
 		}
