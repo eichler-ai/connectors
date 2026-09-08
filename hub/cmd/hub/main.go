@@ -56,6 +56,7 @@ import (
 	"github.com/eichler-ai/connectors/hub/internal/authserver"
 	"github.com/eichler-ai/connectors/hub/internal/devcert"
 	"github.com/eichler-ai/connectors/hub/internal/files"
+	"github.com/eichler-ai/connectors/hub/internal/graph"
 	"github.com/eichler-ai/connectors/hub/internal/store"
 	"github.com/eichler-ai/connectors/internal/auth"
 )
@@ -156,12 +157,18 @@ func run() error {
 	defer st.Close()
 
 	var provider *authserver.OIDCProvider
+	var graphClient *graph.Client
 	if id := os.Getenv("HUB_MS_CLIENT_ID"); id != "" {
 		secret := strings.TrimSpace(os.Getenv("HUB_MS_CLIENT_SECRET"))
 		if secret == "" {
 			return errors.New("HUB_MS_CLIENT_SECRET is required with HUB_MS_CLIENT_ID")
 		}
 		provider = &authserver.OIDCProvider{Name: "microsoft", DiscoveryURL: authserver.MicrosoftDiscoveryURL, ClientID: id, ClientSecret: secret}
+		// The same Entra app id/secret redeems the Graph refresh token
+		// sign-in captured (authserver/oidc.go's AuthURL scope); no separate
+		// registration or secret (RFC excel/docs/rfc-graph-create-and-open.md
+		// §3.1).
+		graphClient = &graph.Client{ClientID: id, ClientSecret: secret}
 	} else {
 		// Every OAuth endpoint still works (metadata, registration, token
 		// refresh) but nobody can sign in; loud at startup, not at the
@@ -198,6 +205,8 @@ func run() error {
 		Connectors:     []hub.Connector{excel.New()},
 		Files:          filesStore,
 		Store:          st,
+		Keys:           keys,
+		Graph:          graphClient,
 		Version:        version(),
 		Environment:    environment,
 		Logger:         logger,

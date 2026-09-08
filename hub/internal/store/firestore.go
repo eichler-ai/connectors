@@ -33,6 +33,7 @@ const (
 	colCodes      = "auth_codes"
 	colRefresh    = "refresh_tokens"
 	colBridge     = "bridge_tokens"
+	colGraph      = "graph_tokens"
 	colAudit      = "audit"
 	subAuditRows  = "rows"
 )
@@ -309,7 +310,39 @@ func (f *Firestore) RevokeUser(ctx context.Context, userID string) (int, error) 
 		}
 		n++
 	}
+	// The Graph token, keyed by user id directly (one per user, unlike
+	// refresh/bridge tokens which are keyed by hash).
+	if _, err := f.c.Collection(colGraph).Doc(userID).Get(ctx); err == nil {
+		if _, err := f.c.Collection(colGraph).Doc(userID).Delete(ctx); err != nil {
+			return n, err
+		}
+		n++
+	} else if !notFound(err) {
+		return n, err
+	}
 	return n, nil
+}
+
+func (f *Firestore) PutGraphToken(ctx context.Context, t GraphToken) error {
+	_, err := f.c.Collection(colGraph).Doc(t.UserID).Set(ctx, t)
+	return err
+}
+
+func (f *Firestore) GraphToken(ctx context.Context, userID string) (GraphToken, error) {
+	ds, err := f.c.Collection(colGraph).Doc(userID).Get(ctx)
+	if err != nil {
+		if notFound(err) {
+			return GraphToken{}, ErrNotFound
+		}
+		return GraphToken{}, err
+	}
+	var t GraphToken
+	return t, ds.DataTo(&t)
+}
+
+func (f *Firestore) DeleteGraphToken(ctx context.Context, userID string) error {
+	_, err := f.c.Collection(colGraph).Doc(userID).Delete(ctx)
+	return err
 }
 
 func (f *Firestore) PutBridgeToken(ctx context.Context, t BridgeToken) error {

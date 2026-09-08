@@ -24,6 +24,7 @@ type Memory struct {
 	codes      map[string]AuthCode
 	refresh    map[string]RefreshToken
 	bridge     map[string]BridgeToken
+	graph      map[string]GraphToken // by user id
 	audit      map[string][]AuditRow // by user id
 }
 
@@ -37,6 +38,7 @@ func NewMemory() *Memory {
 		codes:      map[string]AuthCode{},
 		refresh:    map[string]RefreshToken{},
 		bridge:     map[string]BridgeToken{},
+		graph:      map[string]GraphToken{},
 		audit:      map[string][]AuditRow{},
 	}
 }
@@ -255,7 +257,35 @@ func (m *Memory) RevokeUser(_ context.Context, userID string) (int, error) {
 			n++
 		}
 	}
+	if _, ok := m.graph[userID]; ok {
+		delete(m.graph, userID)
+		n++
+	}
 	return n, nil
+}
+
+func (m *Memory) PutGraphToken(_ context.Context, t GraphToken) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.graph[t.UserID] = t
+	return nil
+}
+
+func (m *Memory) GraphToken(_ context.Context, userID string) (GraphToken, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	t, ok := m.graph[userID]
+	if !ok {
+		return GraphToken{}, ErrNotFound
+	}
+	return t, nil
+}
+
+func (m *Memory) DeleteGraphToken(_ context.Context, userID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.graph, userID)
+	return nil
 }
 
 func (m *Memory) PutBridgeToken(_ context.Context, t BridgeToken) error {
