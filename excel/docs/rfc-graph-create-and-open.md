@@ -17,6 +17,12 @@ where Excel for the web can open it, before anything is open. Once open, the **b
 The two never drive the same open document at once (that is Flow 2, explicitly out of scope here —
 Graph and interactive co-authoring do not compose reliably).
 
+**Scope decision (2026-09-08): broad file access.** With `Files.ReadWrite` over the user's whole
+OneDrive (§9), the API path does more than create-and-open: Claude can also **open an existing**
+OneDrive workbook (take its URL, hand it back to open, then drive it) and **read/edit existing
+files headlessly** via Graph when nothing is open. The create-and-open story below is the primary
+one; the existing-file capabilities come with the same permission and are specced as §3.5.
+
 ## 2. End-to-end sequence
 
 ```
@@ -48,33 +54,40 @@ Claude (MCP)        Hub (connector + Graph client)        Microsoft Graph / OneD
   identity (scopes `openid profile email`). Graph calls need a Microsoft **access token for Graph**
   with a Files scope, plus a stored Microsoft **refresh token** to mint more without re-prompting.
   Two ways to get it:
-  - **Incremental consent (recommended).** Sign-in stays minimal. The *first* time the user invokes
-    a Graph-backed tool, the hub runs a second, incremental Microsoft authorization requesting
-    `offline_access <Files scope>`; Microsoft shows a one-time consent for file access; the hub
-    stores the resulting refresh token. Least surprise, least privilege, opt-in.
-  - **Upfront.** Request the Files scope at every sign-in. Simpler code, but every user consents to
-    file access even if they never use it. Rejected for v1.
+  - **Upfront at sign-in (chosen 2026-09-08).** The Microsoft login requests
+    `openid profile email offline_access Files.ReadWrite` from the start, so one consent covers
+    identity and file access and there is no second prompt later. The Microsoft refresh token from
+    that login is stored (§3.1, encrypted) and reused for Graph. Consequence to accept: the consent
+    screen names broad file access at first sign-in, and an **unverified** publisher with this scope
+    triggers the strongest warning and is blocked outright in many work tenants — so this scope must
+    not reach work tenants before publisher verification (Partner Center, already in progress). Fine
+    for the personal-account v1 target.
+  - **Incremental (not chosen).** Would keep sign-in minimal and prompt for files only on first use.
+    Recorded as the fallback if the upfront consent screen proves too heavy in practice.
 - **Storing the Microsoft refresh token.** Sensitive. Encrypt at rest (AEAD with a key from Secret
   Manager, distinct from the JWT signing key), keyed by `{user_id, provider}`. Never logged. A new
   store collection `graph_tokens` (hash/ciphertext only). Revoked by `RevokeUser` alongside bridge
   tokens.
 
 ### 3.2 The `create_workbook` tool (MCP)
-- Input: an optional content source and a name. Content source, in order of v1 priority:
-  1. **From data** — the tool builds a minimal valid `.xlsx` server-side from rows/sheets the agent
-     supplies (the common case: Claude generated a table and wants it in Excel). Keeps bytes off the
-     wire and avoids the agent hand-building xlsx (which, as we found live, Excel's importer
-     rejects if malformed).
+- Input: a content source and a name. **All three sources are in v1 (chosen 2026-09-08)**; build in
+  this order:
+  1. **From data** — the tool builds a valid `.xlsx` server-side from rows/sheets the agent supplies
+     (the common case: Claude generated a table and wants it in Excel). Keeps bytes off the wire and
+     avoids the agent hand-building xlsx (which, as we found live, Excel's importer rejects if
+     malformed). Build first.
   2. **From an uploaded file** — the agent puts an `.xlsx` into the hub file exchange (phase 2,
-     GCS); the hub streams those bytes to Graph. No base64 in the tool call.
-  3. **Blank** — a new empty workbook.
-- Action: upload to the user's OneDrive **app folder** via Graph
-  (`PUT /me/drive/special/approot:/<name>.xlsx:/content`; files >4 MiB use an upload session).
+     GCS); the hub streams those bytes to Graph. No base64 in the tool call. Depends on the phase-2
+     file exchange, so it lands with or after that.
+  3. **Blank** — a new empty workbook. Trivial once the upload path exists.
+- Action: upload to a chosen path in the user's OneDrive via Graph
+  (`PUT /me/drive/root:/<folder>/<name>.xlsx:/content`; files >4 MiB use an upload session). With the
+  broad `Files.ReadWrite` scope (§9) the target can be any folder, defaulting to a visible
+  `Eichler Connectors/` folder rather than a hidden app folder.
 - Output: `{ webUrl, doc_key, open_hint }` where `webUrl` is what the user clicks, `doc_key` is the
   stable identifier the agent will match against `list_instances` once the pane connects, and
   `open_hint` is human text ("Open this and I'll take the controls").
-- The file lands in the user's own OneDrive (`Apps/Eichler Connectors/…` under the app folder), so
-  the user owns it and it is visible to them; the app can only touch what it created.
+- The file lands in the user's own OneDrive, owned and visible to them.
 
 ### 3.3 Correlation: matching the created file to the connected pane
 The glue that makes "then Claude controls it" work. After `create_workbook`, the agent must know
@@ -90,6 +103,18 @@ which future bridge instance is *this* file.
 - Until the join is exact, fall back to: one new bridge appearing for this user shortly after
   `create_workbook`, with a matching title, is the target — good enough to prompt, not to
   auto-write. **This is the main open technical question (§6).**
+
+### 3.5 Existing-file capabilities (unlocked by the broad scope)
+With `Files.ReadWrite` over the whole OneDrive, two more tools become possible on the same
+plumbing; specced here, scheduled after create-and-open:
+- **`open_workbook`** — given a file the user names (by Graph search or a URL they paste), return its
+  `webUrl` + `doc_key` so the user can open it and the bridge can then drive it. Same correlation
+  and auto-open story as §3.3–§3.4.
+- **`edit_workbook_headless`** — read/edit an existing OneDrive workbook via the Graph Excel API
+  with **nothing open** (ranges, tables, formulas, recalculation). This is the headless at-rest path
+  from the earlier discussion. It must refuse or warn when the file is currently open interactively
+  (Graph vs live co-authoring do not compose — the Flow 2 hazard), e.g. detect the lock and return a
+  `document-open-elsewhere` notice rather than risk a conflicting write.
 
 ### 3.4 Auto-open of the pane
 - For the pane to be there when the user opens the file, the connector must be **installed for the
@@ -110,29 +135,37 @@ which future bridge instance is *this* file.
   this is the OneDrive path that produces an openable document.
 
 ## 5. Security & privacy
-- Least privilege: `Files.ReadWrite.AppFolder` (app can touch only files it created) over
-  `Files.ReadWrite` (all the user's files). v1 recommendation: AppFolder.
-- Incremental, opt-in consent for file access (§3.1); the Microsoft consent screen states it.
+- **Scope is `Files.ReadWrite` over the whole OneDrive (chosen §9.2)** — the connector can read and
+  write any of the user's workbooks, not just ones it created. This is a broad grant; the
+  compensating controls are the audit trail (PRD §12, every exec and every Graph write logged with
+  user/file/outcome), `RevokeUser` cutting Graph access with everything else, and — before this
+  reaches work tenants — publisher verification so the consent screen is trustworthy and not blocked.
+- Upfront consent at sign-in (§3.1); the Microsoft consent screen names the file access.
 - Microsoft refresh tokens encrypted at rest, never logged, revoked with the user.
-- The created file is in the *user's* OneDrive, owned by them, not in hub storage.
+- Created/edited files are in the *user's* OneDrive, owned by them, not in hub storage.
 - Personal Microsoft accounts have OneDrive; work/school accounts need a OneDrive/SharePoint
   license. Behaviour differs — verify per account type.
 
-## 6. Open questions / decisions needed
-1. **Consent model:** incremental (recommended) vs upfront. 
-2. **File scope:** `Files.ReadWrite.AppFolder` (recommended) vs `Files.ReadWrite`.
-3. **Content source priority for v1:** from-data (recommended first) / from-uploaded-file / blank —
-   which do we build first?
-4. **The correlation join (§3.3)** — the real technical unknown. Needs a live check: what exactly
-   does the web pane report as `document.url` for a Graph-app-folder file, and can the hub compute
-   the same key from the driveItem? Proposed spike: create a file via Graph, open it, read
-   `Office.context.document.url` in the pane, compare to the driveItem `id`/`webUrl`.
-5. **Account type for v1:** personal OneDrive only, or work/SharePoint too.
+## 6. Decisions (resolved 2026-09-08)
+1. **Consent model:** upfront at sign-in (§3.1). Incremental kept as the fallback.
+2. **File scope:** `Files.ReadWrite` — all the user's files (§5, §3.5).
+3. **Content sources for v1:** all three (from-data first, then from-uploaded-file, then blank; §3.2).
+4. **Account type for v1:** personal OneDrive first; work/SharePoint later (needs verification + more
+   surface).
+
+**Still open — one technical unknown, not a preference:** the correlation join (§3.3). Needs a live
+check: what exactly does the web pane report as `Office.context.document.url` for a Graph-created
+OneDrive file, and can the hub compute the same key from the driveItem `id`/`webUrl`? Proposed
+spike: create a file via Graph, open it, read `document.url` in the pane, compare. This gates
+"then Claude controls *this* file" being exact rather than best-guess.
 
 ## 7. Phasing
 - **Now:** this RFC + decisions.
-- **Phase 2.5 (proposed):** Graph client + delegated-token acquisition + `create_workbook`
-  (from-data) + the correlation spike (§6.4). Works pre-distribution with a manual pane open.
-- **Phase 3:** seamless auto-open once the connector is installable from AppSource/admin deployment.
-- **Later:** from-uploaded-file, upload sessions for large files, SharePoint, and — separately and
+- **Phase 2.5 (proposed):** the correlation spike (§6) *first* — it is cheap and de-risks the rest —
+  then Graph client + upfront `Files.ReadWrite` token acquisition and storage + `create_workbook`
+  (from-data). Works pre-distribution with a manual pane open.
+- **Phase 3:** seamless auto-open once the connector is installable from AppSource/admin deployment;
+  publisher verification lands here too, which is the gate for the broad scope reaching work tenants.
+- **Later:** create_workbook from-uploaded-file + blank, `open_workbook` and
+  `edit_workbook_headless` (§3.5), upload sessions for large files, SharePoint, and — separately and
   only if justified — a guarded look at Flow 2.
