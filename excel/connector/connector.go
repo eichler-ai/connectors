@@ -64,6 +64,7 @@ func (*Connector) Validate(_ context.Context, s hub.Script) error {
 func (c *Connector) Tools(reg *hub.ToolRegistry) {
 	registerExecuteScript(reg, c)
 	registerGetStatus(reg, c)
+	registerExportFile(reg, c)
 }
 
 // namesSheet is the target-implicit heuristic (§10): a script "names a

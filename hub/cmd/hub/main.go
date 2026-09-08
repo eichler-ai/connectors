@@ -29,6 +29,10 @@
 //	HUB_ALLOWED_ORIGINS    comma-separated extra browser origins allowed on /<c>/bridge
 //	HUB_ENV                "prod", "staging" or "dev" (default; -dev always forces "dev"
 //	                       regardless of this variable); see hub.Options.Environment
+//	HUB_FILES_BUCKET       Cloud Storage bucket for exported files (PRD §11); unset means
+//	                       -dev/tests only — a local temp dir stands in, and its signed
+//	                       URLs are served by this process at /files/local/. Never unset
+//	                       in staging/prod: deploy.sh creates the bucket and sets this.
 package main
 
 import (
@@ -51,6 +55,7 @@ import (
 	"github.com/eichler-ai/connectors/hub"
 	"github.com/eichler-ai/connectors/hub/internal/authserver"
 	"github.com/eichler-ai/connectors/hub/internal/devcert"
+	"github.com/eichler-ai/connectors/hub/internal/files"
 	"github.com/eichler-ai/connectors/hub/internal/store"
 	"github.com/eichler-ai/connectors/internal/auth"
 )
@@ -163,6 +168,11 @@ func run() error {
 		// first user's attempt.
 		logger.Warn("HUB_MS_CLIENT_ID is not set: Microsoft sign-in is disabled")
 	}
+	filesStore, err := openFiles(ctx, publicURL, logger)
+	if err != nil {
+		return err
+	}
+
 	as, err := authserver.New(authserver.Options{
 		Issuer:            publicURL,
 		Store:             st,
@@ -186,6 +196,7 @@ func run() error {
 		AuthServer:     as,
 		AllowedOrigins: origins,
 		Connectors:     []hub.Connector{excel.New()},
+		Files:          filesStore,
 		Version:        version(),
 		Environment:    environment,
 		Logger:         logger,
@@ -277,6 +288,24 @@ func openStore(ctx context.Context, logger *slog.Logger) (store.Store, error) {
 	}
 	logger.Info("firestore store", "project", project, "database", database)
 	return fs, nil
+}
+
+// openFiles picks the GCS Store when HUB_FILES_BUCKET is set — staging and
+// prod deploys always set it (deploy.sh creates the bucket) — and the local
+// temp-dir Store otherwise, which is what -dev and every test path exercise
+// (see hub/internal/files/temp.go).
+func openFiles(ctx context.Context, publicURL string, logger *slog.Logger) (hub.Files, error) {
+	bucket := strings.TrimSpace(os.Getenv("HUB_FILES_BUCKET"))
+	if bucket == "" {
+		logger.Warn("HUB_FILES_BUCKET is not set: exports use a local temp directory, not Cloud Storage")
+		return files.NewTemp(publicURL)
+	}
+	st, err := files.NewGCS(ctx, bucket)
+	if err != nil {
+		return nil, fmt.Errorf("files: %w", err)
+	}
+	logger.Info("files store", "bucket", bucket)
+	return st, nil
 }
 
 // revokeUser is the `hub revoke-user <user_id>` kill switch (PRD §13).

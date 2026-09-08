@@ -318,6 +318,7 @@
       var p = msg.params || {};
       switch (msg.method) {
         case "exec": runScript(p); break;
+        case "export": runExport(p); break;
         case "cancel":
           // A task pane cannot interrupt a running script (single JavaScript thread; Excel.run has no
           // abort). Say so rather than silently ignoring the cancel.
@@ -408,6 +409,85 @@
     if (rawResult !== undefined) text = text.replace("\"__RAW__\"", function () { return rawResult; });
     if (ws && ws.readyState === WebSocket.OPEN) ws.send(text);
     else log("result for " + params.id + " dropped: socket not open", "err");
+  }
+
+  // --- Export (export_file, hub PRD §10/§11) ------------------------------------------------
+  // The hub asks for a file with `export`; the pane produces it and POSTs the bytes straight to
+  // /<connector>/files?id=<id> over plain HTTPS (bridge token in Authorization), never through the
+  // WebSocket and never as base64 in a script. csv has no Office.js "save as" — it is the active
+  // sheet's used range, serialised the way Excel's own CSV export reads it (POC 08-csv-export.js);
+  // xlsx/pdf are the whole document via getFileAsync (POC 09/10), assembled into a Blob directly
+  // instead of the POC's base64 round trip, since a Blob is exactly what fetch's body wants.
+  function runExport(req) {
+    var id = req.id, format = req.format;
+    log("export " + id + ": format=" + format);
+    exportBytes(format).then(function (blob) {
+      return uploadExport(id, blob);
+    }).then(function () {
+      log("export " + id + ": uploaded ok");
+      send("result", { id: id, ok: true, duration_ms: 0 });
+    }).catch(function (e) {
+      log("export " + id + " failed: " + (e && e.message), "err");
+      send("result", { id: id, ok: false, error: serializeError(e), duration_ms: 0 });
+    });
+  }
+
+  function exportBytes(format) {
+    if (typeof Excel === "undefined") return Promise.reject(new Error("the task pane is not running inside Excel"));
+    switch (format) {
+      case "csv": return exportCsv();
+      case "xlsx": return exportWholeDocument(Office.FileType.Compressed, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+      case "pdf": return exportWholeDocument(Office.FileType.Pdf, "application/pdf");
+      default: return Promise.reject(new Error("unsupported export format " + format));
+    }
+  }
+
+  function exportCsv() {
+    return Excel.run(function (context) {
+      var sheet = context.workbook.worksheets.getActiveWorksheet();
+      var used = sheet.getUsedRange(true);
+      used.load("text");
+      return context.sync().then(function () {
+        var q = function (s) { return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+        var csv = used.text.map(function (row) { return row.map(q).join(","); }).join("\r\n") + "\r\n";
+        return new Blob([csv], { type: "text/csv" });
+      });
+    });
+  }
+
+  // Whole-document export: getFileAsync + getSliceAsync, assembled into a Blob. Slices arrive as
+  // Uint8Array (or an ArrayBuffer-like on some hosts); closeAsync always runs, success or failure,
+  // the same discipline the POC scripts used with their `finally`.
+  function exportWholeDocument(type, mime) {
+    return new Promise(function (resolve, reject) {
+      Office.context.document.getFileAsync(type, { sliceSize: 4 * 1024 * 1024 }, function (r) {
+        if (r.status !== Office.AsyncResultStatus.Succeeded) { reject(new Error(r.error.code + ": " + r.error.message)); return; }
+        var file = r.value;
+        var chunks = [];
+        var i = 0;
+        function done(err, blob) { file.closeAsync(function () { if (err) reject(err); else resolve(blob); }); }
+        (function next() {
+          if (i >= file.sliceCount) { done(null, new Blob(chunks, { type: mime })); return; }
+          file.getSliceAsync(i, function (sr) {
+            if (sr.status !== Office.AsyncResultStatus.Succeeded) { done(new Error(sr.error.code + ": " + sr.error.message)); return; }
+            var bytes = sr.value.data instanceof Uint8Array ? sr.value.data : new Uint8Array(sr.value.data);
+            chunks.push(bytes);
+            i += 1;
+            next();
+          });
+        })();
+      });
+    });
+  }
+
+  function uploadExport(id, blob) {
+    if (!cred) return Promise.reject(new Error("not signed in"));
+    var url = BASE + "/files?id=" + encodeURIComponent(id);
+    return fetch(url, { method: "POST", headers: { "Authorization": "Bearer " + cred.token }, body: blob })
+      .then(function (resp) {
+        if (resp.ok) return;
+        return resp.text().then(function (t) { throw new Error("upload HTTP " + resp.status + ": " + t); });
+      });
   }
 
   // documents[]: Excel for the web has one workbook per pane, so this is one entry. Office.js has

@@ -21,7 +21,11 @@ func TestSkillFileStaysWithinItsBudget(t *testing.T) {
 	// Revit's by design because Office.js itself needs no explaining (§10).
 	const pessimisticBytesPerToken = 3
 	const ceilingTokens = 25000
-	const budgetTokens = ceilingTokens * 12 / 100
+	// Raised from 12% to 12.5% of the ceiling for export_file (phase 2 unit
+	// A): the file-exchange bullet and the csv-is-sheet-scoped quirk earned
+	// their keep — see hub/docs/PRD.md §17 phase 2. Still smaller than
+	// Revit's by design.
+	const budgetTokens = ceilingTokens * 125 / 1000
 	approx := len(skill) / pessimisticBytesPerToken
 	if approx > budgetTokens {
 		t.Errorf("skill.md is ~%d tokens (%d bytes), over the %d-token budget by ~%d. "+
@@ -37,12 +41,13 @@ func TestSkillFileStaysWithinItsBudget(t *testing.T) {
 func TestSkillFileMatchesTheToolSurface(t *testing.T) {
 	doc := string(skill)
 	for _, want := range []string{"`get_skills`", "`list_instances`", "`get_status`", "`execute_script`",
-		"`expect: {workbook, sheet}`", "`target-implicit`", "`expect-mismatch`", "16 MiB", "30 s", "600 s"} {
+		"`expect: {workbook, sheet}`", "`target-implicit`", "`expect-mismatch`", "16 MiB", "30 s", "600 s",
+		"`export_file`", "csv", "xlsx", "pdf"} {
 		if !strings.Contains(doc, want) {
 			t.Errorf("skill.md does not mention %s", want)
 		}
 	}
-	for _, stale := range []string{"export_file", "import_workbook", "`pair`"} {
+	for _, stale := range []string{"import_workbook", "`pair`"} {
 		if strings.Contains(doc, stale) {
 			t.Errorf("skill.md mentions %s, which is not in this release", stale)
 		}

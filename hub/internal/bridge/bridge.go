@@ -100,6 +100,11 @@ type pendingExec struct {
 	// notices collects notice messages the bridge sends about this exec
 	// while it runs (e.g. cannot-cancel); merged into the result.
 	notices []protocol.Notice
+	// format is set only for a pending export: the file format/extension the
+	// hub itself asked the bridge to produce. The files upload handler
+	// trusts this, never a client-supplied value, when it picks the stored
+	// object's extension — see UploadAuthorize.
+	format string
 }
 
 // New builds the service.
@@ -380,11 +385,6 @@ func (s *Service) Exec(ctx context.Context, b *registry.Bridge, req ExecRequest)
 		req.Timeout = defaultExecTimeout
 	}
 	id := fmt.Sprintf("e%d", s.seq.Add(1))
-	p := &pendingExec{bridge: b, ch: make(chan protocol.Result, 1)}
-	s.mu.Lock()
-	s.pending[id] = p
-	s.mu.Unlock()
-
 	msg := protocol.New(protocol.MethodExec, protocol.Exec{
 		ID:         id,
 		DocumentID: req.DocumentID,
@@ -393,6 +393,43 @@ func (s *Service) Exec(ctx context.Context, b *registry.Bridge, req ExecRequest)
 		TimeoutMs:  req.Timeout.Milliseconds(),
 		Limits:     protocol.Limits{ResultBytes: s.opts.ResultBytes},
 	})
+	return s.roundTrip(ctx, b, id, msg, req.Timeout, "")
+}
+
+// ExportRequest is what a connector asks the hub to have the bridge produce
+// as a file (§10/§11).
+type ExportRequest struct {
+	DocumentID string
+	Format     string
+	Timeout    time.Duration
+}
+
+// Export sends `export` to b and waits for its outcome: an error `result`
+// from the bridge (it never got as far as uploading), a synthetic success
+// `result` the files upload handler delivers through CompleteExport once the
+// bytes are safely stored, the timeout, or ctx. The wait is otherwise
+// identical to Exec's — same pending map, same cancel-on-timeout, same
+// dropped-late-reply behaviour — because an export id is correlated exactly
+// like an exec id (§10).
+func (s *Service) Export(ctx context.Context, b *registry.Bridge, req ExportRequest) (protocol.Result, error) {
+	if req.Timeout <= 0 {
+		req.Timeout = defaultExecTimeout
+	}
+	id := fmt.Sprintf("x%d", s.seq.Add(1))
+	msg := protocol.New(protocol.MethodExport, protocol.Export{ID: id, Format: req.Format, DocumentID: req.DocumentID})
+	return s.roundTrip(ctx, b, id, msg, req.Timeout, req.Format)
+}
+
+// roundTrip is Exec and Export's shared send-and-wait: register a pending
+// entry, send msg, and wait for its result channel, timeout, or ctx. format
+// is empty for an exec (UploadAuthorize refuses any pending entry with no
+// format, so an exec id can never be mistaken for an export's).
+func (s *Service) roundTrip(ctx context.Context, b *registry.Bridge, id string, msg protocol.Message, timeout time.Duration, format string) (protocol.Result, error) {
+	p := &pendingExec{bridge: b, ch: make(chan protocol.Result, 1), format: format}
+	s.mu.Lock()
+	s.pending[id] = p
+	s.mu.Unlock()
+
 	sendCtx, cancel := context.WithTimeout(ctx, sendTimeout)
 	err := s.reg.Send(sendCtx, b, msg)
 	cancel()
@@ -401,10 +438,10 @@ func (s *Service) Exec(ctx context.Context, b *registry.Bridge, req ExecRequest)
 		if errors.Is(err, registry.ErrNotRegistered) {
 			return protocol.Result{}, ErrBridgeGone
 		}
-		return protocol.Result{}, fmt.Errorf("send exec %s to bridge: %w", id, err)
+		return protocol.Result{}, fmt.Errorf("send %s to bridge: %w", id, err)
 	}
 
-	timer := time.NewTimer(req.Timeout)
+	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	select {
 	case res, ok := <-p.ch:
@@ -420,12 +457,56 @@ func (s *Service) Exec(ctx context.Context, b *registry.Bridge, req ExecRequest)
 	case <-timer.C:
 		s.forget(id)
 		go s.send(b, protocol.New(protocol.MethodCancel, protocol.Cancel{ID: id}))
-		return protocol.Result{}, fmt.Errorf("exec %s after %s: %w", id, req.Timeout, ErrTimeout)
+		return protocol.Result{}, fmt.Errorf("%s after %s: %w", id, timeout, ErrTimeout)
 	case <-ctx.Done():
 		s.forget(id)
 		go s.send(b, protocol.New(protocol.MethodCancel, protocol.Cancel{ID: id}))
-		return protocol.Result{}, fmt.Errorf("exec %s: %w", id, ctx.Err())
+		return protocol.Result{}, fmt.Errorf("%s: %w", id, ctx.Err())
 	}
+}
+
+// UploadAuthorize is called by the files upload handler before it reads a
+// single byte off the request body. It looks up the pending export by id and
+// refuses anything the hub did not itself ask for: an unknown id (never
+// issued, or the export already timed out and forgot it), an exec id (no
+// format), or an id whose pending export belongs to a different user (§13:
+// isolation between users — an upload can only ever complete its own user's
+// export). On success it returns the format the hub asked the bridge to
+// produce, which the caller uses to pick the stored object's extension —
+// never whatever the uploader's request claims.
+func (s *Service) UploadAuthorize(id, uploaderUser string) (format string, ok bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p := s.pending[id]
+	if p == nil || p.format == "" || p.bridge.UserID != uploaderUser {
+		return "", false
+	}
+	return p.format, true
+}
+
+// CompleteExport delivers the outcome of an upload to the Export call
+// waiting on id, exactly as a `result` message from the bridge itself would
+// (deliver is symmetric: whichever arrives first — the pane's own `result`,
+// or this — wins, and the loser is dropped with a log line, which is also
+// what happens to an upload that finishes after the export already timed
+// out). Re-checks ownership so a caller cannot complete an export it never
+// authorized with UploadAuthorize.
+func (s *Service) CompleteExport(id, uploaderUser string, res protocol.Result) bool {
+	s.mu.Lock()
+	p := s.pending[id]
+	if p != nil && (p.format == "" || p.bridge.UserID != uploaderUser) {
+		p = nil
+	}
+	if p != nil {
+		delete(s.pending, id)
+	}
+	s.mu.Unlock()
+	if p == nil {
+		s.log.Info("bridge: upload completed for an unknown, expired or foreign export id", "exec_id", id, "uploader", uploaderUser)
+		return false
+	}
+	p.ch <- res
+	return true
 }
 
 func (s *Service) forget(id string) {

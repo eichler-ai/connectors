@@ -17,6 +17,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/oauthex"
 
 	"github.com/eichler-ai/connectors/hub/internal/bridge"
+	"github.com/eichler-ai/connectors/hub/internal/files"
 	"github.com/eichler-ai/connectors/hub/internal/registry"
 	"github.com/eichler-ai/connectors/hub/wellknown"
 	"github.com/eichler-ai/connectors/internal/auth"
@@ -42,6 +43,11 @@ type Options struct {
 	// sockets (the hub's own origin is always allowed).
 	AllowedOrigins []string
 	Connectors     []Connector
+	// Files is the file exchange (§10, §11) an export_file-style tool
+	// stores into; nil means no connector in this hub can export (Export
+	// itself refuses with files-unconfigured, and the upload endpoint is not
+	// mounted).
+	Files files.Store
 	// Version is reported as each MCP server's version and by get_skills.
 	Version string
 	// Environment is "prod", "staging" or "dev" (default). Excel for the web
@@ -67,6 +73,7 @@ type Server struct {
 	host    *Host
 	handler http.Handler
 	servers map[string]*mcp.Server
+	uploads *uploadLimiter
 }
 
 // NewServer wires everything up. It does not listen; cmd/hub does.
@@ -105,12 +112,18 @@ func NewServer(opts Options) (*Server, error) {
 	bopts.Logger = opts.Logger
 	bridges := bridge.New(reg, opts.Auth, bopts)
 
-	host := &Host{reg: reg, bridges: bridges, log: opts.Logger, userOf: opts.UserOf, defaultTimeout: DefaultTimeout, maxTimeout: MaxTimeout}
+	host := &Host{reg: reg, bridges: bridges, files: opts.Files, log: opts.Logger, userOf: opts.UserOf, defaultTimeout: DefaultTimeout, maxTimeout: MaxTimeout}
 	if host.userOf == nil {
 		host.userOf = userFromToken
 	}
 
 	mux := http.NewServeMux()
+	// A Store that needs the hub to serve its own signed URLs (the temp-dir
+	// implementation, -dev/tests only — GCS's V4 signed URLs point straight
+	// at Cloud Storage) advertises it by implementing this handler.
+	if lh, ok := opts.Files.(interface{ Handler() http.Handler }); ok {
+		mux.Handle("GET /files/local/", lh.Handler())
+	}
 	// Not /healthz: Cloud Run's frontend answers that exact path itself
 	// (a platform quirk) before it ever reaches this container.
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
@@ -124,7 +137,7 @@ func NewServer(opts Options) (*Server, error) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(wellknown.MicrosoftIdentityAssociation)
 	})
-	s := &Server{opts: opts, host: host, handler: mux, servers: map[string]*mcp.Server{}}
+	s := &Server{opts: opts, host: host, handler: mux, servers: map[string]*mcp.Server{}, uploads: newUploadLimiter()}
 	if opts.AuthServer != nil {
 		opts.AuthServer.Routes(mux)
 	}
@@ -168,6 +181,9 @@ func NewServer(opts Options) (*Server, error) {
 		mux.Handle("/"+slug+"/mcp", requireBearer(mcpHandler))
 		if c.Capabilities().Bridge {
 			mux.Handle("GET /"+slug+"/bridge", bridges.Handler(slug))
+			if opts.Files != nil {
+				mux.Handle("POST /"+slug+"/files", s.filesUploadHandler(slug))
+			}
 		}
 		if static := c.Static(); static != nil {
 			mux.Handle("GET /"+slug+"/addin/", http.StripPrefix("/"+slug+"/addin/", http.FileServerFS(static)))

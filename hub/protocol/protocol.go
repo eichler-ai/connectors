@@ -36,6 +36,7 @@ const (
 	MethodRegister = "register" // bridge → hub, live documents[] update
 	MethodExec     = "exec"     // hub → bridge
 	MethodResult   = "result"   // bridge → hub
+	MethodExport   = "export"   // hub → bridge, ask for a file (§10/§11)
 	MethodCancel   = "cancel"   // hub → bridge, best effort
 	MethodNotice   = "notice"   // either direction, out-of-band diagnostic
 	MethodReplaced = "replaced" // hub → bridge, connection superseded
@@ -179,6 +180,22 @@ type Result struct {
 	// Notices are things the bridge resolved or observed on the agent's behalf
 	// while running this script (observability over silence).
 	Notices []diag.Record `json:"notices,omitempty"`
+}
+
+// Export asks the bridge to produce a file and upload its bytes to the hub
+// over plain HTTPS — POST /<connector>/files?id=<id> with the same bridge
+// token presented in hello — rather than returning them as a `result` (§10:
+// "nothing base64 in a script"; a whole-document export can be many MiB,
+// which does not belong inside the WebSocket's JSON framing). ID correlates
+// the eventual outcome exactly like Exec's: the bridge's own `result` (ok,
+// or an error such as a failed getFileAsync) if it never gets as far as
+// uploading, or — once the upload lands — a synthetic `result` the hub
+// itself delivers with the signed URL. Format is a connector-defined tag
+// (Excel: csv, xlsx, pdf); DocumentID selects a document as in Exec.
+type Export struct {
+	ID         string `json:"id"`
+	Format     string `json:"format"`
+	DocumentID string `json:"document_id,omitempty"`
 }
 
 // Cancel asks the bridge to abandon a running exec. Best effort: a bridge that

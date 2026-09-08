@@ -1,13 +1,17 @@
 package connector
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"net/http/httptest"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -23,10 +27,54 @@ import (
 const token = "excel-test-token-0123456789"
 
 type fixture struct {
-	srv  *hub.Server
-	http *httptest.Server
-	cs   *mcp.ClientSession
-	uid  string
+	srv   *hub.Server
+	http  *httptest.Server
+	cs    *mcp.ClientSession
+	uid   string
+	files *fakeFiles
+}
+
+// fakeFiles is this package's stand-in for hub/internal/files.Temp, which
+// excel/connector cannot import (Go's internal rule: only packages under
+// hub/ may). It is the same shape — bytes in memory, signed URLs served by
+// its own httptest.Server — just local to this test package, and it is what
+// exercises "the tool returns a working signed URL" for export_file without
+// reaching into the hub's internal store.
+type fakeFiles struct {
+	mu      sync.Mutex
+	objects map[string][]byte
+	srv     *httptest.Server
+}
+
+func newFakeFiles() *fakeFiles {
+	f := &fakeFiles{objects: map[string][]byte{}}
+	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		b, ok := f.objects[strings.TrimPrefix(r.URL.Path, "/")]
+		f.mu.Unlock()
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write(b)
+	}))
+	return f
+}
+
+func (f *fakeFiles) Put(_ context.Context, user, connector, id, ext string, r io.Reader) (hub.ObjectRef, error) {
+	b, err := io.ReadAll(r)
+	if err != nil {
+		return hub.ObjectRef{}, err
+	}
+	key := fmt.Sprintf("%s/%s/%s.%s", user, connector, id, ext)
+	f.mu.Lock()
+	f.objects[key] = b
+	f.mu.Unlock()
+	return hub.ObjectRef{Key: key, Bytes: int64(len(b))}, nil
+}
+
+func (f *fakeFiles) SignedURL(_ context.Context, ref hub.ObjectRef, ttl time.Duration) (string, time.Time, error) {
+	return f.srv.URL + "/" + ref.Key, time.Now().Add(ttl), nil
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -36,9 +84,12 @@ func newFixture(t *testing.T) *fixture {
 		t.Fatal(err)
 	}
 	uid := a.UserID()
+	ff := newFakeFiles()
+	t.Cleanup(ff.srv.Close)
 	srv, err := hub.NewServer(hub.Options{
 		Auth:       a,
 		Connectors: []hub.Connector{New()},
+		Files:      ff,
 		Logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 		// In-memory MCP sessions have no bearer token; act as the dev user, the
 		// identity the fake bridge's hello resolves to.
@@ -60,7 +111,7 @@ func newFixture(t *testing.T) *fixture {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { cs.Close() })
-	return &fixture{srv: srv, http: hs, cs: cs, uid: uid}
+	return &fixture{srv: srv, http: hs, cs: cs, uid: uid, files: ff}
 }
 
 // miniExcel is a fake bridge that behaves like the prelude wrap() injects:
@@ -260,7 +311,7 @@ func TestToolSurface(t *testing.T) {
 	for _, tl := range tools.Tools {
 		names = append(names, tl.Name)
 	}
-	if got := strings.Join(names, ","); got != "execute_script,get_skills,get_status,list_instances" {
+	if got := strings.Join(names, ","); got != "execute_script,export_file,get_skills,get_status,list_instances" {
 		t.Fatalf("tools: %s", got)
 	}
 }
@@ -297,6 +348,111 @@ func TestTargetImplicitHeuristic(t *testing.T) {
 		if got := targetImplicit(tc.script, tc.expectSheet); got != tc.want {
 			t.Errorf("targetImplicit(%q, %q) = %v, want %v", tc.script, tc.expectSheet, got, tc.want)
 		}
+	}
+}
+
+// uploadExport plays the pane's half of one export: wait for the `export`
+// message, POST the given bytes to the files endpoint with the bridge
+// token, exactly as taskpane.js does after assembling getFileAsync's slices.
+// uploadExport runs in its own goroutine (the export_file call it is racing
+// against blocks until the upload lands), so it reports failures with
+// t.Error, never t.Fatal — go vet flags a Fatal off the test goroutine
+// because runtime.Goexit there would not actually stop the test.
+func uploadExport(t *testing.T, f *fixture, fake *bridgetest.Fake, body []byte) {
+	t.Helper()
+	msgs := fake.WaitFor(protocol.MethodExport, 1, 5*time.Second)
+	var ex protocol.Export
+	if err := msgs[len(msgs)-1].Decode(&ex); err != nil {
+		t.Errorf("decode export: %v", err)
+		return
+	}
+	req, err := http.NewRequest(http.MethodPost, f.http.URL+"/excel/files?id="+ex.ID, bytes.NewReader(body))
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Errorf("upload: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		b, _ := io.ReadAll(resp.Body)
+		t.Errorf("upload status: %d %s", resp.StatusCode, b)
+	}
+}
+
+func TestExportFileRoundTrip(t *testing.T) {
+	f := newFixture(t)
+	fake := f.connect(t, &miniExcel{workbook: "Book1.xlsx", sheet: "Data"})
+	body := []byte("a,b\r\n1,2\r\n")
+	go uploadExport(t, f, fake, body)
+
+	res, err := f.cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "export_file", Arguments: map[string]any{"format": "csv"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out ExportFileOut
+	b, _ := json.Marshal(res.StructuredContent)
+	if err := json.Unmarshal(b, &out); err != nil {
+		t.Fatal(err)
+	}
+	if res.IsError || out.URL == "" || out.Bytes != int64(len(body)) || out.Format != "csv" || out.Filename != "workbook.csv" || out.InstanceID != "pane-1" {
+		t.Fatalf("export_file: isError=%v %+v", res.IsError, out)
+	}
+	if out.ExpiresAt == "" {
+		t.Fatal("expires_at is empty")
+	}
+	// The signed URL actually works.
+	dl, err := http.Get(out.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := io.ReadAll(dl.Body)
+	dl.Body.Close()
+	if string(got) != string(body) {
+		t.Fatalf("downloaded %q, want %q", got, body)
+	}
+	// A resource_link references the download; the bytes are not re-embedded.
+	var link *mcp.ResourceLink
+	for _, c := range res.Content {
+		if rl, ok := c.(*mcp.ResourceLink); ok {
+			link = rl
+		}
+	}
+	if link == nil || link.URI != out.URL || link.MIMEType != "text/csv" {
+		t.Fatalf("resource_link: %+v", link)
+	}
+}
+
+func TestExportFileInvalidFormat(t *testing.T) {
+	f := newFixture(t)
+	f.connect(t, &miniExcel{workbook: "Book1.xlsx", sheet: "Data"})
+	res, err := f.cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "export_file", Arguments: map[string]any{"format": "docx"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out ExportFileOut
+	b, _ := json.Marshal(res.StructuredContent)
+	json.Unmarshal(b, &out)
+	if !res.IsError || out.Error == nil || out.Error.Code != "invalid-format" {
+		t.Fatalf("invalid format: isError=%v %+v", res.IsError, out)
+	}
+}
+
+func TestExportFileNoBridge(t *testing.T) {
+	f := newFixture(t)
+	res, err := f.cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "export_file", Arguments: map[string]any{"format": "pdf"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out ExportFileOut
+	b, _ := json.Marshal(res.StructuredContent)
+	json.Unmarshal(b, &out)
+	if !res.IsError || out.Error == nil || out.Error.Code != "no-bridge" {
+		t.Fatalf("no bridge: isError=%v %+v", res.IsError, out)
 	}
 }
 
