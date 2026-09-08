@@ -2,12 +2,14 @@ package hub
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -34,7 +36,15 @@ type Options struct {
 	Connectors     []Connector
 	// Version is reported as each MCP server's version and by get_skills.
 	Version string
-	Logger  *slog.Logger
+	// Environment is "prod", "staging" or "dev" (default). Excel for the web
+	// keys a sideloaded add-in by the manifest <Id>, so a hub that is not
+	// "prod" gets a deterministic Id and DisplayName suffix derived from
+	// Environment and PublicURL — see manifestHandler — so a dev or staging
+	// add-in never collides with (or silently replaces) the production one
+	// in a user's My Add-ins list. Production serves the manifest file's Id
+	// and name unchanged, since that is what the Store submission carries.
+	Environment string
+	Logger      *slog.Logger
 	// Bridge holds socket tuning; tests shorten the intervals.
 	Bridge bridge.Options
 	// UserOf overrides how tools learn the calling user; nil means "from the
@@ -72,6 +82,13 @@ func NewServer(opts Options) (*Server, error) {
 	}
 	if opts.Version == "" {
 		opts.Version = "dev"
+	}
+	switch opts.Environment {
+	case "":
+		opts.Environment = "dev"
+	case "prod", "staging", "dev":
+	default:
+		return nil, fmt.Errorf("hub: Options.Environment %q is not prod, staging or dev", opts.Environment)
 	}
 
 	reg := registry.New()
@@ -148,9 +165,43 @@ func (s *Server) manifestHandler(static fs.FS) http.HandlerFunc {
 		if s.opts.PublicURL != DevPublicURL {
 			b = bytes.ReplaceAll(b, []byte(DevPublicURL), []byte(s.opts.PublicURL))
 		}
+		if s.opts.Environment != "prod" {
+			b = rewriteManifestIdentity(b, s.opts.Environment, s.opts.PublicURL)
+		}
 		w.Header().Set("Content-Type", "application/xml")
 		_, _ = w.Write(b)
 	}
+}
+
+var (
+	manifestIDPattern          = regexp.MustCompile(`<Id>[^<]*</Id>`)
+	manifestDisplayNamePattern = regexp.MustCompile(`(<DisplayName DefaultValue=")([^"]*)("\s*/>)`)
+)
+
+// rewriteManifestIdentity replaces a non-production manifest's <Id> with a
+// deterministic per-environment UUID and appends " (<environment>)" to its
+// DisplayName, so Excel for the web — which keys a sideloaded add-in by Id —
+// never conflates a dev or staging add-in with production, or with each
+// other, and a user can tell them apart in the ribbon and My Add-ins.
+func rewriteManifestIdentity(b []byte, environment, publicURL string) []byte {
+	id := manifestID(environment, publicURL)
+	b = manifestIDPattern.ReplaceAll(b, []byte("<Id>"+id+"</Id>"))
+	b = manifestDisplayNamePattern.ReplaceAll(b, []byte(`${1}${2} (`+environment+`)${3}`))
+	return b
+}
+
+// manifestID derives a stable, valid v4-shaped UUID from environment and
+// publicURL: the first 16 bytes of sha256("connectors-addin:"+environment+
+// ":"+publicURL), with the version and variant bits set as RFC 4122
+// requires. Deterministic (same inputs, same output every call) rather than
+// random, so a redeploy of the same environment doesn't churn the add-in's
+// identity and force every user to re-sideload it.
+func manifestID(environment, publicURL string) string {
+	sum := sha256.Sum256([]byte("connectors-addin:" + environment + ":" + publicURL))
+	b := sum[:16]
+	b[6] = (b[6] & 0x0f) | 0x40 // version 4
+	b[8] = (b[8] & 0x3f) | 0x80 // variant 10
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
 // userFromToken is the production Host.userOf: the bearer middleware put a

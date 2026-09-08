@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -37,7 +38,7 @@ func (*stub) Skill() []byte                                { return []byte("# st
 func (s *stub) Validate(context.Context, hub.Script) error { return s.validateErr }
 func (*stub) Static() fs.FS {
 	return fstest.MapFS{
-		"manifest.xml":  {Data: []byte(`<Source>` + hub.DevPublicURL + `/stub/addin/pane.html</Source>`)},
+		"manifest.xml":  {Data: []byte(`<Id>d9cd8bd0-fb31-48f1-bbbd-997f15140cc4</Id><DisplayName DefaultValue="Stub Connector"/><Source>` + hub.DevPublicURL + `/stub/addin/pane.html</Source>`)},
 		"pane.html":     {Data: []byte("<p>pane</p>")},
 		"taskpane.html": {Data: []byte("<p>pane</p>")},
 	}
@@ -50,7 +51,16 @@ type fixture struct {
 	stub *stub
 }
 
+// newFixture builds a fixture whose manifest handler behaves like production
+// (no Id/DisplayName rewriting), which is what every test predating
+// hub.Options.Environment assumed; TestManifestIdentity below exercises
+// dev/staging explicitly.
 func newFixture(t *testing.T, publicURL string) *fixture {
+	t.Helper()
+	return newFixtureEnv(t, publicURL, "prod")
+}
+
+func newFixtureEnv(t *testing.T, publicURL, environment string) *fixture {
 	t.Helper()
 	a, err := auth.NewDevToken(token)
 	if err != nil {
@@ -59,11 +69,12 @@ func newFixture(t *testing.T, publicURL string) *fixture {
 	p, _ := a.VerifyAccessToken(context.Background(), token)
 	st := &stub{}
 	srv, err := hub.NewServer(hub.Options{
-		PublicURL:  publicURL,
-		Auth:       a,
-		Connectors: []hub.Connector{st},
-		Logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
-		Bridge:     bridge.Options{HelloTimeout: time.Second},
+		PublicURL:   publicURL,
+		Environment: environment,
+		Auth:        a,
+		Connectors:  []hub.Connector{st},
+		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Bridge:      bridge.Options{HelloTimeout: time.Second},
 		// Tools driven over the in-memory transport have no bearer token; act
 		// as the dev user, the same identity the bridge hello resolves to.
 		UserOf: func(*mcp.CallToolRequest) (string, bool) { return p.UserID, true },
@@ -127,7 +138,7 @@ func TestHealthAndStatic(t *testing.T) {
 	}
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	if resp.Header.Get("Content-Type") != "application/xml" || string(body) != `<Source>https://connectors.example/stub/addin/pane.html</Source>` {
+	if resp.Header.Get("Content-Type") != "application/xml" || string(body) != `<Id>d9cd8bd0-fb31-48f1-bbbd-997f15140cc4</Id><DisplayName DefaultValue="Stub Connector"/><Source>https://connectors.example/stub/addin/pane.html</Source>` {
 		t.Fatalf("manifest: %s (%s)", body, resp.Header.Get("Content-Type"))
 	}
 
@@ -149,6 +160,86 @@ func TestManifestUnchangedInDevMode(t *testing.T) {
 	resp.Body.Close()
 	if !strings.Contains(string(body), hub.DevPublicURL) {
 		t.Fatalf("dev manifest was rewritten: %s", body)
+	}
+}
+
+var (
+	manifestIDRe   = regexp.MustCompile(`<Id>([^<]*)</Id>`)
+	manifestNameRe = regexp.MustCompile(`<DisplayName DefaultValue="([^"]*)"`)
+)
+
+func manifestIdentity(t *testing.T, body []byte) (id, name string) {
+	t.Helper()
+	m := manifestIDRe.FindSubmatch(body)
+	n := manifestNameRe.FindSubmatch(body)
+	if m == nil || n == nil {
+		t.Fatalf("manifest missing Id or DisplayName: %s", body)
+	}
+	return string(m[1]), string(n[1])
+}
+
+var uuidRe = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
+
+// TestManifestIdentity covers the fix for a live bug: Excel for the web keys
+// a sideloaded add-in by manifest <Id>, so serving the same Id for dev,
+// staging and prod meant uploading the hosted manifest could silently
+// re-launch a stale dev registration. Production must keep the manifest
+// file's own Id and DisplayName (that's what the Store submission carries);
+// every other environment gets a deterministic, distinct one.
+func TestManifestIdentity(t *testing.T) {
+	const fileID = "d9cd8bd0-fb31-48f1-bbbd-997f15140cc4"
+	const fileName = "Stub Connector"
+	const publicURL = "https://connectors.example"
+
+	fProd := newFixtureEnv(t, publicURL, "prod")
+	respProd, _ := http.Get(fProd.http.URL + "/stub/manifest.xml")
+	bodyProd, _ := io.ReadAll(respProd.Body)
+	respProd.Body.Close()
+	idProd, nameProd := manifestIdentity(t, bodyProd)
+	if idProd != fileID || nameProd != fileName {
+		t.Fatalf("prod manifest identity changed: id=%s name=%q", idProd, nameProd)
+	}
+
+	fStaging := newFixtureEnv(t, publicURL, "staging")
+	respStaging, _ := http.Get(fStaging.http.URL + "/stub/manifest.xml")
+	bodyStaging, _ := io.ReadAll(respStaging.Body)
+	respStaging.Body.Close()
+	idStaging, nameStaging := manifestIdentity(t, bodyStaging)
+	if idStaging == idProd {
+		t.Fatalf("staging Id matches prod: %s", idStaging)
+	}
+	if !uuidRe.MatchString(idStaging) {
+		t.Fatalf("staging Id is not a valid v4-shaped UUID: %s", idStaging)
+	}
+	if nameStaging != fileName+" (staging)" {
+		t.Fatalf("staging DisplayName = %q, want suffix ' (staging)'", nameStaging)
+	}
+
+	fDev := newFixtureEnv(t, publicURL, "dev")
+	respDev, _ := http.Get(fDev.http.URL + "/stub/manifest.xml")
+	bodyDev, _ := io.ReadAll(respDev.Body)
+	respDev.Body.Close()
+	idDev, nameDev := manifestIdentity(t, bodyDev)
+	if idDev == idProd || idDev == idStaging {
+		t.Fatalf("dev Id collides: dev=%s staging=%s prod=%s", idDev, idStaging, idProd)
+	}
+	if !uuidRe.MatchString(idDev) {
+		t.Fatalf("dev Id is not a valid v4-shaped UUID: %s", idDev)
+	}
+	if nameDev != fileName+" (dev)" {
+		t.Fatalf("dev DisplayName = %q, want suffix ' (dev)'", nameDev)
+	}
+
+	// Same environment + PublicURL is stable across calls (and servers): a
+	// redeploy of the same environment must not churn the add-in's identity
+	// and force every user to re-sideload it.
+	fDev2 := newFixtureEnv(t, publicURL, "dev")
+	respDev2, _ := http.Get(fDev2.http.URL + "/stub/manifest.xml")
+	bodyDev2, _ := io.ReadAll(respDev2.Body)
+	respDev2.Body.Close()
+	idDev2, nameDev2 := manifestIdentity(t, bodyDev2)
+	if idDev2 != idDev || nameDev2 != nameDev {
+		t.Fatalf("dev identity not stable: (%s,%q) vs (%s,%q)", idDev, nameDev, idDev2, nameDev2)
 	}
 }
 
@@ -309,5 +400,8 @@ func TestNewServerValidation(t *testing.T) {
 	}
 	if _, err := hub.NewServer(hub.Options{Auth: a, Connectors: []hub.Connector{&stub{}}, PublicURL: "connectors.example"}); err == nil {
 		t.Fatal("relative public URL accepted")
+	}
+	if _, err := hub.NewServer(hub.Options{Auth: a, Connectors: []hub.Connector{&stub{}}, Environment: "production"}); err == nil {
+		t.Fatal("invalid environment accepted")
 	}
 }

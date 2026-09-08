@@ -259,7 +259,7 @@
   Office.onReady(function (info) {
     readyFired = true;
     var h = hostInfo();
-    envEl.textContent = "host=" + info.host + " platform=" + info.platform + " office.js=" + h.version +
+    envEl.textContent = "host=" + info.host + " platform=" + info.platform + " office.js=" + h.version + " hub=" + location.host +
       "\nExcelApi " + highestExcelApi() + "\ninstance " + instanceId;
     if (typeof Excel === "undefined" || !info.host) {
       log("not inside Excel (host=" + info.host + "); scripts will fail but the socket will connect", "err");
