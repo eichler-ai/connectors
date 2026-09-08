@@ -171,7 +171,7 @@ done
 if ! gcloud storage buckets describe "gs://${FILES_BUCKET}" --project="$PROJECT" >/dev/null 2>&1; then
   echo "==> [$ENV] creating bucket gs://${FILES_BUCKET}"
   gcloud storage buckets create "gs://${FILES_BUCKET}" \
-    --project="$PROJECT" --location="$REGION" --uniform-bucket-level-access --public-access-prevention=enforced \
+    --project="$PROJECT" --location="$REGION" --uniform-bucket-level-access --pap \
     >/dev/null
   cat >/tmp/hub-files-lifecycle.json <<'EOF'
 {"rule": [{"action": {"type": "Delete"}, "condition": {"age": 7}}]}
