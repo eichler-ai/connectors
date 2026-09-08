@@ -66,7 +66,7 @@ func registerExecuteScript(reg *hub.ToolRegistry, c *Connector) {
 				expect = *in.Expect
 			}
 			res, rec := reg.Host.Exec(ctx, user, c,
-				hub.Target{InstanceID: in.InstanceID},
+				hub.Target{InstanceID: in.InstanceID, Client: hub.ClientName(req)},
 				hub.Script{Language: Language, Source: wrap(in.Script, expect), Timeout: time.Duration(in.TimeoutMs) * time.Millisecond})
 			if rec != nil {
 				return fail(rec), ExecuteScriptOut{Status: "error", Error: rec}, nil

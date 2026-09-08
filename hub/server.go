@@ -19,6 +19,7 @@ import (
 	"github.com/eichler-ai/connectors/hub/internal/bridge"
 	"github.com/eichler-ai/connectors/hub/internal/files"
 	"github.com/eichler-ai/connectors/hub/internal/registry"
+	"github.com/eichler-ai/connectors/hub/internal/store"
 	"github.com/eichler-ai/connectors/hub/wellknown"
 	"github.com/eichler-ai/connectors/internal/auth"
 )
@@ -48,6 +49,11 @@ type Options struct {
 	// itself refuses with files-unconfigured, and the upload endpoint is not
 	// mounted).
 	Files files.Store
+	// Store is the audit trail's persistence (§11, §12): every Exec/Export/
+	// Import writes a best-effort row here. Nil disables audit writes
+	// entirely; cmd/hub always configures one (Firestore or Memory), so this
+	// is nil only in tests that don't need the audit trail.
+	Store store.Store
 	// Version is reported as each MCP server's version and by get_skills.
 	Version string
 	// Environment is "prod", "staging" or "dev" (default). Excel for the web
@@ -112,7 +118,7 @@ func NewServer(opts Options) (*Server, error) {
 	bopts.Logger = opts.Logger
 	bridges := bridge.New(reg, opts.Auth, bopts)
 
-	host := &Host{reg: reg, bridges: bridges, files: opts.Files, log: opts.Logger, userOf: opts.UserOf, defaultTimeout: DefaultTimeout, maxTimeout: MaxTimeout}
+	host := &Host{reg: reg, bridges: bridges, files: opts.Files, store: opts.Store, log: opts.Logger, userOf: opts.UserOf, defaultTimeout: DefaultTimeout, maxTimeout: MaxTimeout}
 	if host.userOf == nil {
 		host.userOf = userFromToken
 	}

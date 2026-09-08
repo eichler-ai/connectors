@@ -122,6 +122,40 @@ type BridgeToken struct {
 	LastUsedAt time.Time `firestore:"last_used_at"`
 }
 
+// AuditRow is one exec/export/import outcome (PRD §11 "audit", §12, §13's
+// compensating control for arbitrary code execution). It never carries a
+// token, a script *result*, or file bytes: identities, a script hash, a
+// bounded copy of the script text (exec only, so a reviewer can see what ran
+// without an unbounded blob), the outcome, and sizes. ExpiresAt is set for
+// bounded retention; deploy.sh puts a Firestore TTL policy on it.
+type AuditRow struct {
+	ID        string    `firestore:"id"`
+	Timestamp time.Time `firestore:"timestamp"`
+	UserID    string    `firestore:"user_id"`
+	Connector string    `firestore:"connector"`
+	Instance  string    `firestore:"instance_id"`
+	Document  string    `firestore:"document_id,omitempty"`
+	// Action is "exec", "export" or "import".
+	Action string `firestore:"action"`
+	// ScriptSHA256 and ScriptBounded are exec only.
+	ScriptSHA256  string `firestore:"script_sha256,omitempty"`
+	ScriptBounded string `firestore:"script_bounded,omitempty"`
+	Language      string `firestore:"language,omitempty"`
+	OK            bool   `firestore:"ok"`
+	// Code is the outcome's stable diagnostic code, empty on success.
+	Code       string `firestore:"code,omitempty"`
+	DurationMs int64  `firestore:"duration_ms"`
+	// ResultBytes is exec's result size; FileBytes is export/import's file
+	// size; Format is export/import's file format. Never the bytes.
+	ResultBytes int    `firestore:"result_bytes,omitempty"`
+	FileBytes   int64  `firestore:"file_bytes,omitempty"`
+	Format      string `firestore:"format,omitempty"`
+	// Client is the MCP client's Implementation.Name when the SDK session
+	// exposes it; empty when it does not (see hub.clientNameOf).
+	Client    string    `firestore:"client,omitempty"`
+	ExpiresAt time.Time `firestore:"expires_at"`
+}
+
 // Store is what the authorization server needs from persistence.
 type Store interface {
 	// UserByIdentity finds the user for a provider subject, or ErrNotFound.
@@ -173,6 +207,13 @@ type Store interface {
 	// RevokeBridgeToken deletes the token; revoking an unknown hash is not
 	// an error (the pane's sign-out must not fail on a token already gone).
 	RevokeBridgeToken(ctx context.Context, hash string) error
+
+	// PutAuditRow appends one audit row (§11 "per user": audit/{user_id}/rows
+	// in Firestore, so a RevokeUser-style delete can be scoped to one user).
+	PutAuditRow(ctx context.Context, row AuditRow) error
+	// RecentAudit returns up to limit rows for user, newest first. Cheap to
+	// add now; a get_audit tool is a later item, not built here.
+	RecentAudit(ctx context.Context, userID string, limit int) ([]AuditRow, error)
 
 	Close() error
 }

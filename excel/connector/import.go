@@ -95,7 +95,7 @@ func registerImportWorkbook(reg *hub.ToolRegistry, c *Connector) {
 			if in.Expect != nil {
 				expectWorkbook = in.Expect.Workbook
 			}
-			target := hub.Target{InstanceID: in.InstanceID}
+			target := hub.Target{InstanceID: in.InstanceID, Client: hub.ClientName(req)}
 			if expectWorkbook != "" {
 				if rec := checkExpectedWorkbook(ctx, reg, c, user, target, expectWorkbook); rec != nil {
 					return fail(rec), ImportWorkbookOut{Status: "error", Error: rec}, nil

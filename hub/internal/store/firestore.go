@@ -33,6 +33,8 @@ const (
 	colCodes      = "auth_codes"
 	colRefresh    = "refresh_tokens"
 	colBridge     = "bridge_tokens"
+	colAudit      = "audit"
+	subAuditRows  = "rows"
 )
 
 // NewFirestore connects to database in project ("(default)" when database
@@ -346,6 +348,43 @@ func (f *Firestore) RevokeBridgeToken(ctx context.Context, hash string) error {
 	// contract.
 	_, err := f.c.Collection(colBridge).Doc(hash).Delete(ctx)
 	return err
+}
+
+// auditRows is audit/{user_id}/rows: a subcollection per user (§11 "per
+// user"), so RevokeUser-style scoped deletion is a single collection delete
+// if that is ever added, and the TTL policy (deploy.sh) applies to every
+// user's rows via the "rows" collection group.
+func (f *Firestore) auditRows(userID string) *firestore.CollectionRef {
+	return f.c.Collection(colAudit).Doc(userID).Collection(subAuditRows)
+}
+
+func (f *Firestore) PutAuditRow(ctx context.Context, row AuditRow) error {
+	_, err := f.auditRows(row.UserID).Doc(row.ID).Set(ctx, row)
+	return err
+}
+
+func (f *Firestore) RecentAudit(ctx context.Context, userID string, limit int) ([]AuditRow, error) {
+	q := f.auditRows(userID).OrderBy("timestamp", firestore.Desc)
+	if limit > 0 {
+		q = q.Limit(limit)
+	}
+	it := q.Documents(ctx)
+	defer it.Stop()
+	var out []AuditRow
+	for {
+		ds, err := it.Next()
+		if errors.Is(err, iterator.Done) {
+			return out, nil
+		}
+		if err != nil {
+			return out, err
+		}
+		var row AuditRow
+		if err := ds.DataTo(&row); err != nil {
+			return out, err
+		}
+		out = append(out, row)
+	}
 }
 
 func (f *Firestore) Close() error { return f.c.Close() }

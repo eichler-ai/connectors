@@ -63,6 +63,10 @@ type Script struct {
 type Target struct {
 	InstanceID string
 	DocumentID string
+	// Client is the calling MCP client's declared name, for the audit row
+	// (§12). Connectors set it from ClientName(req); empty is fine — the
+	// audit row's client field is best-effort, never load-bearing.
+	Client string
 }
 
 // ToolRegistry is what a connector registers its tools against: the
