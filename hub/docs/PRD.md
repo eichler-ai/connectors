@@ -149,7 +149,8 @@ manifests exist, so they are fixed here.
 
 Naming follows `CONVENTIONS.md`: in Claude's client config a connector is its lowercase slug
 (`excel`); user-facing text says "MCP Server" and "MCP Bridge", never "hub" or "broker". "Hub" is
-engineering shorthand for the platform process in this document and in code.
+the name of the hosted service in this document, in code and in the repo (`hub/`); users see it
+only as "Eichler Connectors".
 
 ## 06. Authentication & authorization
 
@@ -247,7 +248,7 @@ type Connector interface {
 }
 ```
 
-The platform supplies `Exec(ctx, user, target, script) (Result, error)`, `Files`, `Audit`,
+The hub supplies `Exec(ctx, user, target, script) (Result, error)`, `Files`, `Audit`,
 `Registry`, `get_skills`, and — for connectors that opt in — the discovery/how-to tools generically;
 a connector contributes content and any host-specific tools (Excel's `get_status`, Revit's
 transaction controls).
@@ -356,13 +357,15 @@ precedent, and the listing must say plainly that scripts come from the user's ow
 ## 16. Repository layout
 
 ```
-platform/               Go module: hub, auth server, registry, protocol, files, audit, corpus
+hub/                    Go module: the hosted service — auth server, registry, protocol, files, audit, corpus
   cmd/hub/
   internal/{auth,registry,bridge,files,audit,corpus,discovery}/
   docs/PRD.md           this document
+  (packages the local stdio servers also need — protocol, diagnostics — stay importable from here;
+   a separate shared-library directory only if one genuinely emerges)
 excel/
   addin/                manifest + task pane (store artefact)
-  connector/            Go package implementing platform.Connector
+  connector/            Go package implementing hub.Connector
   docs/                 Excel chapter, live test matrix
 figma/ sheets/ rhino/   same shape, later
 revit/                  unchanged; gains connector/ for remote mode when scheduled
