@@ -1,6 +1,7 @@
 package bridge
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -32,16 +33,31 @@ const (
 	maxScriptBytes = 1 << 20
 )
 
+// Options configures Handler beyond the hub and the static files.
+type Options struct {
+	// ExtraOrigins are additional browser origins allowed to open /ws besides the bridge's own
+	// (e.g. Script Lab's runner when the client runs as a snippet there).
+	ExtraOrigins []string
+	// Token, when set, is required as "Authorization: Bearer <token>" on /exec and /status. Mandatory
+	// when the bridge is reachable from beyond localhost.
+	Token string
+	// PublicURL is the externally visible base URL (scheme://host[/prefix]) substituted into the
+	// manifest in place of the localhost default, so one embedded manifest serves both deployments.
+	PublicURL string
+}
+
+const localURL = "https://localhost:3000"
+
 // Handler builds the bridge mux. addin is the directory of static add-in files served at /.
-// extraOrigins are additional browser origins allowed to open /ws besides the bridge's own
-// (e.g. Script Lab's runner when the client runs as a snippet there).
-func Handler(h *Hub, addin fs.FS, extraOrigins ...string) http.Handler {
+func Handler(h *Hub, addin fs.FS, opt Options) http.Handler {
+	extraOrigins := opt.ExtraOrigins
 	mux := http.NewServeMux()
 	mux.Handle("/ws", websocket.Server{
 		// Office loads the task pane from this same origin, so a same-origin check is enough; a
 		// nil Handshake would accept any Origin, which we do not want even for a POC.
 		Handshake: func(cfg *websocket.Config, r *http.Request) error {
 			origin := r.Header.Get("Origin")
+			// Behind Cloud Run the request arrives as plain HTTP but the browser's origin is https.
 			if origin != "https://"+r.Host && !slices.Contains(extraOrigins, origin) && !slices.Contains(extraOrigins, "*") {
 				log.Printf("ws: rejected origin %q (host %s)", origin, r.Host)
 				return errors.New("origin not allowed")
@@ -50,10 +66,35 @@ func Handler(h *Hub, addin fs.FS, extraOrigins ...string) http.Handler {
 		},
 		Handler: h.Serve,
 	})
-	mux.HandleFunc("GET /status", func(w http.ResponseWriter, r *http.Request) {
+	auth := func(next http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			if opt.Token != "" && r.Header.Get("Authorization") != "Bearer "+opt.Token {
+				log.Printf("%s %s: unauthorized from %s", r.Method, r.URL.Path, r.RemoteAddr)
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			next(w, r)
+		}
+	}
+	mux.HandleFunc("GET /status", auth(func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, h.Status())
+	}))
+	mux.HandleFunc("GET /manifest.xml", func(w http.ResponseWriter, r *http.Request) {
+		b, err := fs.ReadFile(addin, "manifest.xml")
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		if opt.PublicURL != "" {
+			// A distinct Id lets the hosted add-in be sideloaded alongside the local one.
+			b = bytes.ReplaceAll(b, []byte(localURL), []byte(opt.PublicURL))
+			b = bytes.ReplaceAll(b, []byte("<Id>8475d0f9-b1f0-4e4b-9253-bfe1a5711e8a</Id>"), []byte("<Id>2c9e7d41-6b3a-4f0e-9d21-7a5e0c4b8f13</Id>"))
+			b = bytes.ReplaceAll(b, []byte("Excel Bridge (POC)"), []byte("Excel Bridge (hosted POC)"))
+		}
+		w.Header().Set("Content-Type", "application/xml")
+		w.Write(b)
 	})
-	mux.HandleFunc("POST /exec", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /exec", auth(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxScriptBytes))
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusRequestEntityTooLarge)
@@ -86,7 +127,7 @@ func Handler(h *Hub, addin fs.FS, extraOrigins ...string) http.Handler {
 		log.Printf("exec: %s ok=%v addin=%.0fms roundtrip=%s result=%dB", resp.ID, resp.OK, resp.DurationMs,
 			time.Since(start).Round(time.Millisecond), len(resp.Result))
 		writeJSON(w, http.StatusOK, ExecResult{Response: resp})
-	})
+	}))
 	files := http.FileServerFS(addin)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("static: %s %s referer=%q origin=%q", r.Method, r.URL.Path, r.Referer(), r.Header.Get("Origin"))

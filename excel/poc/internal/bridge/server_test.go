@@ -63,7 +63,7 @@ func exec(t *testing.T, srv *httptest.Server, script string, timeoutMs int64) (i
 
 func newServer(t *testing.T) (*httptest.Server, *Hub) {
 	hub := NewHub()
-	srv := httptest.NewTLSServer(Handler(hub, fstest.MapFS{"taskpane.html": {Data: []byte("<html>")}}))
+	srv := httptest.NewTLSServer(Handler(hub, fstest.MapFS{"taskpane.html": {Data: []byte("<html>")}}, Options{}))
 	t.Cleanup(srv.Close)
 	return srv, hub
 }
@@ -206,6 +206,46 @@ func TestStaticFiles(t *testing.T) {
 	defer resp.Body.Close()
 	if b, _ := io.ReadAll(resp.Body); resp.StatusCode != 200 || string(b) != "<html>" {
 		t.Errorf("%d %q", resp.StatusCode, b)
+	}
+}
+
+func TestTokenRequired(t *testing.T) {
+	hub := NewHub()
+	srv := httptest.NewTLSServer(Handler(hub, fstest.MapFS{}, Options{Token: "s3cret"}))
+	defer srv.Close()
+	resp, err := srv.Client().Get(srv.URL + "/status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("no token: got %d", resp.StatusCode)
+	}
+	req, _ := http.NewRequest("GET", srv.URL+"/status", nil)
+	req.Header.Set("Authorization", "Bearer s3cret")
+	resp, err = srv.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Errorf("with token: got %d", resp.StatusCode)
+	}
+}
+
+func TestManifestSubstitution(t *testing.T) {
+	hub := NewHub()
+	m := `<Id>8475d0f9-b1f0-4e4b-9253-bfe1a5711e8a</Id><Url>https://localhost:3000/taskpane.html</Url>`
+	srv := httptest.NewTLSServer(Handler(hub, fstest.MapFS{"manifest.xml": {Data: []byte(m)}}, Options{PublicURL: "https://mcp.example.com/excel"}))
+	defer srv.Close()
+	resp, err := srv.Client().Get(srv.URL + "/manifest.xml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	if strings.Contains(string(b), "localhost") || !strings.Contains(string(b), "https://mcp.example.com/excel/taskpane.html") || strings.Contains(string(b), "8475d0f9") {
+		t.Errorf("manifest not substituted: %s", b)
 	}
 }
 

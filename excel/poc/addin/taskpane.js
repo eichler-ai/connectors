@@ -26,7 +26,9 @@
   function main() {
 
   // Same origin as the page by default; a host page (e.g. a Script Lab snippet) can point elsewhere.
-  var WS_URL = window.BRIDGE_WS_URL || "wss://" + location.host + "/ws";
+  // Same origin and directory as the page (so a /excel prefix is honoured); a host page such as a
+  // Script Lab snippet can point elsewhere.
+  var WS_URL = window.BRIDGE_WS_URL || "wss://" + location.host + location.pathname.replace(/[^/]*$/, "") + "ws";
   var MAX_RESULT_BYTES = 16 << 20; // 16 MiB so a whole-document export fits; larger results are truncated and flagged
   var RECONNECT_MS = 2000;
 
