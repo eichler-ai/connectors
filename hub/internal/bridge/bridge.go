@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -196,6 +197,13 @@ func (s *Service) serve(ctx context.Context, connector string, conn *websocket.C
 	if err != nil {
 		s.log.Warn("bridge: hello refused", "connector", connector, "remote", remote, "instance_id", hello.InstanceID, "reason", "token rejected")
 		_ = conn.Close(websocket.StatusPolicyViolation, "token rejected")
+		return
+	}
+	// A pane's token is bound to one connector (auth.Principal.Scopes); a
+	// token with no scopes (the dev token) is good for any.
+	if len(principal.Scopes) > 0 && !slices.Contains(principal.Scopes, connector) {
+		s.log.Warn("bridge: hello refused", "connector", connector, "remote", remote, "instance_id", hello.InstanceID, "user", principal.UserID, "reason", "token is for another connector")
+		_ = conn.Close(websocket.StatusPolicyViolation, "token rejected: it was issued for another connector")
 		return
 	}
 

@@ -8,9 +8,9 @@ import (
 
 // Memory is the in-process Store for -dev and tests. Nothing survives a
 // restart, which for a dev hub means "sign in again". Bound: every write
-// sweeps the expired codes, refresh tokens and login states of its own
-// kind, so the maps never hold more than what is currently valid plus the
-// registered clients (which the collector trims).
+// sweeps the expired codes, refresh tokens, bridge tokens and login states
+// of its own kind, so the maps never hold more than what is currently valid
+// plus the registered clients (which the collector trims).
 type Memory struct {
 	// Now is the clock for expiry sweeps; tests replace it.
 	Now func() time.Time
@@ -22,6 +22,7 @@ type Memory struct {
 	states     map[string]LoginState
 	codes      map[string]AuthCode
 	refresh    map[string]RefreshToken
+	bridge     map[string]BridgeToken
 }
 
 // NewMemory returns an empty store.
@@ -33,6 +34,7 @@ func NewMemory() *Memory {
 		states:     map[string]LoginState{},
 		codes:      map[string]AuthCode{},
 		refresh:    map[string]RefreshToken{},
+		bridge:     map[string]BridgeToken{},
 	}
 }
 
@@ -53,6 +55,16 @@ func (m *Memory) UserByIdentity(_ context.Context, provider, subject string) (Us
 		return User{}, ErrNotFound
 	}
 	return m.users[id], nil
+}
+
+func (m *Memory) User(_ context.Context, id string) (User, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	u, ok := m.users[id]
+	if !ok {
+		return User{}, ErrNotFound
+	}
+	return u, nil
 }
 
 func (m *Memory) PutUser(_ context.Context, u User) error {
@@ -234,7 +246,55 @@ func (m *Memory) RevokeUser(_ context.Context, userID string) (int, error) {
 			n++
 		}
 	}
+	for h, t := range m.bridge {
+		if t.UserID == userID {
+			delete(m.bridge, h)
+			n++
+		}
+	}
 	return n, nil
+}
+
+func (m *Memory) PutBridgeToken(_ context.Context, t BridgeToken) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := m.now()
+	for h, old := range m.bridge {
+		if old.ExpiresAt.Before(now) {
+			delete(m.bridge, h)
+		}
+	}
+	m.bridge[t.Hash] = t
+	return nil
+}
+
+func (m *Memory) BridgeToken(_ context.Context, hash string) (BridgeToken, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	t, ok := m.bridge[hash]
+	if !ok || t.ExpiresAt.Before(m.now()) {
+		return BridgeToken{}, ErrNotFound
+	}
+	return t, nil
+}
+
+func (m *Memory) TouchBridgeToken(_ context.Context, hash string, at time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	t, ok := m.bridge[hash]
+	if !ok {
+		return ErrNotFound
+	}
+	t.LastUsedAt = at
+	m.bridge[hash] = t
+	return nil
+}
+
+func (m *Memory) RevokeBridgeToken(_ context.Context, hash string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.bridge, hash)
+	return nil
 }
 
 func (m *Memory) Close() error { return nil }

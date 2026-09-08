@@ -19,6 +19,12 @@
   <SupportUrl DefaultValue="https://github.com/eichler-ai/connectors"/>
   <AppDomains>
     <AppDomain>https://localhost:8443</AppDomain>
+    <!-- The sign-in dialog (/bridge/authorize on the hub origin) redirects through Microsoft's
+         login and back; on the web a dialog may navigate anywhere, but desktop hosts keep
+         navigation inside the WebView only for listed domains (otherwise the system browser
+         opens and the hand-off is lost). -->
+    <AppDomain>https://login.microsoftonline.com</AppDomain>
+    <AppDomain>https://login.live.com</AppDomain>
   </AppDomains>
   <Hosts>
     <Host Name="Workbook"/>

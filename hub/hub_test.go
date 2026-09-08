@@ -2,6 +2,8 @@ package hub_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -19,7 +21,9 @@ import (
 
 	"github.com/eichler-ai/connectors/hub"
 	"github.com/eichler-ai/connectors/hub/bridgetest"
+	"github.com/eichler-ai/connectors/hub/internal/authserver"
 	"github.com/eichler-ai/connectors/hub/internal/bridge"
+	"github.com/eichler-ai/connectors/hub/internal/store"
 	"github.com/eichler-ai/connectors/hub/protocol"
 	"github.com/eichler-ai/connectors/internal/auth"
 )
@@ -499,6 +503,93 @@ func TestDiscovery(t *testing.T) {
 	resp.Body.Close()
 	if resp.Header.Get("Hub-Version") != "dev" {
 		t.Fatalf("health version header: %q", resp.Header.Get("Hub-Version"))
+	}
+}
+
+// TestSignedInPaneMeetsOAuthSession is the unit-2 done-when in miniature:
+// a bridge presenting a token minted for the Microsoft user connects under
+// that user_id, so an MCP session holding a JWT for the same user finds it
+// with list_instances and runs a script in it; a token for another
+// connector, an unknown token and an expired one are refused; the dev
+// token still works as the configured fallback.
+func TestSignedInPaneMeetsOAuthSession(t *testing.T) {
+	st := store.NewMemory()
+	dev, _ := auth.NewDevToken(token)
+	pemData, _ := auth.GenerateKeyPEM()
+	keys, _ := auth.ParseKeySet(pemData)
+	publicURL := "https://connectors.example"
+	srv, err := hub.NewServer(hub.Options{
+		PublicURL:  publicURL,
+		Auth:       auth.Split{Access: &auth.JWTVerifier{Keys: keys, Issuer: publicURL, Audience: publicURL}, Bridge: authserver.NewBridgeVerifier(st, dev, nil)},
+		Connectors: []hub.Connector{&stub{}},
+		Logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Bridge:     bridge.Options{HelloTimeout: time.Second},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hs := httptest.NewServer(srv.Handler())
+	t.Cleanup(hs.Close)
+	f := &fixture{srv: srv, http: hs, uid: "u_microsoft", keys: keys}
+	ctx := context.Background()
+	now := time.Now()
+	mint := func(plain, connector string, ttl time.Duration) {
+		sum := sha256.Sum256([]byte(plain))
+		if err := st.PutBridgeToken(ctx, store.BridgeToken{Hash: hex.EncodeToString(sum[:]), UserID: f.uid, Connector: connector, CreatedAt: now, ExpiresAt: now.Add(ttl)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mint("pane-token-for-stub", "stub", time.Hour)
+	mint("pane-token-for-other", "other", time.Hour)
+	mint("pane-token-expired", "stub", -time.Second)
+
+	// Refusals: each closes with 1008 and never registers.
+	for name, tok := range map[string]string{"other connector": "pane-token-for-other", "expired": "pane-token-expired", "unknown": "never-minted-000000"} {
+		fake := bridgetest.Dial(t, bridgetest.WSURL(hs.URL, "/stub/bridge"), bridgetest.Options{Connector: "stub", Token: tok, InstanceID: "bad"})
+		if code, reason := fake.WaitClosed(2 * time.Second); code != 1008 || !strings.Contains(reason, "token rejected") {
+			t.Fatalf("%s: close %d %q", name, code, reason)
+		}
+	}
+	if len(srv.Host().Instances(f.uid, "stub")) != 0 {
+		t.Fatal("a refused hello registered")
+	}
+
+	// The signed-in pane and, beside it, a dev-token pane (its own user).
+	bridgetest.Dial(t, bridgetest.WSURL(hs.URL, "/stub/bridge"), bridgetest.Options{Connector: "stub", Token: "pane-token-for-stub", InstanceID: "pane", Documents: []protocol.Document{{ID: "wb", Title: "Book1", Active: true}}})
+	bridgetest.Dial(t, bridgetest.WSURL(hs.URL, "/stub/bridge"), bridgetest.Options{Connector: "stub", Token: token, InstanceID: "devpane"})
+	deadline := time.Now().Add(5 * time.Second)
+	for (!hasInstance(srv.Host().Instances(f.uid, "stub"), "pane") || !hasInstance(srv.Host().Instances(dev.UserID(), "stub"), "devpane")) && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// The OAuth session for the same Microsoft user sees exactly its pane.
+	tr := &mcp.StreamableClientTransport{Endpoint: hs.URL + "/stub/mcp", HTTPClient: &http.Client{Transport: bearer{f.accessToken(t, "stub")}}}
+	cs, err := mcp.NewClient(&mcp.Implementation{Name: "c", Version: "0"}, nil).Connect(ctx, tr, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "list_instances", Arguments: map[string]any{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out hub.ListInstancesOut
+	json.Unmarshal(mustJSON(res.StructuredContent), &out)
+	if len(out.Instances) != 1 || out.Instances[0].InstanceID != "pane" || out.Instances[0].Documents[0].Title != "Book1" {
+		t.Fatalf("list_instances from the OAuth session: %s", mustJSON(out))
+	}
+	if r, rec := srv.Host().Exec(ctx, f.uid, &stub{}, hub.Target{}, hub.Script{Language: "js", Source: "return 1", Timeout: time.Second}); rec != nil || string(r.Reply.Result) != `"return 1"` {
+		t.Fatalf("exec through the signed-in pane: %+v %+v", r, rec)
+	}
+	// Revoking the user drops the token: the next hello is refused. The
+	// live socket stays until it reconnects (documented; the kill switch's
+	// window is one reconnect).
+	if _, err := st.RevokeUser(ctx, f.uid); err != nil {
+		t.Fatal(err)
+	}
+	fake := bridgetest.Dial(t, bridgetest.WSURL(hs.URL, "/stub/bridge"), bridgetest.Options{Connector: "stub", Token: "pane-token-for-stub", InstanceID: "pane2"})
+	if code, _ := fake.WaitClosed(2 * time.Second); code != 1008 {
+		t.Fatalf("hello after revoke-user: close %d", code)
 	}
 }
 

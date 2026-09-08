@@ -6,20 +6,24 @@ extension dials (`/<slug>/bridge`), and the extension's own files (`/<slug>/addi
 `/<slug>/manifest.xml`). Excel is the first connector (`../excel/`).
 
 Phase 0 built the bridge protocol, the in-process registry and Cloud Run deployment; phase 1
-(this state) adds the authorization server: Claude clients sign in with Microsoft and call the MCP
-endpoints with a JWT (see "Auth" below). The pane still uses a shared dev token in its `hello`
-until pane sign-in lands. File exchange and audit follow.
+(this state) adds the authorization server — Claude clients sign in with Microsoft and call the
+MCP endpoints with a JWT — and pane sign-in: the add-in signs in with the same Microsoft login and
+presents a 90-day bridge token in its `hello`, so a Claude session and the pane meet under one
+`user_id` (see "Auth" below). File exchange and audit follow.
 
 ## Run locally (`-dev`)
 
 From the repository root (the Go module lives there and links `hub/` and every connector):
 
 ```sh
-export HUB_DEV_TOKEN="$(openssl rand -hex 16)"   # 16+ characters; the pane's bridge token
 export HUB_MS_CLIENT_ID=4fce14f7-6415-4d92-a8b0-c98f7f0a1763
 export HUB_MS_CLIENT_SECRET="$(gcloud secrets versions access latest --secret=entra-client-secret --project=eichler-ai)"
 go run ./hub/cmd/hub -dev
 ```
+
+`HUB_DEV_TOKEN` is optional now: set it (16+ characters) to let a bridge that has not signed in —
+`hub/bridgetest`, a scripted probe — present it in `hello` as the fixed user `dev-<hash>`. A
+signed-in pane never needs it.
 
 That serves `https://localhost:8443` with a self-signed certificate written to
 `~/Library/Application Support/Connectors/Hub/` (or the platform equivalent). The browser has to
@@ -30,7 +34,7 @@ stderr; they carry ids and outcomes, never scripts, results or tokens.
 Environment: `PORT` (default 8443 in `-dev`, 8080 otherwise), `HUB_PUBLIC_URL` (external origin,
 rewritten into served manifests and used as the OAuth issuer; defaults to the local one),
 `HUB_ALLOWED_ORIGINS` (extra browser origins for the bridge socket, comma-separated),
-`HUB_DEV_TOKEN` (required; the bridge token), `HUB_ENV` (`prod`, `staging` or `dev`; default
+`HUB_DEV_TOKEN` (optional; the fallback bridge token), `HUB_ENV` (`prod`, `staging` or `dev`; default
 `dev`, and `-dev` always forces `dev` regardless of this variable), and the auth settings listed
 under "Auth": `HUB_JWT_SIGNING_KEY`, `HUB_MS_CLIENT_ID`, `HUB_MS_CLIENT_SECRET`,
 `HUB_FIRESTORE_PROJECT`, `HUB_FIRESTORE_DATABASE`. Without `HUB_MS_CLIENT_ID` the hub starts, but
@@ -43,19 +47,19 @@ everyone out (fine for `-dev`, never for a deployment).
 2. Open a workbook in Excel for the web (OneDrive or SharePoint). **Home → Add-ins → More Add-ins →
    My Add-ins → Upload My Add-in**, choose the manifest. If the upload option is missing, tenant
    policy blocks sideloading; a personal Microsoft account allows it.
-3. An **MCP Bridge** group appears on the Home tab. Click **Open MCP Bridge**, paste the value of
-   `HUB_DEV_TOKEN` into the token field and click **Save**. The pane should say *Connected*.
+3. An **MCP Bridge** group appears on the Home tab. Click **Open MCP Bridge**, then **Sign in with
+   Microsoft**. A dialog runs the Microsoft sign-in (the same one Claude clients see) and closes
+   itself; the pane shows *Signed in as …* and *Connected*.
 
-The pane keeps the token in its own origin's `localStorage`; pane sign-in (the next unit)
-replaces the field. If the pane loads but never connects, inspect it (right-click → Inspect) — the
-close reason names the cause (`token rejected`, `bridge-outdated`, …).
+The pane keeps the bridge token in `OfficeRuntime.storage` (per hub origin and connector), so it
+reconnects on the next workbook without a sign-in until the token expires (90 days) or is revoked.
+**Sign out** forgets it and revokes it on the hub. If the pane loads but never connects, inspect
+it (right-click → Inspect) — the close reason names the cause (`token rejected`,
+`bridge-outdated`, …); a `token rejected` close also flips the pane back to *Sign in*, since the
+token was revoked or expired.
 
-**Until the pane signs in**, the dev token resolves to a fixed user (`dev-<hash>`), while an MCP
-session is the Microsoft user who signed in — two different `user_id`s, so `list_instances` from
-an OAuth session does not see a dev-token pane. Running a script end to end therefore waits for
-pane sign-in; the bridge-side tests cover that path with one identity on both ends. What *is*
-live-testable now is the whole sign-in and token flow plus `get_skills` and `list_instances`
-(which need no bridge).
+The signed-in pane and a Claude session for the same Microsoft account share one `user_id`, so
+`list_instances` from that session lists the pane and `execute_script` runs in its workbook.
 
 ## Connect an MCP client
 
@@ -79,7 +83,8 @@ no passwords and no local accounts.
 **Endpoints.** `/.well-known/oauth-authorization-server` (also served at
 `/.well-known/openid-configuration`, which the MCP spec has clients try second), `/oauth/authorize`,
 `/oauth/token`, `/oauth/register`, `/oauth/jwks`, `/oauth/consent`, `/login/microsoft`,
-`/login/microsoft/callback`, and per connector `/<slug>/.well-known/oauth-protected-resource`.
+`/login/microsoft/callback`, per connector `/<slug>/.well-known/oauth-protected-resource`, and for
+the pane `/bridge/authorize` and `/bridge/revoke` (below).
 
 **What a client does.** An unauthenticated request to `/excel/mcp` gets a 401 with
 `WWW-Authenticate: Bearer resource_metadata="…/excel/.well-known/oauth-protected-resource",

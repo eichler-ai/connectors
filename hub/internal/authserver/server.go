@@ -64,10 +64,12 @@ type Options struct {
 }
 
 // Lifetimes. Access: PRD §06. Refresh: 30 days, sliding (each rotation
-// issues a fresh 30 days); a client idle for a month signs in again. Codes
-// and login states are single-shot and short.
+// issues a fresh 30 days); a client idle for a month signs in again. Bridge:
+// 90 days fixed (§18.8) — the pane signs in again, there is no rotation.
+// Codes and login states are single-shot and short.
 const (
 	refreshTokenTTL   = 30 * 24 * time.Hour
+	bridgeTokenTTL    = 90 * 24 * time.Hour
 	authCodeTTL       = 5 * time.Minute
 	loginStateTTL     = 10 * time.Minute
 	sessionTTL        = time.Hour
@@ -143,6 +145,10 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /oauth/register", s.register)
 	mux.HandleFunc("GET /login/microsoft", s.loginStart)
 	mux.HandleFunc("GET /login/microsoft/callback", s.loginCallback)
+	// Pane sign-in (PRD §06 path 1): not OAuth, but it shares the login
+	// and the session, so it lives here. See bridge.go.
+	mux.HandleFunc("GET /bridge/authorize", s.bridgeAuthorize)
+	mux.HandleFunc("POST /bridge/revoke", s.bridgeRevoke)
 }
 
 // RunCollector garbage-collects client registrations that never completed

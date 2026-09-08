@@ -3,28 +3,36 @@ package authserver
 import (
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/eichler-ai/connectors/hub/internal/store"
 )
 
 func (s *Server) callbackURL() string { return s.o.Issuer + "/login/microsoft/callback" }
 
-// loginStart sends the user to the provider. The login state id is the
-// provider's `state`, so the callback can find the pending authorization
-// without a cookie (the session cookie does not exist yet).
+// loginStart sends the user to the provider from the sign-in page's button.
 func (s *Server) loginStart(w http.ResponseWriter, r *http.Request) {
-	if s.o.Provider == nil {
-		s.errorPage(w, http.StatusNotImplemented, "Sign-in unavailable", "No identity provider is configured on this server.")
-		return
-	}
 	ls, ok := s.loadLoginState(w, r, r.URL.Query().Get("ls"))
 	if !ok {
+		return
+	}
+	s.startLogin(w, r, ls)
+}
+
+// startLogin stores ls with a fresh nonce and PKCE verifier and redirects
+// to the provider. The login state id is the provider's `state`, so the
+// callback can find the pending request without a cookie (the session
+// cookie does not exist yet). Shared by the OAuth sign-in page and the
+// pane's /bridge/authorize, which differ only in what ls says to do after.
+func (s *Server) startLogin(w http.ResponseWriter, r *http.Request, ls store.LoginState) {
+	if s.o.Provider == nil {
+		s.errorPage(w, http.StatusNotImplemented, "Sign-in unavailable", "No identity provider is configured on this server.")
 		return
 	}
 	ls.Nonce = randomToken()
 	ls.ProviderPKCE = randomToken()
 	if err := s.o.Store.PutLoginState(r.Context(), ls); err != nil {
-		s.log.Error("login: update login state", "err", err)
+		s.log.Error("login: store login state", "err", err)
 		s.errorPage(w, http.StatusInternalServerError, "Sign-in failed", "The sign-in could not be started.")
 		return
 	}
@@ -40,7 +48,7 @@ func (s *Server) loginStart(w http.ResponseWriter, r *http.Request) {
 
 // loginCallback completes the provider round trip: validates the ID token,
 // finds or creates the user, sets the session cookie and moves on to
-// consent.
+// consent — or, for a pane sign-in, back to the page that started it.
 func (s *Server) loginCallback(w http.ResponseWriter, r *http.Request) {
 	if s.o.Provider == nil {
 		s.errorPage(w, http.StatusNotImplemented, "Sign-in unavailable", "No identity provider is configured on this server.")
@@ -54,6 +62,12 @@ func (s *Server) loginCallback(w http.ResponseWriter, r *http.Request) {
 	if e := q.Get("error"); e != "" {
 		s.log.Info("login: provider returned an error", "error", e)
 		_ = s.o.Store.DeleteLoginState(r.Context(), ls.ID)
+		if ls.Return != "" {
+			// No OAuth client to send the error to: the page sits in the
+			// Office dialog, and the user closes it.
+			s.errorPage(w, http.StatusBadRequest, "Sign-in cancelled", "Microsoft did not complete the sign-in ("+e+"). Close this window and try again from the add-in.")
+			return
+		}
 		s.redirectError(w, r, ls.RedirectURI, ls.State, "access_denied", "sign-in was cancelled or refused: "+e)
 		return
 	}
@@ -82,6 +96,20 @@ func (s *Server) loginCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	s.setSession(w, user.ID)
 	w.Header().Set("Cache-Control", "no-store")
+	if ls.Return != "" {
+		// The pane flow is done with its login state here; the OAuth flow
+		// spends its own at consent. Return was written by /bridge/authorize
+		// from validated parameters, and the check below keeps a corrupted
+		// record from ever becoming an open redirect.
+		_ = s.o.Store.DeleteLoginState(r.Context(), ls.ID)
+		if !strings.HasPrefix(ls.Return, "/") || strings.HasPrefix(ls.Return, "//") {
+			s.log.Error("login: login state has a non-local return", "return", ls.Return)
+			s.errorPage(w, http.StatusInternalServerError, "Sign-in failed", "The sign-in could not be completed.")
+			return
+		}
+		http.Redirect(w, r, ls.Return, http.StatusFound)
+		return
+	}
 	http.Redirect(w, r, "/oauth/consent?ls="+ls.ID, http.StatusFound)
 }
 

@@ -12,23 +12,31 @@
     #status.ok { background: #dff5dd; }
     #status.bad { background: #fde2e2; }
     #env { color: #666; font-size: 12px; margin-bottom: 8px; white-space: pre-wrap; }
-    #token-row { margin-bottom: 8px; }
-    #token { width: 60%; font-size: 12px; }
+    #account { margin-bottom: 8px; }
+    #account .who { margin-right: 8px; }
     #log { font: 11px/1.35 ui-monospace, Menlo, monospace; white-space: pre-wrap; background: #fafafa;
            border: 1px solid #ddd; padding: 6px; max-height: 55vh; overflow: auto; }
     .err { color: #b00020; }
     button { font-size: 12px; margin-right: 6px; }
+    button.primary { background: #1b1b1b; color: #fff; border: 1px solid #1b1b1b; border-radius: 4px; padding: 5px 10px; cursor: pointer; }
+    [hidden] { display: none !important; }
   </style>
 </head>
 <body>
   <h1>Excel MCP Bridge</h1>
   <div id="status">Loading Office.js…</div>
   <div id="env"></div>
-  <!-- Phase-0 sign-in stand-in: the hub's dev token, kept in this origin's localStorage. Phase 1
-       replaces this row with a sign-in button that stores a bridge token the same way. -->
-  <div id="token-row">
-    <input id="token" type="password" placeholder="MCP Server token" autocomplete="off">
-    <button id="save-token">Save</button>
+  <!-- Sign-in (PRD §06 path 1): the button opens the hub's /bridge/authorize in an Office dialog,
+       which runs the Microsoft sign-in and hands back a 90-day bridge token; the pane keeps it in
+       OfficeRuntime.storage and presents it in every hello. Sign out revokes it on the hub too. -->
+  <div id="account">
+    <div id="signed-out">
+      <button id="sign-in" class="primary">Sign in with Microsoft</button>
+    </div>
+    <div id="signed-in" hidden>
+      <span class="who">Signed in as <strong id="who"></strong></span>
+      <button id="sign-out">Sign out</button>
+    </div>
   </div>
   <div>
     <button id="reconnect">Reconnect</button>
