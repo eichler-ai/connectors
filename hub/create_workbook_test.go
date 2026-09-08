@@ -45,6 +45,7 @@ type fakeGraph struct {
 func newFakeGraph(t *testing.T) *fakeGraph {
 	t.Helper()
 	f := &fakeGraph{item: graph.DriveItem{ID: "953169F03C1B112C!456", Name: "Budget-ab12cd.xlsx", WebURL: "https://onedrive.live.com/edit.aspx?x"}}
+	f.item.ParentReference.Path = "/drive/root:/Eichler Connectors"
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /token", func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
@@ -154,7 +155,7 @@ func TestCreateWorkbookFileSuccess(t *testing.T) {
 	if rec != nil {
 		t.Fatalf("rec = %+v", rec)
 	}
-	if item.WebURL != f.item.WebURL || item.DriveID != "953169F03C1B112C" || item.Name != f.item.Name {
+	if item.WebURL != f.item.WebURL || item.DriveID != "953169F03C1B112C" || item.Name != f.item.Name || item.Folder != "Eichler Connectors" {
 		t.Fatalf("item: %+v", item)
 	}
 	if f.lastAuth != "Bearer at-1" {

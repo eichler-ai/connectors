@@ -78,6 +78,7 @@ func TestCreateFileInFolder(t *testing.T) {
 	f := newFakeMicrosoft(t)
 	f.wantRefreshToken = "rt-old"
 	f.putResponse = DriveItem{ID: "953169F03C1B112C!123", Name: "Budget-ab12cd.xlsx", WebURL: "https://onedrive.live.com/x"}
+	f.putResponse.ParentReference.Path = "/drive/root:/Eichler Connectors"
 	c := f.client(t)
 
 	item, next, err := c.CreateFileInFolder(context.Background(), "rt-old", "Eichler Connectors", "Budget-ab12cd.xlsx", []byte("xlsx-bytes"))
@@ -87,8 +88,8 @@ func TestCreateFileInFolder(t *testing.T) {
 	if next != "rt-old" {
 		t.Fatalf("refresh token to persist = %q, want unchanged rt-old (Microsoft didn't rotate)", next)
 	}
-	if item.WebURL != "https://onedrive.live.com/x" || item.DriveID() != "953169F03C1B112C" {
-		t.Fatalf("driveItem: %+v (drive id %q)", item, item.DriveID())
+	if item.WebURL != "https://onedrive.live.com/x" || item.DriveID() != "953169F03C1B112C" || item.Folder() != "Eichler Connectors" {
+		t.Fatalf("driveItem: %+v (drive id %q, folder %q)", item, item.DriveID(), item.Folder())
 	}
 	if f.lastAuth != "Bearer at-123" {
 		t.Fatalf("authorization header: %q", f.lastAuth)
@@ -164,5 +165,31 @@ func TestDriveIDFallsBackToParentReference(t *testing.T) {
 	d.ParentReference.DriveID = "PARENT-CID"
 	if got := d.DriveID(); got != "PARENT-CID" {
 		t.Fatalf("DriveID() = %q, want the parentReference fallback", got)
+	}
+}
+
+// TestFolder covers the live finding (2026-09-08, follow-up to the RFC §3.3
+// spike): a root file's parentReference.path has nothing after "root:", but
+// a file in a folder carries the folder name there, and the pane's doc_key
+// must include it.
+func TestFolder(t *testing.T) {
+	cases := []struct {
+		name, path, want string
+	}{
+		{"root file", "/drive/root:", ""},
+		{"root file trailing slash", "/drive/root:/", ""},
+		{"one folder", "/drive/root:/Eichler Connectors", "Eichler Connectors"},
+		{"nested folders", "/drive/root:/A/B/C", "A/B/C"},
+		{"percent-encoded space decoded", "/drive/root:/Eichler%20Connectors", "Eichler Connectors"},
+		{"no root marker at all", "", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var d DriveItem
+			d.ParentReference.Path = c.path
+			if got := d.Folder(); got != c.want {
+				t.Errorf("Folder() for path %q = %q, want %q", c.path, got, c.want)
+			}
+		})
 	}
 }

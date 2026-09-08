@@ -3,7 +3,6 @@ package connector
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"strings"
 	"testing"
 
@@ -70,12 +69,37 @@ func TestUniqueWorkbookName(t *testing.T) {
 	}
 }
 
+// TestDocKeyConstruction covers the live finding (2026-09-08): a file's
+// doc_key includes its OneDrive folder path when it has one — the RFC §3.3
+// spike's original folderless result only held for a root-level file.
 func TestDocKeyConstruction(t *testing.T) {
-	item := hub.DriveItem{ID: "953169F03C1B112C!123", Name: "Budget-ab12cd.xlsx", WebURL: "https://onedrive.live.com/x", DriveID: "953169F03C1B112C"}
-	got := fmt.Sprintf(dDocsLiveTemplate, item.DriveID, item.Name)
-	want := "https://d.docs.live.net/953169F03C1B112C/Budget-ab12cd.xlsx"
-	if got != want {
-		t.Fatalf("doc_key = %q, want %q", got, want)
+	cases := []struct {
+		name string
+		item hub.DriveItem
+		want string
+	}{
+		{
+			name: "in a folder",
+			item: hub.DriveItem{ID: "953169F03C1B112C!123", Name: "Spike Test-1ec63325.xlsx", WebURL: "https://onedrive.live.com/x", DriveID: "953169F03C1B112C", Folder: "Eichler Connectors"},
+			want: "https://d.docs.live.net/953169F03C1B112C/Eichler Connectors/Spike Test-1ec63325.xlsx",
+		},
+		{
+			name: "root file, no folder segment",
+			item: hub.DriveItem{ID: "953169F03C1B112C!456", Name: "Budget-ab12cd.xlsx", DriveID: "953169F03C1B112C", Folder: ""},
+			want: "https://d.docs.live.net/953169F03C1B112C/Budget-ab12cd.xlsx",
+		},
+		{
+			name: "nested folder",
+			item: hub.DriveItem{DriveID: "CID", Folder: "A/B", Name: "n.xlsx"},
+			want: "https://d.docs.live.net/CID/A/B/n.xlsx",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := docKeyFor(c.item); got != c.want {
+				t.Errorf("docKeyFor() = %q, want %q", got, c.want)
+			}
+		})
 	}
 }
 

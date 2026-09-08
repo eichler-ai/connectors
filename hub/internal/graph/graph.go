@@ -45,6 +45,10 @@ type DriveItem struct {
 	WebURL          string `json:"webUrl"`
 	ParentReference struct {
 		DriveID string `json:"driveId"`
+		// Path looks like "/drive/root:" for a root-level file or
+		// "/drive/root:/Eichler Connectors" for a file in a folder — see
+		// Folder below.
+		Path string `json:"path"`
 	} `json:"parentReference"`
 }
 
@@ -52,14 +56,41 @@ type DriveItem struct {
 // the RFC's live spike (§3.3) found is also parentReference.driveId and is
 // what the pane-matching doc_key is built from: the web pane's
 // Office.context.document.url for a personal-OneDrive file is
-// https://d.docs.live.net/<CID>/<filename>. The id is preferred because
-// it's always present; parentReference.driveId is the fallback for a
-// response shape that omits it.
+// https://d.docs.live.net/<CID>/<folder path, if any>/<filename>. The id is
+// preferred because it's always present; parentReference.driveId is the
+// fallback for a response shape that omits it.
 func (d DriveItem) DriveID() string {
 	if i := strings.IndexByte(d.ID, '!'); i >= 0 {
 		return d.ID[:i]
 	}
 	return d.ParentReference.DriveID
+}
+
+// Folder is the OneDrive folder path relative to root, with no leading or
+// trailing slash, or "" for a root-level file — the other half of the
+// pane-matching doc_key (RFC §3.3). Live finding 2026-09-08: the RFC's
+// original pane-side spike used a root file and read the d.docs URL as
+// folderless (CID+filename only); a follow-up spike on a file inside
+// "Eichler Connectors" showed the pane's Office.context.document.url is
+// actually https://d.docs.live.net/<CID>/<folder path>/<filename> — the
+// folder segment is real, not an artifact of the first test. Graph's spaces
+// in parentReference.path have been seen unescaped; PathUnescape is applied
+// defensively in case a future response percent-encodes them, since the
+// pane itself reports literal spaces and doc_key must match that exactly.
+func (d DriveItem) Folder() string {
+	const marker = "root:"
+	i := strings.Index(d.ParentReference.Path, marker)
+	if i < 0 {
+		return ""
+	}
+	rest := strings.Trim(d.ParentReference.Path[i+len(marker):], "/")
+	if rest == "" {
+		return ""
+	}
+	if unescaped, err := url.PathUnescape(rest); err == nil {
+		rest = unescaped
+	}
+	return rest
 }
 
 // Client talks to Microsoft Graph on behalf of a user. It mints a fresh

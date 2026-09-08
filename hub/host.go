@@ -372,10 +372,15 @@ type DriveItem struct {
 	ID     string
 	Name   string
 	WebURL string
-	// DriveID is the CID segment of ID (before "!") — the RFC §3.3 spike's
-	// pane-matching identity: a personal OneDrive file's
-	// Office.context.document.url is https://d.docs.live.net/<CID>/<name>.
+	// DriveID is the CID segment of ID (before "!") — half of the RFC §3.3
+	// spike's pane-matching identity: a personal OneDrive file's
+	// Office.context.document.url is
+	// https://d.docs.live.net/<CID>/<Folder>/<Name> (no <Folder> segment for
+	// a root-level file — live-verified 2026-09-08, see graph.DriveItem.Folder).
 	DriveID string
+	// Folder is the other half: the OneDrive folder path (no leading/
+	// trailing slash), or "" for a root-level file.
+	Folder string
 }
 
 // CreateWorkbookFile uploads content as name into the user's OneDrive via
@@ -416,12 +421,12 @@ func (h *Host) CreateWorkbookFile(ctx context.Context, user, name string, conten
 		h.log.Info("graph: create file failed", "user", user, "err", createErr)
 		return DriveItem{}, diag.New(diag.SeverityError, "graph-create-failed", Source, createErr.Error())
 	}
-	out := DriveItem{ID: item.ID, Name: item.Name, WebURL: item.WebURL, DriveID: item.DriveID()}
+	out := DriveItem{ID: item.ID, Name: item.Name, WebURL: item.WebURL, DriveID: item.DriveID(), Folder: item.Folder()}
 	// The correlation spike's observability (RFC §3.3, §6): both what Graph
 	// actually returned and (by the caller logging doc_key alongside this)
 	// what create_workbook constructed from it, so a mismatch is visible
 	// without re-running the live test.
-	h.log.Info("graph: created file", "user", user, "drive_item_id", out.ID, "web_url", out.WebURL, "drive_id", out.DriveID)
+	h.log.Info("graph: created file", "user", user, "drive_item_id", out.ID, "web_url", out.WebURL, "drive_id", out.DriveID, "folder", out.Folder)
 	return out, nil
 }
 

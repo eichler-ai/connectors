@@ -49,11 +49,25 @@ const createWorkbookDescription = "Create a new Excel workbook in the user's One
 	"call list_instances after they say they've opened it to find the right bridge before driving the document. " +
 	"Requires the user to have granted Microsoft file access at sign-in; if they haven't, this returns graph-not-connected."
 
-// dDocsLiveTemplate is the personal-OneDrive URL shape the RFC's live spike
-// found the web pane reports as Office.context.document.url — CID plus the
-// bare filename, no folder (§3.3). doc_key is constructed to equal this
-// exactly so the agent's list_instances match is exact, not a heuristic.
-const dDocsLiveTemplate = "https://d.docs.live.net/%s/%s"
+// docKeyFor builds the personal-OneDrive URL shape the RFC's live spike
+// (§3.3) found the web pane reports as Office.context.document.url:
+// https://d.docs.live.net/<CID>/<folder path>/<filename>, with the folder
+// segment entirely absent for a root-level file. Live finding 2026-09-08
+// (a follow-up to the RFC's original spike, which tested a root file and so
+// looked folderless): create_workbook always uploads into "Eichler
+// Connectors", so the folder segment is always present in practice, but
+// this stays general rather than hard-coding that folder name. doc_key is
+// constructed to equal the pane's URL exactly, string for string (literal
+// spaces, matching what the pane reports — see graph.DriveItem.Folder),
+// so the agent's list_instances match is exact, not a heuristic.
+func docKeyFor(item hub.DriveItem) string {
+	segs := []string{item.DriveID}
+	if item.Folder != "" {
+		segs = append(segs, item.Folder)
+	}
+	segs = append(segs, item.Name)
+	return "https://d.docs.live.net/" + strings.Join(segs, "/")
+}
 
 func registerCreateWorkbook(reg *hub.ToolRegistry, c *Connector) {
 	mcp.AddTool(reg.Server, &mcp.Tool{Name: "create_workbook", Description: createWorkbookDescription},
@@ -76,7 +90,7 @@ func registerCreateWorkbook(reg *hub.ToolRegistry, c *Connector) {
 			if rec != nil {
 				return fail(rec), CreateWorkbookOut{Error: rec}, nil
 			}
-			docKey := fmt.Sprintf(dDocsLiveTemplate, item.DriveID, item.Name)
+			docKey := docKeyFor(item)
 			// The correlation spike's headline check (RFC §3.3, §6): log the
 			// constructed doc_key next to what hub.Host already logged from
 			// the driveItem, so a live test can compare them against what
