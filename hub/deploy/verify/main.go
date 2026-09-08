@@ -1,70 +1,91 @@
-// verify is the operator check deploy.sh runs after every deploy: call the
-// deployed hub's get_skills tool over its real MCP endpoint (the same path a
-// client uses, not an internal shortcut) and print hub_version, so a bad
-// token or a broken deploy fails the deploy loudly instead of silently at
-// the next real client connection.
+// verify is the operator check deploy.sh runs after every deploy: the hub
+// answers /health with the deployed revision, serves the authorization
+// server metadata at the issuer root, serves the connector's protected
+// resource metadata, and challenges an unauthenticated MCP request with the
+// WWW-Authenticate header Claude clients follow. It prints the Hub-Version
+// so the script can compare it with the revision it built. A real MCP call
+// needs a real sign-in and stays a live test.
 //
-//	HUB_DEV_TOKEN=<token> go run ./hub/deploy/verify <mcp-url>
+//	go run ./hub/deploy/verify <public-url> <connector-slug>
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
-
-	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"strings"
+	"time"
 )
 
 func main() {
-	if len(os.Args) != 2 {
-		fmt.Fprintln(os.Stderr, "usage: HUB_DEV_TOKEN=<token> go run ./hub/deploy/verify <mcp-url>")
+	if len(os.Args) != 3 {
+		fmt.Fprintln(os.Stderr, "usage: go run ./hub/deploy/verify <public-url> <connector-slug>")
 		os.Exit(2)
 	}
-	url := os.Args[1]
-	token := os.Getenv("HUB_DEV_TOKEN")
-	if token == "" {
-		fmt.Fprintln(os.Stderr, "verify: HUB_DEV_TOKEN is not set")
-		os.Exit(2)
+	base, slug := strings.TrimSuffix(os.Args[1], "/"), os.Args[2]
+	client := &http.Client{Timeout: 15 * time.Second}
+	fail := func(format string, args ...any) {
+		fmt.Fprintf(os.Stderr, "verify: "+format+"\n", args...)
+		os.Exit(1)
 	}
 
-	tr := &mcp.StreamableClientTransport{
-		Endpoint:   url,
-		HTTPClient: &http.Client{Transport: bearer{token}},
+	resp, err := client.Get(base + "/health")
+	if err != nil || resp.StatusCode != 200 {
+		fail("GET /health: %v (status %v)", err, resp)
 	}
-	ctx := context.Background()
-	cs, err := mcp.NewClient(&mcp.Implementation{Name: "deploy-verify", Version: "0"}, nil).Connect(ctx, tr, nil)
+	resp.Body.Close()
+	version := resp.Header.Get("Hub-Version")
+	if version == "" {
+		fail("GET /health: no Hub-Version header")
+	}
+
+	var asm struct {
+		Issuer                string   `json:"issuer"`
+		AuthorizationEndpoint string   `json:"authorization_endpoint"`
+		TokenEndpoint         string   `json:"token_endpoint"`
+		JWKSURI               string   `json:"jwks_uri"`
+		CodeChallengeMethods  []string `json:"code_challenge_methods_supported"`
+	}
+	getJSON(client, base+"/.well-known/oauth-authorization-server", &asm, fail)
+	if asm.Issuer != base || asm.AuthorizationEndpoint == "" || asm.TokenEndpoint == "" || asm.JWKSURI == "" || len(asm.CodeChallengeMethods) == 0 {
+		fail("authorization server metadata is incomplete or names another issuer: %+v", asm)
+	}
+	var jwks struct {
+		Keys []map[string]any `json:"keys"`
+	}
+	getJSON(client, asm.JWKSURI, &jwks, fail)
+	if len(jwks.Keys) == 0 {
+		fail("JWKS has no keys")
+	}
+	var prm struct {
+		Resource             string   `json:"resource"`
+		AuthorizationServers []string `json:"authorization_servers"`
+	}
+	getJSON(client, base+"/"+slug+"/.well-known/oauth-protected-resource", &prm, fail)
+	if prm.Resource != base+"/"+slug+"/mcp" || len(prm.AuthorizationServers) != 1 || prm.AuthorizationServers[0] != base {
+		fail("protected resource metadata: %+v", prm)
+	}
+
+	resp, err = client.Post(base+"/"+slug+"/mcp", "application/json", strings.NewReader("{}"))
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "verify: connect %s: %v\n", url, err)
-		os.Exit(1)
+		fail("POST /%s/mcp: %v", slug, err)
 	}
-	defer cs.Close()
-
-	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "get_skills", Arguments: map[string]any{}})
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "verify: get_skills: %v\n", err)
-		os.Exit(1)
+	resp.Body.Close()
+	challenge := resp.Header.Get("WWW-Authenticate")
+	if resp.StatusCode != 401 || !strings.Contains(challenge, `resource_metadata="`+base+"/"+slug+`/.well-known/oauth-protected-resource"`) {
+		fail("POST /%s/mcp without a token: %d %q, want 401 with resource_metadata", slug, resp.StatusCode, challenge)
 	}
-	if res.IsError {
-		fmt.Fprintln(os.Stderr, "verify: get_skills returned an error result")
-		os.Exit(1)
-	}
-
-	b, _ := json.Marshal(res.StructuredContent)
-	var out struct {
-		HubVersion string `json:"hub_version"`
-	}
-	if err := json.Unmarshal(b, &out); err != nil || out.HubVersion == "" {
-		fmt.Fprintf(os.Stderr, "verify: no hub_version in get_skills result: %s\n", b)
-		os.Exit(1)
-	}
-	fmt.Println(out.HubVersion)
+	fmt.Println(version)
 }
 
-type bearer struct{ token string }
-
-func (b bearer) RoundTrip(r *http.Request) (*http.Response, error) {
-	r.Header.Set("Authorization", "Bearer "+b.token)
-	return http.DefaultTransport.RoundTrip(r)
+func getJSON(client *http.Client, url string, v any, fail func(string, ...any)) {
+	resp, err := client.Get(url)
+	if err != nil || resp.StatusCode != 200 {
+		fail("GET %s: %v (status %v)", url, err, resp)
+	}
+	defer resp.Body.Close()
+	if err := json.NewDecoder(resp.Body).Decode(v); err != nil {
+		fail("GET %s: not JSON: %v", url, err)
+	}
 }

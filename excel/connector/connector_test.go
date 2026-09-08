@@ -35,14 +35,14 @@ func newFixture(t *testing.T) *fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p, _ := a.VerifyAccessToken(context.Background(), token)
+	uid := a.UserID()
 	srv, err := hub.NewServer(hub.Options{
 		Auth:       a,
 		Connectors: []hub.Connector{New()},
 		Logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 		// In-memory MCP sessions have no bearer token; act as the dev user, the
 		// identity the fake bridge's hello resolves to.
-		UserOf: func(*mcp.CallToolRequest) (string, bool) { return p.UserID, true },
+		UserOf: func(*mcp.CallToolRequest) (string, bool) { return uid, true },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -60,7 +60,7 @@ func newFixture(t *testing.T) *fixture {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { cs.Close() })
-	return &fixture{srv: srv, http: hs, cs: cs, uid: p.UserID}
+	return &fixture{srv: srv, http: hs, cs: cs, uid: uid}
 }
 
 // miniExcel is a fake bridge that behaves like the prelude wrap() injects:

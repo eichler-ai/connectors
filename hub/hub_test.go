@@ -51,6 +51,20 @@ type fixture struct {
 	http *httptest.Server
 	uid  string
 	stub *stub
+	keys *auth.KeySet
+}
+
+// accessToken mints a JWT for the fixture's user with the given scopes, as
+// the authorization server would.
+func (f *fixture) accessToken(t *testing.T, scopes ...string) string {
+	t.Helper()
+	now := time.Now()
+	tok, err := f.keys.Sign(auth.Claims{Issuer: f.srv.PublicURL(), Subject: f.uid, Audience: auth.Audience{f.srv.PublicURL()}, Scope: strings.Join(scopes, " "),
+		ClientID: "test", JTI: "j", IssuedAt: now.Unix(), Expires: now.Add(auth.AccessTokenTTL).Unix()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tok
 }
 
 // newFixture builds a fixture whose manifest handler behaves like production
@@ -64,11 +78,22 @@ func newFixture(t *testing.T, publicURL string) *fixture {
 
 func newFixtureEnv(t *testing.T, publicURL, environment string) *fixture {
 	t.Helper()
-	a, err := auth.NewDevToken(token)
+	dev, err := auth.NewDevToken(token)
 	if err != nil {
 		t.Fatal(err)
 	}
-	p, _ := a.VerifyAccessToken(context.Background(), token)
+	pemData, _ := auth.GenerateKeyPEM()
+	keys, err := auth.ParseKeySet(pemData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if publicURL == "" {
+		publicURL = hub.DevPublicURL
+	}
+	// Bridges present the dev token; MCP clients present JWTs the fixture
+	// mints for the same user id, the split cmd/hub wires in production.
+	uid := dev.UserID()
+	a := auth.Split{Access: &auth.JWTVerifier{Keys: keys, Issuer: publicURL, Audience: publicURL}, Bridge: dev}
 	st := &stub{}
 	srv, err := hub.NewServer(hub.Options{
 		PublicURL:   publicURL,
@@ -79,14 +104,14 @@ func newFixtureEnv(t *testing.T, publicURL, environment string) *fixture {
 		Bridge:      bridge.Options{HelloTimeout: time.Second},
 		// Tools driven over the in-memory transport have no bearer token; act
 		// as the dev user, the same identity the bridge hello resolves to.
-		UserOf: func(*mcp.CallToolRequest) (string, bool) { return p.UserID, true },
+		UserOf: func(*mcp.CallToolRequest) (string, bool) { return uid, true },
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	hs := httptest.NewServer(srv.Handler())
 	t.Cleanup(hs.Close)
-	return &fixture{srv: srv, http: hs, uid: p.UserID, stub: st}
+	return &fixture{srv: srv, http: hs, uid: uid, stub: st, keys: keys}
 }
 
 func (f *fixture) dial(t *testing.T, instance string, docs ...protocol.Document) *bridgetest.Fake {
@@ -297,14 +322,21 @@ func (b bearer) RoundTrip(r *http.Request) (*http.Response, error) {
 
 func TestMCPEndpointRequiresBearer(t *testing.T) {
 	f := newFixture(t, "")
-	for _, tok := range []string{"", "wrong-token-000000000"} {
+	// No token, garbage, and the bridge's dev token (retired from /mcp):
+	// all 401.
+	for _, tok := range []string{"", "wrong-token-000000000", token} {
 		tr := &mcp.StreamableClientTransport{Endpoint: f.http.URL + "/stub/mcp", HTTPClient: &http.Client{Transport: bearer{tok}}}
 		_, err := mcp.NewClient(&mcp.Implementation{Name: "c", Version: "0"}, nil).Connect(context.Background(), tr, nil)
 		if err == nil || !strings.Contains(err.Error(), "Unauthorized") {
 			t.Fatalf("token %q: connect err %v, want Unauthorized", tok, err)
 		}
 	}
-	tr := &mcp.StreamableClientTransport{Endpoint: f.http.URL + "/stub/mcp", HTTPClient: &http.Client{Transport: bearer{token}}}
+	// A valid token without this connector's scope: 403.
+	tr := &mcp.StreamableClientTransport{Endpoint: f.http.URL + "/stub/mcp", HTTPClient: &http.Client{Transport: bearer{f.accessToken(t, "other")}}}
+	if _, err := mcp.NewClient(&mcp.Implementation{Name: "c", Version: "0"}, nil).Connect(context.Background(), tr, nil); err == nil || !strings.Contains(err.Error(), "Forbidden") {
+		t.Fatalf("token without scope: connect err %v, want Forbidden", err)
+	}
+	tr = &mcp.StreamableClientTransport{Endpoint: f.http.URL + "/stub/mcp", HTTPClient: &http.Client{Transport: bearer{f.accessToken(t, "stub")}}}
 	cs, err := mcp.NewClient(&mcp.Implementation{Name: "c", Version: "0"}, nil).Connect(context.Background(), tr, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -427,6 +459,46 @@ func TestExecResolution(t *testing.T) {
 	}
 	if _, rec := h.Exec(ctx, f.uid, f.stub, hub.Target{InstanceID: "a"}, script); rec == nil || rec.Code != "unknown-instance" {
 		t.Fatalf("after disconnect: %+v", rec)
+	}
+}
+
+// TestDiscovery: the 401 carries the resource-metadata pointer Claude
+// clients follow, and the metadata names this connector's MCP URL as the
+// resource, the hub as the authorization server, and the slug as the scope.
+func TestDiscovery(t *testing.T) {
+	f := newFixture(t, "https://connectors.example")
+	resp, err := http.Post(f.http.URL+"/stub/mcp", "application/json", strings.NewReader("{}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	want := `Bearer resource_metadata="https://connectors.example/stub/.well-known/oauth-protected-resource", scope="stub"`
+	if resp.StatusCode != 401 || resp.Header.Get("WWW-Authenticate") != want {
+		t.Fatalf("401 challenge: %d %q", resp.StatusCode, resp.Header.Get("WWW-Authenticate"))
+	}
+	for _, path := range []string{"/stub/.well-known/oauth-protected-resource", "/.well-known/oauth-protected-resource/stub/mcp"} {
+		resp, err = http.Get(f.http.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var prm struct {
+			Resource             string   `json:"resource"`
+			AuthorizationServers []string `json:"authorization_servers"`
+			ScopesSupported      []string `json:"scopes_supported"`
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err := json.Unmarshal(body, &prm); err != nil || resp.StatusCode != 200 {
+			t.Fatalf("%s: %d %s", path, resp.StatusCode, body)
+		}
+		if prm.Resource != "https://connectors.example/stub/mcp" || strings.Join(prm.AuthorizationServers, ",") != "https://connectors.example" || strings.Join(prm.ScopesSupported, ",") != "stub" {
+			t.Fatalf("%s: %+v", path, prm)
+		}
+	}
+	resp, _ = http.Get(f.http.URL + "/health")
+	resp.Body.Close()
+	if resp.Header.Get("Hub-Version") != "dev" {
+		t.Fatalf("health version header: %q", resp.Header.Get("Hub-Version"))
 	}
 }
 

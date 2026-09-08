@@ -14,11 +14,18 @@
 # deploys to Cloud Run with the settings the excel-bridge POC used (single
 # instance, session affinity, 60-minute request timeout, WebSockets).
 #
-# Reads the Cloud Run runtime URL from the service itself where the caller
-# hasn't fixed one (staging), and pulls HUB_DEV_TOKEN from Secret Manager,
-# creating the secret with a fresh random value the first time this runs for
-# an environment. The token value is never printed; see the "read a token"
-# line this script prints at the end.
+# Uses the custom domain (prod) or the deterministic Cloud Run URL (staging)
+# as the public URL, and pulls the environment's secrets from
+# Secret Manager: HUB_DEV_TOKEN (the bridge hello token until pane sign-in
+# lands) and the JWT signing key, both created with fresh random values the
+# first time this runs for an environment, plus the Entra client secret,
+# which is created by hand (it comes from the Entra portal) and only checked
+# here. No secret value is ever printed.
+#
+# Firestore (PRD §11): prod uses the project's (default) database; staging
+# gets its own database so test users and tokens never share collections
+# with production. TTL policies on expires_at keep auth_codes, login_states
+# and refresh_tokens from accumulating.
 set -euo pipefail
 
 usage() {
@@ -33,11 +40,15 @@ case "$ENV" in
   staging)
     SERVICE=hub-staging
     SECRET=hub-staging-dev-token
-    FIXED_PUBLIC_URL=""   # discovered from the service's own run.app URL below
+    JWT_SECRET=hub-staging-jwt-signing-key
+    FIRESTORE_DB=hub-staging
+    FIXED_PUBLIC_URL=""   # the deterministic run.app URL, computed below
     ;;
   prod)
     SERVICE=hub
     SECRET=hub-dev-token
+    JWT_SECRET=hub-jwt-signing-key
+    FIRESTORE_DB="(default)"
     FIXED_PUBLIC_URL="https://connectors.eichler.ai"
     ;;
   *)
@@ -48,6 +59,10 @@ esac
 PROJECT=eichler-ai
 REGION=us-central1
 REPO=cloud-run-source-deploy   # existing Artifact Registry repo (POC also pushes here)
+ENTRA_SECRET=entra-client-secret
+# The Entra application (client) id of "Eichler Connectors"; override with
+# HUB_MS_CLIENT_ID in the environment to deploy against another registration.
+MS_CLIENT_ID="${HUB_MS_CLIENT_ID:-4fce14f7-6415-4d92-a8b0-c98f7f0a1763}"
 
 # --- Safety: this script must only ever touch the one GCP project. ---------
 ACTIVE_PROJECT="$(gcloud config get-value project 2>/dev/null)"
@@ -89,31 +104,66 @@ if [ -z "$(gcloud secrets versions list "$SECRET" --project="$PROJECT" --format=
   openssl rand -hex 24 | tr -d '\n' | gcloud secrets versions add "$SECRET" --project="$PROJECT" --data-file=- >/dev/null
 fi
 
-# --- Runtime service account needs access to the secret. -------------------
+# --- JWT signing key: one P-256 key per environment, created once. --------
+# The secret holds PEM; the hub reads it from the HUB_JWT_SIGNING_KEY env var
+# (multi-line values are fine there, unlike the token's trailing newline).
+# Rotation: prepend a new key block to a new secret version — the first key
+# signs, every key verifies — then drop the old block a deploy later.
+if ! gcloud secrets describe "$JWT_SECRET" --project="$PROJECT" >/dev/null 2>&1; then
+  echo "==> [$ENV] creating secret ${JWT_SECRET}"
+  gcloud secrets create "$JWT_SECRET" --project="$PROJECT" --replication-policy=automatic >/dev/null
+fi
+if [ -z "$(gcloud secrets versions list "$JWT_SECRET" --project="$PROJECT" --format='value(name)' 2>/dev/null)" ]; then
+  echo "==> [$ENV] generating the JWT signing key into ${JWT_SECRET} (this only happens once)"
+  openssl ecparam -genkey -name prime256v1 -noout | gcloud secrets versions add "$JWT_SECRET" --project="$PROJECT" --data-file=- >/dev/null
+fi
+
+# --- Entra client secret: created by hand from the portal, checked here. ---
+if [ -z "$(gcloud secrets versions list "$ENTRA_SECRET" --project="$PROJECT" --filter='state=enabled' --format='value(name)' 2>/dev/null)" ]; then
+  echo "refusing to deploy: secret ${ENTRA_SECRET} has no enabled version; add the Entra app's client secret:" >&2
+  echo "  printf '%s' '<secret>' | gcloud secrets versions add ${ENTRA_SECRET} --project=${PROJECT} --data-file=-" >&2
+  exit 1
+fi
+
+# --- Runtime service account needs access to the secrets. ------------------
 RUNTIME_SA="$(gcloud iam service-accounts list --project="$PROJECT" \
   --filter="email ~ ^[0-9]+-compute@developer.gserviceaccount.com\$" \
   --format='value(email)')"
-gcloud secrets add-iam-policy-binding "$SECRET" \
-  --project="$PROJECT" \
-  --member="serviceAccount:${RUNTIME_SA}" \
-  --role="roles/secretmanager.secretAccessor" \
-  >/dev/null
+for s in "$SECRET" "$JWT_SECRET" "$ENTRA_SECRET"; do
+  gcloud secrets add-iam-policy-binding "$s" \
+    --project="$PROJECT" \
+    --member="serviceAccount:${RUNTIME_SA}" \
+    --role="roles/secretmanager.secretAccessor" \
+    >/dev/null
+done
 
-# --- HUB_PUBLIC_URL: fixed for prod, discovered for staging. ---------------
-# A brand-new staging service doesn't have a URL until it exists, so the
-# first deploy for a fresh environment goes out with the DevPublicURL
-# fallback (the hub still serves fine; only the manifest URL is briefly
-# wrong), then a second deploy corrects it once the run.app URL is known.
-# On every later run the service already exists, so this happens once.
+# --- Firestore: the environment's database and its TTL policies. -----------
+if [ "$FIRESTORE_DB" != "(default)" ] && ! gcloud firestore databases describe --database="$FIRESTORE_DB" --project="$PROJECT" >/dev/null 2>&1; then
+  echo "==> [$ENV] creating Firestore database ${FIRESTORE_DB}"
+  gcloud firestore databases create --database="$FIRESTORE_DB" --location="$REGION" --type=firestore-native --project="$PROJECT" >/dev/null
+fi
+for col in auth_codes login_states refresh_tokens; do
+  # Idempotent: re-enabling an enabled TTL is a no-op. Runs async on
+  # Google's side; --async keeps the deploy moving.
+  gcloud firestore fields ttls update expires_at --collection-group="$col" --database="$FIRESTORE_DB" \
+    --enable-ttl --project="$PROJECT" --async >/dev/null 2>&1 || true
+done
+
+# --- HUB_PUBLIC_URL: the custom domain for prod, the deterministic Cloud Run
+# URL for staging. A service answers on two run.app URLs: a random-suffix one
+# (status.url) and https://<service>-<project number>.<region>.run.app, which
+# is stable across deleting and recreating the service. The public URL is
+# the OAuth issuer and the Entra redirect URI (exact match), so it must be
+# the stable one — and being computable up front, a fresh environment needs
+# only one deploy.
 if [ -n "$FIXED_PUBLIC_URL" ]; then
   PUBLIC_URL="$FIXED_PUBLIC_URL"
 else
-  PUBLIC_URL="$(gcloud run services describe "$SERVICE" --project="$PROJECT" --region="$REGION" \
-    --format='value(status.url)' 2>/dev/null || true)"
+  PROJECT_NUMBER="$(gcloud projects describe "$PROJECT" --format='value(projectNumber)')"
+  PUBLIC_URL="https://${SERVICE}-${PROJECT_NUMBER}.${REGION}.run.app"
 fi
 
 deploy_revision() {
-  local url="$1"
   local -a args=(
     "$SERVICE"
     --project="$PROJECT"
@@ -125,48 +175,33 @@ deploy_revision() {
     --max-instances=1
     --session-affinity
     --timeout=3600
-    --set-secrets="HUB_DEV_TOKEN=${SECRET}:latest"
+    --set-secrets="HUB_DEV_TOKEN=${SECRET}:latest,HUB_JWT_SIGNING_KEY=${JWT_SECRET}:latest,HUB_MS_CLIENT_SECRET=${ENTRA_SECRET}:latest"
     --quiet
   )
   # HUB_ENV distinguishes this deployment's add-in Id/DisplayName from the
   # other environment's (see hub.Options.Environment) so Excel for the web,
   # which keys a sideloaded add-in by manifest Id, never conflates them.
-  local env_vars="HUB_ENV=${ENV}"
-  if [ -n "$url" ]; then
-    env_vars="${env_vars},HUB_PUBLIC_URL=${url}"
-  fi
-  args+=(--set-env-vars="$env_vars")
+  # "^@^" makes @ the list delimiter for gcloud, since the default comma is
+  # a legal character in some of these values.
+  args+=(--set-env-vars="^@^HUB_ENV=${ENV}@HUB_PUBLIC_URL=${PUBLIC_URL}@HUB_FIRESTORE_PROJECT=${PROJECT}@HUB_FIRESTORE_DATABASE=${FIRESTORE_DB}@HUB_MS_CLIENT_ID=${MS_CLIENT_ID}")
   gcloud run deploy "${args[@]}"
 }
 
 echo "==> [$ENV] deploying ${SERVICE}"
-deploy_revision "$PUBLIC_URL"
+deploy_revision
 
-if [ -z "$PUBLIC_URL" ]; then
-  PUBLIC_URL="$(gcloud run services describe "$SERVICE" --project="$PROJECT" --region="$REGION" \
-    --format='value(status.url)')"
-  echo "==> [$ENV] discovered ${SERVICE}'s URL (${PUBLIC_URL}); redeploying with HUB_PUBLIC_URL set"
-  deploy_revision "$PUBLIC_URL"
-fi
-
-# --- Verify: liveness, then a real MCP call through the deployed token. ----
+# --- Verify: liveness, discovery documents, the 401 challenge. -------------
 # This is the check an operator would run by hand; catches a broken deploy
-# (or a mangled secret, see the tr -d '\n' above) here instead of at the next
-# real client connection.
-echo "==> [$ENV] verifying /health"
-HEALTH_CODE="$(curl -s -o /dev/null -w '%{http_code}' "${PUBLIC_URL}/health")"
-if [ "$HEALTH_CODE" != "200" ]; then
-  echo "verify: GET ${PUBLIC_URL}/health -> ${HEALTH_CODE}, want 200" >&2
-  exit 1
-fi
-
-echo "==> [$ENV] verifying get_skills over the deployed MCP endpoint"
-TOKEN="$(gcloud secrets versions access latest --secret="$SECRET" --project="$PROJECT")"
-GOT_VERSION="$(HUB_DEV_TOKEN="$TOKEN" go run ./hub/deploy/verify "${PUBLIC_URL}/excel/mcp")"
+# (or a mangled secret) here instead of at the next real client connection.
+# A real token needs a real sign-in, so the MCP call itself is the
+# orchestrator's live test (hub/README.md "Auth").
+echo "==> [$ENV] verifying ${PUBLIC_URL}"
+GOT_VERSION="$(go run ./hub/deploy/verify "${PUBLIC_URL}" excel)"
 if [ "$GOT_VERSION" != "$REV" ]; then
-  echo "verify: get_skills hub_version=${GOT_VERSION}, want the deployed revision ${REV}" >&2
+  echo "verify: /health Hub-Version=${GOT_VERSION}, want the deployed revision ${REV}" >&2
   exit 1
 fi
 
 echo "==> [$ENV] done: ${SERVICE} at ${PUBLIC_URL} (image ${IMAGE}, hub_version ${GOT_VERSION})"
-echo "    read the dev token:  gcloud secrets versions access latest --secret=${SECRET} --project=${PROJECT}"
+echo "    add in Claude Code:  claude mcp add --transport http excel ${PUBLIC_URL}/excel/mcp"
+echo "    read the bridge token:  gcloud secrets versions access latest --secret=${SECRET} --project=${PROJECT}"

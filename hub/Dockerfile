@@ -20,6 +20,7 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.buildVersion=${VERS
 
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /hub /hub
-# Cloud Run sets $PORT; HUB_PUBLIC_URL, HUB_DEV_TOKEN and HUB_ALLOWED_ORIGINS come
-# from the service configuration.
+# Cloud Run sets $PORT; everything else (HUB_PUBLIC_URL, the Firestore and
+# Entra settings, the mounted secrets) comes from the service configuration
+# that hub/deploy/deploy.sh writes.
 ENTRYPOINT ["/hub"]
