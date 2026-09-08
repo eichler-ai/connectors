@@ -83,7 +83,7 @@ Live against Excel for the web in Chrome, 2026-09-07 (details and scripts in `ex
 | A hung script blocks the pane until it ends; nothing outside can interrupt it | Timeouts plus a "reload the pane" notice; no hard cancellation promised |
 | Excel keeps a "closed" pane alive; Script Lab ran two runner instances | Newest-connection-wins with an explicit `replaced` notice to the loser |
 | `golang.org/x/net/websocket` returns one frame per receive; Chrome fragments large messages | Stream-decode JSON on the socket (or use a full WebSocket library) |
-| Formatting, charts, pivots, CSV/xlsx/PDF export, `insertWorksheetsFromBase64` all work | The Excel tool surface can be `execute_script` plus discovery, like Revit |
+| Formatting, charts, pivots, CSV/xlsx/PDF export, `insertWorksheetsFromBase64` all work, written from model knowledge with at most one correction | The Excel tool surface is `execute_script` plus a skill file; no discovery tools in v1 |
 | The first write went into the user's real workbook | Target workbook/sheet must be surfaced before any write (§10) |
 | Store validation, Script Lab hosting and Cloud Run domain mapping all exercised | Distribution path is known (§14) |
 
@@ -241,21 +241,36 @@ type Connector interface {
     Capabilities() Capabilities                    // Bridge, API, or both; supported languages
     Tools(reg *ToolRegistry)                       // MCP tools; most wrap platform.Exec
     Static() fs.FS                                 // manifest + extension files, may be nil
-    Docs() DiscoverySource                         // for describe/search tools (§10 for Excel)
+    Skill() []byte                                 // skill file served by get_skills
+    Docs() DiscoverySource                         // optional; nil when a connector has no discovery tools
     Validate(ctx, script Script) error             // optional pre-flight (size, denylist)
 }
 ```
 
 The platform supplies `Exec(ctx, user, target, script) (Result, error)`, `Files`, `Audit`,
-`Registry`, and the discovery/how-to tools generically; a connector contributes content and any
-host-specific tools (Excel's `get_selection`, Revit's transaction controls).
+`Registry`, `get_skills`, and — for connectors that opt in — the discovery/how-to tools generically;
+a connector contributes content and any host-specific tools (Excel's `get_status`, Revit's
+transaction controls).
 
 ## 10. Excel connector v1
 
-- **Tools:** `execute_script` (body of an `async (context)` function, JSON result), `list_instances`,
-  `get_status` (workbook, sheet, selection, host, API set), `describe_function`,
-  `search_functions`, `search_howtos`, `describe_howto`, `submit_howto`, `export_file`
-  (csv/xlsx/pdf via the file exchange), `import_workbook` (sheets from an uploaded xlsx), `pair`.
+- **Tools:** `execute_script` (body of an `async (context)` function, JSON result),
+  `get_skills` (returns the connector's skill file — see below), `list_instances`, `get_status`
+  (workbook, sheet, selection, host, API set), `export_file` (csv/xlsx/pdf via the file exchange),
+  `import_workbook` (sheets from an uploaded xlsx), `pair`.
+- **No discovery tools in v1.** Office.js is well represented in model training and the POC's
+  scripts were written from that knowledge with a one-error correction loop at most, so
+  `describe_function`/`search_functions` and the how-to corpus are deferred (§17 phase 5) rather
+  than ported from Revit. What the model does *not* reliably know is this connector's contract
+  and the host's quirks, and that is what the skill file carries.
+- **Skill file (`get_skills`).** A markdown document, versioned with the connector and served from
+  the hub, that the agent fetches once per session: the script contract (`context` in, JSON out,
+  return values not proxies), result and timeout limits, how targets are named and the safety
+  notices in the next bullet, the file-exchange flow, and the live-verified host quirks the POC
+  found (no multi-area addresses in `getRange`/`charts.add`, `getMergedAreas` reports the anchor
+  cell on the web, `getCellProperties` border naming, no-fill reads back as `""`, hung scripts
+  cannot be interrupted, `getFileAsync(Pdf)` works on the web). Same token-budget discipline as the
+  Revit skill (`skill.md`): raise the budget deliberately as features land; never trim silently.
 - **Safety:** every write-capable result reports `{workbook, sheet, address}` it touched; scripts
   that do not name a target sheet get a `target-implicit` notice; `execute_script` accepts an
   optional `expect: {workbook, sheet}` that fails fast on mismatch. This is the fix for the POC's
@@ -263,9 +278,9 @@ host-specific tools (Excel's `get_selection`, Revit's transaction controls).
 - **Runtime:** the POC runner as is — `new Function` inside `Excel.run`, 16 MiB result cap with
   truncation flag, cooperative deadline, errors verbatim. Shared runtime in the manifest so the
   add-in survives a closed pane and can reconnect on workbook open.
-- **Discovery:** `office-js.d.ts` parsed into the same index shape the Revit `describe_function`
-  uses, tagged by requirement set so the agent avoids APIs the web host lacks; how-to corpus seeded
-  from the POC's 14 scripts (formatting, charts/pivot, exports, upload, UI control).
+- **Reference material for the skill file:** the POC's 14 scripts (formatting, charts/pivot,
+  exports, upload, UI control) become worked examples linked from the skill, not a searchable
+  corpus.
 - **Files:** exports go bridge → hub → Cloud Storage; the tool returns a signed URL and, for MCP
   clients that can receive files, the content. Uploads reverse it. Nothing base64 in a script.
 - **Manifest:** served by the hub with its stable Id; Store submission per §14. Excel desktop
@@ -363,10 +378,10 @@ the path layout already permits.
 |---|---|---|
 | 0 — Foundations (1–2 wks) | `platform/` skeleton, bridge protocol v1, registry, Firestore, Cloud Run + staging, CI | POC add-in pointed at `/excel/bridge` runs a script via a temporary token-authed tool |
 | 1 — Auth (2 wks) | authorization server, Microsoft + Google login, MCP endpoint with `RequireBearerToken`, pairing via pane sign-in | Claude Desktop/Code/claude.ai add "Eichler Connectors", sign in, run `execute_script` in Excel for the web; Partner Center registration started |
-| 2 — Excel v1 (2–3 wks) | tools in §10, safety notices, file exchange, audit, discovery index from `office-js.d.ts`, corpus seeded; shared-runtime manifest | live test matrix green on Excel web (Chrome, Edge) and desktop (Win, Mac); threat model written; external review scheduled |
+| 2 — Excel v1 (2 wks) | tools in §10, skill file, safety notices, file exchange, audit; shared-runtime manifest | live test matrix green on Excel web (Chrome, Edge) and desktop (Win, Mac); threat model written; external review scheduled |
 | 3 — Distribution (calendar-bound) | AppSource submission, admin-deployment guide, docs site page, status page | first external user installed without our help |
 | 4 — Second connector (Figma) | prove the connector interface; plugin UI dials `/figma/bridge` | Figma plugin runs generated scripts through the same sign-in |
-| 5 — Options | local hybrid for Excel (v1.1), Revit remote mode, Sheets API path, multi-instance hub | as demand dictates |
+| 5 — Options | local hybrid for Excel (v1.1), Revit remote mode, Sheets API path, multi-instance hub, Excel discovery tools + how-to corpus if skill-file guidance proves insufficient | as demand dictates |
 
 ## 18. Decisions needed
 
