@@ -54,7 +54,7 @@ func registerGetStatus(reg *hub.ToolRegistry, c *Connector) {
 		if rec != nil {
 			return fail(rec), GetStatusOut{Error: rec}, nil
 		}
-		res, rec := reg.Host.Exec(ctx, user, c, hub.Target{InstanceID: in.InstanceID}, hub.Script{Language: Language, Source: statusScript})
+		res, rec := reg.Host.Exec(ctx, user, c, hub.Target{InstanceID: in.InstanceID, Client: hub.ClientName(req)}, hub.Script{Language: Language, Source: statusScript})
 		if rec != nil {
 			return fail(rec), GetStatusOut{Error: rec}, nil
 		}

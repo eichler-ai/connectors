@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"sort"
 	"sync"
 	"time"
 )
@@ -23,6 +24,7 @@ type Memory struct {
 	codes      map[string]AuthCode
 	refresh    map[string]RefreshToken
 	bridge     map[string]BridgeToken
+	audit      map[string][]AuditRow // by user id
 }
 
 // NewMemory returns an empty store.
@@ -35,6 +37,7 @@ func NewMemory() *Memory {
 		codes:      map[string]AuthCode{},
 		refresh:    map[string]RefreshToken{},
 		bridge:     map[string]BridgeToken{},
+		audit:      map[string][]AuditRow{},
 	}
 }
 
@@ -295,6 +298,32 @@ func (m *Memory) RevokeBridgeToken(_ context.Context, hash string) error {
 	defer m.mu.Unlock()
 	delete(m.bridge, hash)
 	return nil
+}
+
+func (m *Memory) PutAuditRow(_ context.Context, row AuditRow) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := m.now()
+	rows := m.audit[row.UserID]
+	kept := rows[:0]
+	for _, r := range rows {
+		if r.ExpiresAt.After(now) {
+			kept = append(kept, r)
+		}
+	}
+	m.audit[row.UserID] = append(kept, row)
+	return nil
+}
+
+func (m *Memory) RecentAudit(_ context.Context, userID string, limit int) ([]AuditRow, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rows := append([]AuditRow(nil), m.audit[userID]...)
+	sort.Slice(rows, func(i, j int) bool { return rows[i].Timestamp.After(rows[j].Timestamp) })
+	if limit > 0 && len(rows) > limit {
+		rows = rows[:limit]
+	}
+	return rows, nil
 }
 
 func (m *Memory) Close() error { return nil }

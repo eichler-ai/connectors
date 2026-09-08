@@ -197,6 +197,7 @@ func run() error {
 		AllowedOrigins: origins,
 		Connectors:     []hub.Connector{excel.New()},
 		Files:          filesStore,
+		Store:          st,
 		Version:        version(),
 		Environment:    environment,
 		Logger:         logger,
@@ -274,7 +275,10 @@ func loadSigningKeys(dev bool) (*auth.KeySet, error) {
 }
 
 // openStore picks Firestore when HUB_FIRESTORE_PROJECT is set, memory
-// otherwise.
+// otherwise. The same store backs both the authorization server and the
+// audit trail (hub.Options.Store, §11/§12): whichever one persists users and
+// tokens also persists audit rows, so audit writes are on exactly when this
+// store survives a restart.
 func openStore(ctx context.Context, logger *slog.Logger) (store.Store, error) {
 	project := os.Getenv("HUB_FIRESTORE_PROJECT")
 	if project == "" {

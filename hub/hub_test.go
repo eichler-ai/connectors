@@ -58,11 +58,12 @@ func (*stub) Static() fs.FS {
 }
 
 type fixture struct {
-	srv  *hub.Server
-	http *httptest.Server
-	uid  string
-	stub *stub
-	keys *auth.KeySet
+	srv   *hub.Server
+	http  *httptest.Server
+	uid   string
+	stub  *stub
+	keys  *auth.KeySet
+	store store.Store
 }
 
 // accessToken mints a JWT for the fixture's user with the given scopes, as
@@ -110,12 +111,18 @@ func newFixtureEnv(t *testing.T, publicURL, environment string) *fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Memory store, as -dev/tests always use (§ config: "audit writing is on
+	// when a store is configured"), so the audit trail is exercised by every
+	// fixture without every test having to opt in.
+	auditStore := store.NewMemory()
+	t.Cleanup(func() { auditStore.Close() })
 	srv, err := hub.NewServer(hub.Options{
 		PublicURL:   publicURL,
 		Environment: environment,
 		Auth:        a,
 		Connectors:  []hub.Connector{st},
 		Files:       fs,
+		Store:       auditStore,
 		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Bridge:      bridge.Options{HelloTimeout: time.Second},
 		// Tools driven over the in-memory transport have no bearer token; act
@@ -127,7 +134,7 @@ func newFixtureEnv(t *testing.T, publicURL, environment string) *fixture {
 	}
 	hs := httptest.NewServer(srv.Handler())
 	t.Cleanup(hs.Close)
-	return &fixture{srv: srv, http: hs, uid: uid, stub: st, keys: keys}
+	return &fixture{srv: srv, http: hs, uid: uid, stub: st, keys: keys, store: auditStore}
 }
 
 func (f *fixture) dial(t *testing.T, instance string, docs ...protocol.Document) *bridgetest.Fake {

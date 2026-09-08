@@ -156,9 +156,13 @@ if [ "$FIRESTORE_DB" != "(default)" ] && ! gcloud firestore databases describe -
   echo "==> [$ENV] creating Firestore database ${FIRESTORE_DB}"
   gcloud firestore databases create --database="$FIRESTORE_DB" --location="$REGION" --type=firestore-native --project="$PROJECT" >/dev/null
 fi
-for col in auth_codes login_states refresh_tokens bridge_tokens; do
+for col in auth_codes login_states refresh_tokens bridge_tokens rows; do
   # Idempotent: re-enabling an enabled TTL is a no-op. Runs async on
-  # Google's side; --async keeps the deploy moving.
+  # Google's side; --async keeps the deploy moving. "rows" is the audit
+  # trail's collection group (phase 2 unit C): every user's audit/{user_id}/
+  # rows subcollection, 90-day retention (hub.AuditRow.ExpiresAt); a
+  # collection-group TTL targets every "rows" subcollection regardless of
+  # its parent document, which is exactly the per-user layout PRD §11 wants.
   gcloud firestore fields ttls update expires_at --collection-group="$col" --database="$FIRESTORE_DB" \
     --enable-ttl --project="$PROJECT" --async >/dev/null 2>&1 || true
 done

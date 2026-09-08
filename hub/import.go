@@ -14,6 +14,7 @@ import (
 	"github.com/eichler-ai/connectors/hub/diag"
 	"github.com/eichler-ai/connectors/hub/internal/bridge"
 	"github.com/eichler-ai/connectors/hub/internal/fetch"
+	"github.com/eichler-ai/connectors/hub/internal/store"
 	"github.com/eichler-ai/connectors/hub/protocol"
 )
 
@@ -174,25 +175,40 @@ func (h *Host) Import(ctx context.Context, user string, c Connector, target Targ
 
 	start := time.Now()
 	res, err := h.bridges.Import(ctx, b, bridge.ImportRequest{DocumentID: target.DocumentID, URL: signedURL, Options: req.Options, Timeout: timeout})
+	elapsed := time.Since(start)
 	attrs := []any{"user", user, "connector", c.Slug(), "instance_id", b.InstanceID, "document", doc.ID,
-		"bytes", ref.Bytes, "elapsed", time.Since(start).Round(time.Millisecond)}
+		"bytes", ref.Bytes, "elapsed", elapsed.Round(time.Millisecond)}
+	// Same boundary as Exec/Export: the source is already staged and the
+	// bridge was sent the request, so every path below writes a row. The
+	// staging failures above (bad source, put/sign errors) never reached the
+	// bridge, matching the no-bridge/invalid-timeout boundary.
 	if err != nil {
 		h.log.Info("import: failed", append(attrs, "err", err)...)
-		return ImportResult{}, execError(err, b, timeout)
+		rec := execError(err, b, timeout)
+		h.putAudit(store.AuditRow{UserID: user, Connector: c.Slug(), Instance: b.InstanceID, Document: doc.ID, Action: "import",
+			OK: false, Code: rec.Code, DurationMs: elapsed.Milliseconds(), FileBytes: ref.Bytes, Format: "xlsx", Client: target.Client})
+		return ImportResult{}, rec
 	}
 	if !res.OK {
-		h.log.Info("import: failed", append(attrs, "code", exportErrorCode(res.Error))...)
+		code := exportErrorCode(res.Error)
+		h.log.Info("import: failed", append(attrs, "code", code)...)
+		h.putAudit(store.AuditRow{UserID: user, Connector: c.Slug(), Instance: b.InstanceID, Document: doc.ID, Action: "import",
+			OK: false, Code: code, DurationMs: elapsed.Milliseconds(), FileBytes: ref.Bytes, Format: "xlsx", Client: target.Client})
 		return ImportResult{}, exportError(res.Error)
 	}
 	var payload importPayload
 	if err := json.Unmarshal(res.Result, &payload); err != nil {
 		rec := diag.New(diag.SeverityError, "bad-import-result", Source, "the pane's outcome was not the expected shape: "+err.Error())
 		h.log.Info("import: failed", append(attrs, "code", rec.Code)...)
+		h.putAudit(store.AuditRow{UserID: user, Connector: c.Slug(), Instance: b.InstanceID, Document: doc.ID, Action: "import",
+			OK: false, Code: rec.Code, DurationMs: elapsed.Milliseconds(), FileBytes: ref.Bytes, Format: "xlsx", Client: target.Client})
 		return ImportResult{}, rec
 	}
 	// The audit line (§12): identities, document, size, sheet count — never
 	// the bytes and never the sheet names (may carry user data).
 	h.log.Info("import: done", append(attrs, "added_sheets", len(payload.AddedSheets))...)
+	h.putAudit(store.AuditRow{UserID: user, Connector: c.Slug(), Instance: b.InstanceID, Document: doc.ID, Action: "import",
+		OK: true, DurationMs: elapsed.Milliseconds(), FileBytes: ref.Bytes, Format: "xlsx", Client: target.Client})
 	return ImportResult{Instance: instanceOf(b), Document: doc, Bytes: ref.Bytes, AddedSheets: payload.AddedSheets, AllSheets: payload.AllSheets}, nil
 }
 

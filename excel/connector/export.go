@@ -49,7 +49,7 @@ func registerExportFile(reg *hub.ToolRegistry, c *Connector) {
 				rec := diag.New(diag.SeverityError, "invalid-format", Source, fmt.Sprintf("format %q is not one of csv, xlsx, pdf", in.Format))
 				return fail(rec), ExportFileOut{Error: rec}, nil
 			}
-			res, rec := reg.Host.Export(ctx, user, c, hub.Target{InstanceID: in.InstanceID}, hub.ExportRequest{Format: in.Format})
+			res, rec := reg.Host.Export(ctx, user, c, hub.Target{InstanceID: in.InstanceID, Client: hub.ClientName(req)}, hub.ExportRequest{Format: in.Format})
 			if rec != nil {
 				return fail(rec), ExportFileOut{Error: rec}, nil
 			}

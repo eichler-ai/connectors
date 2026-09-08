@@ -2,6 +2,7 @@ package hub
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -16,6 +17,7 @@ import (
 	"github.com/eichler-ai/connectors/hub/internal/bridge"
 	"github.com/eichler-ai/connectors/hub/internal/files"
 	"github.com/eichler-ai/connectors/hub/internal/registry"
+	"github.com/eichler-ai/connectors/hub/internal/store"
 	"github.com/eichler-ai/connectors/hub/protocol"
 )
 
@@ -38,7 +40,11 @@ type Host struct {
 	reg     *registry.Registry
 	bridges *bridge.Service
 	files   files.Store
-	log     *slog.Logger
+	// store is the audit trail's persistence (§11, §12, §13). Nil disables
+	// audit writes entirely (a hub built without a store, as some tests
+	// construct); production and -dev both pass one (Firestore or Memory).
+	store store.Store
+	log   *slog.Logger
 
 	// userOf resolves the MCP session's user. In production it reads the
 	// TokenInfo the bearer middleware attached; tests, which drive tools over
@@ -62,6 +68,12 @@ const (
 	ExportURLTTL = 15 * time.Minute
 	// Source labels diagnostics raised by the hub itself.
 	Source = "hub"
+	// AuditRetention is how long an audit row lives (§11 "bounded retention");
+	// deploy.sh puts a matching Firestore TTL policy on ExpiresAt.
+	AuditRetention = 90 * 24 * time.Hour
+	// auditScriptBound caps the script text an audit row keeps (§12): enough
+	// for a reviewer to see what ran, never an unbounded blob.
+	auditScriptBound = 2 << 10
 )
 
 // Instance is one live bridge as tools report it (list_instances, get_status).
@@ -99,6 +111,25 @@ func (h *Host) User(req *mcp.CallToolRequest) (string, *diag.Record) {
 	}
 	return "", diag.New(diag.SeverityError, "unauthenticated", Source, "the MCP session carries no user identity").
 		WithRemedy("reconnect the MCP client with a valid bearer token")
+}
+
+// ClientName returns the calling MCP client's declared name
+// (Implementation.Name from its initialize call), for a connector's tool
+// handler to pass into Target.Client. Empty when the session's initialize
+// params are not available — the Streamable HTTP handler runs each request
+// as its own stateless session (see Options.Bridge/NewServer), and not every
+// client/transport combination surfaces InitializeParams to the handler by
+// the time a tool call arrives. Best-effort metadata only; never treated as
+// required.
+func ClientName(req *mcp.CallToolRequest) string {
+	if req == nil || req.Session == nil {
+		return ""
+	}
+	ip := req.Session.InitializeParams()
+	if ip == nil || ip.ClientInfo == nil {
+		return ""
+	}
+	return ip.ClientInfo.Name
 }
 
 // Instances lists the user's live bridges for a connector, oldest first.
@@ -177,15 +208,25 @@ func (h *Host) Exec(ctx context.Context, user string, c Connector, target Target
 	}
 
 	hash := sha256.Sum256([]byte(script.Source))
+	hashHex := hex.EncodeToString(hash[:])
 	start := time.Now()
 	res, err := h.bridges.Exec(ctx, b, bridge.ExecRequest{DocumentID: target.DocumentID, Script: script.Source, Language: script.Language, Timeout: timeout})
+	elapsed := time.Since(start)
 	// The audit line (§12): identities, hash, outcome, sizes — never the
 	// script or the result.
 	attrs := []any{"user", user, "connector", c.Slug(), "instance_id", b.InstanceID, "document", doc.ID,
-		"script_sha256", hex.EncodeToString(hash[:8]), "script_bytes", len(script.Source), "elapsed", time.Since(start).Round(time.Millisecond)}
+		"script_sha256", hashHex[:16], "script_bytes", len(script.Source), "elapsed", elapsed.Round(time.Millisecond)}
+	// From here on the bridge was reached (a request went out on the wire),
+	// which is the §13 boundary for writing an audit row: everything above
+	// (invalid-script, invalid-timeout, resolve/unknown-document) short-
+	// circuits before anything executed, so there is nothing to audit.
 	if err != nil {
 		h.log.Info("exec: failed", append(attrs, "err", err)...)
-		return Result{}, execError(err, b, timeout)
+		rec := execError(err, b, timeout)
+		h.putAudit(store.AuditRow{UserID: user, Connector: c.Slug(), Instance: b.InstanceID, Document: doc.ID, Action: "exec",
+			ScriptSHA256: hashHex, ScriptBounded: boundScript(script.Source), Language: script.Language,
+			OK: false, Code: rec.Code, DurationMs: elapsed.Milliseconds(), Client: target.Client})
+		return Result{}, rec
 	}
 	code := ""
 	if res.Error != nil {
@@ -195,6 +236,9 @@ func (h *Host) Exec(ctx context.Context, user string, c Connector, target Target
 		}
 	}
 	h.log.Info("exec: done", append(attrs, "ok", res.OK, "code", code, "result_bytes", len(res.Result), "truncated", res.Truncated, "notices", len(res.Notices))...)
+	h.putAudit(store.AuditRow{UserID: user, Connector: c.Slug(), Instance: b.InstanceID, Document: doc.ID, Action: "exec",
+		ScriptSHA256: hashHex, ScriptBounded: boundScript(script.Source), Language: script.Language,
+		OK: res.OK, Code: code, DurationMs: elapsed.Milliseconds(), ResultBytes: len(res.Result), Client: target.Client})
 	return Result{Reply: res, Instance: instanceOf(b), Document: doc}, nil
 }
 
@@ -260,24 +304,37 @@ func (h *Host) Export(ctx context.Context, user string, c Connector, target Targ
 
 	start := time.Now()
 	res, err := h.bridges.Export(ctx, b, bridge.ExportRequest{DocumentID: target.DocumentID, Format: req.Format, Timeout: timeout})
+	elapsed := time.Since(start)
 	attrs := []any{"user", user, "connector", c.Slug(), "instance_id", b.InstanceID, "document", doc.ID,
-		"format", req.Format, "elapsed", time.Since(start).Round(time.Millisecond)}
+		"format", req.Format, "elapsed", elapsed.Round(time.Millisecond)}
+	// Same boundary as Exec: the bridge was reached from here on, so every
+	// path below writes a row.
 	if err != nil {
 		h.log.Info("export: failed", append(attrs, "err", err)...)
-		return ExportResult{}, execError(err, b, timeout)
+		rec := execError(err, b, timeout)
+		h.putAudit(store.AuditRow{UserID: user, Connector: c.Slug(), Instance: b.InstanceID, Document: doc.ID, Action: "export",
+			OK: false, Code: rec.Code, DurationMs: elapsed.Milliseconds(), Format: req.Format, Client: target.Client})
+		return ExportResult{}, rec
 	}
 	if !res.OK {
-		h.log.Info("export: failed", append(attrs, "code", exportErrorCode(res.Error))...)
+		code := exportErrorCode(res.Error)
+		h.log.Info("export: failed", append(attrs, "code", code)...)
+		h.putAudit(store.AuditRow{UserID: user, Connector: c.Slug(), Instance: b.InstanceID, Document: doc.ID, Action: "export",
+			OK: false, Code: code, DurationMs: elapsed.Milliseconds(), Format: req.Format, Client: target.Client})
 		return ExportResult{}, exportError(res.Error)
 	}
 	var payload uploadPayload
 	if err := json.Unmarshal(res.Result, &payload); err != nil {
 		rec := diag.New(diag.SeverityError, "bad-upload", Source, "the upload handler's outcome was not the expected shape: "+err.Error())
 		h.log.Info("export: failed", append(attrs, "code", rec.Code)...)
+		h.putAudit(store.AuditRow{UserID: user, Connector: c.Slug(), Instance: b.InstanceID, Document: doc.ID, Action: "export",
+			OK: false, Code: rec.Code, DurationMs: elapsed.Milliseconds(), Format: req.Format, Client: target.Client})
 		return ExportResult{}, rec
 	}
 	// The audit line (§12): identities, format, size — never the bytes.
 	h.log.Info("export: done", append(attrs, "bytes", payload.Bytes)...)
+	h.putAudit(store.AuditRow{UserID: user, Connector: c.Slug(), Instance: b.InstanceID, Document: doc.ID, Action: "export",
+		OK: true, DurationMs: elapsed.Milliseconds(), FileBytes: payload.Bytes, Format: req.Format, Client: target.Client})
 	return ExportResult{Instance: instanceOf(b), Document: doc, URL: payload.URL, Bytes: payload.Bytes, ExpiresAt: payload.ExpiresAt}, nil
 }
 
@@ -308,6 +365,58 @@ func exportError(e *protocol.ScriptError) *diag.Record {
 		detail["stack"] = e.Stack
 	}
 	return diag.New(diag.SeverityError, code, Source, e.Message).WithDetail(detail)
+}
+
+// boundScript returns the first auditScriptBound bytes of s, so a reviewer
+// can see what ran without the row carrying an unbounded blob (§12).
+func boundScript(s string) string {
+	if len(s) <= auditScriptBound {
+		return s
+	}
+	return s[:auditScriptBound]
+}
+
+// randomAuditID mints an audit row id; same shape as the other hub-minted
+// ids (randomImportID).
+func randomAuditID() (string, error) {
+	b := make([]byte, 8)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return "aud_" + hex.EncodeToString(b), nil
+}
+
+// putAudit writes one audit row (§11, §12, §13's compensating control).
+// Best-effort and synchronous: it runs on its own short-lived context (not
+// the caller's, which may already be near its deadline after a long exec)
+// so a slow-to-cancel request doesn't also lose its audit row, but a
+// Firestore failure is only logged — at Error, with the stable
+// "audit-write-failed" code an alert can key on — and never turned into a
+// failure of the user's operation. h.store is nil in tests/hubs that never
+// configure one; that is not a failure either.
+func (h *Host) putAudit(row store.AuditRow) {
+	if h.store == nil {
+		return
+	}
+	if row.ID == "" {
+		id, err := randomAuditID()
+		if err != nil {
+			h.log.Error("audit-write-failed", "code", "audit-write-failed", "user", row.UserID, "connector", row.Connector, "action", row.Action, "err", err)
+			return
+		}
+		row.ID = id
+	}
+	if row.Timestamp.IsZero() {
+		row.Timestamp = time.Now()
+	}
+	if row.ExpiresAt.IsZero() {
+		row.ExpiresAt = row.Timestamp.Add(AuditRetention)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := h.store.PutAuditRow(ctx, row); err != nil {
+		h.log.Error("audit-write-failed", "code", "audit-write-failed", "user", row.UserID, "connector", row.Connector, "action", row.Action, "err", err)
+	}
 }
 
 func execError(err error, b *registry.Bridge, timeout time.Duration) *diag.Record {

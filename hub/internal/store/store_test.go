@@ -209,4 +209,45 @@ func contract(t *testing.T, s Store) {
 	if _, err := s.BridgeToken(ctx, other.Hash); err != nil {
 		t.Fatalf("another user's bridge token was revoked: %v", err)
 	}
+
+	// Audit rows: ordering by time (newest first), the limit, per-user
+	// scoping, ExpiresAt set.
+	auditUser := "audituser" + suffix
+	otherUser := "audituser-other" + suffix
+	rows := []AuditRow{
+		{ID: "r1" + suffix, Timestamp: now.Add(-2 * time.Minute), UserID: auditUser, Connector: "excel", Instance: "i1", Action: "exec",
+			ScriptSHA256: "deadbeef", ScriptBounded: "return 1", Language: "js", OK: true, DurationMs: 12, ResultBytes: 3, ExpiresAt: now.Add(90 * 24 * time.Hour)},
+		{ID: "r2" + suffix, Timestamp: now.Add(-1 * time.Minute), UserID: auditUser, Connector: "excel", Instance: "i1", Action: "export",
+			OK: false, Code: "export-failed", DurationMs: 30, FileBytes: 4096, Format: "pdf", ExpiresAt: now.Add(90 * 24 * time.Hour)},
+		{ID: "r3" + suffix, Timestamp: now, UserID: auditUser, Connector: "excel", Instance: "i1", Action: "import",
+			OK: true, DurationMs: 50, FileBytes: 2048, Format: "xlsx", Client: "claude-code", ExpiresAt: now.Add(90 * 24 * time.Hour)},
+		{ID: "ro1" + suffix, Timestamp: now, UserID: otherUser, Connector: "excel", Instance: "i2", Action: "exec", OK: true, ExpiresAt: now.Add(90 * 24 * time.Hour)},
+	}
+	for _, r := range rows {
+		if err := s.PutAuditRow(ctx, r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got3, err := s.RecentAudit(ctx, auditUser, 10)
+	if err != nil || len(got3) != 3 {
+		t.Fatalf("recent audit: %v %+v", err, got3)
+	}
+	if got3[0].ID != "r3"+suffix || got3[1].ID != "r2"+suffix || got3[2].ID != "r1"+suffix {
+		t.Fatalf("recent audit order (want newest first): %+v", got3)
+	}
+	if got3[0].Client != "claude-code" || got3[0].FileBytes != 2048 || got3[0].Format != "xlsx" {
+		t.Fatalf("recent audit fields: %+v", got3[0])
+	}
+	if !got3[0].ExpiresAt.Equal(now.Add(90 * 24 * time.Hour)) {
+		t.Fatalf("recent audit expires_at: %v", got3[0].ExpiresAt)
+	}
+	if got2, err := s.RecentAudit(ctx, auditUser, 2); err != nil || len(got2) != 2 || got2[0].ID != "r3"+suffix || got2[1].ID != "r2"+suffix {
+		t.Fatalf("recent audit limit: %v %+v", err, got2)
+	}
+	if gotOther, err := s.RecentAudit(ctx, otherUser, 10); err != nil || len(gotOther) != 1 || gotOther[0].ID != "ro1"+suffix {
+		t.Fatalf("recent audit scoped to other user: %v %+v", err, gotOther)
+	}
+	if gotNone, err := s.RecentAudit(ctx, "nobody"+suffix, 10); err != nil || len(gotNone) != 0 {
+		t.Fatalf("recent audit for unknown user: %v %+v", err, gotNone)
+	}
 }
