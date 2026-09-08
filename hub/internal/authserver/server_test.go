@@ -908,3 +908,41 @@ func TestOfflineAccessScope(t *testing.T) {
 		t.Fatalf("offline_access alone: %d %+v", status, tr)
 	}
 }
+
+// TestConsentCSPAllowsRedirectOrigin: the consent form's POST ends in a
+// 302 to the client's redirect_uri, and browsers apply form-action to that
+// redirect, so the consent page's CSP must name the redirect origin — and
+// nothing wider. Other pages keep form-action 'self'.
+func TestConsentCSPAllowsRedirectOrigin(t *testing.T) {
+	f := newFixture(t)
+	clientID := f.register("http://localhost/callback", "https://claude.ai/api/mcp/auth_callback")
+	p := newPKCE()
+	for redirect, origin := range map[string]string{
+		"http://localhost:3118/callback":          "http://localhost:3118",
+		"https://claude.ai/api/mcp/auth_callback": "https://claude.ai",
+	} {
+		f.signOut()
+		ls := f.signIn(f.authorizeParams(clientID, redirect, p))
+		resp := f.get(f.srv.URL + "/oauth/consent?ls=" + ls)
+		body(t, resp)
+		csp := resp.Header.Get("Content-Security-Policy")
+		want := "form-action 'self' " + origin + ";"
+		if !strings.Contains(csp, want) || !strings.Contains(csp, "default-src 'none'") || !strings.Contains(csp, "frame-ancestors 'none'") || strings.Contains(csp, "*") {
+			t.Fatalf("%s: consent CSP %q, want it to contain %q", redirect, csp, want)
+		}
+		// Approve still 302s to the redirect_uri.
+		f.approve(ls, redirect)
+	}
+	// The sign-in page (a link, no form) and error page keep 'self' only.
+	f.signOut()
+	resp := f.get(f.srv.URL + "/oauth/authorize?" + f.authorizeParams(clientID, "http://localhost:3118/callback", p).Encode())
+	body(t, resp)
+	if csp := resp.Header.Get("Content-Security-Policy"); !strings.Contains(csp, "form-action 'self';") {
+		t.Fatalf("sign-in CSP %q", csp)
+	}
+	resp = f.get(f.srv.URL + "/oauth/consent?ls=nope")
+	body(t, resp)
+	if csp := resp.Header.Get("Content-Security-Policy"); !strings.Contains(csp, "form-action 'self';") {
+		t.Fatalf("error page CSP %q", csp)
+	}
+}

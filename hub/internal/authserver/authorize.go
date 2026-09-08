@@ -125,6 +125,10 @@ func (s *Server) renderConsent(w http.ResponseWriter, ls store.LoginState) {
 		RedirectHost: u.Host,
 		Loopback:     isLoopbackHost(u.Hostname()),
 		LS:           ls.ID,
+		// scheme://host[:port] is the CSP source expression form; approve
+		// and deny both redirect there. The URI was validated at authorize
+		// time, so it cannot carry anything but a scheme, host and port.
+		FormActionOrigins: []string{u.Scheme + "://" + u.Host},
 	})
 }
 

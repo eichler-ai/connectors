@@ -58,13 +58,25 @@ type pageData struct {
 	RedirectHost string
 	Loopback     bool
 	LS           string
+	// FormActionOrigins are added to the page's `form-action` CSP source
+	// list. Browsers enforce form-action not only on the form's action URL
+	// but on the redirect the submission produces: the consent form posts
+	// to /oauth/consent, which 302s to the client's redirect_uri, and with
+	// `form-action 'self'` alone the browser silently drops that navigation
+	// and the client never receives its code (found live with Claude Code).
+	// So the consent page, and only it, lists the redirect_uri's origin.
+	FormActionOrigins []string
 }
 
 func (s *Server) render(w http.ResponseWriter, status int, name string, d pageData) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Frame-Options", "DENY")
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'")
+	formAction := "'self'"
+	for _, o := range d.FormActionOrigins {
+		formAction += " " + o
+	}
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action "+formAction+"; frame-ancestors 'none'")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.WriteHeader(status)
 	if err := s.tmpl.ExecuteTemplate(w, name, d); err != nil {
