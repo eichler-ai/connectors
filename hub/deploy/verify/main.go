@@ -41,8 +41,11 @@ func main() {
 	}
 
 	var asm struct {
-		Issuer, AuthorizationEndpoint, TokenEndpoint, JWKSURI string
-		CodeChallengeMethods                                  []string `json:"code_challenge_methods_supported"`
+		Issuer                string   `json:"issuer"`
+		AuthorizationEndpoint string   `json:"authorization_endpoint"`
+		TokenEndpoint         string   `json:"token_endpoint"`
+		JWKSURI               string   `json:"jwks_uri"`
+		CodeChallengeMethods  []string `json:"code_challenge_methods_supported"`
 	}
 	getJSON(client, base+"/.well-known/oauth-authorization-server", &asm, fail)
 	if asm.Issuer != base || asm.AuthorizationEndpoint == "" || asm.TokenEndpoint == "" || asm.JWKSURI == "" || len(asm.CodeChallengeMethods) == 0 {
