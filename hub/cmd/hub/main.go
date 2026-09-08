@@ -38,6 +38,12 @@ import (
 	"github.com/eichler-ai/connectors/internal/auth"
 )
 
+// buildVersion is set with -ldflags "-X main.buildVersion=<rev>" by the Cloud
+// Build pipeline (hub/Dockerfile's VERSION build arg), which builds from a bare
+// source copy with no .git directory, so the VCS stamp below is unavailable.
+// Local builds leave it empty and fall back to the VCS stamp.
+var buildVersion string
+
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "hub:", err)
@@ -64,7 +70,10 @@ func run() error {
 	logger := slog.New(handler)
 	slog.SetDefault(logger)
 
-	devToken := os.Getenv("HUB_DEV_TOKEN")
+	// TrimSpace: Secret Manager values written via `gcloud secrets versions add
+	// --data-file=-` from a shell pipeline often carry a trailing newline, which
+	// would otherwise become part of the token and never match a bearer header.
+	devToken := strings.TrimSpace(os.Getenv("HUB_DEV_TOKEN"))
 	if devToken == "" {
 		return errors.New("HUB_DEV_TOKEN is required (phase-0 auth); set it to a random string of 16+ characters")
 	}
@@ -156,8 +165,12 @@ func dataDir() string {
 }
 
 // version is the VCS revision the toolchain stamped into the binary, so
-// get_skills can say which build served it.
+// get_skills can say which build served it. buildVersion (set at link time,
+// see above) wins when present, since a Cloud Build image has no VCS stamp.
 func version() string {
+	if buildVersion != "" {
+		return buildVersion
+	}
 	if bi, ok := debug.ReadBuildInfo(); ok {
 		var rev, modified string
 		for _, s := range bi.Settings {

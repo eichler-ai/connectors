@@ -55,6 +55,35 @@ should be listed with the workbook and active sheet), `get_status`, and `execute
 Tools and the script contract are documented for the agent in
 [`../excel/connector/skill.md`](../excel/connector/skill.md), which `get_skills` returns.
 
+## Deploy
+
+`hub/deploy/deploy.sh staging|prod` builds the image with Cloud Build from the repo root and
+deploys it to Cloud Run (`us-central1`, project `eichler-ai`): `hub-staging` at its own `run.app`
+URL, `hub` at `https://connectors.eichler.ai`. Both run one instance (min = max = 1) with session
+affinity and a 60-minute request timeout, so the WebSocket bridge survives. Re-running the script is
+safe — it reuses the existing secret and service, and only creates what's missing.
+
+```sh
+hub/deploy/deploy.sh staging
+hub/deploy/deploy.sh prod
+```
+
+Each environment's `HUB_DEV_TOKEN` lives in Secret Manager (`hub-staging-dev-token`,
+`hub-dev-token`), generated once by the script and never printed by it. Fetch one to sideload the
+add-in or connect an MCP client:
+
+```sh
+gcloud secrets versions access latest --secret=hub-dev-token --project=eichler-ai          # prod
+gcloud secrets versions access latest --secret=hub-staging-dev-token --project=eichler-ai  # staging
+```
+
+To point Excel at the hosted hub instead of a local one, download the manifest from
+`https://connectors.eichler.ai/excel/manifest.xml` (or the staging equivalent) and sideload it as
+in "Sideload the add-in in Excel for the web" above, then paste the token from Secret Manager into
+the pane. **Staging and prod manifests share the same add-in Id** (there's no per-environment
+override), so Excel treats them as the same add-in — only one can be sideloaded at a time in a given
+Excel account.
+
 ## Tests
 
 ```sh

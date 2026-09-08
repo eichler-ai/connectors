@@ -113,11 +113,11 @@ func (f *fixture) inMemoryClient(t *testing.T) *mcp.ClientSession {
 	return cs
 }
 
-func TestHealthzAndStatic(t *testing.T) {
+func TestHealthAndStatic(t *testing.T) {
 	f := newFixture(t, "https://connectors.example")
-	resp, err := http.Get(f.http.URL + "/healthz")
+	resp, err := http.Get(f.http.URL + "/health")
 	if err != nil || resp.StatusCode != 200 {
-		t.Fatalf("healthz: %v %v", err, resp)
+		t.Fatalf("health: %v %v", err, resp)
 	}
 	resp.Body.Close()
 
