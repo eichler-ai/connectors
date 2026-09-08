@@ -10,6 +10,8 @@ this MCP Server. The pane must be open in Excel; `list_instances` shows what is 
   sheet in `detail.sheet`). One bridge → tools target it; several → pass `instance_id`.
 - `get_status` — workbook name, active sheet, all sheet names, selection, `excel_api` level.
 - `execute_script` — `script`, optional `instance_id`, `timeout_ms`, `expect: {workbook, sheet}`.
+- `export_file` — `format` (`csv`, `xlsx` or `pdf`), optional `instance_id`, `filename`. Returns a
+  short-lived signed `url` plus `bytes`; use this for file bytes, never `execute_script` (see below).
 
 ## Script contract
 
@@ -54,8 +56,9 @@ this MCP Server. The pane must be open in Excel; `list_instances` shows what is 
 - `chart.getImage()` returns a base64 PNG — the cheap way to look at what you built.
 - `workbook.getSelectedRange()` throws when the selection is not a range (a chart is selected).
 - Whole-document export works on the web: `Office.context.document.getFileAsync(Office.FileType.Pdf
-  | Compressed)` — ~1 s for xlsx, ~10 s for a 200-page PDF. Large files belong in the file exchange
-  (later phase); do not return them as `result`.
+  | Compressed)` — ~1 s for xlsx, ~10 s for a 200-page PDF; `export_file` runs it for you and never
+  puts the bytes through a script. csv has no `getFileAsync` type — it is the active sheet's used
+  range, not the whole workbook, serialised from `.text` the way Excel's own CSV export reads it.
 - No API replaces the open workbook. `workbook.insertWorksheetsFromBase64(xlsxBase64)` copies sheets in;
   `Excel.createWorkbook(base64)` opens a new one. Do not put base64 in a script.
 - Excel keeps a "closed" pane alive: after the X is clicked the bridge stays connected until the

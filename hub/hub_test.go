@@ -1,6 +1,7 @@
 package hub_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -11,6 +12,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"regexp"
 	"strings"
 	"testing"
@@ -23,6 +25,7 @@ import (
 	"github.com/eichler-ai/connectors/hub/bridgetest"
 	"github.com/eichler-ai/connectors/hub/internal/authserver"
 	"github.com/eichler-ai/connectors/hub/internal/bridge"
+	"github.com/eichler-ai/connectors/hub/internal/files"
 	"github.com/eichler-ai/connectors/hub/internal/store"
 	"github.com/eichler-ai/connectors/hub/protocol"
 	"github.com/eichler-ai/connectors/internal/auth"
@@ -99,11 +102,16 @@ func newFixtureEnv(t *testing.T, publicURL, environment string) *fixture {
 	uid := dev.UserID()
 	a := auth.Split{Access: &auth.JWTVerifier{Keys: keys, Issuer: publicURL, Audience: publicURL}, Bridge: dev}
 	st := &stub{}
+	fs, err := files.NewTemp(publicURL)
+	if err != nil {
+		t.Fatal(err)
+	}
 	srv, err := hub.NewServer(hub.Options{
 		PublicURL:   publicURL,
 		Environment: environment,
 		Auth:        a,
 		Connectors:  []hub.Connector{st},
+		Files:       fs,
 		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Bridge:      bridge.Options{HelloTimeout: time.Second},
 		// Tools driven over the in-memory transport have no bearer token; act
@@ -463,6 +471,155 @@ func TestExecResolution(t *testing.T) {
 	}
 	if _, rec := h.Exec(ctx, f.uid, f.stub, hub.Target{InstanceID: "a"}, script); rec == nil || rec.Code != "unknown-instance" {
 		t.Fatalf("after disconnect: %+v", rec)
+	}
+}
+
+// TestFilesUploadEndpoint covers the POST /<connector>/files auth and
+// validation the brief calls out directly, without a real export in flight:
+// no token and a wrong token are 401, a valid token but an id nobody issued
+// is 404 (this is also what a late upload after the tool timed out gets —
+// bridge.Service already forgot the pending entry), a missing id is 400, and
+// a declared Content-Length over the cap is refused before any bytes move.
+func TestFilesUploadEndpoint(t *testing.T) {
+	f := newFixture(t, "")
+	for _, tok := range []string{"", "wrong-token-000000000"} {
+		req, _ := http.NewRequest(http.MethodPost, f.http.URL+"/stub/files?id=x1", strings.NewReader("data"))
+		if tok != "" {
+			req.Header.Set("Authorization", "Bearer "+tok)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("token %q: status %d, want 401", tok, resp.StatusCode)
+		}
+	}
+
+	// Through the handler directly for the oversized case: net/http's client
+	// refuses to send a request whose declared Content-Length does not match
+	// the body it is actually given, which would test the client, not the
+	// handler's check.
+	post := func(path string, contentLength int64) int {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader("data"))
+		req.Header.Set("Authorization", "Bearer "+token)
+		if contentLength > 0 {
+			req.ContentLength = contentLength
+		}
+		rec := httptest.NewRecorder()
+		f.srv.Handler().ServeHTTP(rec, req)
+		resp := rec.Result()
+		return resp.StatusCode
+	}
+	if got := post("/stub/files?id=never-issued", 0); got != http.StatusNotFound {
+		t.Fatalf("unknown id: status %d, want 404", got)
+	}
+	if got := post("/stub/files", 0); got != http.StatusBadRequest {
+		t.Fatalf("missing id: status %d, want 400", got)
+	}
+	if got := post("/stub/files?id=never-issued", 200<<20); got != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized Content-Length: status %d, want 413", got)
+	}
+}
+
+// TestExportUploadRoundTrip is the full path: Host.Export sends `export` to
+// a dialed fake bridge, the test plays the pane's part (POST the bytes to
+// the files endpoint with the bridge token, exactly as taskpane.js does),
+// and Export returns a URL that is actually downloadable — "the tool returns
+// a working signed URL from the temp impl".
+func TestExportUploadRoundTrip(t *testing.T) {
+	f := newFixture(t, "")
+	fake := f.dial(t, "exp1", protocol.Document{ID: "d1", Title: "Doc", Active: true})
+	body := []byte("%PDF-1.4 stand-in bytes")
+	uploaded := make(chan int, 1)
+	go func() {
+		msgs := fake.WaitFor(protocol.MethodExport, 1, 5*time.Second)
+		var ex protocol.Export
+		if err := msgs[0].Decode(&ex); err != nil {
+			t.Error(err)
+			return
+		}
+		if ex.Format != "pdf" {
+			t.Errorf("format = %q, want pdf", ex.Format)
+		}
+		req, err := http.NewRequest(http.MethodPost, f.http.URL+"/stub/files?id="+ex.ID, bytes.NewReader(body))
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		resp.Body.Close()
+		uploaded <- resp.StatusCode
+	}()
+
+	res, rec := f.srv.Host().Export(context.Background(), f.uid, f.stub, hub.Target{InstanceID: "exp1"}, hub.ExportRequest{Format: "pdf", Timeout: 5 * time.Second})
+	if rec != nil {
+		t.Fatalf("export: %+v", rec)
+	}
+	if status := <-uploaded; status != http.StatusNoContent {
+		t.Fatalf("upload status: %d", status)
+	}
+	if res.Bytes != int64(len(body)) || res.URL == "" || res.Document.ID != "d1" {
+		t.Fatalf("export result: %+v", res)
+	}
+	// The fixture's public URL is a placeholder (hub.DevPublicURL), not the
+	// httptest server's actual address, so the signed URL's host is not
+	// reachable directly; only its path — files.Temp's contract — is under
+	// test here, same as hub/internal/files' own contract test.
+	signed, err := url.Parse(res.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dl, err := http.Get(f.http.URL + signed.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := io.ReadAll(dl.Body)
+	dl.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(body) {
+		t.Fatalf("downloaded %q, want %q", got, body)
+	}
+}
+
+// TestExportFilesUnconfigured: a hub with no Files store refuses Export
+// loudly instead of nil-panicking or silently no-opping.
+func TestExportFilesUnconfigured(t *testing.T) {
+	// A server with the same auth/connector shape as the others but Files
+	// left nil.
+	dev, _ := auth.NewDevToken(token)
+	srv, err := hub.NewServer(hub.Options{
+		Auth:       auth.Split{Access: &auth.JWTVerifier{}, Bridge: dev},
+		Connectors: []hub.Connector{&stub{}},
+		Logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Bridge:     bridge.Options{HelloTimeout: time.Second},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hs := httptest.NewServer(srv.Handler())
+	t.Cleanup(hs.Close)
+	_, rec := srv.Host().Export(context.Background(), dev.UserID(), &stub{}, hub.Target{}, hub.ExportRequest{Format: "csv"})
+	if rec == nil || rec.Code != "files-unconfigured" {
+		t.Fatalf("export with no Files: %+v", rec)
+	}
+	// The upload route itself is simply not mounted.
+	resp, err := http.Post(hs.URL+"/stub/files?id=x", "application/octet-stream", strings.NewReader("x"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("upload route with no Files configured: status %d, want 404 (unmounted)", resp.StatusCode)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -13,16 +14,30 @@ import (
 
 	"github.com/eichler-ai/connectors/hub/diag"
 	"github.com/eichler-ai/connectors/hub/internal/bridge"
+	"github.com/eichler-ai/connectors/hub/internal/files"
 	"github.com/eichler-ai/connectors/hub/internal/registry"
 	"github.com/eichler-ai/connectors/hub/protocol"
 )
 
-// Host is the set of hub services a connector's tools call: Exec, the
-// registry, and the identity of the calling MCP session. One Host serves
+// Files is the file exchange seam an export_file-style tool stores into
+// (§10, §11): Put lands a stream at files/{user}/{connector}/{id}.{ext},
+// SignedURL mints a short-lived URL for it. Aliased from hub/internal/files
+// so the GCS and temp-dir implementations live there, next to Registry's and
+// Bridge's own internal packages, while every connector package — which
+// cannot import hub/internal/files itself, only what hub re-exports — can
+// still name the type to build a fixture with a fake Store.
+type Files = files.Store
+
+// ObjectRef is what Files.Put returns and Files.SignedURL takes.
+type ObjectRef = files.ObjectRef
+
+// Host is the set of hub services a connector's tools call: Exec, Export,
+// the registry, and the identity of the calling MCP session. One Host serves
 // every connector; the connector slug travels with each call.
 type Host struct {
 	reg     *registry.Registry
 	bridges *bridge.Service
+	files   files.Store
 	log     *slog.Logger
 
 	// userOf resolves the MCP session's user. In production it reads the
@@ -41,6 +56,10 @@ const (
 	// inside Cloud Run's 60-minute request ceiling.
 	DefaultTimeout = 30 * time.Second
 	MaxTimeout     = 10 * time.Minute
+	// ExportURLTTL is how long a signed URL for an exported file stays valid
+	// (PRD §11: "short-lived signed URLs"). 15 min covers a slow client
+	// fetching a large PDF without leaving the link usable for long.
+	ExportURLTTL = 15 * time.Minute
 	// Source labels diagnostics raised by the hub itself.
 	Source = "hub"
 )
@@ -177,6 +196,118 @@ func (h *Host) Exec(ctx context.Context, user string, c Connector, target Target
 	}
 	h.log.Info("exec: done", append(attrs, "ok", res.OK, "code", code, "result_bytes", len(res.Result), "truncated", res.Truncated, "notices", len(res.Notices))...)
 	return Result{Reply: res, Instance: instanceOf(b), Document: doc}, nil
+}
+
+// ExportRequest is what a connector asks the hub to have the bridge produce
+// as a file (§10, §11).
+type ExportRequest struct {
+	// Format is a connector-defined tag (Excel: csv, xlsx, pdf) that becomes
+	// the stored object's extension — trusted because it travels through
+	// bridge.Service's pending-export record, not because the eventual
+	// uploader says so (see bridge.Service.UploadAuthorize).
+	Format     string
+	DocumentID string
+	Timeout    time.Duration
+}
+
+// ExportResult is a completed export: where the bytes ended up.
+type ExportResult struct {
+	Instance  Instance
+	Document  protocol.Document
+	URL       string
+	Bytes     int64
+	ExpiresAt time.Time
+}
+
+// uploadPayload is the JSON the files upload handler puts in the synthetic
+// `result` it delivers through bridge.Service.CompleteExport; Export decodes
+// it back out. It never leaves this process — it is not part of the wire
+// protocol between hub and bridge, only between the upload handler and Export.
+type uploadPayload struct {
+	URL       string    `json:"url"`
+	Bytes     int64     `json:"bytes"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+// Export asks the connector's bridge to produce a file and land it in the
+// file store, and waits for either the bridge's own failure `result` (it
+// never got as far as uploading — e.g. a failed getFileAsync) or the files
+// upload handler's success delivery (§10, §11). Files must be configured;
+// a connector with Capabilities().Bridge but no export tool simply never
+// calls this.
+func (h *Host) Export(ctx context.Context, user string, c Connector, target Target, req ExportRequest) (ExportResult, *diag.Record) {
+	if h.files == nil {
+		return ExportResult{}, diag.New(diag.SeverityError, "files-unconfigured", Source, "the hub has no file store configured; exports are unavailable")
+	}
+	timeout := req.Timeout
+	if timeout <= 0 {
+		timeout = h.defaultTimeout
+	}
+	if timeout > h.maxTimeout {
+		return ExportResult{}, diag.New(diag.SeverityError, "invalid-timeout", Source,
+			fmt.Sprintf("timeout %s exceeds the maximum of %s", timeout, h.maxTimeout))
+	}
+	b, rec := h.resolve(user, c.Slug(), target)
+	if rec != nil {
+		return ExportResult{}, rec
+	}
+	doc, found := b.Document(target.DocumentID)
+	if target.DocumentID != "" && !found {
+		return ExportResult{}, diag.New(diag.SeverityError, "unknown-document", Source,
+			fmt.Sprintf("bridge %s has no document with id %q", b.InstanceID, target.DocumentID)).
+			WithRemedy("call list_instances for the current document ids")
+	}
+
+	start := time.Now()
+	res, err := h.bridges.Export(ctx, b, bridge.ExportRequest{DocumentID: target.DocumentID, Format: req.Format, Timeout: timeout})
+	attrs := []any{"user", user, "connector", c.Slug(), "instance_id", b.InstanceID, "document", doc.ID,
+		"format", req.Format, "elapsed", time.Since(start).Round(time.Millisecond)}
+	if err != nil {
+		h.log.Info("export: failed", append(attrs, "err", err)...)
+		return ExportResult{}, execError(err, b, timeout)
+	}
+	if !res.OK {
+		h.log.Info("export: failed", append(attrs, "code", exportErrorCode(res.Error))...)
+		return ExportResult{}, exportError(res.Error)
+	}
+	var payload uploadPayload
+	if err := json.Unmarshal(res.Result, &payload); err != nil {
+		rec := diag.New(diag.SeverityError, "bad-upload", Source, "the upload handler's outcome was not the expected shape: "+err.Error())
+		h.log.Info("export: failed", append(attrs, "code", rec.Code)...)
+		return ExportResult{}, rec
+	}
+	// The audit line (§12): identities, format, size — never the bytes.
+	h.log.Info("export: done", append(attrs, "bytes", payload.Bytes)...)
+	return ExportResult{Instance: instanceOf(b), Document: doc, URL: payload.URL, Bytes: payload.Bytes, ExpiresAt: payload.ExpiresAt}, nil
+}
+
+func exportErrorCode(e *protocol.ScriptError) string {
+	if e == nil {
+		return "export-failed"
+	}
+	if e.Code != "" {
+		return e.Code
+	}
+	return e.Name
+}
+
+// exportError turns the bridge's failure result into a diagnostic record.
+// Connector-specific error shaping (Office.js codes, etc.) happens in the
+// connector's own tool, same as execute_script's scriptError; this is the
+// generic fallback for the hub's own Export path.
+func exportError(e *protocol.ScriptError) *diag.Record {
+	if e == nil {
+		return diag.New(diag.SeverityError, "export-failed", Source, "the export failed without an error object")
+	}
+	code := exportErrorCode(e)
+	detail := map[string]any{"name": e.Name}
+	if len(e.DebugInfo) > 0 {
+		detail["debug_info"] = e.DebugInfo
+	}
+	if e.Stack != "" {
+		detail["stack"] = e.Stack
+	}
+	return diag.New(diag.SeverityError, code, Source, e.Message).WithDetail(detail)
 }
 
 func execError(err error, b *registry.Bridge, timeout time.Duration) *diag.Record {

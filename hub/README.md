@@ -157,6 +157,14 @@ hub/deploy/deploy.sh staging
 hub/deploy/deploy.sh prod
 ```
 
+Also created the first time: a per-environment Cloud Storage bucket for the file exchange
+(`eichler-ai-hub-staging-files`, `eichler-ai-hub-files`) — 7-day lifecycle delete, uniform
+bucket-level access, not public — with the runtime service account granted object read/write and
+`roles/iam.serviceAccountTokenCreator` on itself (V4 signed URLs need to sign with no private key
+on hand; see `hub/internal/files/gcs.go`). `HUB_FILES_BUCKET` points the deployed hub at it;
+unset (never in staging/prod) falls back to a local temp directory, which is what `-dev` and every
+test use.
+
 Secrets per environment in Secret Manager: `HUB_DEV_TOKEN` (`hub-staging-dev-token`,
 `hub-dev-token`; the pane's bridge token) and the JWT signing key (`hub-staging-jwt-signing-key`,
 `hub-jwt-signing-key`), both generated once by the script and never printed by it, plus the
@@ -225,9 +233,11 @@ hub/
   internal/authserver/ the OAuth 2.1 authorization server: metadata, authorize + consent, token,
                       DCR + CIMD clients, Microsoft OIDC login, session cookie
   internal/store/     Store interface: memory and Firestore
+  internal/files/     Files/file-exchange interface (PRD §11): GCS and local-temp-dir implementations
   internal/devcert/   -dev certificate
-  connector.go        the Connector interface (PRD §09); host.go: Exec; tools.go: get_skills, list_instances
+  connector.go        the Connector interface (PRD §09); host.go: Exec, Export; tools.go: get_skills, list_instances
+  files.go            POST /<connector>/files upload endpoint and its rate limiter
 excel/
   addin/              manifest + task pane, embedded into the binary
-  connector/          hub.Connector for Excel: execute_script, get_status, skill.md
+  connector/          hub.Connector for Excel: execute_script, get_status, export_file, skill.md
 ```

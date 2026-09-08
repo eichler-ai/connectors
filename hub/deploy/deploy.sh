@@ -28,6 +28,12 @@
 # gets its own database so test users and tokens never share collections
 # with production. TTL policies on expires_at keep auth_codes, login_states,
 # refresh_tokens and bridge_tokens from accumulating.
+#
+# Cloud Storage (PRD §11, phase 2 unit A): one bucket per environment for the
+# file exchange (export_file's bytes), created here with a 7-day
+# lifecycle-delete rule, uniform bucket-level access, and the runtime service
+# account granted both object read/write and — for V4 signed URLs with no
+# private key on hand — roles/iam.serviceAccountTokenCreator on itself.
 set -euo pipefail
 
 usage() {
@@ -44,6 +50,7 @@ case "$ENV" in
     SECRET=hub-staging-dev-token
     JWT_SECRET=hub-staging-jwt-signing-key
     FIRESTORE_DB=hub-staging
+    FILES_BUCKET=eichler-ai-hub-staging-files
     FIXED_PUBLIC_URL=""   # the deterministic run.app URL, computed below
     ;;
   prod)
@@ -51,6 +58,7 @@ case "$ENV" in
     SECRET=hub-dev-token
     JWT_SECRET=hub-jwt-signing-key
     FIRESTORE_DB="(default)"
+    FILES_BUCKET=eichler-ai-hub-files
     FIXED_PUBLIC_URL="https://connectors.eichler.ai"
     ;;
   *)
@@ -151,6 +159,38 @@ for col in auth_codes login_states refresh_tokens bridge_tokens; do
     --enable-ttl --project="$PROJECT" --async >/dev/null 2>&1 || true
 done
 
+# --- Cloud Storage: the file exchange's bucket (PRD §11). -------------------
+# One bucket per environment, not public, uniform bucket-level access (no
+# per-object ACLs to misconfigure), objects at files/{user_id}/excel/{id}.{ext}
+# and a 7-day lifecycle-delete rule so nothing accumulates. The runtime
+# service account has no private key to sign a V4 URL with locally, so it
+# signs by calling IAM's signBlob on itself — that needs
+# roles/iam.serviceAccountTokenCreator granted to itself, which looks
+# unusual but is the documented way to sign from a Cloud Run/GCE identity
+# with no key file (hub/internal/files/gcs.go).
+if ! gcloud storage buckets describe "gs://${FILES_BUCKET}" --project="$PROJECT" >/dev/null 2>&1; then
+  echo "==> [$ENV] creating bucket gs://${FILES_BUCKET}"
+  gcloud storage buckets create "gs://${FILES_BUCKET}" \
+    --project="$PROJECT" --location="$REGION" --uniform-bucket-level-access --public-access-prevention=enforced \
+    >/dev/null
+  cat >/tmp/hub-files-lifecycle.json <<'EOF'
+{"rule": [{"action": {"type": "Delete"}, "condition": {"age": 7}}]}
+EOF
+  gcloud storage buckets update "gs://${FILES_BUCKET}" --project="$PROJECT" \
+    --lifecycle-file=/tmp/hub-files-lifecycle.json >/dev/null
+  rm -f /tmp/hub-files-lifecycle.json
+fi
+gcloud storage buckets add-iam-policy-binding "gs://${FILES_BUCKET}" \
+  --project="$PROJECT" \
+  --member="serviceAccount:${RUNTIME_SA}" \
+  --role="roles/storage.objectAdmin" \
+  >/dev/null
+gcloud iam service-accounts add-iam-policy-binding "$RUNTIME_SA" \
+  --project="$PROJECT" \
+  --member="serviceAccount:${RUNTIME_SA}" \
+  --role="roles/iam.serviceAccountTokenCreator" \
+  >/dev/null
+
 # --- HUB_PUBLIC_URL: the custom domain for prod, the deterministic Cloud Run
 # URL for staging. A service answers on two run.app URLs: a random-suffix one
 # (status.url) and https://<service>-<project number>.<region>.run.app, which
@@ -185,7 +225,7 @@ deploy_revision() {
   # which keys a sideloaded add-in by manifest Id, never conflates them.
   # "^@^" makes @ the list delimiter for gcloud, since the default comma is
   # a legal character in some of these values.
-  args+=(--set-env-vars="^@^HUB_ENV=${ENV}@HUB_PUBLIC_URL=${PUBLIC_URL}@HUB_FIRESTORE_PROJECT=${PROJECT}@HUB_FIRESTORE_DATABASE=${FIRESTORE_DB}@HUB_MS_CLIENT_ID=${MS_CLIENT_ID}")
+  args+=(--set-env-vars="^@^HUB_ENV=${ENV}@HUB_PUBLIC_URL=${PUBLIC_URL}@HUB_FIRESTORE_PROJECT=${PROJECT}@HUB_FIRESTORE_DATABASE=${FIRESTORE_DB}@HUB_MS_CLIENT_ID=${MS_CLIENT_ID}@HUB_FILES_BUCKET=${FILES_BUCKET}")
   gcloud run deploy "${args[@]}"
 }
 

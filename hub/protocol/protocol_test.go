@@ -43,6 +43,37 @@ func TestDecodeRejectsBadEnvelope(t *testing.T) {
 	}
 }
 
+func TestExportEnvelopeRoundTrip(t *testing.T) {
+	msg := New(MethodExport, Export{ID: "x1", Format: "csv", DocumentID: "wb1"})
+	data, err := json.Marshal(msg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire map[string]json.RawMessage
+	if err := json.Unmarshal(data, &wire); err != nil {
+		t.Fatal(err)
+	}
+	if string(wire["jsonrpc"]) != `"2.0"` || string(wire["method"]) != `"export"` || wire["params"] == nil {
+		t.Fatalf("wire shape: %s", data)
+	}
+	var back Message
+	if err := json.Unmarshal(data, &back); err != nil {
+		t.Fatal(err)
+	}
+	var ex Export
+	if err := back.Decode(&ex); err != nil {
+		t.Fatal(err)
+	}
+	if ex.ID != "x1" || ex.Format != "csv" || ex.DocumentID != "wb1" {
+		t.Fatalf("decoded: %+v", ex)
+	}
+	// document_id is omitempty: a whole-workbook export names none.
+	data, _ = json.Marshal(Export{ID: "x2", Format: "pdf"})
+	if strings.Contains(string(data), "document_id") {
+		t.Fatalf("empty document_id was not omitted: %s", data)
+	}
+}
+
 func TestFieldNamesAreSnakeCase(t *testing.T) {
 	// §08 names fields in snake_case; a stray Go-style name would silently
 	// break the JavaScript side.

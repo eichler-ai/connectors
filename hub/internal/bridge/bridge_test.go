@@ -387,6 +387,123 @@ func TestUnresponsiveBridgeIsClosed(t *testing.T) {
 	f.waitGone(t, b)
 }
 
+// TestExportRoundTrip covers the export id lifecycle without a real upload:
+// UploadAuthorize returns the format Export asked for, only to the owning
+// user; CompleteExport delivers the outcome exactly like a `result` message
+// would, and it is refused for a foreign user or an unknown id.
+func TestExportRoundTrip(t *testing.T) {
+	f := newFixture(t, bridge.Options{})
+	fake := bridgetest.Dial(t, f.url, bridgetest.Options{Token: token, InstanceID: "a"})
+	var gotID string
+	done := make(chan struct{})
+	go func() {
+		msgs := fake.WaitFor(protocol.MethodExport, 1, 2*time.Second)
+		var ex protocol.Export
+		if err := msgs[0].Decode(&ex); err != nil {
+			t.Error(err)
+			return
+		}
+		gotID = ex.ID
+		if ex.Format != "csv" {
+			t.Errorf("format = %q, want csv", ex.Format)
+		}
+		close(done)
+	}()
+	b := f.waitRegistered(t, "a")
+	resultC := make(chan protocol.Result, 1)
+	errC := make(chan error, 1)
+	go func() {
+		res, err := f.svc.Export(context.Background(), b, bridge.ExportRequest{Format: "csv", Timeout: 5 * time.Second})
+		resultC <- res
+		errC <- err
+	}()
+	<-done
+
+	// UploadAuthorize refuses a foreign user and an unknown id before it ever
+	// refuses the real thing.
+	if _, ok := f.svc.UploadAuthorize(gotID, "someone-else"); ok {
+		t.Fatal("UploadAuthorize accepted a foreign user")
+	}
+	if _, ok := f.svc.UploadAuthorize("never-issued", f.uid); ok {
+		t.Fatal("UploadAuthorize accepted an unknown id")
+	}
+	format, ok := f.svc.UploadAuthorize(gotID, f.uid)
+	if !ok || format != "csv" {
+		t.Fatalf("UploadAuthorize: %q %v", format, ok)
+	}
+
+	payload := json.RawMessage(`{"url":"https://example/f.csv","bytes":8,"expires_at":"2030-01-01T00:00:00Z"}`)
+	if !f.svc.CompleteExport(gotID, f.uid, protocol.Result{ID: gotID, OK: true, Result: payload}) {
+		t.Fatal("CompleteExport refused the owning user")
+	}
+	if err := <-errC; err != nil {
+		t.Fatal(err)
+	}
+	res := <-resultC
+	if !res.OK || string(res.Result) != string(payload) {
+		t.Fatalf("export result: %+v", res)
+	}
+
+	// A second completion for the same id (a late pane ack, say) is dropped:
+	// the pending entry is already gone.
+	if f.svc.CompleteExport(gotID, f.uid, protocol.Result{ID: gotID, OK: true}) {
+		t.Fatal("CompleteExport delivered twice for one id")
+	}
+}
+
+// TestExportBridgeErrorShortCircuits: the bridge's own `result` (e.g. a
+// failed getFileAsync, sent before any upload was attempted) reaches Export
+// exactly the way a script's error does — no upload ever happens.
+func TestExportBridgeErrorShortCircuits(t *testing.T) {
+	f := newFixture(t, bridge.Options{})
+	fake := bridgetest.Dial(t, f.url, bridgetest.Options{Token: token, InstanceID: "a"})
+	go func() {
+		msgs := fake.WaitFor(protocol.MethodExport, 1, 2*time.Second)
+		var ex protocol.Export
+		msgs[0].Decode(&ex)
+		fake.Send(protocol.New(protocol.MethodResult, protocol.Result{ID: ex.ID, OK: false,
+			Error: &protocol.ScriptError{Name: "RichApi.Error", Code: "GeneralException", Message: "getFileAsync failed"}}))
+	}()
+	b := f.waitRegistered(t, "a")
+	res, err := f.svc.Export(context.Background(), b, bridge.ExportRequest{Format: "pdf", Timeout: 2 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.OK || res.Error == nil || res.Error.Code != "GeneralException" {
+		t.Fatalf("bridge error not propagated: %+v", res)
+	}
+}
+
+// TestExportTimeoutDropsLateUpload: a cancel is sent on timeout as for exec,
+// and CompleteExport for the id afterwards — the "upload after the tool
+// timed out" case the brief calls out — is refused, not silently accepted.
+func TestExportTimeoutDropsLateUpload(t *testing.T) {
+	f := newFixture(t, bridge.Options{})
+	fake := bridgetest.Dial(t, f.url, bridgetest.Options{Token: token, InstanceID: "a"})
+	var gotID string
+	done := make(chan struct{})
+	go func() {
+		msgs := fake.WaitFor(protocol.MethodExport, 1, 2*time.Second)
+		var ex protocol.Export
+		msgs[0].Decode(&ex)
+		gotID = ex.ID
+		close(done)
+	}()
+	b := f.waitRegistered(t, "a")
+	_, err := f.svc.Export(context.Background(), b, bridge.ExportRequest{Format: "xlsx", Timeout: 100 * time.Millisecond})
+	if !errors.Is(err, bridge.ErrTimeout) {
+		t.Fatalf("want ErrTimeout, got %v", err)
+	}
+	<-done
+	fake.WaitFor(protocol.MethodCancel, 1, 2*time.Second)
+	if _, ok := f.svc.UploadAuthorize(gotID, f.uid); ok {
+		t.Fatal("UploadAuthorize accepted an id whose export already timed out")
+	}
+	if f.svc.CompleteExport(gotID, f.uid, protocol.Result{ID: gotID, OK: true}) {
+		t.Fatal("CompleteExport delivered a late upload after the export timed out")
+	}
+}
+
 func TestNoticeAttachesToInFlightExec(t *testing.T) {
 	f := newFixture(t, bridge.Options{})
 	fake := bridgetest.Dial(t, f.url, bridgetest.Options{Token: token, InstanceID: "a"})
