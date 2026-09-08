@@ -52,6 +52,11 @@ func (f *fixture) bridgeSignIn(connector, label string) *http.Response {
 	if pu.Query().Get("redirect_uri") != f.srv.URL+"/login/microsoft/callback" {
 		f.t.Fatalf("provider redirect_uri %q", pu.Query().Get("redirect_uri"))
 	}
+	// Always force the account chooser (see AuthURL): a multi-account user
+	// must not be bound silently to whichever account the browser last used.
+	if pu.Query().Get("prompt") != "select_account" {
+		f.t.Fatalf("provider prompt %q, want select_account", pu.Query().Get("prompt"))
+	}
 	resp = f.get(loc)
 	body(f.t, resp)
 	loc = resp.Header.Get("Location")

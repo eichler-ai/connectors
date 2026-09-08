@@ -170,6 +170,13 @@ func (p *OIDCProvider) AuthURL(ctx context.Context, redirectURI, state, nonce, p
 		"nonce":                 {nonce},
 		"code_challenge":        {base64.RawURLEncoding.EncodeToString(sum[:])},
 		"code_challenge_method": {"S256"},
+		// Always let the user pick which Microsoft account. Without this, the
+		// provider silently reuses whatever account is active in the browser,
+		// so a user signed in to both a work and a personal account binds the
+		// wrong identity with no chance to choose — and because the hub keys
+		// routing by user_id, an MCP session and a pane that resolved to
+		// different accounts never meet (seen live 2026-09-08).
+		"prompt": {"select_account"},
 	}
 	return d.AuthorizationEndpoint + "?" + q.Encode(), nil
 }
