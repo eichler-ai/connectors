@@ -476,22 +476,24 @@ func TestDiscovery(t *testing.T) {
 	if resp.StatusCode != 401 || resp.Header.Get("WWW-Authenticate") != want {
 		t.Fatalf("401 challenge: %d %q", resp.StatusCode, resp.Header.Get("WWW-Authenticate"))
 	}
-	resp, err = http.Get(f.http.URL + "/stub/.well-known/oauth-protected-resource")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var prm struct {
-		Resource             string   `json:"resource"`
-		AuthorizationServers []string `json:"authorization_servers"`
-		ScopesSupported      []string `json:"scopes_supported"`
-	}
-	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if err := json.Unmarshal(body, &prm); err != nil || resp.StatusCode != 200 {
-		t.Fatalf("metadata: %d %s", resp.StatusCode, body)
-	}
-	if prm.Resource != "https://connectors.example/stub/mcp" || strings.Join(prm.AuthorizationServers, ",") != "https://connectors.example" || strings.Join(prm.ScopesSupported, ",") != "stub" {
-		t.Fatalf("metadata: %+v", prm)
+	for _, path := range []string{"/stub/.well-known/oauth-protected-resource", "/.well-known/oauth-protected-resource/stub/mcp"} {
+		resp, err = http.Get(f.http.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var prm struct {
+			Resource             string   `json:"resource"`
+			AuthorizationServers []string `json:"authorization_servers"`
+			ScopesSupported      []string `json:"scopes_supported"`
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err := json.Unmarshal(body, &prm); err != nil || resp.StatusCode != 200 {
+			t.Fatalf("%s: %d %s", path, resp.StatusCode, body)
+		}
+		if prm.Resource != "https://connectors.example/stub/mcp" || strings.Join(prm.AuthorizationServers, ",") != "https://connectors.example" || strings.Join(prm.ScopesSupported, ",") != "stub" {
+			t.Fatalf("%s: %+v", path, prm)
+		}
 	}
 	resp, _ = http.Get(f.http.URL + "/health")
 	resp.Body.Close()

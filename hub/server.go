@@ -153,13 +153,17 @@ func NewServer(opts Options) (*Server, error) {
 		// the authorization server issues one audience for the whole hub and
 		// this connector's slug as the scope (§18.3; authserver.acceptedResource).
 		metadataURL := opts.PublicURL + "/" + slug + "/.well-known/oauth-protected-resource"
-		mux.Handle("/"+slug+"/.well-known/oauth-protected-resource", mcpauth.ProtectedResourceMetadataHandler(&oauthex.ProtectedResourceMetadata{
+		prm := mcpauth.ProtectedResourceMetadataHandler(&oauthex.ProtectedResourceMetadata{
 			Resource:               opts.PublicURL + "/" + slug + "/mcp",
 			AuthorizationServers:   []string{opts.PublicURL},
 			ScopesSupported:        []string{slug},
 			BearerMethodsSupported: []string{"header"},
 			ResourceName:           "Eichler Connectors: " + slug,
-		}))
+		})
+		mux.Handle("/"+slug+"/.well-known/oauth-protected-resource", prm)
+		// Also at RFC 9728's path-insertion location, which a client that
+		// ignores the WWW-Authenticate pointer probes first.
+		mux.Handle("/.well-known/oauth-protected-resource/"+slug+"/mcp", prm)
 		requireBearer := auth.RequireBearer(opts.Auth, auth.BearerOptions{ResourceMetadataURL: metadataURL, Scopes: []string{slug}})
 		mux.Handle("/"+slug+"/mcp", requireBearer(mcpHandler))
 		if c.Capabilities().Bridge {
