@@ -12,7 +12,9 @@ import (
 	"regexp"
 	"strings"
 
+	mcpauth "github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/modelcontextprotocol/go-sdk/oauthex"
 
 	"github.com/eichler-ai/connectors/hub/internal/bridge"
 	"github.com/eichler-ai/connectors/hub/internal/registry"
@@ -31,6 +33,11 @@ type Options struct {
 	PublicURL string
 	// Auth verifies MCP bearer tokens and bridge hello tokens.
 	Auth auth.Authenticator
+	// AuthServer mounts the authorization server's routes at the issuer
+	// root (PRD §05). Nil leaves only the resource-server side: the MCP
+	// endpoints still demand tokens and advertise PublicURL as their
+	// issuer, which is what tests of the bridge side want.
+	AuthServer interface{ Routes(mux *http.ServeMux) }
 	// AllowedOrigins are extra browser origins permitted on the bridge
 	// sockets (the hub's own origin is always allowed).
 	AllowedOrigins []string
@@ -108,6 +115,9 @@ func NewServer(opts Options) (*Server, error) {
 	// (a platform quirk) before it ever reaches this container.
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
+		// The deploy check reads the version here now that /mcp needs a
+		// user's token to answer anything.
+		w.Header().Set("Hub-Version", opts.Version)
 		_, _ = w.Write([]byte("ok\n"))
 	})
 	mux.HandleFunc("GET /.well-known/microsoft-identity-association.json", func(w http.ResponseWriter, r *http.Request) {
@@ -115,7 +125,9 @@ func NewServer(opts Options) (*Server, error) {
 		_, _ = w.Write(wellknown.MicrosoftIdentityAssociation)
 	})
 	s := &Server{opts: opts, host: host, handler: mux, servers: map[string]*mcp.Server{}}
-	requireBearer := auth.RequireBearer(opts.Auth)
+	if opts.AuthServer != nil {
+		opts.AuthServer.Routes(mux)
+	}
 	for _, c := range opts.Connectors {
 		slug := c.Slug()
 		if slug == "" || strings.ContainsAny(slug, "/ ") || s.servers[slug] != nil {
@@ -135,6 +147,20 @@ func NewServer(opts Options) (*Server, error) {
 			Stateless: true,
 			Logger:    opts.Logger,
 		})
+		// Resource metadata (RFC 9728) per connector: the resource is this
+		// connector's MCP URL — the canonical form every MCP client sends as
+		// its `resource` and the only form the go-sdk client accepts — while
+		// the authorization server issues one audience for the whole hub and
+		// this connector's slug as the scope (§18.3; authserver.acceptedResource).
+		metadataURL := opts.PublicURL + "/" + slug + "/.well-known/oauth-protected-resource"
+		mux.Handle("/"+slug+"/.well-known/oauth-protected-resource", mcpauth.ProtectedResourceMetadataHandler(&oauthex.ProtectedResourceMetadata{
+			Resource:               opts.PublicURL + "/" + slug + "/mcp",
+			AuthorizationServers:   []string{opts.PublicURL},
+			ScopesSupported:        []string{slug},
+			BearerMethodsSupported: []string{"header"},
+			ResourceName:           "Eichler Connectors: " + slug,
+		}))
+		requireBearer := auth.RequireBearer(opts.Auth, auth.BearerOptions{ResourceMetadataURL: metadataURL, Scopes: []string{slug}})
 		mux.Handle("/"+slug+"/mcp", requireBearer(mcpHandler))
 		if c.Capabilities().Bridge {
 			mux.Handle("GET /"+slug+"/bridge", bridges.Handler(slug))
@@ -152,6 +178,9 @@ func (s *Server) Handler() http.Handler { return s.handler }
 
 // Host exposes the services for tests and cmd/hub.
 func (s *Server) Host() *Host { return s.host }
+
+// PublicURL is the normalised public origin, which is also the issuer.
+func (s *Server) PublicURL() string { return s.opts.PublicURL }
 
 // MCPServer returns the connector's mcp.Server, for tests that connect to it
 // over the in-memory transport.
