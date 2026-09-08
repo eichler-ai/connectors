@@ -38,6 +38,12 @@ import (
 	"github.com/eichler-ai/connectors/internal/auth"
 )
 
+// buildVersion is set with -ldflags "-X main.buildVersion=<rev>" by the Cloud
+// Build pipeline (hub/Dockerfile's VERSION build arg), which builds from a bare
+// source copy with no .git directory, so the VCS stamp below is unavailable.
+// Local builds leave it empty and fall back to the VCS stamp.
+var buildVersion string
+
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "hub:", err)
@@ -156,8 +162,12 @@ func dataDir() string {
 }
 
 // version is the VCS revision the toolchain stamped into the binary, so
-// get_skills can say which build served it.
+// get_skills can say which build served it. buildVersion (set at link time,
+// see above) wins when present, since a Cloud Build image has no VCS stamp.
 func version() string {
+	if buildVersion != "" {
+		return buildVersion
+	}
 	if bi, ok := debug.ReadBuildInfo(); ok {
 		var rev, modified string
 		for _, s := range bi.Settings {

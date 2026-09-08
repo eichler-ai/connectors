@@ -12,9 +12,11 @@ COPY hub ./hub
 COPY excel ./excel
 COPY internal ./internal
 # -trimpath drops build-machine paths; VCS stamping is unavailable in a bare
-# copy anyway, so get_skills reports "unknown" for an image built this way
-# until the deploy pipeline passes the revision through (next PR).
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /hub ./hub/cmd/hub
+# copy anyway (no .git), so the deploy pipeline (hub/deploy/deploy.sh) passes
+# the git revision in as VERSION and it is linked into main.buildVersion,
+# which version() prefers over the (absent) VCS stamp.
+ARG VERSION=unknown
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.buildVersion=${VERSION}" -o /hub ./hub/cmd/hub
 
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /hub /hub
