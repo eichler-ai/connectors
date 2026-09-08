@@ -156,6 +156,18 @@ type AuditRow struct {
 	ExpiresAt time.Time `firestore:"expires_at"`
 }
 
+// GraphToken is the user's Microsoft refresh token for Graph calls (RFC
+// excel/docs/rfc-graph-create-and-open.md §3.1), one per user, keyed by
+// user id. Ciphertext is AES-256-GCM over the token with a key derived from
+// KeySet.Secret("graph-token-enc") (hub/internal/graphtoken) — the store
+// only ever holds and returns opaque bytes, never the plaintext token, so
+// it cannot leak it into a log by accident.
+type GraphToken struct {
+	UserID     string    `firestore:"user_id"`
+	Ciphertext []byte    `firestore:"ciphertext"`
+	UpdatedAt  time.Time `firestore:"updated_at"`
+}
+
 // Store is what the authorization server needs from persistence.
 type Store interface {
 	// UserByIdentity finds the user for a provider subject, or ErrNotFound.
@@ -191,11 +203,24 @@ type Store interface {
 	RotateRefreshToken(ctx context.Context, oldHash string, now time.Time, next RefreshToken) (RefreshToken, error)
 	// RevokeFamily revokes every refresh token minted from one code.
 	RevokeFamily(ctx context.Context, familyID string) error
-	// RevokeUser revokes every refresh token and deletes every bridge token
-	// of a user (the §13 kill switch; outstanding access tokens expire on
-	// their own within 15 minutes, and a pane's socket ends at its next
-	// reconnect). Returns how many tokens of both kinds it touched.
+	// RevokeUser revokes every refresh token, deletes every bridge token, and
+	// deletes the Graph token of a user (the §13 kill switch — the Graph
+	// grant is file access to the user's whole OneDrive, so the kill switch
+	// must cover it too; outstanding access tokens expire on their own
+	// within 15 minutes, and a pane's socket ends at its next reconnect).
+	// Returns how many records of all three kinds it touched.
 	RevokeUser(ctx context.Context, userID string) (int, error)
+
+	// PutGraphToken stores (or overwrites) user's encrypted Graph refresh
+	// token; called on every sign-in that grants Files access, and again
+	// whenever the Graph client rotates the token.
+	PutGraphToken(ctx context.Context, t GraphToken) error
+	// GraphToken looks up user's stored token, or ErrNotFound if they never
+	// granted Files access (or RevokeUser deleted it).
+	GraphToken(ctx context.Context, userID string) (GraphToken, error)
+	// DeleteGraphToken removes user's stored token; deleting an unknown user
+	// is not an error (matches RevokeBridgeToken's contract).
+	DeleteGraphToken(ctx context.Context, userID string) error
 
 	PutBridgeToken(ctx context.Context, t BridgeToken) error
 	// BridgeToken looks a token up by hash; unknown, revoked and expired

@@ -193,12 +193,45 @@ func contract(t *testing.T, s Store) {
 	other := BridgeToken{Hash: "bto" + suffix, UserID: "someone-else" + suffix, Connector: "excel", CreatedAt: now, ExpiresAt: now.Add(time.Hour)}
 	_ = s.PutBridgeToken(ctx, other)
 
-	// The one live refresh token, plus bt (the memory store may or may not
-	// have swept the expired one: either count is right, so revoke the
-	// expired token explicitly first to make the number exact).
+	// Graph tokens: round trip, missing, overwrite, and encrypted-at-rest
+	// (this layer only ever sees ciphertext bytes handed to it — the actual
+	// AES-GCM encryption is hub/internal/graphtoken's job and has its own
+	// test, but a plaintext-looking round trip through the store would be a
+	// red flag here too).
+	if _, err := s.GraphToken(ctx, u.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing graph token: %v", err)
+	}
+	plaintext := []byte("M.C1_BL2." + suffix) // shaped like a real Microsoft refresh token
+	gt := GraphToken{UserID: u.ID, Ciphertext: []byte("not-the-plaintext:" + suffix), UpdatedAt: now}
+	if err := s.PutGraphToken(ctx, gt); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.GraphToken(ctx, u.ID); err != nil || string(got.Ciphertext) == string(plaintext) || string(got.Ciphertext) != string(gt.Ciphertext) {
+		t.Fatalf("graph token: %v %+v", err, got)
+	}
+	gt2 := GraphToken{UserID: u.ID, Ciphertext: []byte("rotated:" + suffix), UpdatedAt: now.Add(time.Minute)}
+	if err := s.PutGraphToken(ctx, gt2); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.GraphToken(ctx, u.ID); err != nil || string(got.Ciphertext) != string(gt2.Ciphertext) {
+		t.Fatalf("graph token overwrite: %v %+v", err, got)
+	}
+	if err := s.DeleteGraphToken(ctx, "someone-else-entirely"+suffix); err != nil {
+		t.Fatalf("delete missing graph token: %v", err)
+	}
+	// Put it back: RevokeUser below must delete it as part of the cascade,
+	// not this explicit delete.
+	if err := s.PutGraphToken(ctx, gt2); err != nil {
+		t.Fatal(err)
+	}
+
+	// The one live refresh token, plus bt, plus the graph token (the memory
+	// store may or may not have swept the expired bridge token: either count
+	// is right, so revoke the expired token explicitly first to make the
+	// number exact).
 	_ = s.RevokeBridgeToken(ctx, expiredBT.Hash)
-	if n, err := s.RevokeUser(ctx, u.ID); err != nil || n != 2 {
-		t.Fatalf("revoke user: %d %v (want the one live refresh token plus one bridge token)", n, err)
+	if n, err := s.RevokeUser(ctx, u.ID); err != nil || n != 3 {
+		t.Fatalf("revoke user: %d %v (want the one live refresh token, one bridge token, and the graph token)", n, err)
 	}
 	if _, err := s.RotateRefreshToken(ctx, live.Hash, now, RefreshToken{Hash: "b2" + suffix, ExpiresAt: now.Add(time.Hour)}); !errors.Is(err, ErrRevoked) {
 		t.Fatalf("after revoke user: %v", err)
@@ -208,6 +241,14 @@ func contract(t *testing.T, s Store) {
 	}
 	if _, err := s.BridgeToken(ctx, other.Hash); err != nil {
 		t.Fatalf("another user's bridge token was revoked: %v", err)
+	}
+	if _, err := s.GraphToken(ctx, u.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatal("graph token survived revoke user")
+	}
+	// RevokeUser on a user with no graph token at all touches only the two
+	// other kinds, and is not an error.
+	if n, err := s.RevokeUser(ctx, "no-graph-token"+suffix); err != nil || n != 0 {
+		t.Fatalf("revoke user with nothing to revoke: %d %v", n, err)
 	}
 
 	// Audit rows: ordering by time (newest first), the limit, per-user

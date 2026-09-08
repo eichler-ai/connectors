@@ -29,6 +29,12 @@ type fakeOIDC struct {
 	codes    map[string]codeRecord
 	// Identity minted for the next login.
 	oid, tid, email, name string
+	// refreshToken, when set, is returned alongside the id_token — the
+	// Graph refresh token AuthURL's offline_access Files.ReadWrite scope
+	// earns (RFC excel/docs/rfc-graph-create-and-open.md §3.1). Empty by
+	// default so existing tests that don't care about it see no graph token
+	// stored.
+	refreshToken string
 	// Faults.
 	wrongNonce, wrongAud, wrongTenant bool
 	keysFetches                       int
@@ -94,7 +100,11 @@ func newFakeOIDC(t *testing.T, clientID string) *fakeOIDC {
 			"nonce": nonce, "exp": time.Now().Add(time.Hour).Unix(), "iat": time.Now().Unix(),
 			"preferred_username": f.email, "name": f.name,
 		}
-		_ = json.NewEncoder(w).Encode(map[string]string{"id_token": f.sign(claims), "token_type": "Bearer"})
+		resp := map[string]string{"id_token": f.sign(claims), "token_type": "Bearer"}
+		if f.refreshToken != "" {
+			resp["refresh_token"] = f.refreshToken
+		}
+		_ = json.NewEncoder(w).Encode(resp)
 	})
 	mux.HandleFunc("GET /common/discovery/v2.0/keys", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()

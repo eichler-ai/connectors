@@ -58,6 +58,13 @@ type Identity struct {
 	Tenant      string
 	Email       string
 	DisplayName string
+	// GraphRefreshToken is Microsoft's refresh token for the Graph scope
+	// requested in AuthURL (RFC excel/docs/rfc-graph-create-and-open.md
+	// §3.1: upfront consent). Empty if the token response carried none —
+	// e.g. a provider that doesn't grant offline_access, or (should Files.
+	// ReadWrite ever be dropped from AuthURL for a tenant) no Files scope.
+	// Never logged; login.go hands it straight to hub/internal/graphtoken.
+	GraphRefreshToken string
 }
 
 const (
@@ -161,11 +168,18 @@ func (p *OIDCProvider) AuthURL(ctx context.Context, redirectURI, state, nonce, p
 	}
 	sum := sha256.Sum256([]byte(pkceVerifier))
 	q := url.Values{
-		"client_id":             {p.ClientID},
-		"response_type":         {"code"},
-		"redirect_uri":          {redirectURI},
-		"response_mode":         {"query"},
-		"scope":                 {"openid profile email"},
+		"client_id":     {p.ClientID},
+		"response_type": {"code"},
+		"redirect_uri":  {redirectURI},
+		"response_mode": {"query"},
+		// offline_access Files.ReadWrite (RFC excel/docs/rfc-graph-create-and-
+		// open.md §3.1, decided 2026-09-08): one consent now covers identity
+		// and the Excel connector's Graph API path, so create_workbook never
+		// needs a second prompt. The refresh token this earns is captured in
+		// Exchange below and stored encrypted (login.go, hub/internal/
+		// graphtoken). Consequence accepted in the RFC: this scope is broad
+		// and, pre-publisher-verification, must not reach work tenants.
+		"scope":                 {"openid profile email offline_access Files.ReadWrite"},
 		"state":                 {state},
 		"nonce":                 {nonce},
 		"code_challenge":        {base64.RawURLEncoding.EncodeToString(sum[:])},
@@ -214,9 +228,14 @@ func (p *OIDCProvider) Exchange(ctx context.Context, code, redirectURI, pkceVeri
 		return Identity{}, err
 	}
 	var tok struct {
-		IDToken   string `json:"id_token"`
-		Error     string `json:"error"`
-		ErrorDesc string `json:"error_description"`
+		IDToken string `json:"id_token"`
+		// RefreshToken is Microsoft's refresh token for the scopes AuthURL
+		// requested (offline_access Files.ReadWrite, above) — never logged,
+		// carried out through Identity.GraphRefreshToken. Never part of the
+		// ID token itself; it rides beside it in this same response.
+		RefreshToken string `json:"refresh_token"`
+		Error        string `json:"error"`
+		ErrorDesc    string `json:"error_description"`
 	}
 	if err := json.Unmarshal(body, &tok); err != nil || resp.StatusCode != http.StatusOK || tok.IDToken == "" {
 		if tok.Error != "" {
@@ -272,7 +291,7 @@ func (p *OIDCProvider) Exchange(ctx context.Context, code, redirectURI, pkceVeri
 	if email == "" {
 		email = c.Username
 	}
-	return Identity{Subject: subject, Tenant: c.TID, Email: email, DisplayName: c.Name}, nil
+	return Identity{Subject: subject, Tenant: c.TID, Email: email, DisplayName: c.Name, GraphRefreshToken: tok.RefreshToken}, nil
 }
 
 // expectedIssuer resolves Entra's templated issuer

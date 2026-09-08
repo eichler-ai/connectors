@@ -16,9 +16,12 @@ import (
 	"github.com/eichler-ai/connectors/hub/diag"
 	"github.com/eichler-ai/connectors/hub/internal/bridge"
 	"github.com/eichler-ai/connectors/hub/internal/files"
+	"github.com/eichler-ai/connectors/hub/internal/graph"
+	"github.com/eichler-ai/connectors/hub/internal/graphtoken"
 	"github.com/eichler-ai/connectors/hub/internal/registry"
 	"github.com/eichler-ai/connectors/hub/internal/store"
 	"github.com/eichler-ai/connectors/hub/protocol"
+	"github.com/eichler-ai/connectors/internal/auth"
 )
 
 // Files is the file exchange seam an export_file-style tool stores into
@@ -45,6 +48,15 @@ type Host struct {
 	// construct); production and -dev both pass one (Firestore or Memory).
 	store store.Store
 	log   *slog.Logger
+
+	// keys decrypts the Microsoft refresh token graphtoken stores (RFC
+	// excel/docs/rfc-graph-create-and-open.md §3.1). Nil in hubs/tests that
+	// never wire Graph — CreateWorkbookFile then reports graph-unconfigured
+	// rather than a nil-pointer panic.
+	keys *auth.KeySet
+	// graphClient is the Microsoft Graph API path (§3.1, §3.2). Nil for the
+	// same reason as keys, and checked alongside it.
+	graphClient *graph.Client
 
 	// userOf resolves the MCP session's user. In production it reads the
 	// TokenInfo the bearer middleware attached; tests, which drive tools over
@@ -131,6 +143,13 @@ func ClientName(req *mcp.CallToolRequest) string {
 	}
 	return ip.ClientInfo.Name
 }
+
+// Log is the hub's logger, for a connector tool that needs to add its own
+// structured line beside what a Host method already logs — e.g.
+// create_workbook logging the doc_key it constructs next to the driveItem
+// CreateWorkbookFile already logged, so the RFC §3.3 correlation spike's two
+// halves land in the same log stream.
+func (h *Host) Log() *slog.Logger { return h.log }
 
 // Instances lists the user's live bridges for a connector, oldest first.
 func (h *Host) Instances(user, connector string) []Instance {
@@ -336,6 +355,79 @@ func (h *Host) Export(ctx context.Context, user string, c Connector, target Targ
 	h.putAudit(store.AuditRow{UserID: user, Connector: c.Slug(), Instance: b.InstanceID, Document: doc.ID, Action: "export",
 		OK: true, DurationMs: elapsed.Milliseconds(), FileBytes: payload.Bytes, Format: req.Format, Client: target.Client})
 	return ExportResult{Instance: instanceOf(b), Document: doc, URL: payload.URL, Bytes: payload.Bytes, ExpiresAt: payload.ExpiresAt}, nil
+}
+
+// graphFolder is where create_workbook puts files (RFC §3.2): a visible
+// folder rather than a hidden app folder, since the broad Files.ReadWrite
+// scope (§5) means the connector isn't confined to one anyway.
+const graphFolder = "Eichler Connectors"
+
+// DriveItem is what a completed CreateWorkbookFile upload returns from
+// Microsoft Graph: the subset a connector's create_workbook tool needs to
+// build its response and the pane-matching doc_key (RFC §3.2, §3.3).
+// Defined here rather than aliasing hub/internal/graph.DriveItem so a
+// connector package — which cannot import hub/internal/* — can still name
+// the type, the same reasoning as Files/ObjectRef above.
+type DriveItem struct {
+	ID     string
+	Name   string
+	WebURL string
+	// DriveID is the CID segment of ID (before "!") — half of the RFC §3.3
+	// spike's pane-matching identity: a personal OneDrive file's
+	// Office.context.document.url is
+	// https://d.docs.live.net/<CID>/<Folder>/<Name> (no <Folder> segment for
+	// a root-level file — live-verified 2026-09-08, see graph.DriveItem.Folder).
+	DriveID string
+	// Folder is the other half: the OneDrive folder path (no leading/
+	// trailing slash), or "" for a root-level file.
+	Folder string
+}
+
+// CreateWorkbookFile uploads content as name into the user's OneDrive via
+// Microsoft Graph (RFC excel/docs/rfc-graph-create-and-open.md §3.1, §3.2):
+// decrypts their stored Microsoft refresh token, asks the Graph client to
+// mint a fresh access token and PUT the file, and persists whatever refresh
+// token Graph hands back (rotated or not) before reporting the outcome —
+// so a token Microsoft rotated mid-call is never dropped even when the
+// upload itself then fails. A user who never granted Files access (or was
+// revoked) gets graph-not-connected, not a Graph error; a hub with no Graph
+// client wired at all (see NewServer) gets graph-unconfigured.
+func (h *Host) CreateWorkbookFile(ctx context.Context, user, name string, content []byte) (DriveItem, *diag.Record) {
+	if h.graphClient == nil || h.keys == nil {
+		return DriveItem{}, diag.New(diag.SeverityError, "graph-unconfigured", Source,
+			"this hub has no Microsoft Graph client configured").
+			WithRemedy("this is a server configuration issue, not something the caller can fix")
+	}
+	refreshToken, err := graphtoken.Get(ctx, h.store, h.keys, user)
+	if errors.Is(err, store.ErrNotFound) {
+		return DriveItem{}, diag.New(diag.SeverityError, "graph-not-connected", Source,
+			"no Microsoft file access is on record for you").
+			WithRemedy("sign in again to grant file access (sign-in now asks for it)")
+	}
+	if err != nil {
+		return DriveItem{}, diag.New(diag.SeverityError, "graph-token-unreadable", Source,
+			"the stored Microsoft token could not be read: "+err.Error())
+	}
+	item, nextRefresh, createErr := h.graphClient.CreateFileInFolder(ctx, refreshToken, graphFolder, name, content)
+	if nextRefresh != "" && nextRefresh != refreshToken {
+		if perr := graphtoken.Put(ctx, h.store, h.keys, user, nextRefresh, time.Now()); perr != nil {
+			// Best-effort like putAudit: the create itself already
+			// succeeded or failed on its own terms, and the old refresh
+			// token generally still works until Microsoft expires it.
+			h.log.Error("graph: could not persist a rotated refresh token", "user", user, "err", perr)
+		}
+	}
+	if createErr != nil {
+		h.log.Info("graph: create file failed", "user", user, "err", createErr)
+		return DriveItem{}, diag.New(diag.SeverityError, "graph-create-failed", Source, createErr.Error())
+	}
+	out := DriveItem{ID: item.ID, Name: item.Name, WebURL: item.WebURL, DriveID: item.DriveID(), Folder: item.Folder()}
+	// The correlation spike's observability (RFC §3.3, §6): both what Graph
+	// actually returned and (by the caller logging doc_key alongside this)
+	// what create_workbook constructed from it, so a mismatch is visible
+	// without re-running the live test.
+	h.log.Info("graph: created file", "user", user, "drive_item_id", out.ID, "web_url", out.WebURL, "drive_id", out.DriveID, "folder", out.Folder)
+	return out, nil
 }
 
 func exportErrorCode(e *protocol.ScriptError) string {

@@ -20,6 +20,13 @@ this MCP Server. The pane must be open in Excel; `list_instances` shows what is 
   collision — `added_sheets` reports the actual resulting names, not what you asked for. The file
   must be a genuine `.xlsx` from a real writer; a hand-assembled or truncated one is rejected before
   it reaches the workbook (`not-an-xlsx`).
+- `create_workbook` — creates a **new** workbook in the user's OneDrive (no pane needed to start) and
+  returns `{web_url, doc_key, open_hint}`. `data: [{name, rows: [[cell, ...]]}]` populates sheets;
+  omit `data` for blank. Tell the user to open `web_url`; once they do and the pane connects, call
+  `list_instances` and match a document's id against `doc_key` to find the right bridge before driving
+  it with `execute_script` — a new document opens detached until then. Pre-distribution, the user must
+  also sideload the connector and open the MCP Bridge pane by hand after clicking the link. Needs
+  Microsoft file access granted at sign-in; `graph-not-connected` means they must sign in again.
 
 ## Script contract
 

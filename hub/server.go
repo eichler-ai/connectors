@@ -18,6 +18,7 @@ import (
 
 	"github.com/eichler-ai/connectors/hub/internal/bridge"
 	"github.com/eichler-ai/connectors/hub/internal/files"
+	"github.com/eichler-ai/connectors/hub/internal/graph"
 	"github.com/eichler-ai/connectors/hub/internal/registry"
 	"github.com/eichler-ai/connectors/hub/internal/store"
 	"github.com/eichler-ai/connectors/hub/wellknown"
@@ -54,6 +55,15 @@ type Options struct {
 	// entirely; cmd/hub always configures one (Firestore or Memory), so this
 	// is nil only in tests that don't need the audit trail.
 	Store store.Store
+	// Keys decrypts the Microsoft refresh token graphtoken stores (RFC
+	// excel/docs/rfc-graph-create-and-open.md §3.1). Nil disables Graph-
+	// backed tools (create_workbook reports graph-unconfigured); cmd/hub
+	// always passes the same KeySet it gives the authorization server, since
+	// that is what encrypted the token in the first place.
+	Keys *auth.KeySet
+	// Graph is the Microsoft Graph API path (§3.1, §3.2). Nil for the same
+	// reason as Keys, and checked alongside it.
+	Graph *graph.Client
 	// Version is reported as each MCP server's version and by get_skills.
 	Version string
 	// Environment is "prod", "staging" or "dev" (default). Excel for the web
@@ -118,7 +128,8 @@ func NewServer(opts Options) (*Server, error) {
 	bopts.Logger = opts.Logger
 	bridges := bridge.New(reg, opts.Auth, bopts)
 
-	host := &Host{reg: reg, bridges: bridges, files: opts.Files, store: opts.Store, log: opts.Logger, userOf: opts.UserOf, defaultTimeout: DefaultTimeout, maxTimeout: MaxTimeout}
+	host := &Host{reg: reg, bridges: bridges, files: opts.Files, store: opts.Store, keys: opts.Keys, graphClient: opts.Graph,
+		log: opts.Logger, userOf: opts.UserOf, defaultTimeout: DefaultTimeout, maxTimeout: MaxTimeout}
 	if host.userOf == nil {
 		host.userOf = userFromToken
 	}

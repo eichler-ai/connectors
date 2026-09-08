@@ -313,7 +313,7 @@ func TestToolSurface(t *testing.T) {
 	for _, tl := range tools.Tools {
 		names = append(names, tl.Name)
 	}
-	if got := strings.Join(names, ","); got != "execute_script,export_file,get_skills,get_status,import_workbook,list_instances" {
+	if got := strings.Join(names, ","); got != "create_workbook,execute_script,export_file,get_skills,get_status,import_workbook,list_instances" {
 		t.Fatalf("tools: %s", got)
 	}
 }

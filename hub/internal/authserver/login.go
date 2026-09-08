@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/eichler-ai/connectors/hub/internal/graphtoken"
 	"github.com/eichler-ai/connectors/hub/internal/store"
 )
 
@@ -93,6 +94,19 @@ func (s *Server) loginCallback(w http.ResponseWriter, r *http.Request) {
 		s.log.Error("login: store user", "err", err)
 		s.errorPage(w, http.StatusInternalServerError, "Sign-in failed", "Your account could not be recorded.")
 		return
+	}
+	// The Microsoft refresh token AuthURL's upfront consent earns (RFC
+	// excel/docs/rfc-graph-create-and-open.md §3.1), encrypted before it
+	// ever reaches the store. Best-effort: a user who somehow signs in
+	// without one (a provider that doesn't grant offline_access) still gets
+	// a session — create_workbook is what reports graph-not-connected, not
+	// sign-in. Never logged past this point.
+	if id.GraphRefreshToken != "" {
+		if err := graphtoken.Put(r.Context(), s.o.Store, s.o.Keys, user.ID, id.GraphRefreshToken, s.now()); err != nil {
+			s.log.Error("login: store graph token", "user", user.ID, "err", err)
+		} else {
+			s.log.Info("login: graph token stored", "user", user.ID)
+		}
 	}
 	s.setSession(w, user.ID)
 	w.Header().Set("Cache-Control", "no-store")
