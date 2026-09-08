@@ -5,8 +5,8 @@
 //	hub -dev             serve HTTPS on https://localhost:8443 with a self-signed certificate,
 //	                     so the add-in can be sideloaded against this laptop
 //	hub -trust-cert      print the command that trusts the -dev certificate
-//	hub revoke-user ID   revoke every refresh token of a user (PRD §13 kill switch); the
-//	                     user's access tokens expire on their own within 15 minutes
+//	hub revoke-user ID   revoke every refresh token and bridge token of a user (PRD §13 kill
+//	                     switch); the user's access tokens expire on their own within 15 minutes
 //
 // Environment:
 //
@@ -22,9 +22,10 @@
 //	HUB_FIRESTORE_PROJECT  GCP project of the Firestore database; unset means in-memory
 //	                       storage (nothing survives a restart — -dev only)
 //	HUB_FIRESTORE_DATABASE Firestore database id; default "(default)"
-//	HUB_DEV_TOKEN          phase-0 shared secret, required until pane sign-in (unit 2):
-//	                       the token in a bridge hello. No longer accepted on /<c>/mcp.
-//	                       Never logged.
+//	HUB_DEV_TOKEN          optional phase-0 shared secret, accepted in a bridge hello as a
+//	                       fallback after the store lookup, for panes that have not signed
+//	                       in yet; unset means only signed-in panes connect. Never accepted
+//	                       on /<c>/mcp. Never logged.
 //	HUB_ALLOWED_ORIGINS    comma-separated extra browser origins allowed on /<c>/bridge
 //	HUB_ENV                "prod", "staging" or "dev" (default; -dev always forces "dev"
 //	                       regardless of this variable); see hub.Options.Environment
@@ -93,14 +94,17 @@ func run() error {
 
 	// TrimSpace: Secret Manager values written via `gcloud secrets versions add
 	// --data-file=-` from a shell pipeline often carry a trailing newline, which
-	// would otherwise become part of the token and never match a bearer header.
-	devToken := strings.TrimSpace(os.Getenv("HUB_DEV_TOKEN"))
-	if devToken == "" {
-		return errors.New("HUB_DEV_TOKEN is required (bridge hello token until pane sign-in lands); set it to a random string of 16+ characters")
-	}
-	bridgeAuth, err := auth.NewDevToken(devToken)
-	if err != nil {
-		return err
+	// would otherwise become part of the token and never match a hello.
+	var devFallback auth.Authenticator
+	if devToken := strings.TrimSpace(os.Getenv("HUB_DEV_TOKEN")); devToken != "" {
+		d, err := auth.NewDevToken(devToken)
+		if err != nil {
+			return err
+		}
+		devFallback = d
+		// Loud, because a hub with the fallback set accepts one shared secret
+		// as a bridge identity; drop the variable once every pane signs in.
+		logger.Warn("HUB_DEV_TOKEN is set: the dev token is accepted in bridge hellos as a fallback", "dev_user", d.UserID())
 	}
 
 	port := os.Getenv("PORT")
@@ -175,8 +179,10 @@ func run() error {
 	go as.RunCollector(ctx)
 
 	srv, err := hub.NewServer(hub.Options{
-		PublicURL:      publicURL,
-		Auth:           auth.Split{Access: as.Verifier(), Bridge: bridgeAuth},
+		PublicURL: publicURL,
+		// Bridge hellos verify against the store's bridge tokens (pane
+		// sign-in), then the dev token if one is configured.
+		Auth:           auth.Split{Access: as.Verifier(), Bridge: authserver.NewBridgeVerifier(st, devFallback, logger)},
 		AuthServer:     as,
 		AllowedOrigins: origins,
 		Connectors:     []hub.Connector{excel.New()},
@@ -288,7 +294,7 @@ func revokeUser(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("revoked %d refresh token(s) for %s; outstanding access tokens expire within %s\n", n, args[0], auth.AccessTokenTTL)
+	fmt.Printf("revoked %d refresh/bridge token(s) for %s; outstanding access tokens expire within %s, connected panes drop at their next reconnect\n", n, args[0], auth.AccessTokenTTL)
 	return nil
 }
 

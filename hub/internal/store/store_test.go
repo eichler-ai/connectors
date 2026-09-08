@@ -49,6 +49,12 @@ func contract(t *testing.T, s Store) {
 	if err != nil || got.ID != u.ID || got.DisplayName != "Ada" || !got.CreatedAt.Equal(now) {
 		t.Fatalf("user: %v %+v", err, got)
 	}
+	if got, err := s.User(ctx, u.ID); err != nil || got.Email != "a@example.com" {
+		t.Fatalf("user by id: %v %+v", err, got)
+	}
+	if _, err := s.User(ctx, "nobody"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing user by id: %v", err)
+	}
 
 	// Clients: touch and collection.
 	c := Client{ID: "dcr_" + suffix, Name: "x", RedirectURIs: []string{"https://a/cb"}, CreatedAt: now.Add(-48 * time.Hour)}
@@ -145,10 +151,62 @@ func contract(t *testing.T, s Store) {
 	}
 	live := RefreshToken{Hash: "b1" + suffix, FamilyID: "famC" + suffix, UserID: u.ID, ClientID: c.ID, ExpiresAt: now.Add(time.Hour)}
 	_ = s.PutRefreshToken(ctx, live)
-	if n, err := s.RevokeUser(ctx, u.ID); err != nil || n != 1 {
-		t.Fatalf("revoke user: %d %v (want exactly the one live token)", n, err)
+
+	// Bridge tokens: round trip, touch, expiry, revoke (idempotent), and
+	// the kill switch deletes the user's tokens alongside the refresh
+	// tokens it flags.
+	bt := BridgeToken{Hash: "bt1" + suffix, UserID: u.ID, Connector: "excel", Label: "Excel/web", CreatedAt: now, ExpiresAt: now.Add(90 * 24 * time.Hour)}
+	if err := s.PutBridgeToken(ctx, bt); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.BridgeToken(ctx, bt.Hash); err != nil || got.UserID != u.ID || got.Connector != "excel" || got.Label != "Excel/web" || !got.LastUsedAt.IsZero() {
+		t.Fatalf("bridge token: %v %+v", err, got)
+	}
+	if _, err := s.BridgeToken(ctx, "missing"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing bridge token: %v", err)
+	}
+	if err := s.TouchBridgeToken(ctx, bt.Hash, now); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.BridgeToken(ctx, bt.Hash); !got.LastUsedAt.Equal(now) {
+		t.Fatalf("touch: last_used_at %v, want %v", got.LastUsedAt, now)
+	}
+	if err := s.TouchBridgeToken(ctx, "missing", now); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("touch missing bridge token: %v", err)
+	}
+	expiredBT := BridgeToken{Hash: "btx" + suffix, UserID: u.ID, Connector: "excel", CreatedAt: now.Add(-91 * 24 * time.Hour), ExpiresAt: now.Add(-time.Second)}
+	_ = s.PutBridgeToken(ctx, expiredBT)
+	if _, err := s.BridgeToken(ctx, expiredBT.Hash); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expired bridge token: %v", err)
+	}
+	gone := BridgeToken{Hash: "btr" + suffix, UserID: u.ID, Connector: "excel", CreatedAt: now, ExpiresAt: now.Add(time.Hour)}
+	_ = s.PutBridgeToken(ctx, gone)
+	if err := s.RevokeBridgeToken(ctx, gone.Hash); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RevokeBridgeToken(ctx, gone.Hash); err != nil {
+		t.Fatalf("revoking twice: %v", err)
+	}
+	if _, err := s.BridgeToken(ctx, gone.Hash); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("revoked bridge token: %v", err)
+	}
+	other := BridgeToken{Hash: "bto" + suffix, UserID: "someone-else" + suffix, Connector: "excel", CreatedAt: now, ExpiresAt: now.Add(time.Hour)}
+	_ = s.PutBridgeToken(ctx, other)
+
+	// The one live refresh token, plus bt (the memory store may or may not
+	// have swept the expired one: either count is right, so revoke the
+	// expired token explicitly first to make the number exact).
+	_ = s.RevokeBridgeToken(ctx, expiredBT.Hash)
+	if n, err := s.RevokeUser(ctx, u.ID); err != nil || n != 2 {
+		t.Fatalf("revoke user: %d %v (want the one live refresh token plus one bridge token)", n, err)
 	}
 	if _, err := s.RotateRefreshToken(ctx, live.Hash, now, RefreshToken{Hash: "b2" + suffix, ExpiresAt: now.Add(time.Hour)}); !errors.Is(err, ErrRevoked) {
 		t.Fatalf("after revoke user: %v", err)
+	}
+	if _, err := s.BridgeToken(ctx, bt.Hash); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("bridge token after revoke user: %v", err)
+	}
+	if _, err := s.BridgeToken(ctx, other.Hash); err != nil {
+		t.Fatalf("another user's bridge token was revoked: %v", err)
 	}
 }

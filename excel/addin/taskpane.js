@@ -3,6 +3,11 @@
  * runner semantics are the POC's (a script is the body of an async function taking `context`, the
  * Excel.RequestContext from Excel.run; its return value is JSON-serialised back; errors verbatim).
  *
+ * The hello carries a bridge token the user obtains by signing in with Microsoft from this pane
+ * (PRD §06 path 1): the hub's /bridge/authorize runs in an Office dialog and hands back a 90-day
+ * token, kept in OfficeRuntime.storage. The token maps to the same user_id an OAuth MCP session
+ * for that account has, which is how Claude's list_instances finds this pane.
+ *
  * Every message is a JSON-RPC 2.0 notification {jsonrpc:"2.0", method, params}; execs are
  * correlated by params.id. */
 
@@ -33,13 +38,22 @@
   // origin, so the pane needs no configuration to find its hub.
   var BASE = location.pathname.replace(/\/addin\/[^/]*$/, "");
   var WS_URL = window.BRIDGE_WS_URL || "wss://" + location.host + BASE + "/bridge";
-  var TOKEN_KEY = "hub.token";
+  // The hub's pane sign-in and revocation endpoints live at the origin root, not under the
+  // connector (hub/internal/authserver/bridge.go).
+  var AUTHORIZE_URL = location.origin + "/bridge/authorize";
+  var REVOKE_URL = location.origin + "/bridge/revoke";
+  // One credential per hub origin and connector, so a pane pointed at staging and one at prod
+  // never hand each other the wrong token.
+  var CRED_KEY = "hub.bridge:" + location.origin + ":" + CONNECTOR;
   var RECONNECT_MIN_MS = 1000, RECONNECT_MAX_MS = 30000;
 
   var statusEl = document.getElementById("status");
   var envEl = document.getElementById("env");
   var logEl = document.getElementById("log");
-  var tokenEl = document.getElementById("token");
+  var signedOutEl = document.getElementById("signed-out");
+  var signedInEl = document.getElementById("signed-in");
+  var whoEl = document.getElementById("who");
+  var signInBtn = document.getElementById("sign-in");
 
   // Stable for this pane: a reconnect presents the same id and the hub treats it as the same bridge
   // coming back rather than a second instance. Kept in sessionStorage so a pane reload — Excel
@@ -60,9 +74,12 @@
   var reconnectTimer = null;
   var reconnectDelay = RECONNECT_MIN_MS;
   var replaced = false;
+  var signingOut = false; // the close we are about to see is ours; do not reconnect
   var documents = [];
   var resultLimit = 16 << 20;
   var running = null; // id of the exec currently inside Excel.run, for cancel replies
+  // The bridge credential: {token, user, expires_at} from the hub's sign-in page, or null.
+  var cred = null;
 
   function log(msg, cls) {
     var line = document.createElement("div");
@@ -74,19 +91,178 @@
   }
   function setStatus(text, cls) { statusEl.textContent = text; statusEl.className = cls || ""; }
 
-  function token() { try { return localStorage.getItem(TOKEN_KEY) || ""; } catch (e) { return ""; } }
-  tokenEl.value = token();
-  document.getElementById("save-token").onclick = function () {
-    try { localStorage.setItem(TOKEN_KEY, tokenEl.value.trim()); } catch (e) { log("cannot store token: " + e.message, "err"); return; }
-    log("token saved");
-    replaced = false;
-    if (ws) ws.close(); else connect();
-  };
-
   function hostInfo() {
     var d = (window.Office && Office.context && Office.context.diagnostics) || {};
     return { app: String(d.host || "none"), platform: String(d.platform || "browser"), version: String(d.version || "") };
   }
+
+  // --- Credential storage ------------------------------------------------------------------
+  // OfficeRuntime.storage is the Office way: it persists across sessions and is shared with the
+  // shared runtime. localStorage is the fallback when it is absent (a plain tab, an old host).
+  // Both are wrapped in promises so the callers read the same either way.
+  function storage() {
+    var rt = window.OfficeRuntime && OfficeRuntime.storage;
+    if (rt && rt.getItem) {
+      return {
+        name: "OfficeRuntime.storage",
+        get: function (k) { return rt.getItem(k); },
+        set: function (k, v) { return rt.setItem(k, v); },
+        remove: function (k) { return rt.removeItem(k); }
+      };
+    }
+    return {
+      name: "localStorage",
+      get: function (k) { return new Promise(function (res) { try { res(localStorage.getItem(k)); } catch (e) { res(null); } }); },
+      set: function (k, v) { return new Promise(function (res, rej) { try { localStorage.setItem(k, v); res(); } catch (e) { rej(e); } }); },
+      remove: function (k) { return new Promise(function (res) { try { localStorage.removeItem(k); } catch (e) { /* gone anyway */ } res(); }); }
+    };
+  }
+
+  function loadCredential() {
+    var st = storage();
+    return st.get(CRED_KEY).then(function (raw) {
+      if (!raw) return null;
+      var c;
+      try { c = JSON.parse(raw); } catch (e) { return null; }
+      if (!c || typeof c.token !== "string" || !c.token) return null;
+      if (c.expires_at && Date.parse(c.expires_at) < Date.now()) {
+        log("stored sign-in expired " + c.expires_at + "; sign in again");
+        st.remove(CRED_KEY);
+        return null;
+      }
+      return c;
+    }, function (e) { log("cannot read stored sign-in from " + st.name + ": " + (e && e.message), "err"); return null; });
+  }
+
+  function saveCredential(c) {
+    var st = storage();
+    return st.set(CRED_KEY, JSON.stringify({ token: c.token, user: c.user || "", expires_at: c.expires_at || "" }))
+      .then(function () { log("sign-in stored in " + st.name); },
+            function (e) { log("cannot store sign-in in " + st.name + ": " + (e && e.message) + "; it lasts until this pane reloads", "err"); });
+  }
+
+  function renderAccount() {
+    signedOutEl.hidden = !!cred;
+    signedInEl.hidden = !cred;
+    whoEl.textContent = cred ? (cred.user || "Microsoft account") : "";
+  }
+
+  // --- Sign in -----------------------------------------------------------------------------
+  // Opens the hub's /bridge/authorize. Inside Office that is an Office dialog (its own window;
+  // the page hands the token back with messageParent). Outside, or when the dialog API is
+  // missing, a plain popup that postMessages to us. Either way onCredential finishes it.
+  var dialog = null;
+  var pendingPopup = null;
+
+  function signInURL() {
+    var h = hostInfo();
+    return AUTHORIZE_URL + "?connector=" + encodeURIComponent(CONNECTOR) + "&label=" + encodeURIComponent(h.app + "/" + h.platform);
+  }
+
+  function signIn() {
+    var url = signInURL();
+    var ui = window.Office && Office.context && Office.context.ui;
+    if (ui && ui.displayDialogAsync) {
+      setStatus("Signing in… complete the Microsoft sign-in in the window that opened.");
+      log("opening sign-in dialog");
+      ui.displayDialogAsync(url, { height: 65, width: 35, promptBeforeOpen: false }, function (result) {
+        if (result.status === Office.AsyncResultStatus.Failed) {
+          var code = result.error && result.error.code;
+          log("dialog failed: " + code + " " + (result.error && result.error.message), "err");
+          if (code === 12007) { setStatus("A sign-in window is already open.", "bad"); return; }
+          if (code === 12011) { setStatus("The browser blocked the sign-in window. Allow pop-ups for this site and try again.", "bad"); return; }
+          // 12004 (domain not trusted), 12005 (not https), anything else: try a plain popup.
+          signInPopup(url);
+          return;
+        }
+        dialog = result.value;
+        dialog.addEventHandler(Office.EventType.DialogMessageReceived, function (arg) {
+          var payload = parsePayload(arg.message);
+          if (!payload) { log("dialog sent something that is not a sign-in: " + String(arg.message).slice(0, 80), "err"); return; }
+          try { dialog.close(); } catch (e) { /* already closed */ }
+          dialog = null;
+          onCredential(payload);
+        });
+        dialog.addEventHandler(Office.EventType.DialogEventReceived, function (arg) {
+          var code = arg.error;
+          dialog = null;
+          if (code === 12006) { log("sign-in window closed before finishing"); if (!cred) setStatus("Sign-in cancelled. Sign in to connect.", "bad"); return; }
+          log("dialog event " + code, "err");
+          setStatus("The sign-in window could not load (" + code + "). Try again.", "bad");
+        });
+      });
+      return;
+    }
+    signInPopup(url);
+  }
+
+  function signInPopup(url) {
+    log("opening sign-in popup (no dialog API)");
+    setStatus("Signing in… complete the Microsoft sign-in in the window that opened.");
+    pendingPopup = window.open(url, "hub-signin", "popup,width=520,height=680");
+    if (!pendingPopup) { setStatus("The browser blocked the sign-in window. Allow pop-ups for this site and try again.", "bad"); }
+  }
+  window.addEventListener("message", function (ev) {
+    if (ev.origin !== location.origin) return;
+    var payload = parsePayload(ev.data);
+    if (!payload) return;
+    try { if (pendingPopup && !pendingPopup.closed) pendingPopup.close(); } catch (e) { /* cross-window close refused */ }
+    pendingPopup = null;
+    onCredential(payload);
+  });
+
+  function parsePayload(raw) {
+    var p = raw;
+    if (typeof raw === "string") { try { p = JSON.parse(raw); } catch (e) { return null; } }
+    if (!p || typeof p.token !== "string" || !p.token) return null;
+    if (p.connector && p.connector !== CONNECTOR) { log("sign-in was for connector " + p.connector, "err"); return null; }
+    return { token: p.token, user: String(p.user || ""), expires_at: String(p.expires_at || "") };
+  }
+
+  function onCredential(c) {
+    cred = c;
+    renderAccount();
+    log("signed in as " + (c.user || "?") + (c.expires_at ? ", until " + c.expires_at.slice(0, 10) : ""));
+    saveCredential(c).then(function () {
+      replaced = false;
+      reconnectDelay = RECONNECT_MIN_MS;
+      if (ws && ws.readyState !== WebSocket.CLOSED) ws.close(); else connect();
+    });
+  }
+
+  // --- Sign out ----------------------------------------------------------------------------
+  // Forget the token here and revoke it on the hub (best effort: a hub that cannot be reached
+  // still lets the token expire, and the kill switch covers the rest).
+  function signOut() {
+    var old = cred;
+    cred = null;
+    renderAccount();
+    signingOut = true;
+    if (ws && ws.readyState !== WebSocket.CLOSED) ws.close(1000, "signed out");
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+    storage().remove(CRED_KEY);
+    setStatus("Signed out. Sign in to connect.");
+    log("signed out");
+    if (!old) return;
+    fetch(REVOKE_URL, {
+      method: "POST", keepalive: true,
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: "token=" + encodeURIComponent(old.token)
+    }).then(function (r) { log("revoked on the MCP Server: HTTP " + r.status); },
+            function (e) { log("could not revoke on the MCP Server (" + e.message + "); it expires on its own", "err"); });
+  }
+
+  // The hub refused the token: it was revoked (sign-out elsewhere, kill switch) or expired.
+  // Forget it so the pane shows Sign in instead of retrying a dead credential.
+  function credentialRejected(reason) {
+    cred = null;
+    renderAccount();
+    storage().remove(CRED_KEY);
+    setStatus("The MCP Server rejected the sign-in (" + reason + "). Sign in again.", "bad");
+  }
+
+  signInBtn.onclick = signIn;
+  document.getElementById("sign-out").onclick = signOut;
 
   function send(method, params) {
     if (ws && ws.readyState === WebSocket.OPEN) {
@@ -99,7 +275,8 @@
   function connect() {
     if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
     if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
-    if (!token()) { setStatus("Paste the MCP Server token and click Save.", "bad"); return; }
+    if (!cred) { setStatus("Sign in to connect this workbook to the MCP Server."); return; }
+    signingOut = false;
     setStatus("Connecting to " + WS_URL + " …");
     try {
       ws = new WebSocket(WS_URL);
@@ -110,9 +287,10 @@
       return;
     }
     ws.onopen = function () {
+      if (!cred) { ws.close(1000, "signed out"); return; }
       send("hello", {
         connector: CONNECTOR, protocol_version: PROTOCOL_VERSION, bridge_version: BRIDGE_VERSION,
-        instance_id: instanceId, host: hostInfo(), documents: documents, token: token()
+        instance_id: instanceId, host: hostInfo(), documents: documents, token: cred.token
       });
       reconnectDelay = RECONNECT_MIN_MS;
       setStatus("Connected. Waiting for scripts.", "ok");
@@ -121,9 +299,15 @@
     ws.onclose = function (ev) {
       var why = "code " + ev.code + (ev.reason ? ", " + ev.reason : "");
       log("closed: " + why + " clean=" + ev.wasClean);
+      if (signingOut) { signingOut = false; return; }
+      if (!cred) { setStatus("Signed out."); return; }
       if (replaced) { setStatus("Replaced by a newer connection. Click Reconnect to take over.", "bad"); return; }
       // 1008 is how the hub refuses a hello (bad token, wrong version); retrying will not help.
-      if (ev.code === 1008) { setStatus("Rejected by the MCP Server (" + (ev.reason || "policy violation") + "). Check the token, then Reconnect.", "bad"); return; }
+      if (ev.code === 1008) {
+        if (/token rejected/.test(ev.reason || "")) { credentialRejected(ev.reason); return; }
+        setStatus("Rejected by the MCP Server (" + (ev.reason || "policy violation") + ").", "bad");
+        return;
+      }
       setStatus("Disconnected (" + why + "). Reconnecting…", "bad");
       scheduleReconnect();
     };
@@ -154,7 +338,7 @@
   }
 
   function scheduleReconnect() {
-    if (replaced || reconnectTimer) return;
+    if (replaced || reconnectTimer || !cred) return;
     reconnectTimer = setTimeout(function () { reconnectTimer = null; connect(); }, reconnectDelay);
     reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX_MS);
   }
@@ -250,10 +434,20 @@
   document.getElementById("reconnect").onclick = function () { replaced = false; reconnectDelay = RECONNECT_MIN_MS; if (ws && ws.readyState !== WebSocket.CLOSED) ws.close(); connect(); };
   document.getElementById("clear").onclick = function () { logEl.textContent = ""; };
 
+  // The stored credential is read once Office is ready (OfficeRuntime.storage needs it), then
+  // the socket comes up if there is one; otherwise the pane waits for Sign in.
+  function start() {
+    loadCredential().then(function (c) {
+      cred = c;
+      renderAccount();
+      connect();
+    });
+  }
+
   var readyFired = false;
-  // Outside a host (plain tab, probe) Office.onReady may never fire; still bring the socket up.
+  // Outside a host (plain tab, probe) Office.onReady may never fire; still bring the pane up.
   setTimeout(function () {
-    if (!readyFired) { log("Office.onReady did not fire within 5s; connecting anyway", "err"); connect(); }
+    if (!readyFired) { log("Office.onReady did not fire within 5s; starting anyway", "err"); start(); }
   }, 5000);
 
   Office.onReady(function (info) {
@@ -263,11 +457,11 @@
       "\nExcelApi " + highestExcelApi() + "\ninstance " + instanceId;
     if (typeof Excel === "undefined" || !info.host) {
       log("not inside Excel (host=" + info.host + "); scripts will fail but the socket will connect", "err");
-      connect();
+      start();
       return;
     }
     refreshDocuments(function () {
-      connect();
+      start();
       // Sheet switches re-register so the hub's view of the active sheet stays live.
       Excel.run(function (context) {
         context.workbook.worksheets.onActivated.add(function () { register(); return Promise.resolve(); });

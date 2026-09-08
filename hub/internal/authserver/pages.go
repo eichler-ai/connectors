@@ -4,10 +4,13 @@ import (
 	"net/http"
 )
 
-// Server-rendered pages: sign-in, consent, error. They present the service
-// as "Eichler Connectors" (CONVENTIONS.md) and stay plain enough to load in
-// the small popup Claude Desktop opens and in the browser tab Claude Code
-// and claude.ai send the user to. No script, no external assets.
+// Server-rendered pages: sign-in, consent, error, and the pane's
+// bridge-token hand-off. They present the service as "Eichler Connectors"
+// (CONVENTIONS.md) and stay plain enough to load in the small popup Claude
+// Desktop opens, in the browser tab Claude Code and claude.ai send the user
+// to, and in the Office dialog. No script and no external assets, except on
+// the bridge-token page, which needs Office.js and one nonce'd inline
+// script to hand the token to the add-in.
 const pages = `
 {{define "head"}}<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{.Title}} — Eichler Connectors</title>
@@ -48,6 +51,61 @@ ul{padding-left:1.2rem}code{background:#f0f0ee;padding:.1em .3em;border-radius:4
 <p>{{.Message}}</p>
 <p class="muted">Close this window and try connecting again from your Claude client.</p>
 {{template "foot" .}}{{end}}
+
+{{define "bridge_token"}}{{template "head" .}}
+<h1>Signed in</h1>
+<p>Connecting <strong>{{.ConnectorName}}</strong> as <strong>{{.UserName}}</strong>…</p>
+<p class="muted" id="hint">This window closes by itself.</p>
+<script nonce="{{.ScriptNonce}}" src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+<script nonce="{{.ScriptNonce}}">
+(function () {
+  // The token exists in this page only as the argument of the hand-off
+  // below; the response is no-store and the window closes when delivered.
+  var message = JSON.stringify({{.Payload}});
+  var delivered = false;
+  var hint = document.getElementById("hint");
+  // Office dialog (the pane used displayDialogAsync): messageParent reaches
+  // the pane's DialogMessageReceived handler and the pane closes the dialog.
+  function viaOffice() {
+    if (delivered) return true;
+    try {
+      if (window.Office && Office.context && Office.context.ui && Office.context.ui.messageParent) {
+        Office.context.ui.messageParent(message);
+        delivered = true;
+        return true;
+      }
+    } catch (e) { /* not a dialog after all; try the opener */ }
+    return false;
+  }
+  // Plain popup (window.open from a pane without the dialog API): a
+  // same-origin postMessage to the opener, then close ourselves.
+  function viaOpener() {
+    if (delivered) return true;
+    if (!window.opener) return false;
+    try {
+      window.opener.postMessage(message, location.origin);
+      delivered = true;
+      window.close();
+      return true;
+    } catch (e) { return false; }
+  }
+  function fail() {
+    if (!delivered) hint.textContent = "Could not hand the sign-in back to the add-in. Close this window and try again.";
+  }
+  if (window.Office && Office.onReady) {
+    Office.onReady(function (info) {
+      // Outside an Office host onReady still resolves, with no host; the
+      // opener path is the right one then.
+      if (info && info.host) { if (!viaOffice() && !viaOpener()) fail(); }
+      else if (!viaOpener() && !viaOffice()) fail();
+    });
+  } else if (!viaOpener()) {
+    fail();
+  }
+  setTimeout(function () { if (!delivered && !viaOffice() && !viaOpener()) fail(); }, 4000);
+})();
+</script>
+{{template "foot" .}}{{end}}
 `
 
 type pageData struct {
@@ -66,7 +124,19 @@ type pageData struct {
 	// and the client never receives its code (found live with Claude Code).
 	// So the consent page, and only it, lists the redirect_uri's origin.
 	FormActionOrigins []string
+
+	// The bridge-token page only. ScriptNonce admits its two scripts (the
+	// Office.js load and the inline hand-off) under an otherwise script-free
+	// CSP; Payload is what the add-in receives; the names are for the user.
+	ScriptNonce   string
+	Payload       any
+	ConnectorName string
+	UserName      string
 }
+
+// officeJSOrigin hosts Office.js and the locale/mapping scripts it loads
+// after itself, which is why the CSP names the origin and not the one URL.
+const officeJSOrigin = "https://appsforoffice.microsoft.com"
 
 func (s *Server) render(w http.ResponseWriter, status int, name string, d pageData) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -76,7 +146,15 @@ func (s *Server) render(w http.ResponseWriter, status int, name string, d pageDa
 	for _, o := range d.FormActionOrigins {
 		formAction += " " + o
 	}
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action "+formAction+"; frame-ancestors 'none'")
+	// frame-ancestors 'none' stays on every page including the bridge-token
+	// one: Office opens a dialog as its own window (displayDialogAsync's
+	// displayInIframe defaults to false and the pane never sets it; desktop
+	// hosts use a native window), so the page is never framed.
+	csp := "default-src 'none'; style-src 'unsafe-inline'; form-action " + formAction + "; frame-ancestors 'none'"
+	if d.ScriptNonce != "" {
+		csp += "; script-src 'nonce-" + d.ScriptNonce + "' " + officeJSOrigin
+	}
+	w.Header().Set("Content-Security-Policy", csp)
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.WriteHeader(status)
 	if err := s.tmpl.ExecuteTemplate(w, name, d); err != nil {

@@ -15,11 +15,11 @@ import (
 // Firestore is the deployed Store (PRD §11). One document per record, the
 // record's hash or id as the document id, and the atomic steps as
 // transactions. Expiry is a Firestore TTL policy on `expires_at` for
-// auth_codes, login_states and refresh_tokens (deploy.sh sets it); reads
-// still check the field themselves because TTL deletion lags by up to a
-// day. No ORM, no indexes beyond the automatic single-field ones: the two
-// multi-field lookups (family revocation, unused-client collection) filter
-// the second field in code.
+// auth_codes, login_states, refresh_tokens and bridge_tokens (deploy.sh
+// sets it); reads still check the field themselves because TTL deletion
+// lags by up to a day. No ORM, no indexes beyond the automatic single-field
+// ones: the two multi-field lookups (family revocation, unused-client
+// collection) filter the second field in code.
 type Firestore struct {
 	c *firestore.Client
 }
@@ -32,6 +32,7 @@ const (
 	colStates     = "login_states"
 	colCodes      = "auth_codes"
 	colRefresh    = "refresh_tokens"
+	colBridge     = "bridge_tokens"
 )
 
 // NewFirestore connects to database in project ("(default)" when database
@@ -64,7 +65,11 @@ func (f *Firestore) UserByIdentity(ctx context.Context, provider, subject string
 	if err := ds.DataTo(&link); err != nil {
 		return User{}, err
 	}
-	us, err := f.c.Collection(colUsers).Doc(link.UserID).Get(ctx)
+	return f.User(ctx, link.UserID)
+}
+
+func (f *Firestore) User(ctx context.Context, id string) (User, error) {
+	us, err := f.c.Collection(colUsers).Doc(id).Get(ctx)
 	if err != nil {
 		if notFound(err) {
 			return User{}, ErrNotFound
@@ -291,7 +296,56 @@ func (f *Firestore) RevokeUser(ctx context.Context, userID string) (int, error) 
 		}
 		n++
 	}
+	// Bridge tokens are deleted rather than flagged (see store.BridgeToken).
+	docs, err = f.c.Collection(colBridge).Where("user_id", "==", userID).Documents(ctx).GetAll()
+	if err != nil {
+		return n, err
+	}
+	for _, d := range docs {
+		if _, err := d.Ref.Delete(ctx); err != nil {
+			return n, err
+		}
+		n++
+	}
 	return n, nil
+}
+
+func (f *Firestore) PutBridgeToken(ctx context.Context, t BridgeToken) error {
+	_, err := f.c.Collection(colBridge).Doc(t.Hash).Set(ctx, t)
+	return err
+}
+
+func (f *Firestore) BridgeToken(ctx context.Context, hash string) (BridgeToken, error) {
+	ds, err := f.c.Collection(colBridge).Doc(hash).Get(ctx)
+	if err != nil {
+		if notFound(err) {
+			return BridgeToken{}, ErrNotFound
+		}
+		return BridgeToken{}, err
+	}
+	var t BridgeToken
+	if err := ds.DataTo(&t); err != nil {
+		return BridgeToken{}, err
+	}
+	if t.ExpiresAt.Before(time.Now()) {
+		return BridgeToken{}, ErrNotFound
+	}
+	return t, nil
+}
+
+func (f *Firestore) TouchBridgeToken(ctx context.Context, hash string, at time.Time) error {
+	_, err := f.c.Collection(colBridge).Doc(hash).Update(ctx, []firestore.Update{{Path: "last_used_at", Value: at}})
+	if notFound(err) {
+		return ErrNotFound
+	}
+	return err
+}
+
+func (f *Firestore) RevokeBridgeToken(ctx context.Context, hash string) error {
+	// Delete of a missing document succeeds in Firestore, matching the
+	// contract.
+	_, err := f.c.Collection(colBridge).Doc(hash).Delete(ctx)
+	return err
 }
 
 func (f *Firestore) Close() error { return f.c.Close() }

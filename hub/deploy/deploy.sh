@@ -16,16 +16,18 @@
 #
 # Uses the custom domain (prod) or the deterministic Cloud Run URL (staging)
 # as the public URL, and pulls the environment's secrets from
-# Secret Manager: HUB_DEV_TOKEN (the bridge hello token until pane sign-in
-# lands) and the JWT signing key, both created with fresh random values the
-# first time this runs for an environment, plus the Entra client secret,
-# which is created by hand (it comes from the Entra portal) and only checked
-# here. No secret value is ever printed.
+# Secret Manager: HUB_DEV_TOKEN (the phase-0 bridge hello token, still
+# accepted as a fallback for panes that have not signed in; drop it from
+# --set-secrets once every pane signs in) and the JWT signing key, both
+# created with fresh random values the first time this runs for an
+# environment, plus the Entra client secret, which is created by hand (it
+# comes from the Entra portal) and only checked here. No secret value is
+# ever printed.
 #
 # Firestore (PRD §11): prod uses the project's (default) database; staging
 # gets its own database so test users and tokens never share collections
-# with production. TTL policies on expires_at keep auth_codes, login_states
-# and refresh_tokens from accumulating.
+# with production. TTL policies on expires_at keep auth_codes, login_states,
+# refresh_tokens and bridge_tokens from accumulating.
 set -euo pipefail
 
 usage() {
@@ -142,7 +144,7 @@ if [ "$FIRESTORE_DB" != "(default)" ] && ! gcloud firestore databases describe -
   echo "==> [$ENV] creating Firestore database ${FIRESTORE_DB}"
   gcloud firestore databases create --database="$FIRESTORE_DB" --location="$REGION" --type=firestore-native --project="$PROJECT" >/dev/null
 fi
-for col in auth_codes login_states refresh_tokens; do
+for col in auth_codes login_states refresh_tokens bridge_tokens; do
   # Idempotent: re-enabling an enabled TTL is a no-op. Runs async on
   # Google's side; --async keeps the deploy moving.
   gcloud firestore fields ttls update expires_at --collection-group="$col" --database="$FIRESTORE_DB" \

@@ -1,6 +1,7 @@
 // Package store persists the authorization server's records (PRD §11):
-// users, OAuth clients, authorization codes, refresh tokens and the in-flight
-// login state. Two implementations: Memory for -dev and tests, Firestore for
+// users, OAuth clients, authorization codes, refresh tokens, the panes'
+// bridge tokens and the in-flight login state. Two implementations: Memory
+// for -dev and tests, Firestore for
 // the deployment. The interface is deliberately shaped around the protocol's
 // atomic steps (consume a code, rotate a refresh token) rather than generic
 // get/put, so the reuse-detection guarantees live in one place per backend.
@@ -50,10 +51,16 @@ type Client struct {
 }
 
 // LoginState is one in-flight /oauth/authorize request, from the moment the
-// parameters validated until the consent decision. Keyed by a random id that
-// travels through the sign-in redirects as the provider's `state`.
+// parameters validated until the consent decision — or one in-flight pane
+// sign-in (Return set, no client), which ends at the bridge-token page
+// instead of consent. Keyed by a random id that travels through the sign-in
+// redirects as the provider's `state`.
 type LoginState struct {
-	ID            string    `firestore:"id"`
+	ID string `firestore:"id"`
+	// Return is a hub-local path the login callback sends the user to
+	// instead of the consent page; set only by the pane's mint flow
+	// (/bridge/authorize), and then the OAuth fields below are empty.
+	Return        string    `firestore:"return,omitempty"`
 	ClientID      string    `firestore:"client_id"`
 	ClientName    string    `firestore:"client_name"`
 	RedirectURI   string    `firestore:"redirect_uri"`
@@ -97,10 +104,30 @@ type RefreshToken struct {
 	Revoked   bool      `firestore:"revoked"`
 }
 
+// BridgeToken is the pane's long-lived credential (§06 path 1, §18.8):
+// minted when the user signs in inside the extension, presented in every
+// WebSocket hello, 90 days, revocable. Stored by hash like a refresh token.
+// Revocation deletes the record — there is no rotation or reuse detection
+// to preserve, and a deleted token reads back as ErrNotFound, which is all
+// the verifier needs.
+type BridgeToken struct {
+	Hash      string `firestore:"hash"`
+	UserID    string `firestore:"user_id"`
+	Connector string `firestore:"connector"`
+	// Label is what the extension said about itself at mint time (host and
+	// platform), for a future "your connected apps" list; free text, bounded.
+	Label      string    `firestore:"label,omitempty"`
+	CreatedAt  time.Time `firestore:"created_at"`
+	ExpiresAt  time.Time `firestore:"expires_at"`
+	LastUsedAt time.Time `firestore:"last_used_at"`
+}
+
 // Store is what the authorization server needs from persistence.
 type Store interface {
 	// UserByIdentity finds the user for a provider subject, or ErrNotFound.
 	UserByIdentity(ctx context.Context, provider, subject string) (User, error)
+	// User finds a user by the hub's own id, or ErrNotFound.
+	User(ctx context.Context, id string) (User, error)
 	// PutUser creates or replaces the user and its identity lookup entry.
 	PutUser(ctx context.Context, u User) error
 
@@ -130,9 +157,22 @@ type Store interface {
 	RotateRefreshToken(ctx context.Context, oldHash string, now time.Time, next RefreshToken) (RefreshToken, error)
 	// RevokeFamily revokes every refresh token minted from one code.
 	RevokeFamily(ctx context.Context, familyID string) error
-	// RevokeUser revokes every refresh token of a user (the §13 kill switch;
-	// outstanding access tokens expire on their own within 15 minutes).
+	// RevokeUser revokes every refresh token and deletes every bridge token
+	// of a user (the §13 kill switch; outstanding access tokens expire on
+	// their own within 15 minutes, and a pane's socket ends at its next
+	// reconnect). Returns how many tokens of both kinds it touched.
 	RevokeUser(ctx context.Context, userID string) (int, error)
+
+	PutBridgeToken(ctx context.Context, t BridgeToken) error
+	// BridgeToken looks a token up by hash; unknown, revoked and expired
+	// all read as ErrNotFound.
+	BridgeToken(ctx context.Context, hash string) (BridgeToken, error)
+	// TouchBridgeToken records a successful hello. Best effort by contract:
+	// callers log its error and carry on.
+	TouchBridgeToken(ctx context.Context, hash string, at time.Time) error
+	// RevokeBridgeToken deletes the token; revoking an unknown hash is not
+	// an error (the pane's sign-out must not fail on a token already gone).
+	RevokeBridgeToken(ctx context.Context, hash string) error
 
 	Close() error
 }

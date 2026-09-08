@@ -2,8 +2,9 @@
 // bridge handler and the MCP endpoints only ever see an Authenticator and a
 // Principal. Phase 1 fills the access-token half with JWTs minted by the
 // hub's own authorization server (PRD §06; JWT here, the server in
-// hub/internal/authserver); the bridge-token half is still the phase-0 dev
-// token until pane sign-in lands (unit 2).
+// hub/internal/authserver) and the bridge-token half with the store-backed
+// tokens pane sign-in mints (authserver.BridgeVerifier); the phase-0 dev
+// token remains as an optional fallback for -dev and the transition.
 //
 // It sits at the repository's internal/ rather than hub/internal/ because a
 // connector package's tests build a hub with the dev token, and Go's internal
@@ -29,8 +30,10 @@ type Principal struct {
 	// (§13). No other field of the identity record is needed by the hub core.
 	UserID string
 	// Scopes are the connector slugs the token grants (§18.3: one audience,
-	// per-connector scopes). Empty for a bridge token, which is scoped by
-	// the socket it arrives on.
+	// per-connector scopes). For a bridge token minted by pane sign-in it is
+	// the one connector the token was bound to, and the bridge handler
+	// refuses a hello on any other connector's socket; the dev token leaves
+	// it empty, meaning any connector.
 	Scopes []string
 	// Expires is when the presented token stops being valid, or zero for a
 	// token whose lifetime is managed elsewhere (the dev token).
@@ -53,8 +56,8 @@ type Authenticator interface {
 }
 
 // Split routes each token kind to its own verifier, so the JWT verifier
-// (access) and the dev token (bridge, until unit 2) compose into the one
-// Authenticator the hub takes.
+// (access) and the bridge-token verifier compose into the one Authenticator
+// the hub takes.
 type Split struct {
 	Access Authenticator
 	Bridge Authenticator
@@ -71,8 +74,10 @@ func (s Split) VerifyBridgeToken(ctx context.Context, token string) (Principal, 
 // DevToken is the phase-0 stand-in: one shared secret from HUB_DEV_TOKEN,
 // one fixed user derived from it. Since phase 1 it verifies bridge hellos
 // only — the MCP endpoints take the authorization server's JWTs and nothing
-// else — and it goes away entirely when the pane signs in (unit 2). It is
-// not a production identity: the token is never written to a log.
+// else — and since pane sign-in it is optional: a fallback the store-backed
+// verifier tries after its own lookup, for -dev hubs and bridge-side tests
+// that want one identity on both ends without a sign-in. It is not a
+// production identity: the token is never written to a log.
 type DevToken struct {
 	token  string
 	userID string
