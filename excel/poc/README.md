@@ -88,10 +88,10 @@ an evicted client now stands down instead of reconnecting (newest connection win
 ## Hosted deployment
 
 `Dockerfile` + `gcloud run deploy excel-bridge --source .` (project `eichler-ai`, us-central1, one
-always-on instance) serves the same binary at https://mcp.eichler.ai/excel with `BRIDGE_PREFIX`,
+always-on instance) serves the same binary at https://connectors.eichler.ai/excel with `BRIDGE_PREFIX`,
 `BRIDGE_PUBLIC_URL` and `BRIDGE_TOKEN` in the environment. `/exec` and `/status` require
 `Authorization: Bearer $BRIDGE_TOKEN`; the manifest is rewritten to the public URL with its own Id.
-CLI: `BRIDGE_TOKEN=... excel-bridge run -url https://mcp.eichler.ai/excel script.js`.
+CLI: `BRIDGE_TOKEN=... excel-bridge run -url https://connectors.eichler.ai/excel script.js`.
 
 ## Findings so far (Excel for the web, Chrome, 2026-09-07)
 
