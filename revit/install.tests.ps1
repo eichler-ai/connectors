@@ -372,6 +372,70 @@ Describe 'Versioned add-in layout (self-update-architecture.md §4): pointer, ve
     }
 }
 
+Describe 'Add-in shared-payload dedup (issue B1)' {
+    BeforeEach {
+        $script:stage = Join-Path $TestDrive "stage-$([guid]::NewGuid())"
+        # Two year payloads sharing three files byte-for-byte (Roslyn, a locale satellite, the .xml
+        # sidecar) but each carrying its own, differing AddIn.dll + deps.json.
+        New-Payload (Join-Path $stage 'addin-2025') @{
+            'MCPBridge.AddIn.dll' = 'addin-net8'; 'MCPBridge.AddIn.deps.json' = 'deps-net8'
+            'Microsoft.CodeAnalysis.dll' = 'roslyn'; 'de/Microsoft.CodeAnalysis.resources.dll' = 'de-res'
+            'Eichler.Connectors.Revit.xml' = 'apidoc'
+        }
+        New-Payload (Join-Path $stage 'addin-2027') @{
+            'MCPBridge.AddIn.dll' = 'addin-net10'; 'MCPBridge.AddIn.deps.json' = 'deps-net10'
+            'Microsoft.CodeAnalysis.dll' = 'roslyn'; 'de/Microsoft.CodeAnalysis.resources.dll' = 'de-res'
+            'Eichler.Connectors.Revit.xml' = 'apidoc'
+        }
+    }
+
+    It 'moves files identical across years into addin-shared and strips them from each year folder' {
+        $r = Split-AddinSharedPayload $stage
+        $r.FileCount | Should -Be 3
+        $shared = Join-Path $stage 'addin-shared'
+        Get-Content (Join-Path $shared 'Microsoft.CodeAnalysis.dll') -Raw | Should -Be 'roslyn'
+        Test-Path (Join-Path $shared 'de/Microsoft.CodeAnalysis.resources.dll') | Should -BeTrue
+        Get-Content (Join-Path $shared 'Eichler.Connectors.Revit.xml') -Raw | Should -Be 'apidoc'
+        Test-Path (Join-Path $stage 'addin-2025/Microsoft.CodeAnalysis.dll') | Should -BeFalse
+        Test-Path (Join-Path $stage 'addin-2027/Microsoft.CodeAnalysis.dll') | Should -BeFalse
+        Test-Path (Join-Path $stage 'addin-2025/de') | Should -BeFalse   # emptied subfolder pruned
+        Get-Content (Join-Path $stage 'addin-2025/MCPBridge.AddIn.dll') -Raw | Should -Be 'addin-net8'
+        Get-Content (Join-Path $stage 'addin-2027/MCPBridge.AddIn.dll') -Raw | Should -Be 'addin-net10'
+    }
+
+    It 'keeps same-named but differing files in each year and never shares them (deps.json is per-TFM)' {
+        Split-AddinSharedPayload $stage | Out-Null
+        Test-Path (Join-Path $stage 'addin-shared/MCPBridge.AddIn.deps.json') | Should -BeFalse
+        Get-Content (Join-Path $stage 'addin-2025/MCPBridge.AddIn.deps.json') -Raw | Should -Be 'deps-net8'
+        Get-Content (Join-Path $stage 'addin-2027/MCPBridge.AddIn.deps.json') -Raw | Should -Be 'deps-net10'
+    }
+
+    It 'is a no-op for a single-year stage (nothing to share)' {
+        Remove-Item (Join-Path $stage 'addin-2027') -Recurse -Force
+        Split-AddinSharedPayload $stage | Should -BeNullOrEmpty
+        Test-Path (Join-Path $stage 'addin-shared') | Should -BeFalse
+    }
+
+    It 'Install-AddinVersionPayload merges addin-shared + the year payload into the full version folder' {
+        Split-AddinSharedPayload $stage | Out-Null
+        $app = Join-Path $TestDrive "app-$([guid]::NewGuid())"
+        Install-AddinVersionPayload (Join-Path $stage 'addin-2027') $app 'v0.1.6' '2027' (Join-Path $stage 'addin-shared')
+        $dir = Get-AddinVersionDir $app 'v0.1.6' '2027'
+        Get-Content (Join-Path $dir 'MCPBridge.AddIn.dll') -Raw | Should -Be 'addin-net10'         # year-unique
+        Get-Content (Join-Path $dir 'Microsoft.CodeAnalysis.dll') -Raw | Should -Be 'roslyn'       # shared
+        Test-Path (Join-Path $dir 'de/Microsoft.CodeAnalysis.resources.dll') | Should -BeTrue       # shared subdir
+        Get-Content (Join-Path $dir 'Eichler.Connectors.Revit.xml') -Raw | Should -Be 'apidoc'      # shared sidecar
+        Get-Content (Join-Path $dir 'MCPBridge.AddIn.deps.json') -Raw | Should -Be 'deps-net10'     # year-unique
+    }
+
+    It 'still lays a full payload down when no addin-shared exists (single-year / pre-dedup package)' {
+        $app = Join-Path $TestDrive "app-$([guid]::NewGuid())"
+        # No split done: addin-2027 is a complete folder; a missing shared dir must be tolerated.
+        Install-AddinVersionPayload (Join-Path $stage 'addin-2027') $app 'v0.1.6' '2027' (Join-Path $stage 'no-such-shared')
+        Get-Content (Join-Path (Get-AddinVersionDir $app 'v0.1.6' '2027') 'Microsoft.CodeAnalysis.dll') -Raw | Should -Be 'roslyn'
+    }
+}
+
 Describe 'Add-DesktopMcpServer / Remove-DesktopMcpServer' {
     BeforeEach {
         $script:cfgDir = Join-Path $TestDrive "claude-$([guid]::NewGuid())"
