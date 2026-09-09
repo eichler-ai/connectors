@@ -21,13 +21,24 @@ func TestResolveScript_Inline(t *testing.T) {
 	}
 }
 
-func TestResolveScript_InlineTrimmed(t *testing.T) {
-	got, rec := resolveScript(context.Background(), "  \n"+sampleScript+"\n  ", "")
+func TestResolveScript_InlinePreservedVerbatim(t *testing.T) {
+	in := "  \n" + sampleScript + "\n  "
+	got, rec := resolveScript(context.Background(), in, "")
+	if rec != nil {
+		t.Fatalf("unexpected record: %+v", rec)
+	}
+	if got != in {
+		t.Fatalf("inline script must run verbatim; got %q, want %q", got, in)
+	}
+}
+
+func TestResolveScript_InlineStripsBOM(t *testing.T) {
+	got, rec := resolveScript(context.Background(), string(utf8BOM)+sampleScript, "")
 	if rec != nil {
 		t.Fatalf("unexpected record: %+v", rec)
 	}
 	if got != sampleScript {
-		t.Fatalf("got %q, want trimmed %q", got, sampleScript)
+		t.Fatalf("inline BOM not stripped: got %q", got)
 	}
 }
 
@@ -186,5 +197,61 @@ func TestResolveScript_URLOversize(t *testing.T) {
 func TestResolveScript_DriveLetterIsNotURL(t *testing.T) {
 	if isHTTPRef(`C:\scripts\walls.cs`) {
 		t.Fatal("drive-letter path misclassified as URL")
+	}
+}
+
+func TestResolveScript_NonRegularFileRejected(t *testing.T) {
+	dir := t.TempDir() // absolute and exists, but a directory, not a regular file
+	_, rec := resolveScript(context.Background(), "", dir)
+	if rec == nil || rec.Code != "script-path-not-a-file" {
+		t.Fatalf("want script-path-not-a-file, got %+v", rec)
+	}
+}
+
+func TestResolveScript_URLInvalid(t *testing.T) {
+	_, rec := resolveScript(context.Background(), "", "https://host:notaport/x.cs")
+	if rec == nil || rec.Code != "script-url-invalid" {
+		t.Fatalf("want script-url-invalid, got %+v", rec)
+	}
+}
+
+func TestResolveScript_URLFetchFailed(t *testing.T) {
+	// loopback http (scheme allowed) with nothing listening → Do error
+	_, rec := resolveScript(context.Background(), "", "http://127.0.0.1:1/walls.cs")
+	if rec == nil || rec.Code != "script-url-fetch-failed" {
+		t.Fatalf("want script-url-fetch-failed, got %+v", rec)
+	}
+}
+
+// The security-critical branch: an allowed initial URL that redirects to a
+// non-loopback http host must be blocked, not silently followed.
+func TestResolveScript_URLRedirectToNonLoopbackBlocked(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "http://192.0.2.1/evil.cs", http.StatusFound) // TEST-NET-1, non-loopback http
+	}))
+	defer srv.Close()
+	_, rec := resolveScript(context.Background(), "", srv.URL)
+	if rec == nil || rec.Code != "script-url-fetch-failed" {
+		t.Fatalf("redirect to non-loopback http must be blocked; got %+v", rec)
+	}
+}
+
+// A redirect to an allowed (loopback) host is still followed, so legitimate
+// redirecting URLs keep working.
+func TestResolveScript_URLRedirectToLoopbackAllowed(t *testing.T) {
+	final := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(sampleScript))
+	}))
+	defer final.Close()
+	redir := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, final.URL, http.StatusFound)
+	}))
+	defer redir.Close()
+	got, rec := resolveScript(context.Background(), "", redir.URL)
+	if rec != nil {
+		t.Fatalf("loopback redirect should be followed: %+v", rec)
+	}
+	if got != sampleScript {
+		t.Fatalf("got %q", got)
 	}
 }
