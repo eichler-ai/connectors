@@ -24,13 +24,21 @@ const scriptSourceName = "mcp-server.internal.mcpserver"
 // KBs in practice; this ceiling is generous but keeps a stray large file or a
 // runaway URL well under the 64 MiB NDJSON wire framing limit (transport
 // package) and off the agent's shoulders entirely. A var, not a const, so
-// tests can shrink it without writing multi-megabyte fixtures.
+// tests can shrink it without writing multi-megabyte fixtures. Those tests
+// reassign it under a defer-restore, so this package's tests must stay
+// non-parallel for that to remain race-free.
 var maxScriptSourceBytes int64 = 8 << 20 // 8 MiB
 
 // scriptFetchTimeout bounds a script_path URL fetch, independent of the
 // script's own execution timeout. Resolution is a small text GET; it should
 // never hold the tool call open for long.
 const scriptFetchTimeout = 30 * time.Second
+
+// scriptReadTimeout bounds a local script_path read the same way, so a regular
+// file on a hung/slow network mount (a mapped drive on the Windows connector
+// host) can't block the tool call the way an unbounded os.Open/io.ReadAll
+// would. Mirrors scriptFetchTimeout for the URL branch.
+const scriptReadTimeout = 30 * time.Second
 
 // utf8BOM is the byte-order mark Windows editors and PowerShell prepend to
 // UTF-8 files. Left in place it becomes a leading U+FEFF in the script text
@@ -58,9 +66,10 @@ func resolveScript(ctx context.Context, script, scriptPath string) (string, *dia
 			"neither script nor script_path was provided").
 			WithRemedy("pass the C# inline as script, or an absolute local path or https URL as script_path")
 	case haveScript:
-		// Inline runs verbatim (its prior behavior); only a leading BOM is
-		// stripped, the same as the file/URL path, so a BOM can't reach Roslyn
-		// from either input.
+		// Inline runs as sent, with one exception: a leading UTF-8 BOM is
+		// stripped (the sole change from the prior verbatim pass-through), the
+		// same as the file/URL path, so a BOM can't reach Roslyn from either
+		// input.
 		return stripBOM([]byte(script)), nil
 	}
 
@@ -73,7 +82,7 @@ func resolveScript(ctx context.Context, script, scriptPath string) (string, *dia
 	if isHTTPRef(scriptPath) {
 		raw, rec = fetchScriptURL(ctx, scriptPath)
 	} else {
-		raw, rec = readScriptFile(scriptPath)
+		raw, rec = readScriptFile(ctx, scriptPath)
 	}
 	if rec != nil {
 		return "", rec
@@ -97,39 +106,59 @@ func isHTTPRef(ref string) bool {
 }
 
 // readScriptFile reads an absolute local path, capped at maxScriptSourceBytes.
-func readScriptFile(path string) ([]byte, *diag.Record) {
+// The whole filesystem interaction (stat, regular-file check, open, read) runs
+// under scriptReadTimeout so a hung/slow mount can't block the tool call; a
+// regular-file check also rejects a FIFO/device/directory up front with a
+// clear error rather than a confusing read failure.
+func readScriptFile(ctx context.Context, path string) ([]byte, *diag.Record) {
 	if !filepath.IsAbs(path) {
 		return nil, diag.New(diag.SeverityError, "script-path-not-absolute", scriptSourceName,
 			fmt.Sprintf("script_path %q is not absolute", path)).
 			WithRemedy(`pass an absolute path (e.g. C:\scripts\walls.cs on Windows, /Users/you/walls.cs on macOS)`)
 	}
-	// Require a regular file: a FIFO or a character device (/dev/stdin) would
-	// block the read with no timeout, and a directory opens fine only to fail
-	// with a confusing read error. Reject all of those up front, clearly.
-	info, err := os.Stat(path)
-	if err != nil {
-		return nil, diag.New(diag.SeverityError, "script-file-unreadable", scriptSourceName,
-			fmt.Sprintf("could not stat script_path %q: %v", path, err)).
-			WithRemedy("check the path exists on the connector's host and is readable")
-	}
-	if !info.Mode().IsRegular() {
-		return nil, diag.New(diag.SeverityError, "script-path-not-a-file", scriptSourceName,
-			fmt.Sprintf("script_path %q is not a regular file", path)).
-			WithRemedy("point script_path at a regular file, not a directory, pipe, or device")
-	}
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, diag.New(diag.SeverityError, "script-file-unreadable", scriptSourceName,
-			fmt.Sprintf("could not open script_path %q: %v", path, err)).
-			WithRemedy("check the path exists on the connector's host and is readable")
-	}
-	defer f.Close()
 
-	raw, rec := readCapped(f, fmt.Sprintf("script_path file %q", path))
-	if rec != nil {
-		return nil, rec
+	readCtx, cancel := context.WithTimeout(ctx, scriptReadTimeout)
+	defer cancel()
+
+	type readResult struct {
+		raw []byte
+		rec *diag.Record
 	}
-	return raw, nil
+	done := make(chan readResult, 1)
+	go func() {
+		info, err := os.Stat(path)
+		if err != nil {
+			done <- readResult{nil, diag.New(diag.SeverityError, "script-file-unreadable", scriptSourceName,
+				fmt.Sprintf("could not stat script_path %q: %v", path, err)).
+				WithRemedy("check the path exists on the connector's host and is readable")}
+			return
+		}
+		if !info.Mode().IsRegular() {
+			done <- readResult{nil, diag.New(diag.SeverityError, "script-path-not-a-file", scriptSourceName,
+				fmt.Sprintf("script_path %q is not a regular file", path)).
+				WithRemedy("point script_path at a regular file, not a directory, pipe, or device")}
+			return
+		}
+		f, err := os.Open(path)
+		if err != nil {
+			done <- readResult{nil, diag.New(diag.SeverityError, "script-file-unreadable", scriptSourceName,
+				fmt.Sprintf("could not open script_path %q: %v", path, err)).
+				WithRemedy("check the path exists on the connector's host and is readable")}
+			return
+		}
+		defer f.Close()
+		raw, rec := readCapped(f, fmt.Sprintf("script_path file %q", path))
+		done <- readResult{raw, rec}
+	}()
+
+	select {
+	case <-readCtx.Done():
+		return nil, diag.New(diag.SeverityError, "script-file-unreadable", scriptSourceName,
+			fmt.Sprintf("reading script_path %q timed out after %s", path, scriptReadTimeout)).
+			WithRemedy("the path may be on an unresponsive network mount; check it is reachable")
+	case r := <-done:
+		return r.raw, r.rec
+	}
 }
 
 // scriptHTTPClient fetches script_path URLs. Its CheckRedirect re-applies the
