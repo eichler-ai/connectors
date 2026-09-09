@@ -44,13 +44,16 @@ type bridgePayload struct {
 	ExpiresAt string `json:"expires_at"`
 }
 
-// bridgeAuthorize is GET /bridge/authorize?connector=<slug>[&label=…].
-// Signed out: straight to Microsoft, coming back here after. Signed in:
-// mint and hand off. Minting on a GET is deliberate — the dialog's first
-// navigation is the only request the pane makes — and safe because nobody
-// but the Office host or a same-origin opener can receive the page's
-// hand-off; a cross-site page that opens this URL only strands a token
-// nobody holds, and the mint is logged either way.
+// bridgeAuthorize is GET /bridge/authorize?connector=<slug>[&label=…]
+// [&switch=1]. Signed out: straight to Microsoft, coming back here after.
+// Signed in: mint and hand off — unless switch=1 (the pane's "Switch
+// account"), which clears the session first so the request is treated as
+// signed out and reaches the provider's chooser instead of the fast path.
+// Minting on a GET is deliberate — the dialog's first navigation is the
+// only request the pane makes — and safe because nobody but the Office
+// host or a same-origin opener can receive the page's hand-off; a
+// cross-site page that opens this URL only strands a token nobody holds,
+// and the mint is logged either way.
 func (s *Server) bridgeAuthorize(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	connector := q.Get("connector")
@@ -66,14 +69,23 @@ func (s *Server) bridgeAuthorize(w http.ResponseWriter, r *http.Request) {
 	if len(label) > maxBridgeLabel {
 		label = label[:maxBridgeLabel]
 	}
+	// Rebuilt from the validated values, never echoed from the request, and
+	// never carries switch/prompt: after the provider round trip the pane
+	// lands back here signed in, and must take the fast path rather than
+	// clearing the freshly set session again.
+	returnURL := "/bridge/authorize?" + url.Values{"connector": {connector}, "label": {label}}.Encode()
+	// ?switch=1 (or prompt=select_account, the OAuth-side spelling) is the
+	// pane's "Switch account" button: force the provider round trip even
+	// though a session exists, so its chooser fires instead of the fast
+	// path silently reusing whoever is signed in (the bug this fixes).
+	switchAccount := q.Get("switch") == "1" || q.Get("prompt") == "select_account"
 	userID := s.sessionUser(r)
+	if userID != "" && switchAccount {
+		s.clearSession(w)
+		userID = ""
+	}
 	if userID == "" {
-		ls := store.LoginState{
-			ID: randomToken(),
-			// Rebuilt from the validated values, never echoed from the request.
-			Return:    "/bridge/authorize?" + url.Values{"connector": {connector}, "label": {label}}.Encode(),
-			ExpiresAt: s.now().Add(loginStateTTL),
-		}
+		ls := store.LoginState{ID: randomToken(), Return: returnURL, ExpiresAt: s.now().Add(loginStateTTL)}
 		s.startLogin(w, r, ls)
 		return
 	}
@@ -84,7 +96,7 @@ func (s *Server) bridgeAuthorize(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, store.ErrNotFound) {
 			s.log.Info("bridge authorize: session user unknown; re-authenticating", "user", userID)
 			s.clearSession(w)
-			ls := store.LoginState{ID: randomToken(), Return: "/bridge/authorize?" + url.Values{"connector": {connector}, "label": {label}}.Encode(), ExpiresAt: s.now().Add(loginStateTTL)}
+			ls := store.LoginState{ID: randomToken(), Return: returnURL, ExpiresAt: s.now().Add(loginStateTTL)}
 			s.startLogin(w, r, ls)
 			return
 		}

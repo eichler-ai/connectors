@@ -159,8 +159,16 @@
     return AUTHORIZE_URL + "?connector=" + encodeURIComponent(CONNECTOR) + "&label=" + encodeURIComponent(h.app + "/" + h.platform);
   }
 
-  function signIn() {
-    var url = signInURL();
+  // switch=1 tells the hub to clear its session and go to Microsoft even
+  // though this browser is already signed in (hub/internal/authserver/
+  // bridge.go), so the account chooser fires instead of silently reusing
+  // whichever account the hub session holds.
+  function switchAccountURL() {
+    return signInURL() + "&switch=1";
+  }
+
+  function signIn(url) {
+    url = url || signInURL();
     var ui = window.Office && Office.context && Office.context.ui;
     if (ui && ui.displayDialogAsync) {
       setStatus("Signing in… complete the Microsoft sign-in in the window that opened.");
@@ -230,6 +238,19 @@
     });
   }
 
+  // --- Switch account ------------------------------------------------------------------------
+  // Forget the stored token first, so a switch that is abandoned partway (the dialog closed, the
+  // hub unreachable) does not leave the pane quietly using the old account's still-valid token —
+  // it falls back to signed-out. Then run the same sign-in dance with switch=1, which makes the
+  // hub reach Microsoft's chooser instead of reusing its session.
+  function switchAccount() {
+    cred = null;
+    renderAccount();
+    storage().remove(CRED_KEY);
+    log("switching Microsoft account");
+    signIn(switchAccountURL());
+  }
+
   // --- Sign out ----------------------------------------------------------------------------
   // Forget the token here and revoke it on the hub (best effort: a hub that cannot be reached
   // still lets the token expire, and the kill switch covers the rest).
@@ -261,7 +282,8 @@
     setStatus("The MCP Server rejected the sign-in (" + reason + "). Sign in again.", "bad");
   }
 
-  signInBtn.onclick = signIn;
+  signInBtn.onclick = function () { signIn(); };
+  document.getElementById("switch-account").onclick = switchAccount;
   document.getElementById("sign-out").onclick = signOut;
 
   function send(method, params) {

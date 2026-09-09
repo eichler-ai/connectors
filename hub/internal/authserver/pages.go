@@ -35,6 +35,7 @@ ul{padding-left:1.2rem}code{background:#f0f0ee;padding:.1em .3em;border-radius:4
 
 {{define "consent"}}{{template "head" .}}
 <h1>Allow {{.ClientName}}?</h1>
+<p class="muted">Signed in as <strong>{{.SignedInAs}}</strong>. <a href="/login/switch?ls={{.LS}}">Not you? Use a different account</a></p>
 <p>It will be able to run scripts in these applications on your behalf, as you:</p>
 <ul>{{range .Scopes}}<li><code>{{.}}</code></li>{{end}}</ul>
 <p class="muted">After approval you will be sent back to <code>{{.RedirectHost}}</code>.</p>
@@ -116,6 +117,10 @@ type pageData struct {
 	RedirectHost string
 	Loopback     bool
 	LS           string
+	// SignedInAs is the consent page only: the session user's email or
+	// display name, so the person sees which account they are about to
+	// authorize before approving (and can reach /login/switch instead).
+	SignedInAs string
 	// FormActionOrigins are added to the page's `form-action` CSP source
 	// list. Browsers enforce form-action not only on the form's action URL
 	// but on the redirect the submission produces: the consent form posts
