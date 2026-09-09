@@ -20,6 +20,21 @@ func (s *Server) loginStart(w http.ResponseWriter, r *http.Request) {
 	s.startLogin(w, r, ls)
 }
 
+// loginSwitch is the consent page's "Not you? Use a different account"
+// link: GET /login/switch?ls=<id>. It clears the hub's own session and
+// re-runs the same login state through startLogin, which reaches Microsoft
+// again (unlike a session hit, which skips it) and, because select_account
+// is already in AuthURL, shows the account chooser. The callback lands back
+// on /oauth/consent?ls=<id> as whichever account the user picks.
+func (s *Server) loginSwitch(w http.ResponseWriter, r *http.Request) {
+	ls, ok := s.loadLoginState(w, r, r.URL.Query().Get("ls"))
+	if !ok {
+		return
+	}
+	s.clearSession(w)
+	s.startLogin(w, r, ls)
+}
+
 // startLogin stores ls with a fresh nonce and PKCE verifier and redirects
 // to the provider. The login state id is the provider's `state`, so the
 // callback can find the pending request without a cookie (the session

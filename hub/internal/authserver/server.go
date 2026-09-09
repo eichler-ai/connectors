@@ -145,6 +145,7 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /oauth/register", s.register)
 	mux.HandleFunc("GET /login/microsoft", s.loginStart)
 	mux.HandleFunc("GET /login/microsoft/callback", s.loginCallback)
+	mux.HandleFunc("GET /login/switch", s.loginSwitch)
 	// Pane sign-in (PRD §06 path 1): not OAuth, but it shares the login
 	// and the session, so it lives here. See bridge.go.
 	mux.HandleFunc("GET /bridge/authorize", s.bridgeAuthorize)

@@ -28,13 +28,16 @@
   <div id="env"></div>
   <!-- Sign-in (PRD §06 path 1): the button opens the hub's /bridge/authorize in an Office dialog,
        which runs the Microsoft sign-in and hands back a 90-day bridge token; the pane keeps it in
-       OfficeRuntime.storage and presents it in every hello. Sign out revokes it on the hub too. -->
+       OfficeRuntime.storage and presents it in every hello. Sign out revokes it on the hub too.
+       Switch account reuses that same dialog with switch=1, so a session for the wrong Microsoft
+       account does not silently bind again: it forces the account chooser. -->
   <div id="account">
     <div id="signed-out">
       <button id="sign-in" class="primary">Sign in with Microsoft</button>
     </div>
     <div id="signed-in" hidden>
       <span class="who">Signed in as <strong id="who"></strong></span>
+      <button id="switch-account">Switch account</button>
       <button id="sign-out">Sign out</button>
     </div>
   </div>

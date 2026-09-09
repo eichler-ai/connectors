@@ -92,7 +92,7 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.sessionUser(r) != "" {
-		s.renderConsent(w, ls)
+		s.renderConsent(w, r, ls)
 		return
 	}
 	s.render(w, http.StatusOK, "signin", pageData{Title: "Sign in", ClientName: cl.Name, LS: ls.ID})
@@ -116,7 +116,7 @@ func (s *Server) redirectWith(w http.ResponseWriter, r *http.Request, redirectUR
 	http.Redirect(w, r, u.String(), http.StatusFound)
 }
 
-func (s *Server) renderConsent(w http.ResponseWriter, ls store.LoginState) {
+func (s *Server) renderConsent(w http.ResponseWriter, r *http.Request, ls store.LoginState) {
 	u, _ := url.Parse(ls.RedirectURI)
 	s.render(w, http.StatusOK, "consent", pageData{
 		Title:        "Allow access",
@@ -125,11 +125,33 @@ func (s *Server) renderConsent(w http.ResponseWriter, ls store.LoginState) {
 		RedirectHost: u.Host,
 		Loopback:     isLoopbackHost(u.Hostname()),
 		LS:           ls.ID,
+		SignedInAs:   s.signedInLabel(r),
 		// scheme://host[:port] is the CSP source expression form; approve
 		// and deny both redirect there. The URI was validated at authorize
 		// time, so it cannot carry anything but a scheme, host and port.
 		FormActionOrigins: []string{u.Scheme + "://" + u.Host},
 	})
+}
+
+// signedInLabel is what the consent page shows for "signed in as": the
+// session user's email, falling back to their display name or a generic
+// label — never empty, and never the raw user id.
+func (s *Server) signedInLabel(r *http.Request) string {
+	userID := s.sessionUser(r)
+	if userID == "" {
+		return ""
+	}
+	user, err := s.o.Store.User(r.Context(), userID)
+	if err != nil {
+		return "your Microsoft account"
+	}
+	if user.Email != "" {
+		return user.Email
+	}
+	if user.DisplayName != "" {
+		return user.DisplayName
+	}
+	return "your Microsoft account"
 }
 
 // consentGet shows the consent page after sign-in.
@@ -142,7 +164,7 @@ func (s *Server) consentGet(w http.ResponseWriter, r *http.Request) {
 		s.render(w, http.StatusOK, "signin", pageData{Title: "Sign in", ClientName: ls.ClientName, LS: ls.ID})
 		return
 	}
-	s.renderConsent(w, ls)
+	s.renderConsent(w, r, ls)
 }
 
 // consentPost records the decision: approve mints a code bound to the
