@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "id": "build-a-custom-width-door-family-and-place-it-hosted-in-a-wall",
+  "rev": 1,
+  "kind": "howto",
+  "title": "Build a custom-width door family and place it hosted in a wall",
+  "task": "Model a wider-than-standard door as its own loadable family and place it into a project: create a family document from Door.rft, extend the template's hidden preview Wall before setting a large Width, model the flush panel as a solid extrusion with reveal grooves as void extrusions, LoadFamily into the project, activate the FamilySymbol and place a hosted FamilyInstance in a wall.",
+  "members": [
+    "Eichler.Connectors.Revit.Connector.CreateProjectDocument",
+    "Autodesk.Revit.ApplicationServices.Application.FamilyTemplatePath",
+    "Eichler.Connectors.Revit.Connector.CreateFamilyDocument",
+    "Autodesk.Revit.DB.LocationCurve.Curve",
+    "Autodesk.Revit.DB.FamilyManager.NewType",
+    "Autodesk.Revit.DB.FamilyManager.RenameCurrentType",
+    "Autodesk.Revit.DB.FamilyManager.Set",
+    "Autodesk.Revit.DB.SketchPlane.Create",
+    "Autodesk.Revit.Creation.FamilyItemFactory.NewExtrusion",
+    "Autodesk.Revit.DB.Document.LoadFamily",
+    "Autodesk.Revit.DB.Family.GetFamilySymbolIds",
+    "Autodesk.Revit.DB.FamilySymbol.Activate",
+    "Autodesk.Revit.Creation.Document.NewFamilyInstance"
+  ],
+  "script_language": "csharp-script",
+  "script": "// TASK: build a custom-width (wider than the door template's preview wall) door family, load it\n// into a project, and place it hosted in a wall. Runs in a fresh scratch PROJECT document so it\n// touches no open model -- against your real project, use the `Document` global instead of `proj`\n// and skip the scratch host wall. The scratch project and family documents stay OPEN after the run\n// (Close is a gated lifecycle action); close them by title in a later run (documents-create-write-and-close).\nvar app = UIApplication.Application;\nvar proj = Connector.CreateProjectDocument();\nSystem.Console.WriteLine(\"cleanup-title=\" + proj.Title + \";\");   // repo sweep convention only\n\n// 1. Door template: its file NAME sets the category (Doors). It ships a hidden preview Wall,\n//    fixed length ~15 ft, purely for editor context.\nstring template = null;\nforeach (var f in System.IO.Directory.EnumerateFiles(app.FamilyTemplatePath, \"Door.rft\", System.IO.SearchOption.AllDirectories)) { template = f; break; }\nif (template == null) throw new System.Exception(\"no Door.rft under \" + app.FamilyTemplatePath);\nvar famDoc = Connector.CreateFamilyDocument(template);\nSystem.Console.WriteLine(\"cleanup-title=\" + famDoc.Title + \";\");\ndouble doorWidth = 16.0;\n\n// 2. Extend the preview wall PAST the final width BEFORE setting Width. Setting Width beyond the\n//    preview wall's length makes the door's opening void cut past the wall end and the commit fails\n//    with \"Can't make cut-out\" (the block rolls back). Extend the wall first.\nConnector.WithTransaction(famDoc, () => {\n  Autodesk.Revit.DB.Wall preview = null;\n  foreach (Autodesk.Revit.DB.Wall w in new Autodesk.Revit.DB.FilteredElementCollector(famDoc).OfClass(typeof(Autodesk.Revit.DB.Wall))) { preview = w; break; }\n  var lc = preview.Location as Autodesk.Revit.DB.LocationCurve;\n  var line = lc.Curve as Autodesk.Revit.DB.Line;\n  var mid = (line.GetEndPoint(0) + line.GetEndPoint(1)) / 2.0;\n  var dir = (line.GetEndPoint(1) - line.GetEndPoint(0)).Normalize();\n  double half = doorWidth / 2.0 + 6.0;                       // comfortably longer than the door\n  lc.Curve = Autodesk.Revit.DB.Line.CreateBound(mid - dir * half, mid + dir * half);\n  var fm = famDoc.FamilyManager;\n  if (fm.Types.Size == 0) fm.NewType(\"16x7 Sectional\"); else fm.RenameCurrentType(\"16x7 Sectional\");\n  foreach (Autodesk.Revit.DB.FamilyParameter p in fm.GetParameters()) { if (p.Definition.Name == \"Width\") { fm.Set(p, doorWidth); break; } }\n  foreach (Autodesk.Revit.DB.FamilyParameter p in fm.GetParameters()) { if (p.Definition.Name == \"Height\") { fm.Set(p, 7.0); break; } }\n  famDoc.Regenerate();\n  return true;\n});\n\n// 3. Panel as a solid extrusion + a reveal groove as a VOID extrusion (a void auto-cuts any solid\n//    it intersects in the SAME family document -- no boolean call). Geometry goes through\n//    famDoc.FamilyCreate. Keep the void depth LESS than the panel depth so it grooves, not perforates.\nConnector.WithTransaction(famDoc, () => {\n  double leftX = -doorWidth/2.0 + 0.05, rightX = doorWidth/2.0 - 0.05, bottomZ = 0.1, topZ = 6.9, yInner = -0.25;\n  var plane = Autodesk.Revit.DB.Plane.CreateByNormalAndOrigin(Autodesk.Revit.DB.XYZ.BasisY, new Autodesk.Revit.DB.XYZ(0, yInner, 0));\n  var sp = Autodesk.Revit.DB.SketchPlane.Create(famDoc, plane);\n  System.Func<double,double,double,double, Autodesk.Revit.DB.CurveArrArray> rect = (x0,z0,x1,z1) => {\n    var loop = new Autodesk.Revit.DB.CurveArray();\n    loop.Append(Autodesk.Revit.DB.Line.CreateBound(new Autodesk.Revit.DB.XYZ(x0, yInner, z0), new Autodesk.Revit.DB.XYZ(x1, yInner, z0)));\n    loop.Append(Autodesk.Revit.DB.Line.CreateBound(new Autodesk.Revit.DB.XYZ(x1, yInner, z0), new Autodesk.Revit.DB.XYZ(x1, yInner, z1)));\n    loop.Append(Autodesk.Revit.DB.Line.CreateBound(new Autodesk.Revit.DB.XYZ(x1, yInner, z1), new Autodesk.Revit.DB.XYZ(x0, yInner, z1)));\n    loop.Append(Autodesk.Revit.DB.Line.CreateBound(new Autodesk.Revit.DB.XYZ(x0, yInner, z1), new Autodesk.Revit.DB.XYZ(x0, yInner, z0)));\n    var arr = new Autodesk.Revit.DB.CurveArrArray(); arr.Append(loop); return arr;\n  };\n  famDoc.FamilyCreate.NewExtrusion(true, rect(leftX,bottomZ,rightX,topZ), sp, 0.25);        // solid panel\n  double midZ = (bottomZ+topZ)/2.0;\n  famDoc.FamilyCreate.NewExtrusion(false, rect(leftX,midZ-0.05,rightX,midZ+0.05), sp, 0.1);  // void groove\n  famDoc.Regenerate();\n  return true;\n});\n\n// 4. Host wall in the project (setup), then LoadFamily BETWEEN blocks: called ON the family doc\n//    with the TARGET project passed in; the target must not be modifiable, so it runs at top level.\nAutodesk.Revit.DB.Level level = null;\nforeach (Autodesk.Revit.DB.Level l in new Autodesk.Revit.DB.FilteredElementCollector(proj).OfClass(typeof(Autodesk.Revit.DB.Level))) { if (level == null || l.Elevation < level.Elevation) level = l; }\nvar hostWallId = Connector.WithTransaction(proj, () => {\n  var w = Autodesk.Revit.DB.Wall.Create(proj, Autodesk.Revit.DB.Line.CreateBound(new Autodesk.Revit.DB.XYZ(0,0,0), new Autodesk.Revit.DB.XYZ(30,0,0)), level.Id, false);\n  proj.Regenerate();\n  return w.Id;\n});\nvar family = famDoc.LoadFamily(proj);\nif (family == null) throw new System.Exception(\"LoadFamily returned null (a family of the same name may already be loaded)\");\n\n// 5. Activate the symbol and place the door hosted in the wall.\nreturn Connector.WithTransaction(proj, () => {\n  Autodesk.Revit.DB.FamilySymbol symbol = null;\n  foreach (var sid in family.GetFamilySymbolIds()) { symbol = proj.GetElement(sid) as Autodesk.Revit.DB.FamilySymbol; break; }\n  if (!symbol.IsActive) { symbol.Activate(); }\n  proj.Regenerate();\n  var wall = proj.GetElement(hostWallId) as Autodesk.Revit.DB.Wall;\n  var inst = proj.Create.NewFamilyInstance(new Autodesk.Revit.DB.XYZ(15,0,0), symbol, wall, level, Autodesk.Revit.DB.Structure.StructuralType.NonStructural);\n  proj.Regenerate();\n  var wp = symbol.LookupParameter(\"Width\");\n  return new { familyName = family.Name, typeName = symbol.Name, widthFt = wp != null ? wp.AsDouble() : -1, hosted = inst.Host != null };\n});",
+  "pitfalls": [
+    {
+      "symptom": "Setting the door family's Width (FamilyManager.Set) to a value wider than about 15 ft fails at commit with 'Can't make cut-out' (InvalidOperationException, the whole WithTransaction block rolled back, a warning dialog auto-answered), even though the panel geometry is valid.",
+      "cause": "Door.rft (and Window.rft) ship a hidden preview Wall of fixed length (~15 ft) for editor context; the door's opening void cuts past the end of that wall once Width exceeds its length.",
+      "fix": "In a block BEFORE setting Width, find the family document's preview Wall (the only Wall in it) and extend its LocationCurve.Curve about its midpoint to comfortably exceed the final width (a ~28 ft wall for a 16 ft door), then set Width.",
+      "members": [
+        "Autodesk.Revit.DB.FamilyManager.Set",
+        "Autodesk.Revit.DB.LocationCurve.Curve"
+      ]
+    },
+    {
+      "symptom": "doc.LoadFamily(familyDoc, ...) does not compile against the real overloads, or a plausible-looking call returns false with a null out family.",
+      "cause": "LoadFamily is an instance method on the SOURCE family document; the TARGET project is passed as the argument, and the target must not be modifiable.",
+      "fix": "Call familyDoc.LoadFamily(projectDoc) at top level BETWEEN blocks; check the result for null (a family of the same name already loaded).",
+      "members": [
+        "Autodesk.Revit.DB.Document.LoadFamily"
+      ]
+    },
+    {
+      "symptom": "NewFamilyInstance throws for the freshly loaded door symbol.",
+      "cause": "A FamilySymbol that has never been placed is inactive.",
+      "fix": "Check symbol.IsActive and call symbol.Activate() then doc.Regenerate() before NewFamilyInstance.",
+      "members": [
+        "Autodesk.Revit.DB.FamilySymbol.Activate"
+      ]
+    }
+  ],
+  "tags": [
+    "doors",
+    "families",
+    "family-instances",
+    "creation",
+    "loading",
+    "pitfall"
+  ],
+  "provenance": {
+    "kind": "submission",
+    "ref": "https://github.com/eichler-ai/connectors/issues/258",
+    "reviewed_by": "nchim"
+  },
+  "verify": {
+    "creates_documents": true
+  },
+  "created_at": "2026-09-09T00:00:00Z",
+  "updated_at": "2026-09-09T00:00:00Z"
+}

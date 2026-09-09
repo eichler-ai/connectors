@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "id": "text-notes-and-annotation-text",
-  "rev": 1,
+  "rev": 2,
   "kind": "howto",
   "title": "Add a text note to a view and read notes back for review",
   "task": "Place annotation text in a view with TextNote.Create(document, viewId, position, text, textNoteTypeId) using a TextNoteType from the document, then collect the view's notes and read TextNote.Text back, trimming the trailing carriage return Revit appends.",
@@ -30,6 +30,18 @@
       "members": [
         "Autodesk.Revit.DB.TextNoteType"
       ]
+    },
+    {
+      "symptom": "After ElementTransformUtils.MoveElement repositions a TextNote, its leader points at a nonsensical spot far from the target you set.",
+      "cause": "MoveElement rigidly translates the note's existing Leader.End and Leader.Elbow by the same delta; setting those to their final absolute values BEFORE moving the note shifts them a second time.",
+      "fix": "Add the leader with TextNote.AddLeader; then MOVE the note first (by newPosition - TextNote.Coord) and only AFTER the move set the absolute Leader.End/.Elbow, re-fetching TextNote.GetLeaders()[0]. Note this is a different leader API from RoomTag/IndependentTag (HasLeader/LeaderEnd/TagHeadPosition).",
+      "members": [
+        "Autodesk.Revit.DB.ElementTransformUtils.MoveElement",
+        "Autodesk.Revit.DB.TextNote.AddLeader",
+        "Autodesk.Revit.DB.TextNote.GetLeaders",
+        "Autodesk.Revit.DB.Leader.End",
+        "Autodesk.Revit.DB.Leader.Elbow"
+      ]
     }
   ],
   "tags": [
@@ -39,8 +51,9 @@
     "pitfall"
   ],
   "provenance": {
-    "kind": "harness",
-    "ref": "revit/test-harness/phase_c_test.go TestPhaseCFloorsGridsSheetsAndText/CreateTextNote"
+    "kind": "submission",
+    "ref": "https://github.com/eichler-ai/connectors/issues/264",
+    "reviewed_by": "nchim"
   },
   "verify": {
     "mutations": {
@@ -53,5 +66,5 @@
     }
   },
   "created_at": "2026-09-02T00:00:00Z",
-  "updated_at": "2026-09-02T00:00:00Z"
+  "updated_at": "2026-09-09T00:00:00Z"
 }

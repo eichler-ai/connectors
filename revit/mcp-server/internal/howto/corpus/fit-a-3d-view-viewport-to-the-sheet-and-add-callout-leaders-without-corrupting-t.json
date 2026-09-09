@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "id": "fit-a-3d-view-viewport-to-the-sheet-and-add-callout-leaders-without-corrupting-t",
+  "rev": 1,
+  "kind": "howto",
+  "title": "Fit a 3D-view viewport to the sheet and add callout leaders without corrupting them",
+  "task": "Place an isometric 3D view on a sheet and fit it to the real sheet size, then add text-note callout leaders: read the title block's Sheet Width/Height, place the viewport, resize by setting View.Scale and re-center with Viewport.SetBoxCenter using Viewport.GetBoxOutline, and add each TextNote leader by moving the note first then setting Leader.End/Elbow -- MoveElement also translates existing leader points.",
+  "members": [
+    "Autodesk.Revit.DB.View3D.CreateIsometric",
+    "Autodesk.Revit.DB.ViewSheet.Create",
+    "Autodesk.Revit.DB.Viewport.Create",
+    "Autodesk.Revit.DB.Element.LookupParameter",
+    "Autodesk.Revit.DB.View.Scale",
+    "Autodesk.Revit.DB.Viewport.GetBoxOutline",
+    "Autodesk.Revit.DB.Viewport.SetBoxCenter",
+    "Autodesk.Revit.DB.TextNote.Create",
+    "Autodesk.Revit.DB.TextNote.AddLeader",
+    "Autodesk.Revit.DB.TextNote.GetLeaders",
+    "Autodesk.Revit.DB.TextNote.Coord",
+    "Autodesk.Revit.DB.Leader.End",
+    "Autodesk.Revit.DB.Leader.Elbow",
+    "Autodesk.Revit.DB.ElementTransformUtils.MoveElement"
+  ],
+  "script_language": "csharp-script",
+  "script": "// TASK: place an isometric 3D view on a sheet, fit it to the REAL sheet size, and add text-note\n// callout leaders without corrupting them. Runs in a fresh scratch PROJECT document so it touches\n// no open model -- against your real project use the `Document` global and your own view/sheet. The\n// scratch project stays OPEN after the run; close it by title later (documents-create-write-and-close).\nvar proj = Connector.CreateProjectDocument();\nSystem.Console.WriteLine(\"cleanup-title=\" + proj.Title + \";\");\nAutodesk.Revit.DB.Level level = null;\nforeach (Autodesk.Revit.DB.Level l in new Autodesk.Revit.DB.FilteredElementCollector(proj).OfClass(typeof(Autodesk.Revit.DB.Level))) { if (level == null || l.Elevation < level.Elevation) level = l; }\nAutodesk.Revit.DB.ElementId v3dTypeId = null;\nforeach (Autodesk.Revit.DB.ViewFamilyType t in new Autodesk.Revit.DB.FilteredElementCollector(proj).OfClass(typeof(Autodesk.Revit.DB.ViewFamilyType))) { if (t.ViewFamily == Autodesk.Revit.DB.ViewFamily.ThreeDimensional) { v3dTypeId = t.Id; break; } }\nAutodesk.Revit.DB.FamilySymbol tbSym = null;\nforeach (Autodesk.Revit.DB.FamilySymbol s in new Autodesk.Revit.DB.FilteredElementCollector(proj).OfClass(typeof(Autodesk.Revit.DB.FamilySymbol)).OfCategory(Autodesk.Revit.DB.BuiltInCategory.OST_TitleBlocks)) { tbSym = s; break; }\nAutodesk.Revit.DB.ElementId textTypeId = null;\nforeach (Autodesk.Revit.DB.TextNoteType t in new Autodesk.Revit.DB.FilteredElementCollector(proj).OfClass(typeof(Autodesk.Revit.DB.TextNoteType))) { textTypeId = t.Id; break; }\n\n// 1. Setup + isometric view + sheet + viewport.\nvar ids = Connector.WithTransaction(proj, () => {\n  for (int i = 0; i < 4; i++) Autodesk.Revit.DB.Wall.Create(proj, Autodesk.Revit.DB.Line.CreateBound(new Autodesk.Revit.DB.XYZ(i*6, 0, 0), new Autodesk.Revit.DB.XYZ(i*6, 20, 0)), level.Id, false);\n  var v = Autodesk.Revit.DB.View3D.CreateIsometric(proj, v3dTypeId);\n  if (tbSym != null && !tbSym.IsActive) tbSym.Activate();\n  var sheet = Autodesk.Revit.DB.ViewSheet.Create(proj, tbSym != null ? tbSym.Id : Autodesk.Revit.DB.ElementId.InvalidElementId);\n  sheet.SheetNumber = \"A-3D\" + (System.DateTime.UtcNow.Ticks % 100000); sheet.Name = \"Overview\";\n  proj.Regenerate();\n  var vp = Autodesk.Revit.DB.Viewport.Create(proj, sheet.Id, v.Id, new Autodesk.Revit.DB.XYZ(0.7, 0.5, 0));\n  proj.Regenerate();\n  return new System.Collections.Generic.List<Autodesk.Revit.DB.ElementId> { v.Id, sheet.Id, vp.Id };\n});\nvar view3d = proj.GetElement(ids[0]) as Autodesk.Revit.DB.View3D;\nvar sheetEl = proj.GetElement(ids[1]) as Autodesk.Revit.DB.ViewSheet;\nvar vpEl = proj.GetElement(ids[2]) as Autodesk.Revit.DB.Viewport;\n\n// 2. CONFIRM the real sheet size before positioning (an 11x17 sheet is ~1.42 x 0.92 ft; coordinates\n//    that suit a D-size sheet fall off a small one).\nAutodesk.Revit.DB.Element tbInst = null;\nforeach (var e in new Autodesk.Revit.DB.FilteredElementCollector(proj, sheetEl.Id).OfCategory(Autodesk.Revit.DB.BuiltInCategory.OST_TitleBlocks)) { tbInst = e; break; }\ndouble sheetW = tbInst.LookupParameter(\"Sheet Width\").AsDouble();\ndouble sheetH = tbInst.LookupParameter(\"Sheet Height\").AsDouble();\nint scaleBefore = view3d.Scale;\nvar oB = vpEl.GetBoxOutline();\ndouble bW = oB.MaximumPoint.X-oB.MinimumPoint.X, bH = oB.MaximumPoint.Y-oB.MinimumPoint.Y;\n\n// 3. Fit: on-sheet box size is inversely proportional to View.Scale (double the Scale => half the\n//    display size). First estimate, then measure-and-adjust: Viewport.GetBoxOutline INCLUDES the\n//    viewport label, so a single estimate can run slightly large.\nint applied = (int)System.Math.Ceiling(scaleBefore * System.Math.Max(bW/(sheetW*0.85), bH/(sheetH*0.85)));\nint a0 = applied;\nConnector.WithTransaction(proj, () => { view3d.Scale = a0; return true; });\nConnector.WithTransaction(proj, () => { vpEl.SetBoxCenter(new Autodesk.Revit.DB.XYZ(sheetW/2.0, sheetH/2.0, 0)); return true; });\nint iters = 0;\nfor (; iters < 6; iters++) {\n  var ob = vpEl.GetBoxOutline();\n  if ((ob.MaximumPoint.X-ob.MinimumPoint.X) <= sheetW*0.98 && (ob.MaximumPoint.Y-ob.MinimumPoint.Y) <= sheetH*0.98) break;\n  applied = (int)System.Math.Ceiling(applied * 1.1);\n  int a2 = applied;\n  Connector.WithTransaction(proj, () => { view3d.Scale = a2; return true; });\n  Connector.WithTransaction(proj, () => { vpEl.SetBoxCenter(new Autodesk.Revit.DB.XYZ(sheetW/2.0, sheetH/2.0, 0)); return true; });\n}\nint scaleAfter = view3d.Scale;\nvar oA = vpEl.GetBoxOutline();\nbool boxFitsSheet = oA.MinimumPoint.X >= -0.01 && oA.MaximumPoint.X <= sheetW + 0.01 && oA.MinimumPoint.Y >= -0.01 && oA.MaximumPoint.Y <= sheetH + 0.01;\n\n// 4. Callout leaders on the SHEET. TextNote leaders are AddLeader/GetLeaders with settable\n//    Leader.End/.Elbow (a different API from RoomTag/IndependentTag). For each: MOVE the note to its\n//    label spot FIRST, THEN set the absolute Leader geometry -- ElementTransformUtils.MoveElement\n//    rigidly translates existing leader points too, so setting them before the move shifts them twice.\nvar leaderCheck = Connector.WithTransaction(proj, () => {\n  var results = new System.Collections.Generic.List<object>();\n  var o = vpEl.GetBoxOutline();\n  var labelSpots = new Autodesk.Revit.DB.XYZ[] { new Autodesk.Revit.DB.XYZ(0.15, sheetH-0.1, 0), new Autodesk.Revit.DB.XYZ(sheetW-0.3, 0.12, 0) };\n  var targets = new Autodesk.Revit.DB.XYZ[] { new Autodesk.Revit.DB.XYZ(o.MinimumPoint.X+0.1, o.MinimumPoint.Y+0.1, 0), new Autodesk.Revit.DB.XYZ(o.MaximumPoint.X-0.1, o.MaximumPoint.Y-0.1, 0) };\n  for (int i = 0; i < labelSpots.Length; i++) {\n    var note = Autodesk.Revit.DB.TextNote.Create(proj, sheetEl.Id, new Autodesk.Revit.DB.XYZ(0.5, 0.5, 0), \"Room \" + (i+1), textTypeId);\n    proj.Regenerate();\n    note.AddLeader(Autodesk.Revit.DB.TextNoteLeaderTypes.TNLT_STRAIGHT_R);\n    proj.Regenerate();\n    Autodesk.Revit.DB.ElementTransformUtils.MoveElement(proj, note.Id, labelSpots[i] - note.Coord);   // move FIRST\n    proj.Regenerate();\n    var ld = note.GetLeaders()[0];\n    ld.End = targets[i];                                                                                // THEN set leader geometry\n    ld.Elbow = new Autodesk.Revit.DB.XYZ((labelSpots[i].X + targets[i].X)/2.0, labelSpots[i].Y, 0);\n    proj.Regenerate();\n    var chk = note.GetLeaders()[0];\n    results.Add(new { endMatches = System.Math.Abs(chk.End.X - targets[i].X) < 1e-6 && System.Math.Abs(chk.End.Y - targets[i].Y) < 1e-6 });\n  }\n  return results;\n});\n\nreturn new { sheetWidthFt = sheetW, sheetHeightFt = sheetH, scaleBefore, scaleAfter, fitIterations = iters, boxFitsSheet, leaderCheck };",
+  "pitfalls": [
+    {
+      "symptom": "After moving a TextNote to its label position, its leader points at a nonsensical spot far from the target you set.",
+      "cause": "ElementTransformUtils.MoveElement rigidly translates the note's existing Leader.End and Leader.Elbow by the same delta; if you set those to their final absolute values BEFORE moving the note, the move shifts them a second time.",
+      "fix": "Move the TextNote FIRST (MoveElement by newPosition - note.Coord), THEN set the absolute Leader.End/.Elbow, re-fetching note.GetLeaders()[0] after the move.",
+      "members": [
+        "Autodesk.Revit.DB.ElementTransformUtils.MoveElement",
+        "Autodesk.Revit.DB.Leader.End"
+      ]
+    },
+    {
+      "symptom": "Viewport, leaders or text placed with reasonable-looking coordinates land off the printable page.",
+      "cause": "The title block may be small format -- an 11x17 sheet is only ~1.42 x 0.92 ft -- so coordinates that suit a D/E-size sheet fall off it.",
+      "fix": "Read the title block instance's 'Sheet Width' and 'Sheet Height' parameters and compute every placement (viewport center, leader endpoints) from the real size.",
+      "members": [
+        "Autodesk.Revit.DB.Element.LookupParameter"
+      ]
+    },
+    {
+      "symptom": "One doubling of View.Scale does not make the viewport fit the sheet; the box still overflows by a little.",
+      "cause": "On-sheet box size is inversely proportional to View.Scale (doubling Scale halves the display), but Viewport.GetBoxOutline INCLUDES the viewport label, so a single computed scale can run slightly large.",
+      "fix": "Compute an initial scale from GetBoxOutline vs the sheet size, then measure and bump the scale (re-centering with SetBoxCenter) until the box fits within the sheet bounds.",
+      "members": [
+        "Autodesk.Revit.DB.View.Scale",
+        "Autodesk.Revit.DB.Viewport.GetBoxOutline"
+      ]
+    }
+  ],
+  "tags": [
+    "sheets",
+    "viewports",
+    "views",
+    "text-notes",
+    "annotation",
+    "pitfall"
+  ],
+  "provenance": {
+    "kind": "submission",
+    "ref": "https://github.com/eichler-ai/connectors/issues/260",
+    "reviewed_by": "nchim"
+  },
+  "verify": {
+    "creates_documents": true
+  },
+  "created_at": "2026-09-09T00:00:00Z",
+  "updated_at": "2026-09-09T00:00:00Z"
+}

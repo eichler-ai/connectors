@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "id": "capture-a-view-as-a-png-image-and-publish-the-file",
+  "rev": 1,
+  "kind": "howto",
+  "title": "Capture a view as a PNG image and publish the file",
+  "task": "Render a Revit view to a PNG image file so it can be seen or screenshotted: set the view's DisplayStyle, build ImageExportOptions with the view in SetViewsAndSheets and BOTH file-type fields set, call Document.ExportImage, find the file Revit actually wrote (it appends the view name to FilePath), and Connector.Publish it so the image comes back to the caller.",
+  "members": [
+    "Eichler.Connectors.Revit.Connector.CreateProjectDocument",
+    "Autodesk.Revit.DB.View3D.CreateIsometric",
+    "Autodesk.Revit.DB.View.DisplayStyle",
+    "Autodesk.Revit.DB.ImageExportOptions.SetViewsAndSheets",
+    "Autodesk.Revit.DB.ImageExportOptions.HLRandWFViewsFileType",
+    "Autodesk.Revit.DB.ImageExportOptions.ShadowViewsFileType",
+    "Autodesk.Revit.DB.ImageExportOptions.FilePath",
+    "Autodesk.Revit.DB.Document.ExportImage",
+    "Eichler.Connectors.Revit.Connector.ExportsDirectory",
+    "Eichler.Connectors.Revit.Connector.Publish"
+  ],
+  "script_language": "csharp-script",
+  "script": "// TASK: capture a PNG image of a Revit view so it can be SEEN / screenshotted, and hand the file\n// back with Connector.Publish. Runs in a fresh scratch PROJECT document (a wall + isometric view as\n// setup) so it touches no open model -- against your real project use the `Document` global and pick\n// an existing view instead of the scratch one. The scratch project stays OPEN after the run.\nvar proj = Connector.CreateProjectDocument();\nSystem.Console.WriteLine(\"cleanup-title=\" + proj.Title + \";\");\nAutodesk.Revit.DB.Level level = null;\nforeach (Autodesk.Revit.DB.Level l in new Autodesk.Revit.DB.FilteredElementCollector(proj).OfClass(typeof(Autodesk.Revit.DB.Level))) { if (level == null || l.Elevation < level.Elevation) level = l; }\nAutodesk.Revit.DB.ElementId v3dTypeId = null;\nforeach (Autodesk.Revit.DB.ViewFamilyType t in new Autodesk.Revit.DB.FilteredElementCollector(proj).OfClass(typeof(Autodesk.Revit.DB.ViewFamilyType))) { if (t.ViewFamily == Autodesk.Revit.DB.ViewFamily.ThreeDimensional) { v3dTypeId = t.Id; break; } }\n\n// 1. A view to capture (here a scratch isometric 3D view over one wall). Set the DisplayStyle INSIDE\n//    a block; a shaded style is fine as long as ShadowViewsFileType is set (see step 2).\nvar vid = Connector.WithTransaction(proj, () => {\n  Autodesk.Revit.DB.Wall.Create(proj, Autodesk.Revit.DB.Line.CreateBound(new Autodesk.Revit.DB.XYZ(0,0,0), new Autodesk.Revit.DB.XYZ(20,0,0)), level.Id, false);\n  var v = Autodesk.Revit.DB.View3D.CreateIsometric(proj, v3dTypeId);\n  v.DisplayStyle = Autodesk.Revit.DB.DisplayStyle.ShadingWithEdges;\n  proj.Regenerate();\n  return v.Id;\n});\nvar view = proj.GetElement(vid) as Autodesk.Revit.DB.View3D;\n\n// 2. Export the view to PNG BETWEEN blocks (ExportImage is self-transacting; inside a block it fails\n//    script-target-must-not-be-modifiable). Set BOTH file-type fields: a SHADED view's image is\n//    governed by ShadowViewsFileType, a wireframe/HLR view's by HLRandWFViewsFileType -- set only one\n//    and the other display style writes NO file and throws NO exception.\nstring dir = Connector.ExportsDirectory;\nstring stem = System.IO.Path.Combine(dir, \"view_capture\");\nvar opt = new Autodesk.Revit.DB.ImageExportOptions();\nopt.ExportRange = Autodesk.Revit.DB.ExportRange.SetOfViews;\nopt.SetViewsAndSheets(new System.Collections.Generic.List<Autodesk.Revit.DB.ElementId>{ view.Id });\nopt.HLRandWFViewsFileType = Autodesk.Revit.DB.ImageFileType.PNG;\nopt.ShadowViewsFileType = Autodesk.Revit.DB.ImageFileType.PNG;\nopt.ImageResolution = Autodesk.Revit.DB.ImageResolution.DPI_150;\nopt.ZoomType = Autodesk.Revit.DB.ZoomFitType.FitToPage;\nopt.PixelSize = 1024;\nopt.FilePath = stem;   // Revit treats this as a STEM and APPENDS \" - <ViewType> - <ViewName>.png\"\nproj.ExportImage(opt);\n\n// 3. Find the file Revit actually wrote (its name differs from FilePath) and Publish it so it comes\n//    back to the caller in files[].\nvar published = new System.Collections.Generic.List<string>();\nforeach (var f in System.IO.Directory.GetFiles(dir, \"view_capture*\")) { Connector.Publish(f); published.Add(System.IO.Path.GetFileName(f)); }\nreturn new { publishedFiles = published };",
+  "pitfalls": [
+    {
+      "symptom": "Exporting a shaded 3D view (ShadingWithEdges/Realistic) writes NO file and throws NO exception; Connector.Publish then finds nothing.",
+      "cause": "A shaded view's image is governed by ImageExportOptions.ShadowViewsFileType, while a wireframe/HLR view uses HLRandWFViewsFileType; if only one is set, the other display style silently produces no file.",
+      "fix": "Set BOTH HLRandWFViewsFileType AND ShadowViewsFileType (e.g. ImageFileType.PNG) so any display style produces a file.",
+      "members": [
+        "Autodesk.Revit.DB.ImageExportOptions.ShadowViewsFileType"
+      ]
+    },
+    {
+      "symptom": "The file at ImageExportOptions.FilePath does not exist after ExportImage.",
+      "cause": "Revit treats FilePath as a STEM and appends ' - <ViewType> - <ViewName>.<ext>', so the real filename differs from what you set.",
+      "fix": "After ExportImage, glob the export directory for '<stem>*' to find the file Revit actually wrote, then Publish that path.",
+      "members": [
+        "Autodesk.Revit.DB.ImageExportOptions.FilePath"
+      ]
+    },
+    {
+      "symptom": "Calling ExportImage inside a Connector.WithTransaction block fails with script-target-must-not-be-modifiable.",
+      "cause": "ExportImage (like Document.Export) is self-transacting and requires the target document not to be modifiable.",
+      "fix": "Set the view's DisplayStyle inside a block, then call ExportImage at top level BETWEEN blocks.",
+      "members": [
+        "Autodesk.Revit.DB.Document.ExportImage"
+      ]
+    }
+  ],
+  "tags": [
+    "export",
+    "image",
+    "png",
+    "screenshot",
+    "views",
+    "files",
+    "connector",
+    "pitfall"
+  ],
+  "provenance": {
+    "kind": "submission",
+    "ref": "https://github.com/eichler-ai/connectors/issues/261",
+    "reviewed_by": "nchim"
+  },
+  "verify": {
+    "creates_documents": true
+  },
+  "created_at": "2026-09-09T00:00:00Z",
+  "updated_at": "2026-09-09T00:00:00Z"
+}

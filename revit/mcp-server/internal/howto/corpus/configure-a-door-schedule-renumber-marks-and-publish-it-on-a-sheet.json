@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "id": "configure-a-door-schedule-renumber-marks-and-publish-it-on-a-sheet",
+  "rev": 1,
+  "kind": "howto",
+  "title": "Configure a door schedule, renumber marks, and publish it on a sheet",
+  "task": "Turn a category schedule into a usable door schedule and publish it: create a door ViewSchedule, add Mark/Family/Type/Level/Width/Height columns by schedulable-field parameter id, sort by Level then Mark, renumber every door's Mark, then place the schedule on a titled sheet with ScheduleSheetInstance -- a schedule cannot be exported directly.",
+  "members": [
+    "Autodesk.Revit.DB.ViewSchedule.CreateSchedule",
+    "Autodesk.Revit.DB.ScheduleDefinition.GetSchedulableFields",
+    "Autodesk.Revit.DB.ScheduleDefinition.AddField",
+    "Autodesk.Revit.DB.ScheduleDefinition.AddSortGroupField",
+    "Autodesk.Revit.DB.ScheduleSortGroupField",
+    "Autodesk.Revit.DB.SchedulableField.ParameterId",
+    "Autodesk.Revit.Creation.Document.NewFamilyInstance",
+    "Autodesk.Revit.DB.Element.LookupParameter",
+    "Autodesk.Revit.DB.ViewSheet.Create",
+    "Autodesk.Revit.DB.ScheduleSheetInstance.Create"
+  ],
+  "script_language": "csharp-script",
+  "script": "// TASK: turn a door schedule into a usable, sorted, renumbered schedule published on a titled\n// sheet. Runs in a fresh scratch PROJECT document (walls + hosted doors as setup) so it touches no\n// open model -- against your real project use the `Document` global and skip the setup block. The\n// scratch project stays OPEN after the run; close it by title later (documents-create-write-and-close).\nvar proj = Connector.CreateProjectDocument();\nSystem.Console.WriteLine(\"cleanup-title=\" + proj.Title + \";\");\nvar levels = new System.Collections.Generic.List<Autodesk.Revit.DB.Level>();\nforeach (Autodesk.Revit.DB.Level l in new Autodesk.Revit.DB.FilteredElementCollector(proj).OfClass(typeof(Autodesk.Revit.DB.Level))) levels.Add(l);\nlevels.Sort((a,b) => a.Elevation.CompareTo(b.Elevation));\nvar L1 = levels[0]; var L2 = levels.Count > 1 ? levels[1] : levels[0];\nAutodesk.Revit.DB.FamilySymbol doorSym = null;\nforeach (Autodesk.Revit.DB.FamilySymbol s in new Autodesk.Revit.DB.FilteredElementCollector(proj).OfClass(typeof(Autodesk.Revit.DB.FamilySymbol)).OfCategory(Autodesk.Revit.DB.BuiltInCategory.OST_Doors)) { doorSym = s; break; }\nAutodesk.Revit.DB.FamilySymbol tbSym = null;\nforeach (Autodesk.Revit.DB.FamilySymbol s in new Autodesk.Revit.DB.FilteredElementCollector(proj).OfClass(typeof(Autodesk.Revit.DB.FamilySymbol)).OfCategory(Autodesk.Revit.DB.BuiltInCategory.OST_TitleBlocks)) { tbSym = s; break; }\n\n// 1. Setup: a wall on each level with hosted doors. Place each door AT its level's elevation --\n//    a point below the wall body fails with \"Can't cut instance ... out of Wall\".\nConnector.WithTransaction(proj, () => {\n  if (!doorSym.IsActive) doorSym.Activate();\n  proj.Regenerate();\n  var w1 = Autodesk.Revit.DB.Wall.Create(proj, Autodesk.Revit.DB.Line.CreateBound(new Autodesk.Revit.DB.XYZ(0,0,0), new Autodesk.Revit.DB.XYZ(30,0,0)), L1.Id, false);\n  var w2 = Autodesk.Revit.DB.Wall.Create(proj, Autodesk.Revit.DB.Line.CreateBound(new Autodesk.Revit.DB.XYZ(0,10,0), new Autodesk.Revit.DB.XYZ(30,10,0)), L2.Id, false);\n  proj.Regenerate();\n  proj.Create.NewFamilyInstance(new Autodesk.Revit.DB.XYZ(8,0,L1.Elevation), doorSym, w1, L1, Autodesk.Revit.DB.Structure.StructuralType.NonStructural);\n  proj.Create.NewFamilyInstance(new Autodesk.Revit.DB.XYZ(20,0,L1.Elevation), doorSym, w1, L1, Autodesk.Revit.DB.Structure.StructuralType.NonStructural);\n  proj.Create.NewFamilyInstance(new Autodesk.Revit.DB.XYZ(12,10,L2.Elevation), doorSym, w2, L2, Autodesk.Revit.DB.Structure.StructuralType.NonStructural);\n  proj.Regenerate();\n  return true;\n});\n\n// 2. Create the door schedule and add columns BY PARAMETER ID. Family/Type/Level are 'special'\n//    fields whose ids are NEGATIVE BuiltInParameters (ELEM_FAMILY_PARAM, ELEM_TYPE_PARAM,\n//    SCHEDULE_LEVEL_PARAM), NOT ALL_MODEL_FAMILY_NAME / ALL_MODEL_TYPE_NAME.\nvar schedId = Connector.WithTransaction(proj, () => {\n  var schedule = Autodesk.Revit.DB.ViewSchedule.CreateSchedule(proj, new Autodesk.Revit.DB.ElementId(Autodesk.Revit.DB.BuiltInCategory.OST_Doors));\n  schedule.Name = \"Door Schedule (how-to \" + System.DateTime.UtcNow.Ticks + \")\";\n  var def = schedule.Definition;\n  string[] names = { \"Mark\",\"Family\",\"Type\",\"Level\",\"Width\",\"Height\" };\n  long[] pids = { (long)Autodesk.Revit.DB.BuiltInParameter.ALL_MODEL_MARK, (long)Autodesk.Revit.DB.BuiltInParameter.ELEM_FAMILY_PARAM, (long)Autodesk.Revit.DB.BuiltInParameter.ELEM_TYPE_PARAM, (long)Autodesk.Revit.DB.BuiltInParameter.SCHEDULE_LEVEL_PARAM, (long)Autodesk.Revit.DB.BuiltInParameter.GENERIC_WIDTH, (long)Autodesk.Revit.DB.BuiltInParameter.DOOR_HEIGHT };\n  var byName = new System.Collections.Generic.Dictionary<string, Autodesk.Revit.DB.ScheduleField>();\n  for (int i = 0; i < names.Length; i++) { foreach (var sf in def.GetSchedulableFields()) { if (sf.ParameterId.Value == pids[i]) { byName[names[i]] = def.AddField(sf); break; } } }\n  // 3. Sort by Level, then Mark.\n  def.AddSortGroupField(new Autodesk.Revit.DB.ScheduleSortGroupField(byName[\"Level\"].FieldId));\n  def.AddSortGroupField(new Autodesk.Revit.DB.ScheduleSortGroupField(byName[\"Mark\"].FieldId));\n  proj.Regenerate();\n  return schedule.Id;\n});\nvar sched = proj.GetElement(schedId) as Autodesk.Revit.DB.ViewSchedule;\n\n// 4. Renumber every door D01.. ordered by its ORIGINAL Mark (a stable re-label, not a reshuffle).\nvar marks = Connector.WithTransaction(proj, () => {\n  var doors = new System.Collections.Generic.List<Autodesk.Revit.DB.FamilyInstance>();\n  foreach (Autodesk.Revit.DB.FamilyInstance fi in new Autodesk.Revit.DB.FilteredElementCollector(proj).OfCategory(Autodesk.Revit.DB.BuiltInCategory.OST_Doors).WhereElementIsNotElementType()) doors.Add(fi);\n  doors.Sort((a,b) => string.CompareOrdinal(a.LookupParameter(\"Mark\") != null ? (a.LookupParameter(\"Mark\").AsString() ?? \"\") : \"\", b.LookupParameter(\"Mark\") != null ? (b.LookupParameter(\"Mark\").AsString() ?? \"\") : \"\"));\n  int n = 1; var outp = new System.Collections.Generic.List<string>();\n  foreach (var d in doors) { var m = \"D\" + n.ToString(\"00\"); d.LookupParameter(\"Mark\").Set(m); outp.Add(m); n++; }\n  proj.Regenerate();\n  return outp;\n});\n\n// 5. Publish the schedule on a titled sheet with ScheduleSheetInstance.Create. A ViewSchedule is\n//    NOT a printable/exportable view -- Document.ExportImage/Export on it throws \"some of the views\n//    is not exportable\"; you must place it on a sheet and export the SHEET.\nvar placed = Connector.WithTransaction(proj, () => {\n  if (tbSym != null && !tbSym.IsActive) tbSym.Activate();\n  var sheet = Autodesk.Revit.DB.ViewSheet.Create(proj, tbSym != null ? tbSym.Id : Autodesk.Revit.DB.ElementId.InvalidElementId);\n  sheet.SheetNumber = \"A-DS\" + (System.DateTime.UtcNow.Ticks % 100000);\n  sheet.Name = \"Door Schedule Sheet\";\n  var ssi = Autodesk.Revit.DB.ScheduleSheetInstance.Create(proj, sheet.Id, sched.Id, new Autodesk.Revit.DB.XYZ(0.3, 0.6, 0));\n  proj.Regenerate();\n  return new { sheetNumber = sheet.SheetNumber, ssiId = ssi.Id.Value };\n});\n\nreturn new { fieldCount = sched.Definition.GetFieldCount(), marks, placed };",
+  "pitfalls": [
+    {
+      "symptom": "Document.ExportImage (or Export) with a ViewSchedule's id throws ArgumentException 'some of the views is not exportable' (parameter name: views) and writes no file.",
+      "cause": "A schedule is not a printable/exportable view.",
+      "fix": "Place the schedule on a sheet with ScheduleSheetInstance.Create and export the SHEET instead.",
+      "members": [
+        "Autodesk.Revit.DB.ScheduleSheetInstance.Create"
+      ]
+    },
+    {
+      "symptom": "AddField never adds the Family, Type, or Level column when matched against ALL_MODEL_FAMILY_NAME / ALL_MODEL_TYPE_NAME.",
+      "cause": "In a schedule, Family/Type/Level are 'special' schedulable fields whose SchedulableField.ParameterId is a negative BuiltInParameter -- ELEM_FAMILY_PARAM, ELEM_TYPE_PARAM, SCHEDULE_LEVEL_PARAM -- not the ALL_MODEL_* name parameters.",
+      "fix": "Match GetSchedulableFields by ELEM_FAMILY_PARAM / ELEM_TYPE_PARAM / SCHEDULE_LEVEL_PARAM; Mark and dimensions use their normal BuiltInParameter (ALL_MODEL_MARK, GENERIC_WIDTH, DOOR_HEIGHT).",
+      "members": [
+        "Autodesk.Revit.DB.SchedulableField.ParameterId"
+      ]
+    },
+    {
+      "symptom": "Adding a 'From Room: Name' vs 'To Room: Name' column by ParameterId picks the wrong or an ambiguous field.",
+      "cause": "For a door schedule, both 'From Room: Name' and 'To Room: Name' report the SAME SchedulableField.ParameterId (ROOM_NAME); they cannot be told apart by id.",
+      "fix": "Disambiguate room-side fields by SchedulableField.GetName(document) instead of by ParameterId.",
+      "members": [
+        "Autodesk.Revit.DB.SchedulableField.ParameterId"
+      ]
+    },
+    {
+      "symptom": "NewFamilyInstance for a door hosted in an upper-level wall fails at commit with 'Can't cut instance of <type> out of Wall'.",
+      "cause": "The insertion point's z was below the wall body (e.g. 0 while the wall sits at the level's elevation).",
+      "fix": "Place the hosted door at the host wall's level elevation -- set the insertion point z to level.Elevation.",
+      "members": [
+        "Autodesk.Revit.Creation.Document.NewFamilyInstance"
+      ]
+    }
+  ],
+  "tags": [
+    "schedules",
+    "doors",
+    "sheets",
+    "reporting",
+    "pitfall"
+  ],
+  "provenance": {
+    "kind": "submission",
+    "ref": "https://github.com/eichler-ai/connectors/issues/259",
+    "reviewed_by": "nchim"
+  },
+  "verify": {
+    "creates_documents": true
+  },
+  "created_at": "2026-09-09T00:00:00Z",
+  "updated_at": "2026-09-09T00:00:00Z"
+}

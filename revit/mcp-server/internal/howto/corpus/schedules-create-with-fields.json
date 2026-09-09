@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "id": "schedules-create-with-fields",
-  "rev": 1,
+  "rev": 2,
   "kind": "howto",
   "title": "Create a wall schedule with chosen fields, sort it, and read the rows back",
   "task": "Produce a schedule view for a category with the columns the user asked for: ViewSchedule.CreateSchedule for OST_Walls, add fields from ScheduleDefinition.GetSchedulableFields by parameter id, sort with ScheduleSortGroupField, then read the body back with GetTableData and GetCellText. The script creates two scratch walls so the schedule has rows.",
@@ -41,6 +41,30 @@
       "members": [
         "Autodesk.Revit.DB.ViewSchedule.IsValidCategoryForSchedule"
       ]
+    },
+    {
+      "symptom": "Document.ExportImage (or Export) with a ViewSchedule's id throws ArgumentException 'some of the views is not exportable' (parameter name: views) and writes no file.",
+      "cause": "A schedule is not a printable/exportable view.",
+      "fix": "Place the schedule on a sheet with ScheduleSheetInstance.Create and export the SHEET instead.",
+      "members": [
+        "Autodesk.Revit.DB.ScheduleSheetInstance.Create"
+      ]
+    },
+    {
+      "symptom": "AddField never adds a Family, Type, or Level column when matched against ALL_MODEL_FAMILY_NAME / ALL_MODEL_TYPE_NAME.",
+      "cause": "Family/Type/Level are 'special' schedulable fields whose SchedulableField.ParameterId is a negative BuiltInParameter -- ELEM_FAMILY_PARAM, ELEM_TYPE_PARAM, SCHEDULE_LEVEL_PARAM -- not the ALL_MODEL_* name parameters.",
+      "fix": "Match GetSchedulableFields by ELEM_FAMILY_PARAM / ELEM_TYPE_PARAM / SCHEDULE_LEVEL_PARAM (Mark and dimensions still use their normal BuiltInParameter such as ALL_MODEL_MARK).",
+      "members": [
+        "Autodesk.Revit.DB.SchedulableField.ParameterId"
+      ]
+    },
+    {
+      "symptom": "Adding 'From Room: Name' vs 'To Room: Name' by ParameterId picks the wrong or an ambiguous field.",
+      "cause": "For a door schedule both report the SAME SchedulableField.ParameterId (ROOM_NAME); they cannot be told apart by id.",
+      "fix": "Disambiguate room-side schedulable fields by SchedulableField.GetName(document) instead of by ParameterId.",
+      "members": [
+        "Autodesk.Revit.DB.SchedulableField.ParameterId"
+      ]
     }
   ],
   "tags": [
@@ -50,8 +74,9 @@
     "reporting"
   ],
   "provenance": {
-    "kind": "harness",
-    "ref": "revit/test-harness/phase_b_test.go TestPhaseBAnnotationAndScheduling/CreateWallSchedule"
+    "kind": "submission",
+    "ref": "https://github.com/eichler-ai/connectors/issues/263",
+    "reviewed_by": "nchim"
   },
   "verify": {
     "mutations": {
@@ -63,5 +88,5 @@
     }
   },
   "created_at": "2026-09-02T00:00:00Z",
-  "updated_at": "2026-09-02T00:00:00Z"
+  "updated_at": "2026-09-09T00:00:00Z"
 }

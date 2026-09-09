@@ -14,8 +14,6 @@
 {"id":"element-parameters-read-write-delete","rev":1,"script_sha256":"68d5abe6c92c38038b4184a6bf1e6c63d5f3fc7e85c15da700c49bca1176df9e","revit_version":"2027","status":"passed","at":"2026-09-04T02:04:07Z","by":"harness"}
 {"id":"export-views-dwg","rev":1,"script_sha256":"c54086169785fde93d3ccb556ea283c5eca10023eed977438eea10c20bb700af","revit_version":"2025","status":"passed","at":"2026-09-04T02:22:24Z","by":"harness"}
 {"id":"export-views-dwg","rev":1,"script_sha256":"c54086169785fde93d3ccb556ea283c5eca10023eed977438eea10c20bb700af","revit_version":"2027","status":"passed","at":"2026-09-04T02:04:22Z","by":"harness"}
-{"id":"family-document-build-load-place","rev":1,"script_sha256":"4fce1ac93d6b29ba4d802d87f3833ecb4cdc39451dba2d48080611b68728fb20","revit_version":"2025","status":"passed","at":"2026-09-04T02:22:42Z","by":"harness"}
-{"id":"family-document-build-load-place","rev":1,"script_sha256":"4fce1ac93d6b29ba4d802d87f3833ecb4cdc39451dba2d48080611b68728fb20","revit_version":"2027","status":"passed","at":"2026-09-04T02:04:36Z","by":"harness"}
 {"id":"family-instances-place-hosted","rev":1,"script_sha256":"16dac2de4044e0fba0fcbb4f115afe9757fc47a65911f8314518c786c0586c13","revit_version":"2025","status":"passed","at":"2026-09-04T02:23:06Z","by":"harness"}
 {"id":"family-instances-place-hosted","rev":1,"script_sha256":"16dac2de4044e0fba0fcbb4f115afe9757fc47a65911f8314518c786c0586c13","revit_version":"2027","status":"passed","at":"2026-09-04T02:04:55Z","by":"harness"}
 {"id":"files-publish-and-audit-trail","rev":1,"script_sha256":"bd6a3e5238896ff892f2dd61419a56356ab14214bb2f334b014059a3927a20ca","revit_version":"2025","status":"passed","at":"2026-09-04T02:23:24Z","by":"harness"}
@@ -32,8 +30,6 @@
 {"id":"results-return-values-and-mutations","rev":1,"script_sha256":"afe3dba9c8d02455c33a87ef63a03a147305d271914089361742fab30ca10987","revit_version":"2027","status":"passed","at":"2026-09-04T02:06:50Z","by":"harness"}
 {"id":"rooms-create-tag-area","rev":1,"script_sha256":"e8dfa51dc7139e6da3f279120a9f298a109b5a44574b2b38fa134e899c2a5f72","revit_version":"2025","status":"passed","at":"2026-09-04T02:25:32Z","by":"harness"}
 {"id":"rooms-create-tag-area","rev":1,"script_sha256":"e8dfa51dc7139e6da3f279120a9f298a109b5a44574b2b38fa134e899c2a5f72","revit_version":"2027","status":"passed","at":"2026-09-04T02:07:03Z","by":"harness"}
-{"id":"schedules-create-with-fields","rev":1,"script_sha256":"b22ab29b2c6514f0019266b73066b77e56c3d371b91ded37ee4c6f8584e70a6c","revit_version":"2025","status":"passed","at":"2026-09-04T02:25:51Z","by":"harness"}
-{"id":"schedules-create-with-fields","rev":1,"script_sha256":"b22ab29b2c6514f0019266b73066b77e56c3d371b91ded37ee4c6f8584e70a6c","revit_version":"2027","status":"passed","at":"2026-09-04T02:07:18Z","by":"harness"}
 {"id":"self-transacting-calls-between-blocks","rev":1,"script_sha256":"ed5d7b31a21b8d23d1635fa4aedb20a413c28be20385eef339bcfa4f6f9f8bc3","revit_version":"2025","status":"passed","at":"2026-09-04T02:26:07Z","by":"harness"}
 {"id":"self-transacting-calls-between-blocks","rev":1,"script_sha256":"ed5d7b31a21b8d23d1635fa4aedb20a413c28be20385eef339bcfa4f6f9f8bc3","revit_version":"2027","status":"passed","at":"2026-09-04T02:07:32Z","by":"harness"}
 {"id":"set-the-project-name-and-number-in-project-information","rev":1,"script_sha256":"ac2002f64ed320f8ea97301a27777bdfd823bc1305d4c3beb0dee8fd352cb236","revit_version":"2025","status":"passed","at":"2026-09-04T02:26:29Z","by":"harness"}
@@ -44,8 +40,6 @@
 {"id":"sheets-viewports-and-title-blocks","rev":1,"script_sha256":"b8d01321696532f86376c2eb6d2b9c5754bf3ba5082958f90a0538aa7ec44021","revit_version":"2027","status":"passed","at":"2026-09-04T02:08:23Z","by":"harness"}
 {"id":"stairs-with-edit-scope","rev":1,"script_sha256":"e4bc603643158dd158ebc86fc69b4af955e11536dc273bd9eb21a686e54697f4","revit_version":"2025","status":"passed","at":"2026-09-04T02:27:13Z","by":"harness"}
 {"id":"stairs-with-edit-scope","rev":1,"script_sha256":"e4bc603643158dd158ebc86fc69b4af955e11536dc273bd9eb21a686e54697f4","revit_version":"2027","status":"passed","at":"2026-09-04T02:08:40Z","by":"harness"}
-{"id":"text-notes-and-annotation-text","rev":1,"script_sha256":"d30fbdd77f9578afae330d4208d21e32d8c5dfb180647320e17e41bfa2a32c89","revit_version":"2025","status":"passed","at":"2026-09-04T02:27:30Z","by":"harness"}
-{"id":"text-notes-and-annotation-text","rev":1,"script_sha256":"d30fbdd77f9578afae330d4208d21e32d8c5dfb180647320e17e41bfa2a32c89","revit_version":"2027","status":"passed","at":"2026-09-04T02:09:02Z","by":"harness"}
 {"id":"transactions-write-inside-blocks","rev":1,"script_sha256":"c141cb7b1d87303bd052fe0fbff7a32f7abe1cdb699caeb681196d4b77846830","revit_version":"2025","status":"passed","at":"2026-09-04T02:27:45Z","by":"harness"}
 {"id":"transactions-write-inside-blocks","rev":1,"script_sha256":"c141cb7b1d87303bd052fe0fbff7a32f7abe1cdb699caeb681196d4b77846830","revit_version":"2027","status":"passed","at":"2026-09-04T02:09:19Z","by":"harness"}
 {"id":"undo-redo-and-run-labels","rev":1,"script_sha256":"309572db378bece8d6a78f3e4811dcbf506c0280f96896ad8f74cd9c5250b795","revit_version":"2025","status":"passed","at":"2026-09-04T02:27:59Z","by":"harness"}
