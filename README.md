@@ -1,13 +1,26 @@
 # Connectors
 
-MCP-based connectors that let Claude and other agents drive desktop host applications
-directly — starting with Revit.
+MCP-based connectors that let Claude and other agents drive host applications directly — a desktop
+app like Revit, or a web app like Excel.
 
 Each connector follows the same two-component pattern (see [`CONVENTIONS.md`](./CONVENTIONS.md)):
-an in-process **Bridge** (a plugin/add-in inside the host app) plus a standalone, agent-facing
-**MCP Server** that speaks MCP and fans out to however many live app instances exist.
+an in-process **Bridge** (a plugin/add-in inside the host app) plus an agent-facing **MCP Server**
+that speaks MCP and fans out to however many live app instances exist. Revit ships that server as a
+process installed next to the desktop app; Excel's is hosted — the [Connectors Hub](./hub/), a single
+Cloud Run service that serves the MCP endpoint, the WebSocket the add-in dials, and the sign-in.
 
 ## Connectors
+
+- [`excel/`](./excel/) — **Excel connector**, hosted on the [Connectors Hub](./hub/) and **live in
+  production** at `connectors.eichler.ai`. An agent reads, writes, formats, charts and analyses the
+  user's live workbook by running `execute_script` (Office.js) in it — plus `export_file` /
+  `import_workbook` to move files, and `create_workbook` to make a new one in the user's OneDrive.
+  The agent signs in with Microsoft (the hub is its own OAuth 2.1 server); the user opens an **MCP
+  Bridge** task pane in Excel for the web, signed in as the same account, and the hub routes between
+  them. Shipped and live-verified: sign-in, the full tool surface, the audit trail. Install is still
+  a hand-sideloaded add-in (AppSource one-click is the next step). **Connect it** (see
+  [Install](#install)) or read [`excel/README.md`](./excel/README.md); design:
+  [`hub/docs/PRD.md`](./hub/docs/PRD.md).
 
 - [`revit/`](./revit/) — **Revit connector** (Revit MCP Bridge + Revit MCP Server). Rather
   than a fixed catalog of pre-built tools, its primary surface is `execute_script` — dynamic
@@ -22,6 +35,16 @@ an in-process **Bridge** (a plugin/add-in inside the host app) plus a standalone
   [`revit/docs/PRD.md`](./revit/docs/PRD.md); per-phase status: PRD §15.
 
 ## Install
+
+**Excel connector** — nothing to install; it's a hosted service. Add it to your MCP client:
+
+```sh
+claude mcp add --transport http excel https://connectors.eichler.ai/excel/mcp
+```
+
+or in claude.ai add a custom connector with that URL. Sign in with Microsoft when prompted, then open
+the **MCP Bridge** task pane in Excel for the web and sign in with the **same** account. Full
+connect-and-use steps and the current distribution state are in [`excel/README.md`](./excel/README.md).
 
 **Revit connector, on Windows** with Revit 2025 and/or 2027 installed. In PowerShell:
 
