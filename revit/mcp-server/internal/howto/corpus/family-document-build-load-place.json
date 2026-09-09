@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "id": "family-document-build-load-place",
-  "rev": 1,
+  "rev": 2,
   "kind": "howto",
   "title": "Build a minimal family document, load it into the project, and place an instance",
   "task": "Create a custom component the project lacks: make a family document from a family template (Generic Model.rft), draw an extrusion in it, load it into the project with Document.LoadFamily, activate a FamilySymbol and place a FamilyInstance with NewFamilyInstance.",
@@ -49,6 +49,15 @@
       "members": [
         "Autodesk.Revit.DB.Document.Close"
       ]
+    },
+    {
+      "symptom": "Setting a family dimension (e.g. Width via FamilyManager.Set) wider than about 15 ft, in a family built from a HOST-based template (Door.rft, Window.rft), fails at commit with 'Can't make cut-out' (InvalidOperationException, the block rolled back), even though the sketched geometry is valid.",
+      "cause": "Host-based door/window templates ship a hidden preview Wall of fixed length (~15 ft) for editor context; the family's opening void cuts past the end of that wall once the dimension exceeds its length. Generic Model.rft (this how-to's template) has no preview wall and is unaffected.",
+      "fix": "Before setting the wide dimension, find the family document's preview Wall (the only Wall in it) and extend its LocationCurve.Curve about its midpoint to comfortably exceed the final size, then set the dimension.",
+      "members": [
+        "Autodesk.Revit.DB.FamilyManager.Set",
+        "Autodesk.Revit.DB.LocationCurve.Curve"
+      ]
     }
   ],
   "tags": [
@@ -59,8 +68,9 @@
     "connector"
   ],
   "provenance": {
-    "kind": "harness",
-    "ref": "revit/test-harness/validation_corpus_test.go TestValidationCorpus_LoadFamilyAndPlaceInstance; external_commit_test.go TestSelfTransactingApiBetweenBlocksSurvivesTheRun"
+    "kind": "submission",
+    "ref": "https://github.com/eichler-ai/connectors/issues/262",
+    "reviewed_by": "nchim"
   },
   "verify": {
     "mutations": {
@@ -74,5 +84,5 @@
     "creates_documents": true
   },
   "created_at": "2026-09-02T00:00:00Z",
-  "updated_at": "2026-09-02T00:00:00Z"
+  "updated_at": "2026-09-09T00:00:00Z"
 }
