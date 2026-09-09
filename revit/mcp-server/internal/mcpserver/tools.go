@@ -42,7 +42,8 @@ const executeScriptDescription = "Compile and run a C# script against an open Re
 type ExecuteScriptIn struct {
 	InstanceID           string `json:"instance_id" jsonschema:"instance_id of the target Revit instance, from a prior register/list_instances"`
 	DocumentID           string `json:"document_id" jsonschema:"document_id of the target document within that instance (from list_instances). Routes for real: the script runs against this document -- active or background -- and its file-exchange workspace follows it; an id matching no open document fails with document-not-found plus an open_documents candidates list. Omit or pass empty to run against the instance's active document."`
-	Script               string `json:"script" jsonschema:"C# script body to compile and run against the document"`
+	Script               string `json:"script,omitempty" jsonschema:"C# script body to compile and run against the document. Pass exactly one of script or script_path"`
+	ScriptPath           string `json:"script_path,omitempty" jsonschema:"alternative to script: an absolute local path or an https URL whose contents ARE the C# script body. The connector reads it on the server host and compiles those contents, so a large or reused script never travels through the agent's context. Local paths must be absolute (e.g. C:\\scripts\\walls.cs); URLs must be https (http is allowed only for localhost). Pass exactly one of script or script_path"`
 	TimeoutMs            int    `json:"timeout_ms,omitempty" jsonschema:"milliseconds to wait for completion before returning a pending/running status; default 30000"`
 	MaxDurationMs        int    `json:"max_duration_ms,omitempty" jsonschema:"hard ceiling on total script runtime in milliseconds, independent of timeout_ms; default 600000"`
 	OverwriteOutputFiles bool   `json:"overwrite_output_files,omitempty" jsonschema:"if true, Publish() calls that would overwrite an existing exported file succeed and replace it; if false (default), such a collision fails that one file's publish rather than overwriting it silently"`
@@ -118,6 +119,13 @@ func Register(s *mcp.Server, mgr *execution.Manager) {
 		// indexed as an add-in API, which is the whole point of #91.
 		Description: executeScriptDescription,
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in ExecuteScriptIn) (*mcp.CallToolResult, ExecutionOut, error) {
+		// Resolve script/script_path into the single body to compile before
+		// anything else: a bad source is a clean pre-execution error (no
+		// execution_id minted), reported in the same shape as any tool error.
+		script, drec := resolveScript(ctx, in.Script, in.ScriptPath)
+		if drec != nil {
+			return toolResult(nil, drec)
+		}
 		timeoutMs := in.TimeoutMs
 		if timeoutMs <= 0 {
 			timeoutMs = defaultTimeoutMs
@@ -126,7 +134,7 @@ func Register(s *mcp.Server, mgr *execution.Manager) {
 		if maxDurationMs <= 0 {
 			maxDurationMs = defaultMaxDurationMs
 		}
-		res, drec := mgr.ExecuteScript(ctx, in.InstanceID, in.DocumentID, in.Script, timeoutMs, maxDurationMs, execution.ScriptOptions{
+		res, drec := mgr.ExecuteScript(ctx, in.InstanceID, in.DocumentID, script, timeoutMs, maxDurationMs, execution.ScriptOptions{
 			OverwriteOutputFiles:    in.OverwriteOutputFiles,
 			ConfirmLifecycleActions: in.ConfirmLifecycleActions,
 			Label:                   in.Label,

@@ -64,8 +64,13 @@ surfaces. Scripts are always explicitly targeted, so they're unaffected; discove
 
 ## Running a script
 
-`execute_script` takes `instance_id`, `document_id` and `script`; its schema lists the optional
-timeout, duration, overwrite, label and confirmation parameters. `document_id` routes: the script runs
+`execute_script` takes `instance_id`, `document_id` and the C# to run; its schema lists the optional
+timeout, duration, overwrite, label and confirmation parameters. Supply the C# **either** inline as
+`script` **or** as `script_path` — an absolute local path (`C:\scripts\walls.cs`) or an `https` URL —
+never both. `script_path` is read on the machine running the connector and compiled as-is; reach for
+it when a script is large or reused, to keep it out of the conversation. A first script is normally
+inline; the win is on re-runs and shared/checked-in scripts, whose bytes then never reach you at all.
+`document_id` routes: the script runs
 against that document — active or background — and its workspace follows it. An unknown id fails with
 `document-not-found` and an `open_documents` list; omitted means the active document. `UIDocument` is
 null unless the routed document is the active one; use `Document` for a background one.
