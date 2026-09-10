@@ -12,13 +12,13 @@ public sealed class ViewCaptureServiceTests
         public (int, int) Size { get; set; } = (1600, 900);
         public List<string> Modes { get; set; } = new() { "Wireframe", "Shaded", "Rendered" };
         public string? RestoreFailure { get; set; }
-        public List<(string Viewport, int W, int H, string? Mode, string Zoom)> Calls { get; } = new();
+        public List<(string Viewport, int W, int H, string? Mode, string Zoom, string Mime)> Calls { get; } = new();
         public IReadOnlyList<string> ViewportNames(object document) => Names;
         public (int Width, int Height) ViewportSize(object document, string viewport) => Size;
         public IReadOnlyList<string> DisplayModeNames() => Modes;
-        public (byte[] Png, string? RestoreFailure) Capture(object document, string viewport, int width, int height, string? displayMode, string zoom, bool transparent, bool grid, bool axes)
+        public (byte[] Bytes, string? RestoreFailure) Capture(object document, string viewport, int width, int height, string? displayMode, string zoom, bool transparent, bool grid, bool axes, string mimeType)
         {
-            Calls.Add((viewport, width, height, displayMode, zoom));
+            Calls.Add((viewport, width, height, displayMode, zoom, mimeType));
             return (new byte[] { 0x89, (byte)'P', (byte)'N', (byte)'G' }, RestoreFailure);
         }
     }
@@ -26,8 +26,8 @@ public sealed class ViewCaptureServiceTests
     private static readonly object Doc = new();
 
     [Theory]
-    [InlineData(0, 0, 1600, 900, 1280, 720)]   // default long edge, aspect kept
-    [InlineData(0, 0, 900, 1600, 720, 1280)]   // portrait
+    [InlineData(0, 0, 1600, 900, 1024, 576)]   // default long edge, aspect kept
+    [InlineData(0, 0, 900, 1600, 576, 1024)]   // portrait
     [InlineData(4000, 0, 1600, 900, 2048, 1152)] // explicit width capped at the max edge
     [InlineData(0, 300, 1600, 900, 533, 300)]  // height given, width from aspect
     [InlineData(10, 10, 100, 100, 64, 64)]     // never below the minimum edge
@@ -44,8 +44,31 @@ public sealed class ViewCaptureServiceTests
         var r = new ViewCaptureService(fake).Capture(Doc, new CaptureRequest { Target = "active" });
         Assert.Single(r.Images);
         Assert.Equal("Perspective", r.Images[0].Viewport);
-        Assert.Equal((1280, 720), (r.Images[0].Width, r.Images[0].Height));
+        Assert.Equal((1024, 576), (r.Images[0].Width, r.Images[0].Height));
+        Assert.Equal("image/jpeg", r.Images[0].MimeType);
         Assert.Empty(r.Notices);
+    }
+
+    [Fact]
+    public void TransparentBackground_ForcesPng_AndFormatPngIsHonoured()
+    {
+        var fake = new FakeCapture();
+        var svc = new ViewCaptureService(fake);
+        Assert.Equal("image/png", svc.Capture(Doc, new CaptureRequest { Target = "active", TransparentBackground = true }).Images[0].MimeType);
+        Assert.Equal("image/png", svc.Capture(Doc, new CaptureRequest { Target = "active", Format = "png" }).Images[0].MimeType);
+        Assert.Equal("image/png", fake.Calls[1].Mime);
+        var ex = Assert.Throws<CaptureRequestException>(() => svc.Capture(Doc, new CaptureRequest { Target = "active", Format = "gif" }));
+        Assert.Equal("format", ex.Record.Detail["param"]);
+    }
+
+    [Fact]
+    public void DisplayModeWithFlags_ReportsTheFlagsAsIgnored()
+    {
+        var fake = new FakeCapture();
+        var r = new ViewCaptureService(fake).Capture(Doc, new CaptureRequest { Target = "active", DisplayMode = "Shaded", DrawGrid = false });
+        Assert.Equal("capture-options-ignored", Assert.Single(r.Notices).Code);
+        var quiet = new ViewCaptureService(fake).Capture(Doc, new CaptureRequest { Target = "active", DisplayMode = "Shaded" });
+        Assert.Empty(quiet.Notices);
     }
 
     [Fact]

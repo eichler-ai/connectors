@@ -6,7 +6,8 @@ namespace Rhino.MCPBridge.Core.Capture;
 /// </summary>
 internal interface IViewCapture
 {
-    /// <summary>Viewport names of the document, active first.</summary>
+    /// <summary>MODEL viewport names of the document, the active one first when it is a model view
+    /// (a layout/page view is never listed: it is not capturable through the viewport path -- review of #283).</summary>
     IReadOnlyList<string> ViewportNames(object document);
 
     /// <summary>The viewport's current pixel size (for sizing the capture to its aspect).</summary>
@@ -19,5 +20,5 @@ internal interface IViewCapture
     /// the viewport's own), after applying zoom (none/extents/selected). The adapter restores the
     /// viewport's projection and display mode afterwards; a failure to restore is returned as the
     /// second value, never thrown, so the image still reaches the agent (§01).</summary>
-    (byte[] Png, string? RestoreFailure) Capture(object document, string viewport, int width, int height, string? displayMode, string zoom, bool transparent, bool grid, bool axes);
+    (byte[] Bytes, string? RestoreFailure) Capture(object document, string viewport, int width, int height, string? displayMode, string zoom, bool transparent, bool grid, bool axes, string mimeType);
 }

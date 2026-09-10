@@ -19,7 +19,14 @@ type CaptureOptions struct {
 	Width, Height         int
 	TransparentBackground bool
 	DrawGrid, DrawAxes    *bool
+	Format                string // "jpeg" (default) | "png"
 }
+
+// maxCaptureBytes bounds one call's decoded image payload. Base64 inflates by 4/3
+// and the client's MCP output ceiling is finite (Revit PRD §09 measured ~500k
+// chars); a default 1024 px JPEG is ~100 KB, so this is generous for `all`
+// while refusing a run-away.
+const maxCaptureBytes = 4 << 20
 
 // CapturedImage is one image as the plug-in returned it, decoded from base64.
 type CapturedImage struct {
@@ -27,7 +34,7 @@ type CapturedImage struct {
 	Width    int
 	Height   int
 	MIMEType string
-	PNG      []byte
+	Bytes    []byte
 }
 
 // CaptureResult is capture_view's decoded wire result.
@@ -71,6 +78,9 @@ func (r *Router) CaptureView(ctx context.Context, instanceID string, opts Captur
 	if opts.DrawAxes != nil {
 		params["draw_axes"] = *opts.DrawAxes
 	}
+	if opts.Format != "" {
+		params["format"] = opts.Format
+	}
 	wctx, cancel := context.WithTimeout(ctx, captureTimeout)
 	defer cancel()
 	raw, rpcErr, err := conn.Call(wctx, "capture_view", params)
@@ -100,6 +110,7 @@ func (r *Router) CaptureView(ctx context.Context, instanceID string, opts Captur
 		return nil, diag.New(diag.SeverityError, "wire-decode-failed", source, "capture_view returned a result this server could not decode: "+err.Error())
 	}
 	res := &CaptureResult{Notices: w.Notices}
+	total := 0
 	for _, img := range w.Images {
 		b, err := base64.StdEncoding.DecodeString(img.DataBase64)
 		if err != nil {
@@ -109,7 +120,13 @@ func (r *Router) CaptureView(ctx context.Context, instanceID string, opts Captur
 		if mime == "" {
 			mime = "image/png"
 		}
-		res.Images = append(res.Images, CapturedImage{Viewport: img.Viewport, Width: img.Width, Height: img.Height, MIMEType: mime, PNG: b})
+		total += len(b)
+		if total > maxCaptureBytes {
+			return nil, diag.New(diag.SeverityError, "capture-too-large", source,
+				fmt.Sprintf("the capture's images total more than %d MB decoded; the client cannot carry that in one result", maxCaptureBytes>>20)).
+				WithRemedy("capture one viewport at a time, pass a smaller width, or use format jpeg (the default) rather than png")
+		}
+		res.Images = append(res.Images, CapturedImage{Viewport: img.Viewport, Width: img.Width, Height: img.Height, MIMEType: mime, Bytes: b})
 	}
 	return res, nil
 }

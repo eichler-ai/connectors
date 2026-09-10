@@ -166,7 +166,7 @@ public sealed class RequestDispatcherTests
         public IReadOnlyList<string> ViewportNames(object document) => Array.Empty<string>();
         public (int Width, int Height) ViewportSize(object document, string viewport) => (1, 1);
         public IReadOnlyList<string> DisplayModeNames() => Array.Empty<string>();
-        public (byte[] Png, string? RestoreFailure) Capture(object document, string viewport, int width, int height, string? displayMode, string zoom, bool transparent, bool grid, bool axes) => (Array.Empty<byte>(), null);
+        public (byte[] Bytes, string? RestoreFailure) Capture(object document, string viewport, int width, int height, string? displayMode, string zoom, bool transparent, bool grid, bool axes, string mimeType) => (Array.Empty<byte>(), null);
     }
 
     [Fact]

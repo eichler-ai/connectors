@@ -81,6 +81,7 @@ internal sealed class RequestDispatcher
                 TransparentBackground = request.GetOptionalBool("transparent_background", false),
                 DrawGrid = request.GetOptionalBool("draw_grid", true),
                 DrawAxes = request.GetOptionalBool("draw_axes", true),
+                Format = request.GetOptionalString("format") ?? "jpeg",
             };
         }
         catch (JsonRpcParamException ex)

@@ -35,6 +35,12 @@ internal sealed class ViewCaptureService
             throw new CaptureRequestException(Invalid("width", "width and height must be positive when given"));
         }
 
+        var format = request.Format?.ToLowerInvariant() ?? "jpeg";
+        if (format is not ("jpeg" or "jpg" or "png"))
+        {
+            throw new CaptureRequestException(Invalid("format", $"format must be jpeg or png; got '{request.Format}'"));
+        }
+
         string? mode = null;
         if (!string.IsNullOrWhiteSpace(request.DisplayMode))
         {
@@ -69,11 +75,21 @@ internal sealed class ViewCaptureService
         }
 
         var result = new Result();
+        var mime = request.ResolvedMimeType;
+        if (mode is not null && (request.TransparentBackground || !request.DrawGrid || !request.DrawAxes))
+        {
+            // Rhino's render-with-a-mode overload takes none of these flags (found live); saying so beats
+            // silently dropping them (observability over silence -- review of #283).
+            result.Notices.Add(DiagnosticRecord.Create(DiagnosticSeverity.Info, "capture-options-ignored", DiagnosticSource.Execution,
+                "transparent_background, draw_grid and draw_axes do not apply when display_mode is set: Rhino renders a requested mode with the viewport's own grid/axes settings and an opaque background",
+                null, new[] { "omit display_mode to have those flags honoured (the viewport's current mode is used), or accept the mode's defaults" }));
+        }
+
         foreach (var viewport in list)
         {
             var (w, h) = Size(request, _capture.ViewportSize(document, viewport));
-            var (png, restoreFailure) = _capture.Capture(document, viewport, w, h, mode, zoom, request.TransparentBackground, request.DrawGrid, request.DrawAxes);
-            result.Images.Add(new CapturedImage { Viewport = viewport, Width = w, Height = h, Png = png });
+            var (bytes, restoreFailure) = _capture.Capture(document, viewport, w, h, mode, zoom, request.TransparentBackground, request.DrawGrid, request.DrawAxes, mime);
+            result.Images.Add(new CapturedImage { Viewport = viewport, Width = w, Height = h, MimeType = mime, Bytes = bytes });
             if (restoreFailure is not null)
             {
                 result.Notices.Add(DiagnosticRecord.Create(DiagnosticSeverity.Warning, "capture-restore-failed", DiagnosticSource.Execution,

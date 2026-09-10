@@ -36,7 +36,7 @@ internal static class CaptureResultMessage
         var dto = new ResultDto();
         foreach (var img in result.Images)
         {
-            dto.Images.Add(new ImageDto { Viewport = img.Viewport, Width = img.Width, Height = img.Height, DataBase64 = Convert.ToBase64String(img.Png) });
+            dto.Images.Add(new ImageDto { Viewport = img.Viewport, Width = img.Width, Height = img.Height, MimeType = img.MimeType, DataBase64 = Convert.ToBase64String(img.Bytes) });
         }
 
         if (result.Notices.Count > 0)

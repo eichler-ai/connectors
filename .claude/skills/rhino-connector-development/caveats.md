@@ -155,3 +155,17 @@ early is a vacuous pass on the platform the matrix exists for.
 - `rhinocode command <cmd>` to run a plug-in command from a shell; `rhinocode script` for a probe.
 - Reflection-dump an undocumented API (`Rhino.Runtime.Code`) to a file from a spike command before
   designing against it; the spike plug-in source shows how.
+
+## Every script stays `pending`; capture_view answers `instance-busy` forever
+
+Rhino is sitting inside an interactive command (a `Trim` prompt was found once after a restart,
+probably from a stray click on the toolbar). The launcher retries while `Command.InCommand` is
+true, so the run never starts and everything queued behind it reports busy. Screenshot Rhino
+(`screencapture -x` after activating it) and look at the command line; press Escape twice via
+System Events (`key code 53`) and re-run.
+
+## `TypeLoadException: Could not load type 'System.Drawing.Imaging.ImageCodecInfo'`
+
+Rhino's System.Drawing.Common on the Mac is a shim without `ImageCodecInfo` /
+`EncoderParameters`, and tier 1 cannot catch it (the NuGet reference assembly has the type).
+Use `Bitmap.Save(Stream, ImageFormat)` only; JPEG quality is the encoder's default.

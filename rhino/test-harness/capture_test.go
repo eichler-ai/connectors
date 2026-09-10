@@ -7,7 +7,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"image/png"
+	"image"
+	_ "image/jpeg"
+	_ "image/png"
 	"os"
 	"path/filepath"
 	"testing"
@@ -62,12 +64,18 @@ func decodeImages(t *testing.T, env captureEnvelope, label string) [][]byte {
 		if err != nil {
 			t.Fatalf("image %d is not base64: %v", i, err)
 		}
-		if _, err := png.Decode(bytes.NewReader(b)); err != nil {
-			t.Fatalf("image %d is not a decodable PNG: %v", i, err)
+		if _, format, err := image.Decode(bytes.NewReader(b)); err != nil {
+			t.Fatalf("image %d is not a decodable image: %v", i, err)
+		} else if want := map[string]string{"image/png": "png", "image/jpeg": "jpeg"}[c.MIMEType]; want != format {
+			t.Fatalf("image %d declares %s but decodes as %s", i, c.MIMEType, format)
 		}
 		if dir != "" {
 			os.MkdirAll(dir, 0o755)
-			os.WriteFile(filepath.Join(dir, fmt.Sprintf("%s-%d.png", label, i)), b, 0o644)
+			ext := "jpg"
+			if c.MIMEType == "image/png" {
+				ext = "png"
+			}
+			os.WriteFile(filepath.Join(dir, fmt.Sprintf("%s-%d.%s", label, i, ext)), b, 0o644)
 		}
 		out = append(out, b)
 	}
@@ -86,7 +94,7 @@ func captureForDiagnostics(t *testing.T, c *mcpclient.Client, inst instance, lab
 	t.Logf("diagnostic capture: %d image(s) (set MCP_HARNESS_CAPTURES to keep them)", len(imgs))
 }
 
-func TestCaptureViewReturnsADecodablePng(t *testing.T) {
+func TestCaptureViewReturnsADecodableImage(t *testing.T) {
 	c := startServer(t)
 	inst := waitForInstance(t, c)
 	// Put something in the scene so the capture is not blank, then capture with zoom extents.
@@ -100,7 +108,12 @@ func TestCaptureViewReturnsADecodablePng(t *testing.T) {
 		t.Fatalf("expected 1 image, got %d", len(imgs))
 	}
 	meta := env.StructuredContent.Images[0]
-	img, _ := png.Decode(bytes.NewReader(imgs[0]))
+	// The size budget the review asked for: a default capture must stay well inside the client's
+	// output ceiling (base64 inflates by 4/3; keep the raw bytes under 300 KB).
+	if len(imgs[0]) > 300*1024 {
+		t.Fatalf("default capture is %d bytes; too large for one inline result", len(imgs[0]))
+	}
+	img, _, _ := image.Decode(bytes.NewReader(imgs[0]))
 	b := img.Bounds()
 	if b.Dx() != meta.Width || b.Dy() != meta.Height {
 		t.Fatalf("metadata %dx%d != png %dx%d", meta.Width, meta.Height, b.Dx(), b.Dy())
@@ -141,6 +154,24 @@ func TestCaptureAllViewports(t *testing.T) {
 	for _, m := range env.StructuredContent.Images {
 		if m.Width != 400 {
 			t.Fatalf("width not honoured: %+v", m)
+		}
+	}
+}
+
+func TestCapturePngWhenTransparent(t *testing.T) {
+	c := startServer(t)
+	inst := waitForInstance(t, c)
+	env := capture(t, c, map[string]any{"instance_id": inst.InstanceID, "transparent_background": true, "width": 320})
+	if env.IsError {
+		t.Fatalf("%+v", env.StructuredContent.Error)
+	}
+	decodeImages(t, env, "transparent")
+	if env.StructuredContent.Images[0].Width != 320 {
+		t.Fatalf("%+v", env.StructuredContent.Images[0])
+	}
+	for _, cc := range env.Content {
+		if cc.Type == "image" && cc.MIMEType != "image/png" {
+			t.Fatalf("transparent capture must be png, got %s", cc.MIMEType)
 		}
 	}
 }

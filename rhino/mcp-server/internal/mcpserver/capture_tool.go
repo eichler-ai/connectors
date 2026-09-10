@@ -23,6 +23,7 @@ type CaptureViewIn struct {
 	TransparentBackground bool   `json:"transparent_background,omitempty"`
 	DrawGrid              *bool  `json:"draw_grid,omitempty" jsonschema:"draw the construction grid; default true"`
 	DrawAxes              *bool  `json:"draw_axes,omitempty" jsonschema:"draw the world axes icon; default true"`
+	Format                string `json:"format,omitempty" jsonschema:"\"jpeg\" (default, ~100 KB at the default size) or \"png\" (lossless, several times larger); a transparent background is always png"`
 }
 
 // CaptureViewOut is the structured half of the result; the images themselves are MCP image content.
@@ -38,14 +39,15 @@ type CapturedImageOut struct {
 	Width    int    `json:"width"`
 	Height   int    `json:"height"`
 	Bytes    int    `json:"bytes"`
+	MIMEType string `json:"mime_type"`
 }
 
 // RegisterCapture adds capture_view.
 func RegisterCapture(s *mcp.Server, router *execution.Router) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "capture_view",
-		Description: "Look at a Rhino viewport: returns a PNG of the active viewport, a named one, or all of them, inline as image content, " +
-			"bounded to 1280 px on the long edge (2048 max). Optionally zoom to extents or selection and switch display mode for the " +
+		Description: "Look at a Rhino viewport: returns an image (JPEG by default) of the active viewport, a named one, or all of them, inline as image content, " +
+			"bounded to 1024 px on the long edge (2048 max). Optionally zoom to extents or selection and switch display mode for the " +
 			"shot; the viewport is restored afterwards and nothing in the document changes. Busy while a script is running. " +
 			"Use it to check what a script actually produced.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in CaptureViewIn) (*mcp.CallToolResult, CaptureViewOut, error) {
@@ -59,7 +61,7 @@ func RegisterCapture(s *mcp.Server, router *execution.Router) {
 		}
 		res, drec := router.CaptureView(ctx, in.InstanceID, execution.CaptureOptions{
 			DocumentID: in.DocumentID, Target: target, DisplayMode: in.DisplayMode, Zoom: zoom,
-			Width: in.Width, Height: in.Height, TransparentBackground: in.TransparentBackground, DrawGrid: in.DrawGrid, DrawAxes: in.DrawAxes,
+			Width: in.Width, Height: in.Height, TransparentBackground: in.TransparentBackground, DrawGrid: in.DrawGrid, DrawAxes: in.DrawAxes, Format: in.Format,
 		})
 		if drec != nil {
 			out := CaptureViewOut{Images: []CapturedImageOut{}, Error: drec}
@@ -69,9 +71,9 @@ func RegisterCapture(s *mcp.Server, router *execution.Router) {
 		out := CaptureViewOut{Images: []CapturedImageOut{}, Notices: res.Notices}
 		var content []mcp.Content
 		for _, img := range res.Images {
-			out.Images = append(out.Images, CapturedImageOut{Viewport: img.Viewport, Width: img.Width, Height: img.Height, Bytes: len(img.PNG)})
+			out.Images = append(out.Images, CapturedImageOut{Viewport: img.Viewport, Width: img.Width, Height: img.Height, Bytes: len(img.Bytes), MIMEType: img.MIMEType})
 			content = append(content, &mcp.TextContent{Text: fmt.Sprintf("%s (%dx%d)", img.Viewport, img.Width, img.Height)})
-			content = append(content, &mcp.ImageContent{Data: img.PNG, MIMEType: img.MIMEType})
+			content = append(content, &mcp.ImageContent{Data: img.Bytes, MIMEType: img.MIMEType})
 		}
 		return &mcp.CallToolResult{Content: content}, out, nil
 	})
