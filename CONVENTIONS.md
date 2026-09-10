@@ -93,3 +93,9 @@ Any per-request record, replay buffer, or accumulation a long-running process re
 ## Origin
 
 Established while designing and building the Revit connector — see `revit/docs/PRD.md` for the full reasoning behind each of these, and `.claude/skills/revit-connector-development/` for the day-to-day development process built around them. Extract further conventions here as more connectors are built.
+
+## Assembly naming: `<App>.MCPBridge.*`
+
+A bridge's .NET assemblies are prefixed with the app: `Rhino.MCPBridge.Core`, `Rhino.MCPBridge.RhinoAdapter`, `Rhino.MCPBridge.PlugIn`. Two connectors can share one process (Rhino.Inside.Revit loads Rhino into Revit), and bare `MCPBridge.Core` assemblies from two connectors would collide by name. The script-facing API assembly keeps the vendor-rooted name above (`Eichler.Connectors.<App>`), which is already unique per app.
+
+The Revit connector predates this rule and uses bare `MCPBridge.*`; renaming its payload assemblies is tracked in #280. Its `MCPBridge.Shim.dll` stays as it is regardless: Revit loads that file by the name in the `.addin` manifest, and renaming it would force every installed Revit to close for the update the shim design (#211) exists to avoid.

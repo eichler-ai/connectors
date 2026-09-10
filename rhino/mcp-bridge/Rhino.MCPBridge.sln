@@ -1,0 +1,50 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{1B8EB0A0-4F8C-4B7D-AAB8-F861A0AFD28B}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Rhino.MCPBridge.Core", "src\Rhino.MCPBridge.Core\Rhino.MCPBridge.Core.csproj", "{434E11DF-8836-4397-8EF4-8B6080FF1E6E}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Rhino.MCPBridge.PlugIn", "src\Rhino.MCPBridge.PlugIn\Rhino.MCPBridge.PlugIn.csproj", "{667A05A1-33A7-438E-B10D-8B0DC0AEA5FA}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Rhino.MCPBridge.RhinoAdapter", "src\Rhino.MCPBridge.RhinoAdapter\Rhino.MCPBridge.RhinoAdapter.csproj", "{C364AE5C-82B2-4C7A-89D4-83FD34E8D728}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{4C1FBDF3-6B33-4478-9FE4-0666D037F999}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Rhino.MCPBridge.Core.Tests", "tests\Rhino.MCPBridge.Core.Tests\Rhino.MCPBridge.Core.Tests.csproj", "{0CB1B602-50C3-4EF8-B846-FEFEFC5179EF}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{434E11DF-8836-4397-8EF4-8B6080FF1E6E}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{434E11DF-8836-4397-8EF4-8B6080FF1E6E}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{434E11DF-8836-4397-8EF4-8B6080FF1E6E}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{434E11DF-8836-4397-8EF4-8B6080FF1E6E}.Release|Any CPU.Build.0 = Release|Any CPU
+		{667A05A1-33A7-438E-B10D-8B0DC0AEA5FA}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{667A05A1-33A7-438E-B10D-8B0DC0AEA5FA}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{667A05A1-33A7-438E-B10D-8B0DC0AEA5FA}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{667A05A1-33A7-438E-B10D-8B0DC0AEA5FA}.Release|Any CPU.Build.0 = Release|Any CPU
+		{C364AE5C-82B2-4C7A-89D4-83FD34E8D728}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{C364AE5C-82B2-4C7A-89D4-83FD34E8D728}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{C364AE5C-82B2-4C7A-89D4-83FD34E8D728}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{C364AE5C-82B2-4C7A-89D4-83FD34E8D728}.Release|Any CPU.Build.0 = Release|Any CPU
+		{0CB1B602-50C3-4EF8-B846-FEFEFC5179EF}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{0CB1B602-50C3-4EF8-B846-FEFEFC5179EF}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{0CB1B602-50C3-4EF8-B846-FEFEFC5179EF}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{0CB1B602-50C3-4EF8-B846-FEFEFC5179EF}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{434E11DF-8836-4397-8EF4-8B6080FF1E6E} = {1B8EB0A0-4F8C-4B7D-AAB8-F861A0AFD28B}
+		{667A05A1-33A7-438E-B10D-8B0DC0AEA5FA} = {1B8EB0A0-4F8C-4B7D-AAB8-F861A0AFD28B}
+		{C364AE5C-82B2-4C7A-89D4-83FD34E8D728} = {1B8EB0A0-4F8C-4B7D-AAB8-F861A0AFD28B}
+		{0CB1B602-50C3-4EF8-B846-FEFEFC5179EF} = {4C1FBDF3-6B33-4478-9FE4-0666D037F999}
+	EndGlobalSection
+EndGlobal

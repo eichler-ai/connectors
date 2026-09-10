@@ -1,0 +1,29 @@
+<Project>
+  <!--
+    Shared build knobs for the Rhino MCP Bridge (rhino/docs/PRD.md §04, §14).
+
+    RhinoCommon is a pure managed assembly published on NuGet, so every project — the product
+    assemblies AND the tier-1 tests — references the same package with no Rhino install needed. That
+    is the difference from the Revit connector (whose RevitAPI.dll is mixed-mode and Revit-only) and
+    the reason the C# tier-1 suite runs in CI on every push (implementation-plan.md "Tiers").
+
+    ExcludeAssets="runtime" on the product projects: inside a live Rhino the real RhinoCommon is
+    already loaded, so nothing is copied beside the plug-in that could shadow it. The package's
+    lib TFM is net7.0; a net8.0 consumer binds it fine and Rhino 8.35 hosts .NET 8
+    (spikes/phase-1a-findings.md §2).
+
+    Pinned deliberately: a floating version would let a CI run silently change the API surface it
+    compiles against. Bump in one place, here.
+  -->
+  <PropertyGroup>
+    <RhinoCommonVersion>8.25.25314.11001</RhinoCommonVersion>
+    <BridgeTargetFramework>net8.0</BridgeTargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <!-- The bridge's own version, stamped into instances/<pid>.json (PRD §05) and the Status command.
+         Overridden by the release workflow; "dev" everywhere else, like the server's. -->
+    <BridgeVersion Condition="'$(BridgeVersion)' == ''">dev</BridgeVersion>
+  </PropertyGroup>
+</Project>

@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- The Rhino plug-in (.rhp): PlugIn subclass, listener thread, commands. Composition only; no
+       decision logic (that lives in Core, tested). -->
+  <PropertyGroup>
+    <TargetFramework>$(BridgeTargetFramework)</TargetFramework>
+    <RootNamespace>Rhino.MCPBridge.PlugIn</RootNamespace>
+    <AssemblyName>Rhino.MCPBridge.PlugIn</AssemblyName>
+    <TargetExt>.rhp</TargetExt>
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <InformationalVersion>$(BridgeVersion)</InformationalVersion>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="RhinoCommon" Version="$(RhinoCommonVersion)" ExcludeAssets="runtime" PrivateAssets="all" />
+    <ProjectReference Include="../Rhino.MCPBridge.Core/Rhino.MCPBridge.Core.csproj" />
+    <ProjectReference Include="../Rhino.MCPBridge.RhinoAdapter/Rhino.MCPBridge.RhinoAdapter.csproj" />
+  </ItemGroup>
+</Project>
