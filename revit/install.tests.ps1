@@ -18,6 +18,47 @@ BeforeAll {
     }
 }
 
+Describe 'Remove-AppDirExceptSelf (uninstall self-preservation, issue #240)' {
+    It 'removes every child but the running script, and reports no survivors on a clean pass' {
+        $appDir = Join-Path $TestDrive 'MCPBridge'
+        New-Payload $appDir @{
+            'install.ps1'                        = '<the running uninstaller>'
+            'mcp-server.exe'                     = 'exe'
+            'installed-version.json'             = '{}'
+            'addin/0.1.8/2027/MCPBridge.AddIn.dll' = 'payload'
+            'addin/current.json'                 = '{}'
+        }
+        $self = Join-Path $appDir 'install.ps1'
+
+        $survivors = Remove-AppDirExceptSelf $appDir $self
+
+        # #240: the script the summary tells the user to re-run MUST still be there afterwards.
+        Test-Path $self | Should -BeTrue
+        # Everything else is gone.
+        Test-Path (Join-Path $appDir 'mcp-server.exe') | Should -BeFalse
+        Test-Path (Join-Path $appDir 'addin') | Should -BeFalse
+        Test-Path (Join-Path $appDir 'installed-version.json') | Should -BeFalse
+        # The preserved script is deliberately NOT reported as a leftover.
+        @($survivors) | Should -BeNullOrEmpty
+    }
+
+    It 'never lists the preserved script among survivors even though it remains on disk' {
+        $appDir = Join-Path $TestDrive 'MCPBridge2'
+        New-Payload $appDir @{ 'install.ps1' = 'x'; 'a.txt' = 'y' }
+        $self = Join-Path $appDir 'install.ps1'
+
+        $survivors = Remove-AppDirExceptSelf $appDir $self
+
+        Test-Path $self | Should -BeTrue
+        @($survivors) | Should -Not -Contain $self
+    }
+
+    It 'is a no-op that returns nothing when the app dir does not exist' {
+        $missing = Join-Path $TestDrive 'does-not-exist'
+        @(Remove-AppDirExceptSelf $missing (Join-Path $missing 'install.ps1')) | Should -BeNullOrEmpty
+    }
+}
+
 Describe 'Get-DirectoryContentHash' {
     It 'is stable across file order and timestamps, and changes with content or name' {
         $a = Join-Path $TestDrive 'a'
