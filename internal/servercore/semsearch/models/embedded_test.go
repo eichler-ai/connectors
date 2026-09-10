@@ -9,9 +9,9 @@ import (
 	"context"
 	"testing"
 
-	"github.com/eichler-ai/connectors/revit/mcp-server/internal/semsearch/crossenc"
-	"github.com/eichler-ai/connectors/revit/mcp-server/internal/semsearch/models"
-	"github.com/eichler-ai/connectors/revit/mcp-server/internal/semsearch/staticembed"
+	"github.com/eichler-ai/connectors/internal/servercore/semsearch/crossenc"
+	"github.com/eichler-ai/connectors/internal/servercore/semsearch/models"
+	"github.com/eichler-ai/connectors/internal/servercore/semsearch/staticembed"
 )
 
 // TestEmbeddedModelsLoadThroughTheRealLoaders proves the bundled bytes are

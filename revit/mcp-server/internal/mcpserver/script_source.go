@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/eichler-ai/connectors/revit/mcp-server/internal/diag"
+	"github.com/eichler-ai/connectors/internal/servercore/diag"
 )
 
 // scriptSourceName is the diag Source for every record this file produces:

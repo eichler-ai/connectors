@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/eichler-ai/connectors/internal/servercore/transport"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/broker"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/singleton"
-	"github.com/eichler-ai/connectors/revit/mcp-server/internal/transport"
 )
 
 // Re-election coverage, in the same real-process style as

@@ -10,8 +10,8 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/eichler-ai/connectors/internal/servercore/transport"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/execution"
-	"github.com/eichler-ai/connectors/revit/mcp-server/internal/transport"
 )
 
 // connectClient wires an in-process MCP client to a server that has the

@@ -11,9 +11,9 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/eichler-ai/connectors/revit/mcp-server/internal/diag"
+	"github.com/eichler-ai/connectors/internal/servercore/diag"
+	"github.com/eichler-ai/connectors/internal/servercore/semsearch/manager"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/discovery"
-	"github.com/eichler-ai/connectors/revit/mcp-server/internal/semsearch/manager"
 )
 
 const discoverySource = "mcp-server.internal.mcpserver"

@@ -10,10 +10,10 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/eichler-ai/connectors/internal/servercore/semsearch/manager"
+	"github.com/eichler-ai/connectors/internal/servercore/transport"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/discovery"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/registry"
-	"github.com/eichler-ai/connectors/revit/mcp-server/internal/semsearch/manager"
-	"github.com/eichler-ai/connectors/revit/mcp-server/internal/transport"
 )
 
 // connectDiscoveryClient wires an in-process MCP client to a server that has

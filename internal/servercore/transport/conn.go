@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"sync"
 
-	"github.com/eichler-ai/connectors/revit/mcp-server/internal/diag"
+	"github.com/eichler-ai/connectors/internal/servercore/diag"
 )
 
 const source = "mcp-server.internal.transport"

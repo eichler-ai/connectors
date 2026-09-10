@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/eichler-ai/connectors/revit/mcp-server/internal/transport"
+	"github.com/eichler-ai/connectors/internal/servercore/transport"
 )
 
 // SucceededRecently is the evidence behind a how-to's session-level

@@ -19,8 +19,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/eichler-ai/connectors/revit/mcp-server/internal/diag"
-	"github.com/eichler-ai/connectors/revit/mcp-server/internal/semsearch"
+	"github.com/eichler-ai/connectors/internal/servercore/diag"
+	"github.com/eichler-ai/connectors/internal/servercore/semsearch"
 )
 
 // Source is the wire side the manager pages the corpus from; *discovery.Router

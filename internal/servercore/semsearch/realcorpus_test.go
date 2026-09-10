@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/eichler-ai/connectors/revit/mcp-server/internal/semsearch"
-	"github.com/eichler-ai/connectors/revit/mcp-server/internal/semsearch/crossenc"
-	"github.com/eichler-ai/connectors/revit/mcp-server/internal/semsearch/staticembed"
+	"github.com/eichler-ai/connectors/internal/servercore/semsearch"
+	"github.com/eichler-ai/connectors/internal/servercore/semsearch/crossenc"
+	"github.com/eichler-ai/connectors/internal/servercore/semsearch/staticembed"
 )
 
 // TestRealCorpusRecall rebuilds the POC's measurement in Go: the 2027

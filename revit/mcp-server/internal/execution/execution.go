@@ -25,8 +25,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/eichler-ai/connectors/revit/mcp-server/internal/diag"
-	"github.com/eichler-ai/connectors/revit/mcp-server/internal/transport"
+	"github.com/eichler-ai/connectors/internal/servercore/diag"
+	"github.com/eichler-ai/connectors/internal/servercore/transport"
 )
 
 // Status is one of the values execute_script/poll_execution/cancel_execution

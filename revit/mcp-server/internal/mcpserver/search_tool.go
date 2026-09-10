@@ -10,9 +10,9 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/eichler-ai/connectors/revit/mcp-server/internal/diag"
-	"github.com/eichler-ai/connectors/revit/mcp-server/internal/semsearch"
-	"github.com/eichler-ai/connectors/revit/mcp-server/internal/semsearch/manager"
+	"github.com/eichler-ai/connectors/internal/servercore/diag"
+	"github.com/eichler-ai/connectors/internal/servercore/semsearch"
+	"github.com/eichler-ai/connectors/internal/servercore/semsearch/manager"
 )
 
 // Broker-owned paging and display bounds for the index path. They match

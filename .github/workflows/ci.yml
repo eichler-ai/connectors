@@ -47,11 +47,11 @@ jobs:
           go-version-file: revit/mcp-server/go.mod
           cache-dependency-path: revit/mcp-server/go.sum
       # search_functions' two ranking models are fetched (pinned by sha256) into
-      # internal/semsearch/models/assets for go:embed. Fetching here means the
-      # test run exercises the real bundled state, and the cross-compile below
-      # measures the real shipped binary size. See internal/semsearch/models.
+      # the shared servercore module's semsearch/models/assets for go:embed.
+      # Fetching here means the test run exercises the real bundled state, and
+      # the cross-compile below measures the real shipped binary size.
       - name: fetch search_functions models
-        run: ./internal/semsearch/models/fetch-models.sh
+        run: ../../internal/servercore/semsearch/models/fetch-models.sh
       - name: gofmt
         run: |
           unformatted="$(gofmt -l .)"
@@ -85,6 +85,31 @@ jobs:
           case "$line" in
             *unknown*) echo "the built broker reports no source revision -- VCS stamping is off; see internal/buildinfo" && exit 1 ;;
           esac
+
+  servercore:
+    name: Server core (Go)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: internal/servercore
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: internal/servercore/go.mod
+          cache-dependency-path: internal/servercore/go.sum
+      - name: fetch search_functions models
+        run: ./semsearch/models/fetch-models.sh
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "gofmt needed on:" && echo "$unformatted" && exit 1
+          fi
+      - name: go vet
+        run: go vet ./...
+      - name: go test -race
+        run: go test -race ./...
 
   installer:
     name: Installer (PowerShell)

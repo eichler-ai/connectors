@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/eichler-ai/connectors/revit/mcp-server/internal/diag"
-	"github.com/eichler-ai/connectors/revit/mcp-server/internal/semsearch"
+	"github.com/eichler-ai/connectors/internal/servercore/diag"
+	"github.com/eichler-ai/connectors/internal/servercore/semsearch"
 )
 
 // fakeSource serves a scripted corpus over the dump_members shape, per
