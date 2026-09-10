@@ -62,7 +62,15 @@ const (
 	e2eID    = "e2e-harness-smoke-set-the-project-name-and-number"
 	e2eTitle = "E2E harness smoke set the project name and number"
 	e2eTask  = "Read and set the project's Name and Number through Document.ProjectInformation (a ProjectInfo element every project has) inside one Connector.WithTransaction block, and return the values read back after the commit."
-	e2eQuery = "set the project name and number"
+	// The recorded query must carry the distinctive "e2e harness smoke" marker
+	// for the SAME reason the id does (above): a real seed how-to on this exact
+	// topic exists ("set-the-project-name-and-number-in-project-information",
+	// added by #206), and for the bare query "set the project name and number"
+	// the semantic ranker rightly puts that real doc at rank 1 and this
+	// synthetic fixture at rank 2 -- failing verifyRebuiltBroker's rank-1 check.
+	// Anchoring the query on the fixture's own unique marker keeps it rank 1
+	// regardless of what seed docs share its topic.
+	e2eQuery = "e2e harness smoke set the project name and number"
 )
 
 var e2eScript = strings.Join([]string{
