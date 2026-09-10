@@ -86,7 +86,13 @@ func registerCreateWorkbook(reg *hub.ToolRegistry, c *Connector) {
 				rec := diag.New(diag.SeverityError, "internal", Source, "could not generate a unique filename: "+err.Error())
 				return fail(rec), CreateWorkbookOut{Error: rec}, nil
 			}
-			item, rec := reg.Host.CreateWorkbookFile(ctx, user, name, content)
+			// A blank workbook is one empty sheet (xlsxgen.Blank); from-data is
+			// one sheet per entry. Passed through only for the audit row.
+			sheets := len(in.Data)
+			if sheets == 0 {
+				sheets = 1
+			}
+			item, rec := reg.Host.CreateWorkbookFile(ctx, user, c, name, content, sheets)
 			if rec != nil {
 				return fail(rec), CreateWorkbookOut{Error: rec}, nil
 			}

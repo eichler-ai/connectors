@@ -28,12 +28,16 @@ type GetStatusOut struct {
 	// is not a range (a chart, for example).
 	Selection string `json:"selection,omitempty"`
 	// ExcelAPI is the highest ExcelApi requirement set the host supports.
-	ExcelAPI string       `json:"excel_api,omitempty"`
-	Error    *diag.Record `json:"error,omitempty"`
+	ExcelAPI string `json:"excel_api,omitempty"`
+	// SignedInAs is the Microsoft account this MCP session is signed in as,
+	// so it can be compared against the pane's own "Signed in as …" (#251).
+	SignedInAs string       `json:"signed_in_as,omitempty"`
+	Error      *diag.Record `json:"error,omitempty"`
 }
 
-// statusScript is run through the ordinary exec path, so get_status is also
-// the cheapest end-to-end check that the bridge is alive.
+// statusScript is run through the ordinary exec path (Script.Internal, so it
+// is not audited — #254), so get_status is also the cheapest end-to-end check
+// that the bridge is alive.
 const statusScript = `const wb = context.workbook; wb.load("name");
 const ws = wb.worksheets.getActiveWorksheet(); ws.load("name");
 const sheets = wb.worksheets; sheets.load("items/name");
@@ -54,11 +58,11 @@ func registerGetStatus(reg *hub.ToolRegistry, c *Connector) {
 		if rec != nil {
 			return fail(rec), GetStatusOut{Error: rec}, nil
 		}
-		res, rec := reg.Host.Exec(ctx, user, c, hub.Target{InstanceID: in.InstanceID, Client: hub.ClientName(req)}, hub.Script{Language: Language, Source: statusScript})
+		res, rec := reg.Host.Exec(ctx, user, c, hub.Target{InstanceID: in.InstanceID, Client: hub.ClientName(req)}, hub.Script{Language: Language, Source: statusScript, Internal: true})
 		if rec != nil {
 			return fail(rec), GetStatusOut{Error: rec}, nil
 		}
-		out := GetStatusOut{InstanceID: res.Instance.InstanceID, Host: res.Instance.Host}
+		out := GetStatusOut{InstanceID: res.Instance.InstanceID, Host: res.Instance.Host, SignedInAs: reg.Host.SignedInLabel(ctx, user)}
 		if !res.Reply.OK {
 			out.Error = scriptError(res.Reply.Error)
 			return fail(out.Error), out, nil

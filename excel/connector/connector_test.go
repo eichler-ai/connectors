@@ -303,6 +303,27 @@ func TestListInstancesShowsSheet(t *testing.T) {
 	}
 }
 
+// TestListInstancesEmptyHintsAccountMismatch: with no bridge connected,
+// list_instances returns an empty list but a Hint that names the account
+// mismatch and points at Switch account (#251) — an empty list otherwise
+// gives the caller no clue that the pane may be a different account.
+func TestListInstancesEmptyHintsAccountMismatch(t *testing.T) {
+	f := newFixture(t)
+	res, err := f.cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "list_instances", Arguments: map[string]any{}})
+	if err != nil || res.IsError {
+		t.Fatal(err)
+	}
+	var out hub.ListInstancesOut
+	b, _ := json.Marshal(res.StructuredContent)
+	json.Unmarshal(b, &out)
+	if len(out.Instances) != 0 {
+		t.Fatalf("expected no instances: %s", b)
+	}
+	if !strings.Contains(out.Hint, "Switch account") || !strings.Contains(out.Hint, "different Microsoft account") {
+		t.Fatalf("hint should point at the account mismatch and Switch account: %q", out.Hint)
+	}
+}
+
 func TestToolSurface(t *testing.T) {
 	f := newFixture(t)
 	tools, err := f.cs.ListTools(context.Background(), nil)

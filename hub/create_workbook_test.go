@@ -123,9 +123,38 @@ func mustDevToken(t *testing.T) *auth.DevToken {
 	return a
 }
 
+// TestSignedInLabel: the label prefers email, falls back to display name,
+// and is "" when the user is unknown or no store is wired (#251). Best-effort
+// and never an error — it only enriches list_instances/get_status output.
+func TestSignedInLabel(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	if err := st.PutUser(ctx, store.User{ID: "u1", Email: "nick@example.com", DisplayName: "Nick"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.PutUser(ctx, store.User{ID: "u2", DisplayName: "Just A Name"}); err != nil {
+		t.Fatal(err)
+	}
+	h := newGraphHost(t, nil, nil, st, nil)
+	if got := h.SignedInLabel(ctx, "u1"); got != "nick@example.com" {
+		t.Fatalf("email preferred: %q", got)
+	}
+	if got := h.SignedInLabel(ctx, "u2"); got != "Just A Name" {
+		t.Fatalf("display-name fallback: %q", got)
+	}
+	if got := h.SignedInLabel(ctx, "nobody"); got != "" {
+		t.Fatalf("unknown user should be empty: %q", got)
+	}
+	// No store wired → "".
+	h2 := newGraphHost(t, nil, nil, nil, nil)
+	if got := h2.SignedInLabel(ctx, "u1"); got != "" {
+		t.Fatalf("no store should be empty: %q", got)
+	}
+}
+
 func TestCreateWorkbookFileUnconfigured(t *testing.T) {
 	h := newGraphHost(t, nil, nil, store.NewMemory(), nil)
-	_, rec := h.CreateWorkbookFile(context.Background(), "u1", "a.xlsx", []byte("x"))
+	_, rec := h.CreateWorkbookFile(context.Background(), "u1", &stub{}, "a.xlsx", []byte("x"), 1)
 	if rec == nil || rec.Code != "graph-unconfigured" {
 		t.Fatalf("rec = %+v", rec)
 	}
@@ -134,7 +163,7 @@ func TestCreateWorkbookFileUnconfigured(t *testing.T) {
 func TestCreateWorkbookFileNotConnected(t *testing.T) {
 	f := newFakeGraph(t)
 	h := newGraphHost(t, testKeys(t), f.client(), store.NewMemory(), nil)
-	_, rec := h.CreateWorkbookFile(context.Background(), "u1", "a.xlsx", []byte("x"))
+	_, rec := h.CreateWorkbookFile(context.Background(), "u1", &stub{}, "a.xlsx", []byte("x"), 1)
 	if rec == nil || rec.Code != "graph-not-connected" {
 		t.Fatalf("rec = %+v", rec)
 	}
@@ -151,7 +180,7 @@ func TestCreateWorkbookFileSuccess(t *testing.T) {
 	var logBuf bytes.Buffer
 	h := newGraphHost(t, keys, f.client(), st, &logBuf)
 
-	item, rec := h.CreateWorkbookFile(context.Background(), "u1", "Budget-ab12cd.xlsx", []byte("xlsx-bytes"))
+	item, rec := h.CreateWorkbookFile(context.Background(), "u1", &stub{}, "Budget-ab12cd.xlsx", []byte("xlsx-bytes"), 2)
 	if rec != nil {
 		t.Fatalf("rec = %+v", rec)
 	}
@@ -176,6 +205,58 @@ func TestCreateWorkbookFileSuccess(t *testing.T) {
 	}
 }
 
+// TestCreateWorkbookFileAuditRow: a successful create writes one "create"
+// audit row with the file name, drive-item id, sheet count and byte size —
+// and never the content or a sheet name (§5, §12; #254). A failed create
+// (after the Graph PUT was attempted) writes an OK:false row.
+func TestCreateWorkbookFileAuditRow(t *testing.T) {
+	ctx := context.Background()
+	keys := testKeys(t)
+	const refreshToken = "M.C1_BL2.super-secret-refresh-token"
+
+	// Success.
+	f := newFakeGraph(t)
+	st := store.NewMemory()
+	if err := graphtoken.Put(ctx, st, keys, "u1", refreshToken, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	h := newGraphHost(t, keys, f.client(), st, nil)
+	content := []byte("PK\x03\x04 xlsx-bytes")
+	if _, rec := h.CreateWorkbookFile(ctx, "u1", &stub{}, "Budget-ab12cd.xlsx", content, 3); rec != nil {
+		t.Fatalf("rec = %+v", rec)
+	}
+	rows, err := st.RecentAudit(ctx, "u1", 10)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("audit rows: %v %+v", err, rows)
+	}
+	row := rows[0]
+	if row.Action != "create" || !row.OK || row.Connector != "stub" || row.Name != "Budget-ab12cd.xlsx" ||
+		row.Sheets != 3 || row.FileBytes != int64(len(content)) || row.Format != "xlsx" || row.Document != f.item.ID {
+		t.Fatalf("create row: %+v", row)
+	}
+	// Never the content.
+	b, _ := json.Marshal(row)
+	if strings.Contains(string(b), "xlsx-bytes") {
+		t.Fatalf("create row leaked content: %s", b)
+	}
+
+	// Failure after the PUT was attempted still writes a row.
+	f2 := newFakeGraph(t)
+	f2.failPut = 403
+	st2 := store.NewMemory()
+	if err := graphtoken.Put(ctx, st2, keys, "u1", refreshToken, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	h2 := newGraphHost(t, keys, f2.client(), st2, nil)
+	if _, rec := h2.CreateWorkbookFile(ctx, "u1", &stub{}, "a.xlsx", []byte("PK\x03\x04"), 1); rec == nil {
+		t.Fatal("expected a failure")
+	}
+	rows2, _ := st2.RecentAudit(ctx, "u1", 10)
+	if len(rows2) != 1 || rows2[0].Action != "create" || rows2[0].OK || rows2[0].Code != "graph-create-failed" {
+		t.Fatalf("failed-create row: %+v", rows2)
+	}
+}
+
 func TestCreateWorkbookFilePersistsRotatedToken(t *testing.T) {
 	f := newFakeGraph(t)
 	f.rotateTo = "rt-rotated"
@@ -186,7 +267,7 @@ func TestCreateWorkbookFilePersistsRotatedToken(t *testing.T) {
 	}
 	h := newGraphHost(t, keys, f.client(), st, nil)
 
-	if _, rec := h.CreateWorkbookFile(context.Background(), "u1", "a.xlsx", nil); rec != nil {
+	if _, rec := h.CreateWorkbookFile(context.Background(), "u1", &stub{}, "a.xlsx", nil, 1); rec != nil {
 		t.Fatalf("rec = %+v", rec)
 	}
 	got, err := graphtoken.Get(context.Background(), st, keys, "u1")
@@ -206,7 +287,7 @@ func TestCreateWorkbookFileGraphFailureStillPersistsRotation(t *testing.T) {
 	}
 	h := newGraphHost(t, keys, f.client(), st, nil)
 
-	_, rec := h.CreateWorkbookFile(context.Background(), "u1", "a.xlsx", nil)
+	_, rec := h.CreateWorkbookFile(context.Background(), "u1", &stub{}, "a.xlsx", nil, 1)
 	if rec == nil || rec.Code != "graph-create-failed" {
 		t.Fatalf("rec = %+v", rec)
 	}
@@ -228,7 +309,7 @@ func TestCreateWorkbookFileTokenRefreshFailure(t *testing.T) {
 	}
 	h := newGraphHost(t, keys, f.client(), st, nil)
 
-	_, rec := h.CreateWorkbookFile(context.Background(), "u1", "a.xlsx", nil)
+	_, rec := h.CreateWorkbookFile(context.Background(), "u1", &stub{}, "a.xlsx", nil, 1)
 	if rec == nil || rec.Code != "graph-create-failed" {
 		t.Fatalf("rec = %+v", rec)
 	}

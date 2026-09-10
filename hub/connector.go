@@ -56,6 +56,13 @@ type Script struct {
 	Source   string
 	// Timeout is the cooperative deadline; zero takes the hub default.
 	Timeout time.Duration
+	// Internal marks a fixed, hub-authored probe (get_status's status
+	// script) rather than agent-submitted code. The audit trail is the §13
+	// compensating control for *arbitrary* code execution, so an internal
+	// read is excluded from it — otherwise a client polling get_status writes
+	// a row per poll and drowns the exec/export/import rows that matter.
+	// Exec still logs it at Info, so the "is the bridge alive" signal stays.
+	Internal bool
 }
 
 // Target names where a script runs. Empty InstanceID means "the user's only

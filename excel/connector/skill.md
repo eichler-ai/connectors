@@ -10,9 +10,12 @@ user has open in Excel → `Office.js` executing against the live workbook in th
 
 - The pane must be **open and signed in as the same Microsoft account** as this session. Nothing
   routes otherwise.
-- `list_instances` is your ground truth for what is connected. **If it is empty**, the user hasn't
-  opened the pane, isn't signed in, or is signed in as a *different* account — say so and ask them to
-  open the MCP Bridge pane and sign in.
+- `list_instances` is your ground truth for what is connected, and reports `signed_in_as` — the
+  Microsoft account **this session** is signed in as. **If it is empty**, the user hasn't opened the
+  pane, isn't signed in, or the pane is signed in as a *different* account (its own "Signed in as …"
+  won't match `signed_in_as`); the response's `hint` says which. Tell them the account this session
+  uses and, if the pane is already open and Connected, have them click **Switch account** in the pane
+  to match it.
 - `execute_script` runs your JavaScript in the workbook; the other tools wrap common jobs.
 - `create_workbook` is the exception: it makes a file through Microsoft Graph with **no pane
   involved**, then the user opens it and a pane connects.

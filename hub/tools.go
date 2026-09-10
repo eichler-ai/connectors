@@ -46,8 +46,17 @@ type ListInstancesIn struct{}
 
 // ListInstancesOut lists the caller's live bridges.
 type ListInstancesOut struct {
-	Instances []Instance   `json:"instances"`
-	Error     *diag.Record `json:"error,omitempty"`
+	Instances []Instance `json:"instances"`
+	// SignedInAs is the Microsoft account this MCP session is signed in as
+	// (email or display name), so the caller can compare it against what the
+	// pane's own "Signed in as …" shows and spot an account mismatch (#251).
+	// Empty when the identity can't be resolved.
+	SignedInAs string `json:"signed_in_as,omitempty"`
+	// Hint is set only when no bridge is connected: the pane and the session
+	// must be the same Microsoft account or nothing routes, and an empty list
+	// otherwise gives no clue why (#251).
+	Hint  string       `json:"hint,omitempty"`
+	Error *diag.Record `json:"error,omitempty"`
 }
 
 // registerGenericTools adds the tools every connector gets (§09): get_skills
@@ -74,6 +83,24 @@ func registerGenericTools(s *mcp.Server, h *Host, c Connector, version string) {
 		if rec != nil {
 			return ErrorResult(rec), ListInstancesOut{Instances: []Instance{}, Error: rec}, nil
 		}
-		return nil, ListInstancesOut{Instances: h.Instances(user, c.Slug())}, nil
+		out := ListInstancesOut{Instances: h.Instances(user, c.Slug()), SignedInAs: h.SignedInLabel(ctx, user)}
+		if len(out.Instances) == 0 {
+			out.Hint = accountMismatchHint(c.Slug(), out.SignedInAs)
+		}
+		return nil, out, nil
 	})
+}
+
+// accountMismatchHint is the guidance list_instances returns when the caller
+// has no connected bridge: the most common cause is the pane being signed in
+// as a different Microsoft account than the session (#251), which otherwise
+// presents as a silent empty list. signedInAs may be "" — the wording still
+// makes sense.
+func accountMismatchHint(slug, signedInAs string) string {
+	account := "the same Microsoft account this session is signed in as"
+	if signedInAs != "" {
+		account = signedInAs
+	}
+	return "No " + slug + " bridge is connected for this MCP session. Open the MCP Bridge task pane in the host app and sign in with " + account +
+		". If the pane is already open and shows Connected, it is signed in as a different Microsoft account — use 'Switch account' in the pane to match this session."
 }

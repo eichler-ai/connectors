@@ -125,6 +125,27 @@ func (h *Host) User(req *mcp.CallToolRequest) (string, *diag.Record) {
 		WithRemedy("reconnect the MCP client with a valid bearer token")
 }
 
+// SignedInLabel is a human name for the account the MCP session is signed in
+// as — email, else display name — so list_instances/get_status can show it and
+// the user can compare it against what the pane's own "Signed in as …" shows
+// (issue #251: an account mismatch between the pane and the session otherwise
+// looks like "no bridge" with no hint why). Best-effort and read-only: a nil
+// store or an unknown user returns "" and the caller falls back to generic
+// wording. Mirrors authserver.signedInLabel, the consent page's version.
+func (h *Host) SignedInLabel(ctx context.Context, user string) string {
+	if h.store == nil || user == "" {
+		return ""
+	}
+	u, err := h.store.User(ctx, user)
+	if err != nil {
+		return ""
+	}
+	if u.Email != "" {
+		return u.Email
+	}
+	return u.DisplayName
+}
+
 // ClientName returns the calling MCP client's declared name
 // (Implementation.Name from its initialize call), for a connector's tool
 // handler to pass into Target.Client. Empty when the session's initialize
@@ -184,6 +205,7 @@ func (h *Host) resolve(user, connector string, target Target) (*registry.Bridge,
 		return nil, diag.New(diag.SeverityError, "no-bridge", Source,
 			fmt.Sprintf("no %s bridge is connected for this user", connector)).
 			WithRemedy("open the connector's task pane in the host application and check it shows Connected",
+				"if the pane is already open and shows Connected, it is signed in as a different Microsoft account than this MCP session — use 'Switch account' in the pane to sign in with the same account (list_instances reports which account this session is signed in as)",
 				"call list_instances to confirm it appears")
 	default:
 		ids := make([]string, 0, len(all))
@@ -242,9 +264,11 @@ func (h *Host) Exec(ctx context.Context, user string, c Connector, target Target
 	if err != nil {
 		h.log.Info("exec: failed", append(attrs, "err", err)...)
 		rec := execError(err, b, timeout)
-		h.putAudit(store.AuditRow{UserID: user, Connector: c.Slug(), Instance: b.InstanceID, Document: doc.ID, Action: "exec",
-			ScriptSHA256: hashHex, ScriptBounded: boundScript(script.Source), Language: script.Language,
-			OK: false, Code: rec.Code, DurationMs: elapsed.Milliseconds(), Client: target.Client})
+		if !script.Internal {
+			h.putAudit(store.AuditRow{UserID: user, Connector: c.Slug(), Instance: b.InstanceID, Document: doc.ID, Action: "exec",
+				ScriptSHA256: hashHex, ScriptBounded: boundScript(script.Source), Language: script.Language,
+				OK: false, Code: rec.Code, DurationMs: elapsed.Milliseconds(), Client: target.Client})
+		}
 		return Result{}, rec
 	}
 	code := ""
@@ -255,9 +279,14 @@ func (h *Host) Exec(ctx context.Context, user string, c Connector, target Target
 		}
 	}
 	h.log.Info("exec: done", append(attrs, "ok", res.OK, "code", code, "result_bytes", len(res.Result), "truncated", res.Truncated, "notices", len(res.Notices))...)
-	h.putAudit(store.AuditRow{UserID: user, Connector: c.Slug(), Instance: b.InstanceID, Document: doc.ID, Action: "exec",
-		ScriptSHA256: hashHex, ScriptBounded: boundScript(script.Source), Language: script.Language,
-		OK: res.OK, Code: code, DurationMs: elapsed.Milliseconds(), ResultBytes: len(res.Result), Client: target.Client})
+	// An internal probe (get_status) is a fixed hub script, not agent code, so
+	// it is not audited (§13 audits arbitrary execution) — but it is still
+	// logged above, so nothing is lost from the operational view.
+	if !script.Internal {
+		h.putAudit(store.AuditRow{UserID: user, Connector: c.Slug(), Instance: b.InstanceID, Document: doc.ID, Action: "exec",
+			ScriptSHA256: hashHex, ScriptBounded: boundScript(script.Source), Language: script.Language,
+			OK: res.OK, Code: code, DurationMs: elapsed.Milliseconds(), ResultBytes: len(res.Result), Client: target.Client})
+	}
 	return Result{Reply: res, Instance: instanceOf(b), Document: doc}, nil
 }
 
@@ -392,7 +421,15 @@ type DriveItem struct {
 // upload itself then fails. A user who never granted Files access (or was
 // revoked) gets graph-not-connected, not a Graph error; a hub with no Graph
 // client wired at all (see NewServer) gets graph-unconfigured.
-func (h *Host) CreateWorkbookFile(ctx context.Context, user, name string, content []byte) (DriveItem, *diag.Record) {
+//
+// sheets is how many worksheets content holds, for the audit row only (§5:
+// the broad Graph scope's writes must be audited). Once the Graph PUT is
+// attempted — the same §13 boundary Exec/Export/Import use — every outcome
+// writes one "create" row (name, drive-item id, sheet count, byte size; never
+// the content or sheet names); the pre-attempt refusals above it write none.
+// c is taken (rather than a hardcoded slug) only so the audit row is stamped
+// with the calling connector, exactly as Exec/Export/Import stamp theirs.
+func (h *Host) CreateWorkbookFile(ctx context.Context, user string, c Connector, name string, content []byte, sheets int) (DriveItem, *diag.Record) {
 	if h.graphClient == nil || h.keys == nil {
 		return DriveItem{}, diag.New(diag.SeverityError, "graph-unconfigured", Source,
 			"this hub has no Microsoft Graph client configured").
@@ -408,7 +445,9 @@ func (h *Host) CreateWorkbookFile(ctx context.Context, user, name string, conten
 		return DriveItem{}, diag.New(diag.SeverityError, "graph-token-unreadable", Source,
 			"the stored Microsoft token could not be read: "+err.Error())
 	}
+	start := time.Now()
 	item, nextRefresh, createErr := h.graphClient.CreateFileInFolder(ctx, refreshToken, graphFolder, name, content)
+	elapsed := time.Since(start)
 	if nextRefresh != "" && nextRefresh != refreshToken {
 		if perr := graphtoken.Put(ctx, h.store, h.keys, user, nextRefresh, time.Now()); perr != nil {
 			// Best-effort like putAudit: the create itself already
@@ -419,9 +458,17 @@ func (h *Host) CreateWorkbookFile(ctx context.Context, user, name string, conten
 	}
 	if createErr != nil {
 		h.log.Info("graph: create file failed", "user", user, "err", createErr)
-		return DriveItem{}, diag.New(diag.SeverityError, "graph-create-failed", Source, createErr.Error())
+		rec := diag.New(diag.SeverityError, "graph-create-failed", Source, createErr.Error())
+		h.putAudit(store.AuditRow{UserID: user, Connector: c.Slug(), Action: "create",
+			OK: false, Code: rec.Code, DurationMs: elapsed.Milliseconds(), Name: name, Sheets: sheets, FileBytes: int64(len(content)), Format: "xlsx"})
+		return DriveItem{}, rec
 	}
 	out := DriveItem{ID: item.ID, Name: item.Name, WebURL: item.WebURL, DriveID: item.DriveID(), Folder: item.Folder()}
+	// The audit line (§5, §12): who created what file, how big, how many
+	// sheets — never the content or sheet names. Document is the drive-item id
+	// so a row is traceable to the OneDrive file it made.
+	h.putAudit(store.AuditRow{UserID: user, Connector: c.Slug(), Document: out.ID, Action: "create",
+		OK: true, DurationMs: elapsed.Milliseconds(), Name: name, Sheets: sheets, FileBytes: int64(len(content)), Format: "xlsx"})
 	// The correlation spike's observability (RFC §3.3, §6): both what Graph
 	// actually returned and (by the caller logging doc_key alongside this)
 	// what create_workbook constructed from it, so a mismatch is visible
