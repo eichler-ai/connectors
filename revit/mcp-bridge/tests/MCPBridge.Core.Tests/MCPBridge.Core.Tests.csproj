@@ -111,8 +111,9 @@
 
   <!-- Runs after restore (so $(Pkg...) is populated) and before the assembly-attribute generation that
        bakes AssemblyMetadata into the DLL, mirroring MCPBridge.AddIn's own BeforeTargets="GetAssemblyAttributes"
-       targets. Globs each restored package for its RevitAPI(UI).dll under lib/ —one hit per package, since
-       each targets a single TFM (net8.0-windows7.0 for 2025, net10.0-windows7.0 for 2027) —and writes the
+       targets. Globs each restored package for its RevitAPI(UI).dll under ref/ (Nice3point ships pure
+       reference assemblies, so ref/ not lib/) —one hit per package, since each targets a single TFM
+       (net8.0-windows7.0 for 2025, net10.0-windows7.0 for 2027) —and writes the
        RevitApiPath / RevitApiUiPath metadata RevitApiReference.cs expects. Fails loudly if a package layout
        change means the DLL isn't found, rather than baking an empty path that surfaces later as a confusing
        "built without RevitApiPath" test error. -->
@@ -120,13 +121,13 @@
           BeforeTargets="GetAssemblyAttributes"
           Condition="'$(UseNuGetRevitApi)' == 'true' And '$(TargetFramework)' != ''">
     <ItemGroup>
-      <_RevitApiDll Include="$(PkgNice3point_Revit_Api_RevitAPI)/lib/**/RevitAPI.dll" />
-      <_RevitApiUiDll Include="$(PkgNice3point_Revit_Api_RevitAPIUI)/lib/**/RevitAPIUI.dll" />
+      <_RevitApiDll Include="$(PkgNice3point_Revit_Api_RevitAPI)/ref/**/RevitAPI.dll" />
+      <_RevitApiUiDll Include="$(PkgNice3point_Revit_Api_RevitAPIUI)/ref/**/RevitAPIUI.dll" />
     </ItemGroup>
     <Error Condition="'@(_RevitApiDll)' == ''"
-           Text="UseNuGetRevitApi is set but no RevitAPI.dll was found under '$(PkgNice3point_Revit_Api_RevitAPI)/lib'. Check the Nice3point.Revit.Api.RevitAPI package layout / version ($(NiceRevitApiVersion))." />
+           Text="UseNuGetRevitApi is set but no RevitAPI.dll was found under '$(PkgNice3point_Revit_Api_RevitAPI)/ref'. Check the Nice3point.Revit.Api.RevitAPI package layout / version ($(NiceRevitApiVersion))." />
     <Error Condition="'@(_RevitApiUiDll)' == ''"
-           Text="UseNuGetRevitApi is set but no RevitAPIUI.dll was found under '$(PkgNice3point_Revit_Api_RevitAPIUI)/lib'. Check the Nice3point.Revit.Api.RevitAPIUI package layout / version ($(NiceRevitApiVersion))." />
+           Text="UseNuGetRevitApi is set but no RevitAPIUI.dll was found under '$(PkgNice3point_Revit_Api_RevitAPIUI)/ref'. Check the Nice3point.Revit.Api.RevitAPIUI package layout / version ($(NiceRevitApiVersion))." />
     <ItemGroup>
       <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
         <_Parameter1>RevitApiPath</_Parameter1>
