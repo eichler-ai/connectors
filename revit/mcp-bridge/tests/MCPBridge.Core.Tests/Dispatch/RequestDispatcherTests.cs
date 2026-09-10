@@ -1093,9 +1093,9 @@ public class RequestDispatcherTests
         Assert.Contains("\"code\":\"dialog-auto-dismissed\"", json);
         Assert.Contains("Virtual Memory - High Usage", json);
         // The dispatcher must consult the Core allowlist policy, not some ad-hoc predicate.
-        Assert.NotNull(windowInventory.LastShouldDismiss);
-        Assert.True(windowInventory.LastShouldDismiss!("#32770", "Virtual Memory - High Usage"));
-        Assert.False(windowInventory.LastShouldDismiss!("#32770", "Something Else"));
+        Assert.NotNull(windowInventory.LastResolveDismiss);
+        Assert.NotNull(windowInventory.LastResolveDismiss!("#32770", "Virtual Memory - High Usage"));
+        Assert.Null(windowInventory.LastResolveDismiss!("#32770", "Something Else"));
     }
 
     /// <summary>

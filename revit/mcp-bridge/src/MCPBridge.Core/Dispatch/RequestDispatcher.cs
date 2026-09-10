@@ -681,12 +681,13 @@ public sealed class RequestDispatcher
         try
         {
             // §07 v2: the enumeration also auto-dismisses allowlisted raw Win32 (#32770) dialogs the
-            // Revit-framework suppressor cannot see. The allowlist DECISION lives in Core
-            // (DialogAutoDismissPolicy) and is passed in as a pure predicate; the ACTION (WM_CLOSE) stays
-            // in the adapter. Dismissals are NOT reported from here: this method's return value is subject
-            // to #138's wire-budget abandon, and a dismissal (an action already taken) must be reported
+            // Revit-framework suppressor cannot see. The allowlist DECISION -- including the per-signature
+            // action (WM_CLOSE, or a click on one named non-mutating button) -- lives in Core
+            // (DialogAutoDismissPolicy) and is passed in as a pure function; the P/Invoke ACTION stays in
+            // the adapter. Dismissals are NOT reported from here: this method's return value is subject to
+            // #138's wire-budget abandon, and a dismissal (an action already taken) must be reported
             // regardless -- so it flows out through onDismissed, which the caller captures even on abandon.
-            snapshot = _windowInventory.EnumerateOwnedTopLevelWindows(DialogAutoDismissPolicy.ShouldDismiss, onDismissed);
+            snapshot = _windowInventory.EnumerateOwnedTopLevelWindows(DialogAutoDismissPolicy.Resolve, onDismissed);
         }
         catch
         {
@@ -741,9 +742,9 @@ public sealed class RequestDispatcher
 
     /// <summary>
     /// PRD §07 v2: reports allowlisted raw Win32 (#32770) dialogs that this pass auto-dismissed
-    /// (DialogAutoDismissPolicy + Win32WindowInventory's WM_CLOSE). §01 observability-over-silence: an
-    /// action taken on the agent's behalf MUST be stated, never silent. Returns null when nothing was
-    /// dismissed, so the default (no-match) behavior is unchanged.
+    /// (DialogAutoDismissPolicy + Win32WindowInventory's WM_CLOSE / named-button click). §01
+    /// observability-over-silence: an action taken on the agent's behalf MUST be stated, never silent.
+    /// Returns null when nothing was dismissed, so the default (no-match) behavior is unchanged.
     /// </summary>
     private static DiagnosticRecord? BuildDialogAutoDismissedNotice(IReadOnlyList<DismissedDialog> dismissed)
     {
@@ -757,9 +758,11 @@ public sealed class RequestDispatcher
             dismissed.Select(d => $"\"{d.Title}\" (class {d.ClassName})"));
 
         var message = $"Auto-dismissed {dismissed.Count} allowlisted dialog(s) on the agent's behalf per " +
-            $"the PRD §07 auto-dismiss allowlist: {named}. These are known-benign, informational Win32 " +
-            "dialogs that the Revit-framework dialog suppressor cannot see; each was closed with WM_CLOSE " +
-            "(no button clicked, no \"do not show again\" set).";
+            $"the PRD §07 auto-dismiss allowlist: {named}. These are known, non-blocking-by-design Win32 " +
+            "dialogs that the Revit-framework dialog suppressor cannot see; each was dismissed by its " +
+            "per-signature allowlist action -- either WM_CLOSE (no button clicked, no \"do not show again\" " +
+            "set) or a click on a single named non-mutating button -- never a button that changes persistent " +
+            "Revit settings.";
 
         var detail = new Dictionary<string, object?>
         {

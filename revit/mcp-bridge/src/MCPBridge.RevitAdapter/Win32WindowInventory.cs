@@ -28,6 +28,11 @@ public sealed class Win32WindowInventory : IWindowInventory
     // degrade for a diagnosis-only feature, and the caller's wire deadline stays comfortably met.
     private const uint WM_GETTEXT = 0x000D;
     private const uint WM_CLOSE = 0x0010;
+    // BM_CLICK simulates a click on a button control: it posts the down/up pair and notifies the parent
+    // with BN_CLICKED, exactly as a real click would. Posted (async), never sent, for the same UI-thread
+    // reason as WM_CLOSE below.
+    private const uint BM_CLICK = 0x00F5;
+    private const string ButtonClassName = "Button";
     private const uint SMTO_BLOCK = 0x0001;
     private const uint SMTO_ABORTIFHUNG = 0x0008;
     private const uint PerWindowTextTimeoutMs = 100;
@@ -39,7 +44,7 @@ public sealed class Win32WindowInventory : IWindowInventory
     internal const string TextUnavailablePlaceholder = "<text unavailable within budget>";
 
     public WindowInventorySnapshot EnumerateOwnedTopLevelWindows(
-        Func<string, string, bool> shouldDismiss,
+        Func<string, string, DialogDismissAction?> resolveDismiss,
         Action<DismissedDialog> onDismissed)
     {
         var currentProcessId = (uint)Environment.ProcessId;
@@ -70,23 +75,28 @@ public sealed class Win32WindowInventory : IWindowInventory
 
             var className = GetClassNameOf(hWnd);
 
-            // §07 v2: consult the Core-owned allowlist. A match is CLOSED (fire-and-forget WM_CLOSE) and
-            // handed to onDismissed instead of being listed as a present window -- it is on its way out, so
+            // §07 v2: consult the Core-owned allowlist for a per-signature dismiss ACTION. A match is
+            // dismissed (fire-and-forget WM_CLOSE, or a click on one named non-mutating button) and handed
+            // to onDismissed instead of being listed as a present window -- it is on its way out, so
             // reporting it as still-present would be misleading. onDismissed (not the snapshot) is the
             // reporting channel, so the dismissal survives the caller's #138 wire-budget abandon. Only the
             // plain title is used to match, so a match with a timed-out title never happens (the placeholder
             // never matches the allowlist).
-            if (shouldDismiss(className, title))
+            var dismissAction = resolveDismiss(className, title);
+            if (dismissAction is not null)
             {
-                if (TryPostClose(hWnd))
+                if (TryDismiss(hWnd, dismissAction))
                 {
                     onDismissed(new DismissedDialog(className, title));
                     return true;
                 }
 
-                // Post failed: degrade to "not dismissed" and fall through to inventory it as present,
-                // so a benign but un-closable dialog is still surfaced for manual triage (same best-effort
-                // posture as the rest of this class).
+                // Dismiss did not happen (post failed, or a ClickButton whose named button wasn't found):
+                // degrade to "not dismissed" and fall through to inventory it as present, so the dialog is
+                // still surfaced for manual triage (same best-effort posture as the rest of this class). A
+                // ClickButton that can't find its button clicks NOTHING -- never a fallback WM_CLOSE or a
+                // guessed button -- because the whole reason it isn't PostClose is that a wrong button here
+                // would mutate persistent Revit state.
             }
 
             var childText = CollectChildText(hWnd, budget, ref truncated);
@@ -112,6 +122,16 @@ public sealed class Win32WindowInventory : IWindowInventory
         return new WindowInventorySnapshot(results, truncated);
     }
 
+    // §07 v2: perform the allowlist entry's per-signature dismiss action. Returns true only if the action
+    // was actually carried out (WM_CLOSE posted, or the named button found and clicked). Any other outcome
+    // returns false so the caller inventories the window as present rather than reporting a phantom dismiss.
+    private static bool TryDismiss(IntPtr hWnd, DialogDismissAction action) => action.Kind switch
+    {
+        DialogDismissKind.PostClose => TryPostClose(hWnd),
+        DialogDismissKind.ClickButton => TryClickNamedButton(hWnd, action.ButtonText),
+        _ => false,
+    };
+
     // §07 v2 auto-dismiss action: PostMessage (asynchronous, fire-and-forget) NOT SendMessage -- a
     // blocking send would re-introduce the very UI-thread block #138 removed by capping the pass. WM_CLOSE
     // asks the dialog to close as if its X were clicked; it does NOT tick "do not show again" and does NOT
@@ -128,6 +148,74 @@ public sealed class Win32WindowInventory : IWindowInventory
             return false;
         }
     }
+
+    // §07 v2 ClickButton action: find this dialog's button whose caption matches buttonText and post
+    // BM_CLICK to it. SAFE-FAILING BY DESIGN: if no matching button is found (or its text can't be read
+    // within budget), NOTHING is clicked and false is returned. This action exists precisely for dialogs
+    // whose other buttons mutate persistent state, so a wrong or guessed click is worse than not acting --
+    // there is deliberately no fallback to WM_CLOSE or to a default button. The button's text read uses the
+    // same bounded WM_GETTEXT as the inventory; a live modal pumps its own message loop, so its buttons
+    // answer even while Revit's main UI thread is parked in that modal.
+    private static bool TryClickNamedButton(IntPtr parent, string? buttonText)
+    {
+        if (string.IsNullOrEmpty(buttonText))
+        {
+            return false;
+        }
+
+        var wanted = NormalizeButtonText(buttonText);
+        var target = IntPtr.Zero;
+
+        bool ButtonCallback(IntPtr hWnd, IntPtr lParam)
+        {
+            if (!string.Equals(GetClassNameOf(hWnd), ButtonClassName, StringComparison.OrdinalIgnoreCase))
+            {
+                return true; // not a button control
+            }
+
+            var text = GetWindowText(hWnd, out var timedOut);
+            if (timedOut)
+            {
+                return true; // couldn't read it in time -- never guess; keep looking / give up safely
+            }
+
+            if (string.Equals(NormalizeButtonText(text), wanted, StringComparison.OrdinalIgnoreCase))
+            {
+                target = hWnd;
+                return false; // found it -- stop enumerating
+            }
+
+            return true;
+        }
+
+        try
+        {
+            EnumChildWindows(parent, ButtonCallback, IntPtr.Zero);
+        }
+        catch
+        {
+            return false;
+        }
+
+        if (target == IntPtr.Zero)
+        {
+            return false; // named button not present on this dialog -- do nothing
+        }
+
+        try
+        {
+            return PostMessage(target, BM_CLICK, IntPtr.Zero, IntPtr.Zero);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    // Button captions carry a mnemonic ampersand ("&Cancel") and can be padded; the allowlist stores the
+    // human label ("Cancel"). Strip ampersands and trim so the match is against the visible caption. (A
+    // literal ampersand in a caption is "&&"; none of the §07 buttons use one, so a plain strip is fine.)
+    private static string NormalizeButtonText(string text) => text.Replace("&", "").Trim();
 
     private static IReadOnlyList<string> CollectChildText(IntPtr parent, System.Diagnostics.Stopwatch budget, ref bool truncated)
     {
