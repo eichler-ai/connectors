@@ -30,15 +30,18 @@
 
   <PropertyGroup Condition="'$(TargetFramework)'=='net10.0-windows'">
     <RevitVersion>2027</RevitVersion>
+    <NiceRevitApiVersion>$(NiceRevitApiVersion_2027)</NiceRevitApiVersion>
   </PropertyGroup>
   <PropertyGroup Condition="'$(TargetFramework)'=='net8.0-windows'">
     <RevitVersion>2025</RevitVersion>
+    <NiceRevitApiVersion>$(NiceRevitApiVersion_2025)</NiceRevitApiVersion>
   </PropertyGroup>
   <PropertyGroup>
     <RevitInstallDir>C:\Program Files\Autodesk\Revit $(RevitVersion)</RevitInstallDir>
   </PropertyGroup>
 
-  <ItemGroup>
+  <!-- Normal build: reference the real installed Revit assemblies (see Directory.Build.props). -->
+  <ItemGroup Condition="'$(UseNuGetRevitApi)' != 'true'">
     <Reference Include="RevitAPI">
       <HintPath>$(RevitInstallDir)\RevitAPI.dll</HintPath>
       <Private>false</Private>
@@ -47,6 +50,20 @@
       <HintPath>$(RevitInstallDir)\RevitAPIUI.dll</HintPath>
       <Private>false</Private>
     </Reference>
+  </ItemGroup>
+
+  <!-- CI (-p:UseNuGetRevitApi=true): the same public API surface from the Nice3point reference-assembly
+       packages, so this compiles with no Revit install (issue #39). Private=false via
+       ExcludeAssets="runtime" keeps parity with the file references above: inside a live Revit process
+       the real RevitAPI/RevitAPIUI are already loaded, so nothing here should ever be copied next to the
+       add-in and risk shadowing Revit's own copies. These packages are never in a shipped build; the
+       add-in is built on the VM against the installed assemblies. -->
+  <!-- PrivateAssets="all": keep these off the test projects' reference table (they consume RevitAdapter
+       via ProjectReference). See MCPBridge.Core.csproj's NuGet block for the full rationale — a
+       transitive PackageReference would otherwise give CI a different reference graph than the VM. -->
+  <ItemGroup Condition="'$(UseNuGetRevitApi)' == 'true'">
+    <PackageReference Include="Nice3point.Revit.Api.RevitAPI" Version="$(NiceRevitApiVersion)" ExcludeAssets="runtime" PrivateAssets="all" />
+    <PackageReference Include="Nice3point.Revit.Api.RevitAPIUI" Version="$(NiceRevitApiVersion)" ExcludeAssets="runtime" PrivateAssets="all" />
   </ItemGroup>
 
   <!--

@@ -33,9 +33,11 @@
   <!-- Revit-version mapping, mirroring MCPBridge.RevitAdapter.csproj (PRD §11). -->
   <PropertyGroup Condition="'$(TargetFramework)'=='net10.0-windows'">
     <RevitVersion>2027</RevitVersion>
+    <NiceRevitApiVersion>$(NiceRevitApiVersion_2027)</NiceRevitApiVersion>
   </PropertyGroup>
   <PropertyGroup Condition="'$(TargetFramework)'=='net8.0-windows'">
     <RevitVersion>2025</RevitVersion>
+    <NiceRevitApiVersion>$(NiceRevitApiVersion_2025)</NiceRevitApiVersion>
   </PropertyGroup>
   <PropertyGroup>
     <RevitInstallDir>C:\Program Files\Autodesk\Revit $(RevitVersion)</RevitInstallDir>
@@ -51,11 +53,21 @@
     Private=false matches every other project here: inside a live Revit process RevitAPI/RevitAPIUI are
     already loaded, so copying them next to the add-in would only risk shadowing Revit's own copies.
   -->
-  <ItemGroup>
+  <ItemGroup Condition="'$(UseNuGetRevitApi)' != 'true'">
     <Reference Include="RevitAPI">
       <HintPath>$(RevitInstallDir)\RevitAPI.dll</HintPath>
       <Private>false</Private>
     </Reference>
+  </ItemGroup>
+
+  <!-- CI (-p:UseNuGetRevitApi=true): the Nice3point reference-assembly package instead of the installed
+       Revit assembly, so this compiles with no Revit install (issue #39; see Directory.Build.props).
+       This assembly names only Autodesk.Revit.DB types, so only the RevitAPI package is needed.
+       ExcludeAssets="runtime" preserves the Private=false intent above. -->
+  <!-- PrivateAssets="all": keep this off the test projects' reference table. See MCPBridge.Core.csproj's
+       NuGet block for the full rationale (parity with the non-transitive real-Revit assembly reference). -->
+  <ItemGroup Condition="'$(UseNuGetRevitApi)' == 'true'">
+    <PackageReference Include="Nice3point.Revit.Api.RevitAPI" Version="$(NiceRevitApiVersion)" ExcludeAssets="runtime" PrivateAssets="all" />
   </ItemGroup>
 
   <!--
