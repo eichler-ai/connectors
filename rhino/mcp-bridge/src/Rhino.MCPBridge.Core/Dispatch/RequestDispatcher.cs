@@ -164,13 +164,24 @@ internal sealed class RequestDispatcher
             return JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InvalidParams, ex.Message, ex.Diagnostic);
         }
 
-        if (language != "csharp")
+        var runner = _executor.Runners.Get(language);
+        if (runner is null)
         {
-            // PR 2 ships C#; the Python host lands in PR 4 (implementation-plan.md). Loud, never a silent fallback.
+            // Loud, never a silent fallback to the other language (PRD §06).
+            var available = _executor.Runners.Languages;
             var rec = DiagnosticRecord.Create(DiagnosticSeverity.Error, "language-not-available", DiagnosticSource.Execution,
-                $"language '{language}' is not available in this bridge build; only 'csharp' runs today.",
-                new Dictionary<string, object?> { ["language"] = language, ["available"] = new[] { "csharp" } },
-                new[] { "Resend with language: \"csharp\", or update the bridge once Python support ships." });
+                $"language '{language}' is not one this bridge runs; available: {string.Join(", ", available)}.",
+                new Dictionary<string, object?> { ["language"] = language, ["available"] = available },
+                new[] { $"Resend with language set to one of: {string.Join(", ", available)}." });
+            return JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InvalidParams, rec.Message, rec);
+        }
+
+        if (runner.UnavailableReason is { } unavailable)
+        {
+            var rec = DiagnosticRecord.Create(DiagnosticSeverity.Error, "language-not-available", DiagnosticSource.Execution,
+                $"language '{language}' cannot run on this instance right now: {unavailable}",
+                new Dictionary<string, object?> { ["language"] = language, ["available"] = _executor.Runners.Languages, ["reason"] = unavailable },
+                new[] { "If the language is still loading, retry in a few seconds; otherwise use the other language or check the plug-in's connection.log." });
             return JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InvalidParams, rec.Message, rec);
         }
 
@@ -198,9 +209,9 @@ internal sealed class RequestDispatcher
         // Pre-flight on the connection thread (Revit #67): a compile error, a denied member or an
         // unconfirmed lifecycle call is a property of the text and is refused immediately and
         // deterministically, never queued behind a busy main thread. Only once the runner is warm.
-        if (_executor.Runner.IsWarm)
+        if (runner.IsWarm)
         {
-            var rejection = _executor.Runner.TryPreflight(script, confirm);
+            var rejection = runner.TryPreflight(script, confirm);
             if (rejection is not null)
             {
                 _log($"script rejected pre-flight (execution {executionId}): {rejection.Exception?.GetType().Name}: {rejection.Exception?.Message}");
@@ -213,6 +224,7 @@ internal sealed class RequestDispatcher
         {
             ExecutionId = executionId,
             ScriptText = script,
+            Language = language,
             DocumentId = documentId,
             CancellationToken = _executionManager.GetCancellationToken(executionId),
             ConfirmLifecycleActions = confirm,

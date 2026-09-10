@@ -6,6 +6,7 @@ using Rhino.MCPBridge.Core.Connection;
 using Rhino.MCPBridge.Core.Diagnostics;
 using Rhino.MCPBridge.Core.Dispatch;
 using Rhino.MCPBridge.Core.Execution;
+using Rhino.MCPBridge.Core.Execution.Python;
 using DiagnosticSource = Rhino.MCPBridge.Core.Diagnostics.DiagnosticSource;
 using Rhino.MCPBridge.Core.Protocol;
 using Rhino.MCPBridge.RhinoAdapter;
@@ -55,13 +56,13 @@ internal sealed class BridgeHost : ISessionEnvironment
     public string? InstanceFilePath { get; private set; }
     public int ConnectionCount => _sessions.Count;
 
-    public BridgeHost(Guid instanceId, string rhinoVersion, string bridgeVersion, IMainThread mainThread, IDocumentSnapshotSource documents, IRunHost runHost, IRunLauncher launcher, IViewCapture viewCapture, string instancesDir, Action<string> log)
+    public BridgeHost(Guid instanceId, string rhinoVersion, string bridgeVersion, IMainThread mainThread, IDocumentSnapshotSource documents, IRunHost runHost, IRunLauncher launcher, IViewCapture viewCapture, IPythonHost pythonHost, string instancesDir, Action<string> log)
     {
         var runner = new RoslynScriptRunner();
-        var executor = new UndoRunExecutor(runner, runHost);
+        var executor = new UndoRunExecutor(new ScriptRunners(runner, new PythonScriptRunner(pythonHost)), runHost);
         _dispatcher = new RequestDispatcher(ExecutionManager.CreateDefault(ExecutionRingBuffer.CreateDefault()), executor, launcher, log,
             capture: new ViewCaptureService(viewCapture), onMainThread: f => mainThread.Invoke(f));
-        _warmup = new TransactionlessWarmup(runner, log);
+        _warmup = new TransactionlessWarmup(runner, pythonHost, log);
         _instanceId = instanceId;
         _rhinoVersion = rhinoVersion;
         _bridgeVersion = bridgeVersion;

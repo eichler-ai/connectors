@@ -98,8 +98,13 @@ namespace Rhino.MCPBridge.Core.Execution;
 /// is gone entirely -- narrower than the paragraph above used to claim, and still not the thing
 /// holding the boundary.
 /// </summary>
-internal sealed class RoslynScriptRunner
+internal sealed class RoslynScriptRunner : IScriptRunner
 {
+    public string Language => "csharp";
+
+    /// <summary>Roslyn is always usable once the assembly loaded; a cold compile is slower, never refused.</summary>
+    public string? UnavailableReason => null;
+
     private const string SubmissionTypeName = "Submission#0";
     private const string FactoryMethodName = "<Factory>";
 
@@ -265,7 +270,7 @@ internal sealed class RoslynScriptRunner
     /// leaves the compiled script warm in the thread-safe cache, so the UI-thread run reuses it with no
     /// recompile.
     /// </summary>
-    internal ScriptExecutionOutcome? TryPreflight(string scriptText, bool confirmLifecycleActions = false)
+    public ScriptExecutionOutcome? TryPreflight(string scriptText, bool confirmLifecycleActions = false)
     {
         CompiledScript compiled;
         try
@@ -467,7 +472,7 @@ internal sealed class RoslynScriptRunner
 
     /// <summary>#67: true once <see cref="WarmupCompile"/> has completed a first compile+emit, so a further
     /// compile is fast enough to run on the response path. False until then (and if warmup faulted).</summary>
-    internal bool IsWarm => _isWarm;
+    public bool IsWarm => _isWarm;
 
     private volatile bool _isWarm;
 

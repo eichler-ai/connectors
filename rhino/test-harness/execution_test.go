@@ -64,6 +64,15 @@ func csharp(t *testing.T, c *mcpclient.Client, inst instance, script string, ext
 	return callExecute(t, c, args, 60*time.Second)
 }
 
+func python(t *testing.T, c *mcpclient.Client, inst instance, script string, extra map[string]any) executionOut {
+	t.Helper()
+	args := map[string]any{"instance_id": inst.InstanceID, "language": "python", "script": script}
+	for k, v := range extra {
+		args[k] = v
+	}
+	return callExecute(t, c, args, 60*time.Second)
+}
+
 func poll(t *testing.T, c *mcpclient.Client, id string, timeoutMs int) executionOut {
 	t.Helper()
 	raw, err := c.CallTool("poll_execution", map[string]any{"execution_id": id, "timeout_ms": timeoutMs}, time.Duration(timeoutMs)*time.Millisecond+15*time.Second)
@@ -275,11 +284,12 @@ func TestDocumentNotFound_ListsCandidates(t *testing.T) {
 	}
 }
 
-func TestPythonIsNotAvailableYet_Loudly(t *testing.T) {
+func TestUnknownLanguageIsRefused_Loudly(t *testing.T) {
 	c := startServer(t)
 	inst := waitForInstance(t, c)
-	out := callExecute(t, c, map[string]any{"instance_id": inst.InstanceID, "language": "python", "script": "print(1)"}, 30*time.Second)
-	if out.Error == nil || out.Error.Code != "language-not-available" {
+	// The server's schema refuses anything but csharp/python before the bridge sees it.
+	out := callExecute(t, c, map[string]any{"instance_id": inst.InstanceID, "language": "ruby", "script": "puts 1"}, 30*time.Second)
+	if out.Error == nil {
 		t.Fatalf("%+v", out)
 	}
 }
