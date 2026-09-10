@@ -13,6 +13,11 @@ namespace Rhino.MCPBridge.PlugIn;
 [CommandStyle(Style.Hidden | Style.ScriptRunner)]
 public sealed class MCPBridgeRunCommand : Command
 {
+    /// <summary>Rhino instantiates command classes once, after OnLoad; the run host reads the id lazily.</summary>
+    public static MCPBridgeRunCommand? Instance { get; private set; }
+
+    public MCPBridgeRunCommand() { Instance = this; }
+
     public override string EnglishName => UndoRunExecutor.RunCommandName;
 
     protected override Result RunCommand(RhinoDoc doc, RunMode mode)

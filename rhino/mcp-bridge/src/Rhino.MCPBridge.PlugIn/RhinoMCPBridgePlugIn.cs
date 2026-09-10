@@ -37,7 +37,7 @@ public sealed class RhinoMCPBridgePlugIn : Rhino.PlugIns.PlugIn
             var mainThread = new RhinoMainThread(Environment.CurrentManagedThreadId);
             var caseInsensitive = !RuntimeInformation.IsOSPlatform(OSPlatform.Linux);
             var documents = new RhinoDocumentSnapshotSource(InstanceId, caseInsensitive, LogConnection);
-            var runHost = new RhinoRunHost(InstanceId, caseInsensitive, BridgeVersion, Core.Execution.UndoRunExecutor.RunCommandName, LogConnection);
+            var runHost = new RhinoRunHost(InstanceId, caseInsensitive, BridgeVersion, Core.Execution.UndoRunExecutor.RunCommandName, () => MCPBridgeRunCommand.Instance?.Id ?? Guid.Empty, LogConnection);
             var launcher = new RhinoRunLauncher(LogConnection);
             RoslynAssemblyIsolation.EnsureInitialized();
             var host = new BridgeHost(InstanceId, RhinoApp.Version.ToString(), BridgeVersion, mainThread, documents, runHost, launcher, AppDataPaths.InstancesDir(), LogConnection);

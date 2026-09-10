@@ -50,12 +50,28 @@ internal sealed class UndoRunExecutor
 
         var undoLabel = UndoLabel.For(request.Label);
         var mutations = new MutationTracker();
+        var changed = false;
         ScriptExecutionOutcome? outcome = null;
         var started = _host.RunInCommand(document, undoLabel, () =>
         {
-            using var subscription = _host.SubscribeChanges(document, mutations.Record);
-            var globals = new ScriptGlobals((RhinoDoc)document.Raw!, request.CancellationToken, _host.BridgeVersion, request.Label);
-            outcome = _runner.RunAsync(request.ScriptText, globals, request.CancellationToken, request.ConfirmLifecycleActions).GetAwaiter().GetResult();
+            // Nothing may escape this body: it runs inside Rhino's native command dispatcher, and an
+            // exception there is a crash class, not a failed run (review of #282). Everything from the
+            // subscription to the runner is inside the try; a failure becomes the run's outcome.
+            IDisposable? subscription = null;
+            try
+            {
+                subscription = _host.SubscribeChanges(document, mutations.Record, () => changed = true);
+                var globals = new ScriptGlobals((RhinoDoc)document.Raw!, request.CancellationToken, _host.BridgeVersion, request.Label);
+                outcome = _runner.RunAsync(request.ScriptText, globals, request.CancellationToken, request.ConfirmLifecycleActions).GetAwaiter().GetResult();
+            }
+            catch (Exception ex)
+            {
+                outcome = ScriptExecutionOutcome.Failed(ex, "");
+            }
+            finally
+            {
+                try { subscription?.Dispose(); } catch { }
+            }
         });
         if (!started)
         {
@@ -75,9 +91,10 @@ internal sealed class UndoRunExecutor
         }
 
         // Failure or cancellation: revert the run's entry, then report what happened to it (PRD §07,
-        // observability over silence). Nothing to revert when nothing changed.
+        // observability over silence). Nothing to revert only when NO document event fired -- the
+        // report counts objects, but a layer, attribute or material change is a change too.
         var notices = new List<DiagnosticRecord>(outcome.Notices);
-        if (!report.IsEmpty)
+        if (changed || !report.IsEmpty)
         {
             notices.Add(Rollback(document, request.ExecutionId, report));
         }
@@ -96,11 +113,10 @@ internal sealed class UndoRunExecutor
             ["net_modified"] = report.NetModified,
             ["net_deleted"] = report.NetDeleted,
         };
-        var recent = _host.MostRecentCommandName();
-        if (recent is not null && !string.Equals(recent, RunCommandName, StringComparison.OrdinalIgnoreCase))
+        if (!_host.LastCommandWasOurs())
         {
             return DiagnosticRecord.Create(DiagnosticSeverity.Warning, "script-rollback-skipped", DiagnosticSource.Execution,
-                $"execution {executionId} failed after changing the document, but the most recent command is '{recent}', not the connector's, so its changes were NOT reverted -- reverting would undo a person's action.",
+                $"execution {executionId} failed after changing the document, but the most recent command Rhino ran is not the connector's, so its changes were NOT reverted -- reverting would undo a person's action.",
                 detail, new[] { "Inspect the document; use the undo tool (confirm: true) once you have checked that the top undo entry is this run's." });
         }
 
@@ -112,7 +128,7 @@ internal sealed class UndoRunExecutor
         }
 
         return DiagnosticRecord.Create(DiagnosticSeverity.Info, "script-rolled-back", DiagnosticSource.Execution,
-            $"execution {executionId} failed after changing the document; the run's undo entry was reverted ({report.NetAdded} added, {report.NetModified} modified, {report.NetDeleted} deleted undone). Changes outside the document -- files written, commands with external effects -- are not undone by this.",
+            $"execution {executionId} failed after changing the document; the run's undo entry was reverted ({report.NetAdded} added, {report.NetModified} modified, {report.NetDeleted} deleted objects undone, plus any layer/attribute/table changes). Changes outside the document -- files written, commands with external effects -- are not undone by this.",
             detail, null);
     }
 

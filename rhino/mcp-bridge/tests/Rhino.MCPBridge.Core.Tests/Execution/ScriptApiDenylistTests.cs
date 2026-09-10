@@ -52,7 +52,16 @@ public sealed class ScriptApiDenylistTests
     [InlineData("Rhino.RhinoApp.RunScript(\"_Exit\", false);", "exit")]
     [InlineData("Rhino.RhinoApp.RunScript(\"-_Quit\", false);", "quit")]
     [InlineData("Rhino.RhinoApp.RunScript(\"_Circle 0,0,0 5 _Exit\", false);", "exit")] // anywhere in the string
-    public void RunScriptWithAnExitToken_IsDenied(string script, string token) => AssertDenied(script, token);
+    [InlineData("Rhino.RhinoApp.RunScript(\"_Undo\", false);", "undo")] // the most natural spelling of the hard-blocked tier
+    [InlineData("Rhino.RhinoApp.RunScript(\"_Redo\", true);", "redo")]
+    [InlineData("Rhino.RhinoApp.ExecuteCommand(Document, \"_Undo\");", "undo")] // the bridge's own idiom
+    [InlineData("Rhino.RhinoApp.ExecuteCommand(Document, \"_Exit\");", "exit")]
+    public void CommandStringsWithADeniedToken_AreDenied(string script, string token) => AssertDenied(script, token);
+
+    [Theory]
+    [InlineData("Rhino.UI.Dialogs.ShowMessage(\"hi\", \"t\");", "Dialogs.ShowMessage")]
+    [InlineData("Rhino.UI.Dialogs.ShowMessage(\"hi\", \"t\", Rhino.UI.ShowMessageButton.OK, Rhino.UI.ShowMessageIcon.Information);", "Dialogs.ShowMessage")] // any member of the type
+    public void ModalDialogHelpers_AreDenied(string script, string member) => AssertDenied(script, member);
 
     // --- hard-blocked: interactive getters (PRD §08, prevention) ---
 
@@ -82,6 +91,8 @@ public sealed class ScriptApiDenylistTests
     [InlineData("Rhino.RhinoDoc.Create(null);", "RhinoDoc.Create")]
     [InlineData("Rhino.RhinoApp.RunScript(\"_-SaveAs /tmp/x.3dm _Enter\", false);", "saveas")]
     [InlineData("Rhino.RhinoApp.RunScript(\"_-Export /tmp/x.obj _Enter\", false);", "export")]
+    [InlineData("Rhino.RhinoApp.ExecuteCommand(Document, \"_Save\");", "save")]
+    [InlineData("const string c = \"_Export\"; Rhino.RhinoApp.RunScript(c, false);", "export")] // a const still folds
     public void LifecycleMembers_AreGated_AndTheFlagLiftsThem(string script, string member) => AssertGated(script, member);
 
     [Fact]

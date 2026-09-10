@@ -24,7 +24,7 @@ type ExecuteScriptIn struct {
 	TimeoutMs               int    `json:"timeout_ms,omitempty" jsonschema:"milliseconds to wait for completion before returning a pending/running status; default 30000"`
 	MaxDurationMs           int    `json:"max_duration_ms,omitempty" jsonschema:"hard ceiling on the run's total time, independent of timeout_ms; on lapse the bridge cancels the run cooperatively; default 600000"`
 	ConfirmLifecycleActions bool   `json:"confirm_lifecycle_actions,omitempty" jsonschema:"set true to allow RhinoDoc.Save/SaveAs/Export/Close/Open/Create and the RunScript command tokens that do the same; these act outside the document's content (the filesystem, the person's open session, which documents are open) so the post-run undo cannot revert them, and without this flag such a script is refused before it runs (script-lifecycle-confirmation-required)"`
-	Label                   string `json:"label,omitempty" jsonschema:"short name for what this run does, shown as its entry in Rhino's Undo history prefixed 'MCP: '"`
+	Label                   string `json:"label,omitempty" jsonschema:"short name for what this run does. Rhino names the run's Undo entry after the bridge's command, so the label does not appear there; it is echoed on the result, exposed to the script as Connector.RunLabel, and reported by the undo tool when it reverts this run"`
 }
 
 // PollExecutionIn is poll_execution's input.

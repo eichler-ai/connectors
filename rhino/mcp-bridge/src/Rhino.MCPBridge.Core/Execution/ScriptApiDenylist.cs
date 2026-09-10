@@ -25,7 +25,12 @@ namespace Rhino.MCPBridge.Core.Execution;
 /// <c>RunScript</c>'s argument is a string: the walk gates literal command tokens here, and the
 /// runtime wrapper (phase 1 PR 2 leaves that to a follow-up) gates computed ones with the same codes.
 /// Like Revit's, this is a guard against plausible mistakes, not a sandbox: reflection routes around
-/// it and that is accepted (PRD §02).
+/// it and that is accepted (PRD §02). So does a <c>dynamic</c> receiver (<c>dynamic d = Document;
+/// d.Undo();</c>): nothing binds, so the walk sees nothing -- and unlike Revit, where the hard tier
+/// was also enforced by the host's own one-transaction rule, here it is the ONLY line for the undo
+/// members. Accepted for the same reason: reaching for dynamic is deliberate, and the consequence
+/// (a run whose own undo entry is gone) lands on the agent's run, not on a person's work, because
+/// the post-run rollback checks the last command first.
 /// </summary>
 internal static class ScriptApiDenylist
 {
@@ -41,8 +46,10 @@ internal static class ScriptApiDenylist
         [RhinoApp] = new HashSet<string> { "Exit" },
     };
 
-    /// <summary>Types whose every method is hard-blocked (the static interactive getters).</summary>
-    internal static readonly IReadOnlySet<string> DeniedTypes = new HashSet<string> { RhinoGet };
+    /// <summary>Types whose every method is hard-blocked: the static interactive getters, and Rhino's
+    /// modal dialog helpers (message boxes, pickers) -- the same class, a main thread waiting for a
+    /// click nobody will make (review of #282).</summary>
+    internal static readonly IReadOnlySet<string> DeniedTypes = new HashSet<string> { RhinoGet, "Rhino.UI.Dialogs" };
 
     /// <summary>Base types whose derived types may not be constructed (the interactive getter objects).</summary>
     internal static readonly IReadOnlySet<string> DeniedConstructedBaseTypes = new HashSet<string> { GetBaseClass };
@@ -56,8 +63,10 @@ internal static class ScriptApiDenylist
         [RhinoDoc] = new HashSet<string> { "Save", "SaveAs", "SaveAsTemplate", "Export", "ExportSelected", "Write3dmFile", "WriteFile", "Close", "Open", "OpenFile", "OpenHeadless", "Create", "CreateHeadless", "ReadFile", "Import" },
     };
 
-    /// <summary>Command tokens (lower-cased, leading `_`/`-` stripped) that make a RunScript call gated or denied.</summary>
-    internal static readonly IReadOnlySet<string> DeniedCommandTokens = new HashSet<string> { "exit", "quit" };
+    /// <summary>Command tokens (lower-cased, leading `_`/`-` stripped) that make a RunScript/ExecuteCommand
+    /// call gated or denied. Undo/Redo are DENIED: a mid-command undo discards the run's own entry
+    /// (spikes §3), after which the post-run _Undo would revert a person's (review of #282).</summary>
+    internal static readonly IReadOnlySet<string> DeniedCommandTokens = new HashSet<string> { "exit", "quit", "undo", "redo", "undomultiple", "redomultiple" };
     internal static readonly IReadOnlySet<string> LifecycleCommandTokens = new HashSet<string>
     {
         "save", "saveas", "savesmall", "saveastemplate", "incrementalsave", "autosave", "export", "exportselected",
@@ -156,10 +165,12 @@ internal static class ScriptApiDenylist
             : null;
     }
 
-    /// <summary>RhinoApp.RunScript(string, ...): the first argument, when a literal, is scanned for command tokens.</summary>
+    /// <summary>RhinoApp.RunScript / RhinoApp.ExecuteCommand: every constant string argument is scanned
+    /// for command tokens (ExecuteCommand takes a command name; RunScript a macro). A computed string
+    /// is not seen here; the plug-in's runtime wrapper for those is tracked as a follow-up.</summary>
     private static void CheckRunScript(IMethodSymbol method, InvocationExpressionSyntax invocation, SemanticModel semanticModel, HashSet<string> seen, List<string> lifecycleMembers)
     {
-        if (FullName(method.ContainingType) != RhinoApp || method.Name != "RunScript")
+        if (FullName(method.ContainingType) != RhinoApp || (method.Name != "RunScript" && method.Name != "ExecuteCommand"))
         {
             return;
         }
@@ -176,12 +187,12 @@ internal static class ScriptApiDenylist
             {
                 if (DeniedCommandTokens.Contains(token))
                 {
-                    throw ScriptApiDenylistViolationException.UndoOrExitMember(RhinoApp + ".RunScript(\"" + token + "\")");
+                    throw ScriptApiDenylistViolationException.UndoOrExitMember(RhinoApp + "." + method.Name + "(\"" + token + "\")");
                 }
 
                 if (LifecycleCommandTokens.Contains(token))
                 {
-                    var key = RhinoApp + ".RunScript(\"" + token + "\")";
+                    var key = RhinoApp + "." + method.Name + "(\"" + token + "\")";
                     if (seen.Add(key))
                     {
                         lifecycleMembers.Add(key);

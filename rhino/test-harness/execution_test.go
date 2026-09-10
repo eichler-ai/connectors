@@ -297,3 +297,26 @@ func TestPythonIsNotAvailableYet_Loudly(t *testing.T) {
 		t.Fatalf("%+v", out)
 	}
 }
+
+func TestNonObjectChangeIsRolledBackToo(t *testing.T) {
+	// review of #282: a layer added by a run that then throws must be reverted even though no
+	// object event fired and the mutation report is empty.
+	c := startServer(t)
+	inst := waitForInstance(t, c)
+	layer := fmt.Sprintf("h6-%d", time.Now().UnixNano()%100000)
+	out := csharp(t, c, inst, fmt.Sprintf(`Document.Layers.Add("%s", System.Drawing.Color.Red); throw new System.Exception("after layer");`, layer), nil)
+	if out.Status != "error" {
+		t.Fatalf("%+v", out)
+	}
+	var codes []string
+	for _, n := range out.Notices {
+		codes = append(codes, n.Code)
+	}
+	if !has(codes, "script-rolled-back") {
+		t.Fatalf("expected script-rolled-back, got %v", codes)
+	}
+	check := csharp(t, c, inst, fmt.Sprintf(`return Document.Layers.FindName("%s") == null ? "gone" : "present";`, layer), nil)
+	if check.ReturnValue != "gone" {
+		t.Fatalf("layer should have been undone: %+v", check)
+	}
+}

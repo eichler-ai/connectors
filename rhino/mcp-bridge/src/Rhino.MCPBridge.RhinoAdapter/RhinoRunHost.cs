@@ -16,14 +16,18 @@ internal sealed class RhinoRunHost : IRunHost
     private readonly Guid _processSalt;
     private readonly bool _caseInsensitivePaths;
     private readonly string _runCommandName;
+    private readonly Func<Guid> _runCommandId;
     private readonly Action<string> _log;
 
-    public RhinoRunHost(Guid processSalt, bool caseInsensitivePaths, string bridgeVersion, string runCommandName, Action<string> log)
+    /// <param name="runCommandId">The bridge's run command's Command.Id, read lazily because Rhino
+    /// instantiates command classes after the plug-in's OnLoad.</param>
+    public RhinoRunHost(Guid processSalt, bool caseInsensitivePaths, string bridgeVersion, string runCommandName, Func<Guid> runCommandId, Action<string> log)
     {
         _processSalt = processSalt;
         _caseInsensitivePaths = caseInsensitivePaths;
         BridgeVersion = bridgeVersion;
         _runCommandName = runCommandName;
+        _runCommandId = runCommandId;
         _log = log;
     }
 
@@ -80,14 +84,10 @@ internal sealed class RhinoRunHost : IRunHost
             return false; // Rhino refuses a nested command; the launcher retries
         }
 
-        RunQueue.Set(() =>
-        {
-            // Rhino names the entry after the command; an inner record may rename it (open item §17.10 --
-            // the harness reads the history to find out). Harmless if it does not.
-            var serial = document.BeginUndoRecord(undoLabel);
-            try { body(); }
-            finally { if (serial != 0) document.EndUndoRecord(serial); }
-        });
+        // No inner BeginUndoRecord: it does not rename the entry (verified, §17.10) and if a future
+        // Rhino honoured it the run would become two entries (review of #282). The label is reported.
+        _ = undoLabel;
+        RunQueue.Set(body, _log);
         var result = RhinoApp.ExecuteCommand(document, _runCommandName);
         var ran = RunQueue.Ran;
         RunQueue.Clear();
@@ -106,39 +106,57 @@ internal sealed class RhinoRunHost : IRunHost
         return r == Result.Success;
     }
 
-    public string? MostRecentCommandName()
+    public bool LastCommandWasOurs()
     {
-        // Rhino exposes the MRU list as display strings / macros (e.g. "_Undo", "MCPBridgeRun"); the
-        // executor compares case-insensitively against its own command name.
-        var recent = Command.GetMostRecentCommands();
-        if (recent is null || recent.Length == 0) return null;
-        for (var i = recent.Length - 1; i >= 0; i--)
-        {
-            var macro = recent[i].Macro ?? recent[i].DisplayString;
-            if (string.IsNullOrWhiteSpace(macro)) continue;
-            return macro.Trim().TrimStart('_', '-', '!');
-        }
-
-        return null;
+        // Command.LastCommandId: the id of the command that ran most recently, whatever its style or
+        // how it was started. Exact; no ordering assumption (review of #282).
+        var ours = _runCommandId();
+        return ours != Guid.Empty && Command.LastCommandId == ours;
     }
 
-    public IDisposable SubscribeChanges(RunDocument run, Action<DocumentChange> onChange)
+    public IDisposable SubscribeChanges(RunDocument run, Action<DocumentChange> onChange, Action onAnyChange)
     {
         var serial = ((RhinoDoc)run.Raw!).RuntimeSerialNumber;
-        void Added(object? s, RhinoObjectEventArgs e) { if (e.TheObject?.Document?.RuntimeSerialNumber == serial) onChange(Change(DocumentChange.Kind.Added, e.TheObject)); }
-        void Deleted(object? s, RhinoObjectEventArgs e) { if (e.TheObject?.Document?.RuntimeSerialNumber == serial) onChange(Change(DocumentChange.Kind.Deleted, e.TheObject)); }
-        void Undeleted(object? s, RhinoObjectEventArgs e) { if (e.TheObject?.Document?.RuntimeSerialNumber == serial) onChange(Change(DocumentChange.Kind.Undeleted, e.TheObject)); }
-        void Replaced(object? s, RhinoReplaceObjectEventArgs e) { if (e.Document?.RuntimeSerialNumber == serial) onChange(new DocumentChange(DocumentChange.Kind.Replaced, e.ObjectId, e.NewRhinoObject?.ObjectType.ToString() ?? "", LayerOf(e.NewRhinoObject))); }
+        bool Mine(RhinoDoc? d) => d is not null && d.RuntimeSerialNumber == serial;
+        void Added(object? s, RhinoObjectEventArgs e) { if (Mine(e.TheObject?.Document)) { onAnyChange(); onChange(Change(DocumentChange.Kind.Added, e.TheObject!)); } }
+        void Deleted(object? s, RhinoObjectEventArgs e) { if (Mine(e.TheObject?.Document)) { onAnyChange(); onChange(Change(DocumentChange.Kind.Deleted, e.TheObject!)); } }
+        void Undeleted(object? s, RhinoObjectEventArgs e) { if (Mine(e.TheObject?.Document)) { onAnyChange(); onChange(Change(DocumentChange.Kind.Undeleted, e.TheObject!)); } }
+        void Replaced(object? s, RhinoReplaceObjectEventArgs e) { if (Mine(e.Document)) { onAnyChange(); onChange(new DocumentChange(DocumentChange.Kind.Replaced, e.ObjectId, e.NewRhinoObject?.ObjectType.ToString() ?? "", LayerOf(e.NewRhinoObject))); } }
+        // Everything else RhinoCommon reports as a document change: counted as "changed", not netted.
+        void Attributes(object? s, RhinoModifyObjectAttributesEventArgs e) { if (Mine(e.Document)) onAnyChange(); }
+        void Layers(object? s, Rhino.DocObjects.Tables.LayerTableEventArgs e) { if (Mine(e.Document)) onAnyChange(); }
+        void Materials(object? s, Rhino.DocObjects.Tables.MaterialTableEventArgs e) { if (Mine(e.Document)) onAnyChange(); }
+        void Groups(object? s, Rhino.DocObjects.Tables.GroupTableEventArgs e) { if (Mine(e.Document)) onAnyChange(); }
+        void Blocks(object? s, Rhino.DocObjects.Tables.InstanceDefinitionTableEventArgs e) { if (Mine(e.Document)) onAnyChange(); }
+        void DimStyles(object? s, Rhino.DocObjects.Tables.DimStyleTableEventArgs e) { if (Mine(e.Document)) onAnyChange(); }
+        void Lights(object? s, Rhino.DocObjects.Tables.LightTableEventArgs e) { if (Mine(e.Document)) onAnyChange(); }
+        void Props(object? s, DocumentEventArgs e) { if (Mine(e.Document)) onAnyChange(); }
         RhinoDoc.AddRhinoObject += Added;
         RhinoDoc.DeleteRhinoObject += Deleted;
         RhinoDoc.UndeleteRhinoObject += Undeleted;
         RhinoDoc.ReplaceRhinoObject += Replaced;
+        RhinoDoc.ModifyObjectAttributes += Attributes;
+        RhinoDoc.LayerTableEvent += Layers;
+        RhinoDoc.MaterialTableEvent += Materials;
+        RhinoDoc.GroupTableEvent += Groups;
+        RhinoDoc.InstanceDefinitionTableEvent += Blocks;
+        RhinoDoc.DimensionStyleTableEvent += DimStyles;
+        RhinoDoc.LightTableEvent += Lights;
+        RhinoDoc.DocumentPropertiesChanged += Props;
         return new Unsubscriber(() =>
         {
             RhinoDoc.AddRhinoObject -= Added;
             RhinoDoc.DeleteRhinoObject -= Deleted;
             RhinoDoc.UndeleteRhinoObject -= Undeleted;
             RhinoDoc.ReplaceRhinoObject -= Replaced;
+            RhinoDoc.ModifyObjectAttributes -= Attributes;
+            RhinoDoc.LayerTableEvent -= Layers;
+            RhinoDoc.MaterialTableEvent -= Materials;
+            RhinoDoc.GroupTableEvent -= Groups;
+            RhinoDoc.InstanceDefinitionTableEvent -= Blocks;
+            RhinoDoc.DimensionStyleTableEvent -= DimStyles;
+            RhinoDoc.LightTableEvent -= Lights;
+            RhinoDoc.DocumentPropertiesChanged -= Props;
         });
     }
 

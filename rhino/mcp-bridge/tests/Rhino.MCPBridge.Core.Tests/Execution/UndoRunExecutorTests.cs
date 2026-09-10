@@ -64,12 +64,34 @@ public sealed class UndoRunExecutorTests
     public void Rollback_IsSkipped_WhenAnotherCommandIsMostRecent()
     {
         // A person acted between the run and the rollback: never revert their action (PRD §07).
-        var host = new FakeRunHost { DuringRun = OneAdd, RecentCommand = "Circle" };
+        var host = new FakeRunHost { DuringRun = OneAdd, LastWasOurs = false };
         var outcome = new UndoRunExecutor(Runner, host).Execute(Req("throw new System.Exception(\"x\");"))!;
         Assert.Equal(0, host.UndoCalls);
         var notice = Assert.Single(outcome.Notices);
         Assert.Equal("script-rollback-skipped", notice.Code);
-        Assert.Contains("Circle", notice.Message);
+        Assert.Contains("not the connector's", notice.Message);
+    }
+
+    [Fact]
+    public void Throw_AfterANonObjectChange_IsStillUndone()
+    {
+        // review of #282: a layer or attribute change is a change; the rollback keys off ANY document
+        // event, not off the object counts the report can net.
+        var host = new FakeRunHost { NonObjectChangeDuringRun = true };
+        var outcome = new UndoRunExecutor(Runner, host).Execute(Req("throw new System.Exception(\"x\");"))!;
+        Assert.Equal(1, host.UndoCalls);
+        Assert.Equal("script-rolled-back", Assert.Single(outcome.Notices).Code);
+        Assert.Null(outcome.Mutations);
+    }
+
+    [Fact]
+    public void AnExceptionInsideTheCommandBody_BecomesAFailedOutcome_NeverEscapes()
+    {
+        // review of #282: the body runs inside Rhino's native command dispatcher; a throw there is a crash class.
+        var host = new FakeRunHost { DuringRun = _ => throw new InvalidOperationException("subscribe exploded") };
+        var outcome = new UndoRunExecutor(Runner, host).Execute(Req("return 1;"))!;
+        Assert.False(outcome.Success);
+        Assert.Contains("subscribe exploded", outcome.Exception!.Message);
     }
 
     [Fact]

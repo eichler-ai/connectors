@@ -26,12 +26,17 @@ internal interface IRunHost
     /// (spikes §3: a mid-command undo destroys the entry). Returns false when nothing was undone.</summary>
     bool UndoLast(RunDocument document);
 
-    /// <summary>The name of the most recent command Rhino ran, or null. The executor checks it is its
-    /// own before undoing, so a person's action landing between the run and the rollback is never reverted.</summary>
-    string? MostRecentCommandName();
+    /// <summary>Whether the command Rhino ran most recently is the bridge's own run command
+    /// (Command.LastCommandId, exact and order-free -- review of #282). The executor checks it before
+    /// undoing, so a person's action landing between the run and the rollback is never reverted.</summary>
+    bool LastCommandWasOurs();
 
-    /// <summary>Subscribes to the document's add/delete/replace/undelete events for the run's duration.</summary>
-    IDisposable SubscribeChanges(RunDocument document, Action<DocumentChange> onChange);
+    /// <summary>Subscribes to the document's events for the run's duration. <paramref name="onChange"/>
+    /// receives the object events the mutation report nets; <paramref name="onAnyChange"/> fires for
+    /// EVERY document change RhinoCommon reports -- object attributes, layers, materials, groups, block
+    /// definitions, dimension styles, lights, document properties -- because the rollback decision must
+    /// key off "did the run change the document", not off the subset the report can count (review of #282).</summary>
+    IDisposable SubscribeChanges(RunDocument document, Action<DocumentChange> onChange, Action onAnyChange);
 }
 
 /// <summary>

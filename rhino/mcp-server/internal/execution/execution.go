@@ -168,8 +168,10 @@ func (r *Router) remember(executionID, instanceID string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	now := r.now()
+	if _, known := r.routes[executionID]; !known {
+		r.order = append(r.order, executionID) // never twice: a re-remember would inflate the order list
+	}
 	r.routes[executionID] = route{instanceID: instanceID, mintedAt: now}
-	r.order = append(r.order, executionID)
 	for len(r.order) > 0 && (len(r.order) > maxRoutes || now.Sub(r.routes[r.order[0]].mintedAt) > routeMaxAge) {
 		delete(r.routes, r.order[0])
 		r.order = r.order[1:]
@@ -199,9 +201,16 @@ func (r *Router) lookup(ctx context.Context, executionID string) (*transport.Con
 			continue
 		}
 		pctx, cancel := context.WithTimeout(ctx, 3*time.Second)
-		_, rpcErr, err := conn.Call(pctx, "poll_execution", map[string]any{"execution_id": executionID, "timeout_ms": 0})
+		raw, rpcErr, err := conn.Call(pctx, "poll_execution", map[string]any{"execution_id": executionID, "timeout_ms": 0})
 		cancel()
-		if err == nil && rpcErr == nil {
+		if err != nil || rpcErr != nil {
+			continue
+		}
+		// Ownership is proven by the plug-in echoing the id, not by the absence of an error.
+		var probe struct {
+			ExecutionID string `json:"execution_id"`
+		}
+		if json.Unmarshal(raw, &probe) == nil && probe.ExecutionID == executionID {
 			r.remember(executionID, id)
 			return conn, nil
 		}
