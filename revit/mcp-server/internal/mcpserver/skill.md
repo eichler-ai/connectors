@@ -389,7 +389,7 @@ local mode; in remote mode it moves to the shared drive — ask a human where th
 | `describe_howto` | no | one how-to's script, pitfalls and verification |
 | `submit_howto` | no | record a how-to, or fix one that misled you |
 | `get_skills` | no | this document |
-| `update_connector` | no | is a newer connector release out? (server + add-in per Revit version); `apply: true` + `confirm_lifecycle_actions: true` installs it — asks every Revit to close, so ask the user first |
+| `update_connector` | no | is a newer connector release out? (server + add-in per Revit version); `apply: true` + `confirm_lifecycle_actions: true` installs it — closes nothing, tell the user what to restart |
 
 **Starting from nothing:** `list_instances` → pick an instance and document → `search_howtos` →
 `execute_script`.
