@@ -11,7 +11,7 @@ Two components — the Rhino MCP Bridge, a Rhino plug-in that executes agent-aut
 - **MCP Server:** Go, single-binary distribution, shared code with the Revit MCP Server
 - **Status:** design draft, 2026-09-09; nothing built
 
-> This document is the single source of truth for the Rhino connector. It is written against the Revit connector's PRD (`revit/docs/PRD.md`) and `CONVENTIONS.md`: where a section says "as Revit", the Revit design applies unchanged and is not restated; where this connector departs, the section says why. Facts about Rhino that were verified against a live install or McNeel's own statements are marked **verified**; facts still resting on documentation or reasoning are marked **to verify** and are listed again in §14.
+> This document is the single source of truth for the Rhino connector. It is written against the Revit connector's PRD (`revit/docs/PRD.md`) and `CONVENTIONS.md`: where a section says "as Revit", the Revit design applies unchanged and is not restated; where this connector departs, the section says why. Facts about Rhino that were verified against a live install or McNeel's own statements are marked **verified**; facts still resting on documentation or reasoning are marked **to verify** and are listed again in §17.
 
 ## Contents
 
@@ -25,13 +25,14 @@ Two components — the Rhino MCP Bridge, a Rhino plug-in that executes agent-aut
 8. [Blocking prompts & dialogs](#08-blocking-prompts--dialogs)
 9. [API discovery & the how-to corpus](#09-api-discovery--the-how-to-corpus)
 10. [Grasshopper](#10-grasshopper)
-11. [File exchange & document identity](#11-file-exchange--document-identity)
-12. [Security model](#12-security-model)
-13. [Multi-version strategy](#13-multi-version-strategy)
-14. [Signing & distribution](#14-signing--distribution)
-15. [Validation & test corpus](#15-validation--test-corpus)
-16. [Open questions & things to verify](#16-open-questions--things-to-verify)
-17. [Phased roadmap](#17-phased-roadmap)
+11. [Viewport capture](#11-viewport-capture)
+12. [File exchange & document identity](#12-file-exchange--document-identity)
+13. [Security model](#13-security-model)
+14. [Multi-version strategy](#14-multi-version-strategy)
+15. [Signing & distribution](#15-signing--distribution)
+16. [Validation & test corpus](#16-validation--test-corpus)
+17. [Open questions & things to verify](#17-open-questions--things-to-verify)
+18. [Phased roadmap](#18-phased-roadmap)
 
 ---
 
@@ -50,15 +51,15 @@ Goals for v1:
 - Never let a script hang the instance on a prompt or dialog nobody will answer — or, where that cannot be prevented, report exactly what is on screen (§08).
 - Give the agent a self-serve way to learn RhinoCommon, `rhinoscriptsyntax` and Grasshopper's API, in both languages' call shapes (§09).
 - Make Grasshopper definitions editable, runnable, drivable through their UI controls, and observable per component (§10).
-- Keep generated files in one predictable per-document location on disk (§11).
+- Keep generated files in one predictable per-document location on disk (§12).
 
 ## 02. Non-goals for v1
 
-- **Not Rhino 7.** Rhino 7 is .NET Framework only and has no CPython; nothing here targets it. Rhino 9 (in beta on .NET 10 as of July 2026 — **verified**, McNeel forum) is structured for, not targeted (§13).
+- **Not Rhino 7.** Rhino 7 is .NET Framework only and has no CPython; nothing here targets it. Rhino 9 (in beta on .NET 10 as of July 2026 — **verified**, McNeel forum) is structured for, not targeted (§14).
 - **Not a general sandbox.** As Revit §02: full API access, one narrow denylist of things that escape the undo boundary (§07), reflection can route around it and that is accepted.
-- **Not a fixed-tool Grasshopper product.** v1 makes Grasshopper scriptable, discoverable and observable through a small helper surface; a fixed tool set over it is a later phase (§10, §17).
+- **Not a fixed-tool Grasshopper product.** v1 makes Grasshopper scriptable, discoverable and observable through a small helper surface; a fixed tool set over it is a later phase (§10, §18).
 - **Not Rhino.Compute.** Headless geometry over HTTP is a different product with no document, no UI and no Grasshopper canvas; nothing here depends on or competes with it.
-- **Not remote mode.** Rhino runs natively on the Mac, so the Mac + Parallels topology that forced Revit's remote mode does not exist. There is one mode, local (§05, §12).
+- **Not remote mode.** Rhino runs natively on the Mac, so the Mac + Parallels topology that forced Revit's remote mode does not exist. There is one mode, local (§05, §13).
 - **Not cross-agent locking.** Several agents may drive one document; v1 reports who ran last and enforces nothing (§05).
 
 ## 03. Competitive landscape
@@ -87,7 +88,7 @@ Claude session B  <--stdio-->  Rhino MCP Server B  --TCP-->  (the same two insta
                                                               each instance publishes instances/<pid>.json
 ```
 
-MCP tools exposed to the agent, unchanged in name and shape from Revit wherever the concept carries over: `execute_script`, `poll_execution`, `cancel_execution`, `undo`, `redo`, `list_functions`, `search_functions`, `describe_function`, `search_howtos`, `describe_howto`, `submit_howto`, `get_skills`, `list_instances`, `update_connector`. New parameters and fields are called out in the sections that introduce them (`language` in §06, the Grasshopper solve report in §10).
+MCP tools exposed to the agent, unchanged in name and shape from Revit wherever the concept carries over: `execute_script`, `poll_execution`, `cancel_execution`, `undo`, `redo`, `list_functions`, `search_functions`, `describe_function`, `search_howtos`, `describe_howto`, `submit_howto`, `get_skills`, `list_instances`, `update_connector`, plus one new tool, `capture_view` (§11). New parameters and fields are called out in the sections that introduce them (`language` in §06, the Grasshopper solve report in §10).
 
 **Naming** follows `CONVENTIONS.md` exactly: "MCP Bridge" and "MCP Server" inside this directory and in Rhino's own UI, "Rhino MCP Bridge" and "Rhino MCP Server" elsewhere, the client registration slug `"rhino"`, app data under `Connectors/Rhino/`, and the connector's own script API under `Eichler.Connectors.Rhino` with a single public `Connector` type in its own assembly. Repo layout mirrors Revit's: `rhino/mcp-bridge/` (C#), `rhino/mcp-server/` (Go), `rhino/test-harness/`, `rhino/docs/`.
 
@@ -103,7 +104,7 @@ Revit's add-in dials *out* to one well-known listener. That was chosen for two r
 
 Rhino runs natively on the Mac, so the second reason is gone, and the first is a directory scan. With the plug-in listening and the server dialling:
 
-- **The plug-in binds `127.0.0.1` on an ephemeral port at plug-in load** and writes `<app-data>/Connectors/Rhino/instances/<pid>.json`: `port`, `pid`, `instance_id` (a GUID minted once per Rhino process), `rhino_version`, `platform`, `bridge_version`, `schema_fingerprint`, `started_at`, and a per-instance auth `token` (§12). It deletes the file on clean unload. A server treats a file whose `pid` is not a live process as stale and deletes it, so a crashed Rhino leaves nothing behind that survives a scan.
+- **The plug-in binds `127.0.0.1` on an ephemeral port at plug-in load** and writes `<app-data>/Connectors/Rhino/instances/<pid>.json`: `port`, `pid`, `instance_id` (a GUID minted once per Rhino process), `rhino_version`, `platform`, `bridge_version`, `schema_fingerprint`, `started_at`, and a per-instance auth `token` (§13). It deletes the file on clean unload. A server treats a file whose `pid` is not a live process as stale and deletes it, so a crashed Rhino leaves nothing behind that survives a scan.
 - **Every server process is independent.** On launch it scans the directory, dials every live instance, authenticates, and keeps dialling on a backoff for instances that appear later or drop. No lock, no primary, no proxying, no continuity replay, no eviction. A newer server binary is simply what the client spawns next. Two Claude sessions are two servers with two connections into each plug-in; from the agent's point of view they are indistinguishable, which is the same promise Revit's design made through much more mechanism.
 - **Busy state lives where the truth is.** The plug-in serialises script execution on the UI thread, so it — not the server — owns the per-instance `idle`/`pending`/`running`/`busy`/`unrecoverable` state and the ring buffer of recent results. Every connected server sees the same answer, and `poll_execution` for any `execution_id` works from any server, because the plug-in owns the record. This removes the broker-side busy latch that produced Revit's reconcile-before-answering hack (issue #54) and its half-open-socket failure (#269), and it makes "poll survives a server restart" true by construction rather than the unfulfilled promise Revit's PRD had to retract.
 - **`execution_id` is still minted by the server** (Revit §01), namespaced by a per-server-process prefix so two servers can never collide, and echoed by the plug-in.
@@ -112,7 +113,7 @@ Rhino runs natively on the Mac, so the second reason is gone, and the first is a
 **What this design gives up, and what replaces it.**
 
 - *One shared search index per machine.* Each server would build its own `search_functions` index on attach (Revit measured ~1.4 s for a 76k-member corpus plus a ~24 MB model cache). Replacement: the built index is persisted under the server's private app-data root keyed by corpus fingerprint — the manager already computes that fingerprint to share indexes between instances — so the second server on a machine loads it instead of rebuilding. Until that lands, servers build independently; the cost is seconds and memory, not correctness.
-- *A global view for cross-agent coordination.* Neither design actually prevents two agents from editing one document at cross purposes; the singleton only looked like it helped. v1 is observability only: every execution result and every `list_instances` document entry carries `last_run` (`agent_client_id`, a per-server-process id the client can name; `execution_id`; `finished_at`), so an agent that sees another client's run since its own last call can decide what to do. An advisory or exclusive per-document lease is a plug-in-side feature that fits this design without a wire change, deferred until real use shows the collision (§16).
+- *A global view for cross-agent coordination.* Neither design actually prevents two agents from editing one document at cross purposes; the singleton only looked like it helped. v1 is observability only: every execution result and every `list_instances` document entry carries `last_run` (`agent_client_id`, a per-server-process id the client can name; `execution_id`; `finished_at`), so an agent that sees another client's run since its own last call can decide what to do. An advisory or exclusive per-document lease is a plug-in-side feature that fits this design without a wire change, deferred until real use shows the collision (§17).
 
 **Platform note — the document model differs by OS, and addressing is designed for the harder case.** Rhino for Windows opens one document per process; a second file is a second Rhino instance (**verified**, McNeel forum, unchanged through Rhino 7 and, per the same source's silence, to be re-checked on 8). Rhino for Mac opens many documents in one process, one window each. `{instance_id, document_id}` is designed for the Mac case; on Windows every instance has exactly one document and `document_id` may be omitted. As `CONVENTIONS.md` requires, an omitted `document_id` is the active document and a non-matching one is a loud `document-not-found` with candidates, never a silent fallback, on both platforms from the first build.
 
@@ -137,9 +138,9 @@ RhinoCommon must be called on Rhino's main thread (**verified**: every surveyed 
 | Compile-time guard (§07) | A Python AST walk over the script text | Revit's `ScriptApiDenylist` semantic walk, retargeted |
 | Cancellation | Cooperative: `cancel.check()` in loops; the host's own interruption of a non-cooperating script is **to verify** | Cooperative `CancellationToken` as Revit |
 
-**Two facts about the Python host carry risk, and both are named rather than assumed.** First, `Rhino.Runtime.Code` is the API McNeel's own staff describe as undocumented and "still being matured", with no stability guarantee, and the `RhinoCodePlatform.*` assemblies behind it are explicitly internal (**verified**, McNeel forum, September 2024). The older public `Rhino.Runtime.PythonScript.Create()` is IronPython 2, not CPython, and is what the most popular incumbent actually runs — so its "Python" is Python 2. This connector uses `Rhino.Runtime.Code` for real CPython 3 and pins the Rhino service release it was verified against; a service-release break is the same class of risk as Revit's `RevitAPI.dll` version pin and is handled the same way, by the live harness (§15) and the how-to sweep. Second, whether that host can interrupt a script that ignores `cancel` is unknown; if it cannot, a non-cooperating Python script resolves to `unrecoverable` after the grace period exactly as a non-cooperating C# one does (Revit §06), and `skill.md` says so.
+**Two facts about the Python host carry risk, and both are named rather than assumed.** First, `Rhino.Runtime.Code` is the API McNeel's own staff describe as undocumented and "still being matured", with no stability guarantee, and the `RhinoCodePlatform.*` assemblies behind it are explicitly internal (**verified**, McNeel forum, September 2024). The older public `Rhino.Runtime.PythonScript.Create()` is IronPython 2, not CPython, and is what the most popular incumbent actually runs — so its "Python" is Python 2. This connector uses `Rhino.Runtime.Code` for real CPython 3 and pins the Rhino service release it was verified against; a service-release break is the same class of risk as Revit's `RevitAPI.dll` version pin and is handled the same way, by the live harness (§16) and the how-to sweep. Second, whether that host can interrupt a script that ignores `cancel` is unknown; if it cannot, a non-cooperating Python script resolves to `unrecoverable` after the grace period exactly as a non-cooperating C# one does (Revit §06), and `skill.md` says so.
 
-**The connector's own API is one type, `Eichler.Connectors.Rhino.Connector`, reached as `connector` in Python and `Connector` in C#** — the same object, bound into both hosts, so its members are documented once and discovered once (§09). v1 members: `ImportsDirectory`, `ExportsDirectory`, `Publish(path, name?)`, `Grasshopper` (§10), `DialogResultOverrides` (§08), `Settle(doc, keep)` (§07). No `WithTransaction` — Rhino has no transactions, and §07 explains what replaces the block.
+**The connector's own API is one type, `Eichler.Connectors.Rhino.Connector`, reached as `connector` in Python and `Connector` in C#** — the same object, bound into both hosts, so its members are documented once and discovered once (§09). v1 members: `ImportsDirectory`, `ExportsDirectory`, `Publish(path, name?)`, `Grasshopper` (§10), `CaptureView(...)` (§11), `DialogResultOverrides` (§08), `Settle(doc, keep)` (§07). No `WithTransaction` — Rhino has no transactions, and §07 explains what replaces the block.
 
 **Rhino's own script surface stays reachable.** `RhinoApp.RunScript(...)` runs any Rhino command, including ones that prompt (§08) and ones that save or quit (§07); it is not blocked, it is gated where its effects escape undo. Scripts must not be marked with Rhino's `ScriptRunner` command style themselves — the plug-in's executor command carries that attribute (**verified**: `RunScript` from a plug-in silently fails without it), which is one of the reasons scripts run inside a connector-owned command rather than a bare `InvokeOnUiThread`.
 
@@ -184,11 +185,11 @@ As Revit §08 in mechanism: the plug-in reflects every assembly loaded in the Rh
 
 ## 10. Grasshopper
 
-Grasshopper is in scope for v1 at the level agreed on 2026-09-09: **scriptable, discoverable, drivable and observable**, with a small helper surface and a solve-aware execution lifecycle; **fixed Grasshopper tools are a later phase** (§17), added once how-to submissions show which operations recur. Every incumbent's Grasshopper catalog is reachable from a script today through `Grasshopper.Kernel`; what the connector adds is the parts a script cannot do for itself.
+Grasshopper is in scope for v1 at the level agreed on 2026-09-09: **scriptable, discoverable, drivable and observable**, with a small helper surface and a solve-aware execution lifecycle; **fixed Grasshopper tools are a later phase** (§18), added once how-to submissions show which operations recur. Every incumbent's Grasshopper catalog is reachable from a script today through `Grasshopper.Kernel`; what the connector adds is the parts a script cannot do for itself.
 
 ### Addressing
 
-`list_instances` reports each instance's open definitions as `grasshopper_documents[]` (`gh_document_id`, `title`, `path` or `unsaved`, `active`, `enabled`, `component_count`). `execute_script` takes an optional `gh_document_id`; when given, the script's `ghdoc`/`GrasshopperDocument` global is that `GH_Document` and the solve report below covers it. Identity follows §11's rules applied to the `.gh`/`.ghx` path.
+`list_instances` reports each instance's open definitions as `grasshopper_documents[]` (`gh_document_id`, `title`, `path` or `unsaved`, `active`, `enabled`, `component_count`). `execute_script` takes an optional `gh_document_id`; when given, the script's `ghdoc`/`GrasshopperDocument` global is that `GH_Document` and the solve report below covers it. Identity follows §12's rules applied to the `.gh`/`.ghx` path.
 
 ### What a script does directly
 
@@ -205,7 +206,7 @@ Grasshopper is in scope for v1 at the level agreed on 2026-09-09: **scriptable, 
 
 - `Find(nickname | guid)` → component; `Set(nickname, value)` sets a slider, toggle, panel, value list or button by nickname, expiring the object; `Get(nickname)` returns the serialized outputs of one object.
 - `Solve(gh_document, expire_all=False, timeout_ms=None)` runs a solution and returns the **solve report** (below) — the same report the execution result carries when a script triggers a solve by any other route.
-- `Data(param)` serializes a data tree with bounds: paths, item counts, and per-item summaries (numbers and text verbatim; geometry as type + bounding box + a stable handle), never full geometry inline — the same 25,000-token discipline as discovery paging. `Publish` on a `.3dm`/`.gh` export is how full geometry leaves the process (§11).
+- `Data(param)` serializes a data tree with bounds: paths, item counts, and per-item summaries (numbers and text verbatim; geometry as type + bounding box + a stable handle), never full geometry inline — the same 25,000-token discipline as discovery paging. `Publish` on a `.3dm`/`.gh` export is how full geometry leaves the process (§12).
 
 ### The solve report
 
@@ -215,7 +216,21 @@ For the run's duration the plug-in subscribes `SolutionStart`/`SolutionEnd` on t
 
 **Threading.** The solver runs on the main thread inside `NewSolution`, so it is serialised with scripts by construction and cannot interleave with one. A solve the *person* triggers while a script is `pending` delays the script exactly as a command would.
 
-## 11. File exchange & document identity
+## 11. Viewport capture
+
+An agent driving geometry cannot debug what it cannot see. The Revit connector reaches a PNG through a script plus `Publish`, which works but costs a round trip, a file the agent then has to open with its own tools, and a script the agent has to get right first. For Rhino this is a dedicated tool, `capture_view`, and it is one of the few fixed tools in the connector because it is a *connector mechanism* — getting pixels to the agent — not a Rhino capability an agent could discover.
+
+**`capture_view(instance_id, document_id?, target, options?)`** returns the image **inline as MCP image content** (PNG, bounded — default 1280 px on the long edge, hard cap 2048, so a capture never approaches the client's output ceiling) *and* publishes the full-resolution file to the document's `exports/` (§12), reporting it in `files[]`. `target` is one of:
+
+- a Rhino viewport, by name (`Perspective`, `Top`, a named view) or `active`; options: `display_mode` (wireframe, shaded, rendered, …), `zoom` (`extents` | `selected` | `objects: [ids]` | none), `isolate: [ids]` (everything else hidden for the shot, restored after — implemented as a temporary display conduit, never as a document change, so it leaves no undo entry), `width`/`height`, `transparent_background`;
+- a Grasshopper canvas, by `gh_document_id`; options: `zoom` (`extents` | `selected` | `components: [guids]`), `width`, `scale`;
+- `all`: every viewport of the document in one call, returned as one image per viewport.
+
+Captures run on the main thread through the same executor as scripts (`Rhino.Display.ViewCapture` for viewports, `GH_Canvas` image generation for the canvas) and so are serialised with them and report `busy` when a script is running. A capture changes nothing in the document; the temporary zoom and isolate are undone before the call returns and are reported in `notices[]` if restoring failed. The same capability is exposed to scripts as `Connector.CaptureView(...)`, returning the exported path, for the case where a script wants to capture at a specific step.
+
+**Why inline and not only a path.** The agent's own filesystem tools can read the published file, and Claude Code renders a PNG it reads — but that is a second tool call, and the whole point is a one-call look. Inline content is bounded and cheap; the file is the full-resolution record. Both, deliberately.
+
+## 12. File exchange & document identity
 
 As Revit §09 with the remote-mode half deleted: the workspace tree is `~/RhinoMCPExchange/<document-id>/{imports,exports,logs,scripts,tmp/<instance-id>}` (`%USERPROFILE%\RhinoMCPExchange\` on Windows), `Connector.Publish` copies-or-registers into `exports/`, `files[]` carries per-file status, `overwrite_output_files` is request-level, `logs/`/`scripts/`/`tmp/` age out after 14 days via the audit trail's sweep, and the agent reads and writes the tree with its own filesystem tools — which always works, because there is one machine. No `read_file`, no path rewriting, no resources.
 
@@ -223,7 +238,7 @@ As Revit §09 with the remote-mode half deleted: the workspace tree is `~/RhinoM
 
 **Path resolution on macOS** uses the real path (symlinks and `/Volumes` mounts resolved) before hashing, the analogue of Revit's UNC resolution on Windows.
 
-## 12. Security model
+## 13. Security model
 
 `execute_script` is full code execution inside the Rhino process, in two languages, by design. The transport defaults are therefore not optional:
 
@@ -232,51 +247,51 @@ As Revit §09 with the remote-mode half deleted: the workspace tree is `~/RhinoM
 - **Honest limit, as Revit §10:** the token filters accidental cross-talk from unrelated software and adds no boundary inside the same-user trust model — a malicious same-user process can read the file. Unlike Revit, there is no remote mode where the token is the only protection, so this is the whole story.
 - `script_path` reads a local absolute path or fetches an https URL on the server host, which is the same machine as Rhino — Revit's issue #272 does not arise.
 
-## 13. Multi-version strategy
+## 14. Multi-version strategy
 
 Rhino 8 runs .NET (Core) on both platforms — .NET 7 at release, with the RhinoCommon NuGet now targeting `net8.0` and rolling forward (**verified**, McNeel forum, July 2026) — and optionally .NET Framework 4.8 on Windows for compatibility, a mode this connector does not support (Roslyn scripting and the CPython host both assume the Core runtime). Rhino 9 is in beta on .NET 10 as of July 2026 with McNeel's migration guide saying to target `net10.0` (**verified**, same thread, after an initial staff answer said otherwise — a reminder that even vendor guidance moves).
 
 v1 targets Rhino 8 with a single `net8.0` plug-in build for macOS and Windows (**to verify** against the current 8.x service release: the forum records plug-ins built for net7/net8 failing to load on one SR, so the exact TFM is pinned only after a live load on both platforms). The `.csproj` is multi-target from day one so a `net10.0` Rhino 9 build is additive. The plug-in's `rhino_version` in `instances/<pid>.json` and `list_instances` disambiguates discovery exactly as Revit's does (`ambiguous-instance-version` when instances span versions and no `instance_id` is given), and the how-to sidecar stamps per version.
 
-## 14. Signing & distribution
+## 15. Signing & distribution
 
 Rhino has a first-party package manager, **yak**, with a public server McNeel runs and the `_PackageManager` command inside Rhino on both platforms; the most popular incumbent ships through it. A yak package is a zip with a manifest; it can carry the plug-in for both platforms and arbitrary files alongside. Rhino does not require Authenticode or notarization to load a plug-in, though macOS Gatekeeper does for the *server* binary launched by Claude.
 
 Proposed: **one yak package carries the plug-in and both platforms' server binaries**; a Rhino command `MCPBridgeRegister` writes the MCP client registration (`claude mcp add` when the CLI is present, else the JSON snippet shown in the Status panel) pointing at the server binary the package installed. Updates are yak's own (`_PackageManager` shows them), the plug-in re-registers on load if the server path moved, and `update_connector` becomes a check plus a pointer at the package manager rather than an installer of its own — the shim/versioned-folder machinery Revit needed (issue #211) is unnecessary because yak already installs beside the running version and Rhino loads the new one at next start. The server binary's macOS notarization is the one signing cost, and it is deferred exactly as Revit's CA certificate is, with the "unidentified developer" prompt documented until then. Whether yak accepts a package with non-plug-in binaries at the size the server embeds (~70 MB with models) is **to verify**; the fallback is Revit's install-script model with the models fetched on first run.
 
-## 15. Validation & test corpus
+## 16. Validation & test corpus
 
 As Revit §13 in structure — tier 1 unit tests behind the `Core`/adapter seam, tier 2 the live MCP harness against a real Rhino, no mocked middle tier — with the topology collapsed: **the harness runs natively on the Mac against a Mac Rhino**, no `prlctl`, no launcher agent, no shared-folder alias. Windows is a required release target and gets a CI build of the plug-in on a Windows runner plus a live harness pass on a Windows machine before each release; it is not a development platform.
 
 Corpus sourcing adds two Rhino-specific pools to Revit's: the `rhinoscriptsyntax` reference examples (each is a task with an obvious expected outcome), and the Grasshopper example definitions that ship with Rhino (open, drive, solve, read — a ready-made pool for §10's acceptance). The competitive coverage floor is one task per fixed tool in the two broadest incumbent catalogs (§03), run against `execute_script` plus discovery only, in both languages.
 
-## 16. Open questions & things to verify
+## 17. Open questions & things to verify
 
 Facts this document rests on that have not yet been checked against a live Rhino 8, in the order they block phases:
 
 1. `Rhino.Runtime.Code.RhinoCode.RunScript` from a plug-in: real CPython 3, stdout capture, `Outputs` binding, behaviour off the main thread, and whether a running script can be interrupted (§06). Blocks phase 1.
-2. The exact plug-in TFM that loads on the current 8.x SR on both platforms (§13). Blocks phase 1.
+2. The exact plug-in TFM that loads on the current 8.x SR on both platforms (§14). Blocks phase 1.
 3. Undo-record behaviour: empty-record elision, `Undo()` of a just-closed record, save mid-record (§07). Blocks phase 1.
 4. Whether any pre-show dialog hook exists in RhinoCommon or Eto (§08). Blocks nothing; decides whether §08 ever gains suppression.
 5. Rhino for Windows single-document-per-instance, re-confirmed on 8.x (§05).
-6. Unsaved-document title uniquification (§11).
+6. Unsaved-document title uniquification (§12).
 7. Whether `RhinoCommon.xml`/`Grasshopper.xml` are present in an installed Rhino (§09).
 8. Off-main-thread reads of `IGH_ActiveObject.Phase` during a solve (§10).
-9. yak package size and non-plug-in payload acceptance (§14).
+9. yak package size and non-plug-in payload acceptance (§15).
 
 Decisions deliberately deferred, with the trigger that reopens each: cross-agent document leases (first observed collision between two agents on one document); fixed Grasshopper tools (how-to submissions showing recurring operations); Rhino 9 target (its release); a shared on-disk search index (measured multi-session memory cost).
 
-## 17. Phased roadmap
+## 18. Phased roadmap
 
 0. **Shared server packages.** Extract the app-agnostic `internal/` packages from `revit/mcp-server` to a repo-level module the Revit server imports unchanged; CI green on Revit throughout. Success: no Revit behaviour change, one copy of `transport`/`diag`/`registry`/`semsearch`/`howto`.
-1. **Core loop, Rhino 8, macOS.** Plug-in with the loopback listener, `instances/<pid>.json`, auth, `register`, heartbeat; the dial-in server; `execute_script`/`poll_execution`/`cancel_execution` in both languages; undo-record-per-run with rollback and the mutation report; the denylist and confirmation gate including the interactive-getter block; `list_instances` with `last_run`. Success: an agent creates, queries and modifies objects in a Mac Rhino from two concurrent Claude sessions, a failed script is rolled back, a cancelled one resolves `cancelled`, and a server restart loses nothing pollable.
+1. **Core loop, Rhino 8, macOS.** Plug-in with the loopback listener, `instances/<pid>.json`, auth, `register`, heartbeat; the dial-in server; `execute_script`/`poll_execution`/`cancel_execution` in both languages; undo-record-per-run with rollback and the mutation report; the denylist and confirmation gate including the interactive-getter block; `list_instances` with `last_run`; `capture_view` for Rhino viewports (the Grasshopper canvas target lands with phase 4). Success: an agent creates, queries and modifies objects in a Mac Rhino from two concurrent Claude sessions and looks at the result in a viewport, a failed script is rolled back, a cancelled one resolves `cancelled`, and a server restart loses nothing pollable.
 2. **Windows.** The same plug-in build loading on Windows Rhino 8, the Win32 window inventory, the Windows CI runner, a live harness pass. Success: phase 1's acceptance on Windows with one document per instance.
 3. **API discovery.** Reflection cache over RhinoCommon, Grasshopper and plug-ins; `rhinoscriptsyntax` docstring index; both call shapes in `describe_function`; the shared ranking pipeline; `ambiguous-instance-version`. Success: Revit's `TestRealCorpusRecall` equivalent over a labelled Rhino query set, both languages.
 4. **Grasshopper.** `gh_document_id` addressing, `Connector.Grasshopper`, the solve report, the pause/step idioms in `skill.md`. Success: an agent opens a shipped example definition, sets a slider, solves, reads an output tree, and reports a deliberately-broken component's error — from both languages.
 5. **File exchange & audit trail.** Workspace tree, `Publish`, `files[]`, document identity including Grasshopper paths, the 14-day sweep.
 6. **How-to corpus.** Seed extracted from the harness, stamped per version × platform × language, `search_howtos`/`describe_howto`/`submit_howto`, `TestHowToSweep`/`TestHowToEndToEnd`.
 7. **Distribution.** The yak package, `MCPBridgeRegister`, `update_connector` as a check, macOS notarization deferred. Success: a fresh Mac and a fresh Windows machine each install from `_PackageManager` and register with Claude with no manual steps beyond one command.
-8. **Later.** Fixed Grasshopper tools; document leases; Rhino 9; shared on-disk search index — each behind the trigger named in §16.
+8. **Later.** Fixed Grasshopper tools; document leases; Rhino 9; shared on-disk search index — each behind the trigger named in §17.
 
 ---
 
