@@ -135,7 +135,7 @@ type AuditRow struct {
 	Connector string    `firestore:"connector"`
 	Instance  string    `firestore:"instance_id"`
 	Document  string    `firestore:"document_id,omitempty"`
-	// Action is "exec", "export" or "import".
+	// Action is "exec", "export", "import" or "create".
 	Action string `firestore:"action"`
 	// ScriptSHA256 and ScriptBounded are exec only.
 	ScriptSHA256  string `firestore:"script_sha256,omitempty"`
@@ -145,11 +145,17 @@ type AuditRow struct {
 	// Code is the outcome's stable diagnostic code, empty on success.
 	Code       string `firestore:"code,omitempty"`
 	DurationMs int64  `firestore:"duration_ms"`
-	// ResultBytes is exec's result size; FileBytes is export/import's file
-	// size; Format is export/import's file format. Never the bytes.
+	// ResultBytes is exec's result size; FileBytes is export/import/create's
+	// file size; Format is export/import/create's file format. Never the bytes.
 	ResultBytes int    `firestore:"result_bytes,omitempty"`
 	FileBytes   int64  `firestore:"file_bytes,omitempty"`
 	Format      string `firestore:"format,omitempty"`
+	// Name and Sheets are create only: the OneDrive file name the workbook was
+	// created under (provenance — RFC §5 wants the broad Graph scope's writes
+	// named) and how many sheets it holds. Never the sheet names or cell
+	// values, matching import's "count, never names" rule.
+	Name   string `firestore:"name,omitempty"`
+	Sheets int    `firestore:"sheets,omitempty"`
 	// Client is the MCP client's Implementation.Name when the SDK session
 	// exposes it; empty when it does not (see hub.clientNameOf).
 	Client    string    `firestore:"client,omitempty"`

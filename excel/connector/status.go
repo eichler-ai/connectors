@@ -28,12 +28,16 @@ type GetStatusOut struct {
 	// is not a range (a chart, for example).
 	Selection string `json:"selection,omitempty"`
 	// ExcelAPI is the highest ExcelApi requirement set the host supports.
-	ExcelAPI string       `json:"excel_api,omitempty"`
-	Error    *diag.Record `json:"error,omitempty"`
+	ExcelAPI string `json:"excel_api,omitempty"`
+	// SignedInAs is the Microsoft account this MCP session is signed in as,
+	// so it can be compared against the pane's own "Signed in as …" (#251).
+	SignedInAs string       `json:"signed_in_as,omitempty"`
+	Error      *diag.Record `json:"error,omitempty"`
 }
 
-// statusScript is run through the ordinary exec path, so get_status is also
-// the cheapest end-to-end check that the bridge is alive.
+// statusScript is run through the ordinary exec path (Script.Internal, so it
+// is not audited — #254), so get_status is also the cheapest end-to-end check
+// that the bridge is alive.
 const statusScript = `const wb = context.workbook; wb.load("name");
 const ws = wb.worksheets.getActiveWorksheet(); ws.load("name");
 const sheets = wb.worksheets; sheets.load("items/name");
@@ -54,7 +58,7 @@ func registerGetStatus(reg *hub.ToolRegistry, c *Connector) {
 		if rec != nil {
 			return fail(rec), GetStatusOut{Error: rec}, nil
 		}
-		res, rec := reg.Host.Exec(ctx, user, c, hub.Target{InstanceID: in.InstanceID, Client: hub.ClientName(req)}, hub.Script{Language: Language, Source: statusScript})
+		res, rec := reg.Host.Exec(ctx, user, c, hub.Target{InstanceID: in.InstanceID, Client: hub.ClientName(req)}, hub.Script{Language: Language, Source: statusScript, Internal: true})
 		if rec != nil {
 			return fail(rec), GetStatusOut{Error: rec}, nil
 		}
@@ -67,6 +71,10 @@ func registerGetStatus(reg *hub.ToolRegistry, c *Connector) {
 			out.Error = diag.New(diag.SeverityError, "bad-status", Source, "the bridge's status reply was not the expected shape: "+err.Error())
 			return fail(out.Error), out, nil
 		}
+		// After the bridge's reply is decoded, never before: signed_in_as is the
+		// hub's authoritative session identity (#251), so a reply that carried a
+		// signed_in_as key must not be able to overwrite it.
+		out.SignedInAs = reg.Host.SignedInLabel(ctx, user)
 		return nil, out, nil
 	})
 }

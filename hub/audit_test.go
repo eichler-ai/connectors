@@ -139,6 +139,25 @@ func TestAuditNoRowOnNoBridge(t *testing.T) {
 	}
 }
 
+// TestAuditSkipsInternalExec: a Script marked Internal (get_status's fixed
+// probe) writes no audit row, even though it round-trips to the bridge — the
+// audit trail is the §13 control for arbitrary code, not for a hub-authored
+// read (#254).
+func TestAuditSkipsInternalExec(t *testing.T) {
+	f := newFixture(t, "")
+	f.dial(t, "a", protocol.Document{ID: "d1", Active: true})
+	ctx := context.Background()
+	script := hub.Script{Language: "js", Source: "x", Timeout: time.Second, Internal: true}
+
+	if _, rec := f.srv.Host().Exec(ctx, f.uid, f.stub, hub.Target{InstanceID: "a"}, script); rec != nil {
+		t.Fatalf("exec: %+v", rec)
+	}
+	rows, err := f.store.RecentAudit(ctx, f.uid, 10)
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("an internal exec must write no audit row: %v %+v", err, rows)
+	}
+}
+
 // failingAuditStore wraps a real store but fails every audit write, to
 // prove a Firestore outage never blocks the user's exec.
 type failingAuditStore struct{ store.Store }
