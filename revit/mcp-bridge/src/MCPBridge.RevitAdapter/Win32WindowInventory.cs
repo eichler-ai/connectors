@@ -85,7 +85,7 @@ public sealed class Win32WindowInventory : IWindowInventory
             var dismissAction = resolveDismiss(className, title);
             if (dismissAction is not null)
             {
-                if (TryDismiss(hWnd, dismissAction))
+                if (TryDismiss(hWnd, dismissAction, budget))
                 {
                     onDismissed(new DismissedDialog(className, title));
                     return true;
@@ -125,10 +125,10 @@ public sealed class Win32WindowInventory : IWindowInventory
     // §07 v2: perform the allowlist entry's per-signature dismiss action. Returns true only if the action
     // was actually carried out (WM_CLOSE posted, or the named button found and clicked). Any other outcome
     // returns false so the caller inventories the window as present rather than reporting a phantom dismiss.
-    private static bool TryDismiss(IntPtr hWnd, DialogDismissAction action) => action.Kind switch
+    private static bool TryDismiss(IntPtr hWnd, DialogDismissAction action, System.Diagnostics.Stopwatch budget) => action.Kind switch
     {
         DialogDismissKind.PostClose => TryPostClose(hWnd),
-        DialogDismissKind.ClickButton => TryClickNamedButton(hWnd, action.ButtonText),
+        DialogDismissKind.ClickButton => TryClickNamedButton(hWnd, action.ButtonText, budget),
         _ => false,
     };
 
@@ -156,7 +156,7 @@ public sealed class Win32WindowInventory : IWindowInventory
     // there is deliberately no fallback to WM_CLOSE or to a default button. The button's text read uses the
     // same bounded WM_GETTEXT as the inventory; a live modal pumps its own message loop, so its buttons
     // answer even while Revit's main UI thread is parked in that modal.
-    private static bool TryClickNamedButton(IntPtr parent, string? buttonText)
+    private static bool TryClickNamedButton(IntPtr parent, string? buttonText, System.Diagnostics.Stopwatch budget)
     {
         if (string.IsNullOrEmpty(buttonText))
         {
@@ -168,6 +168,14 @@ public sealed class Win32WindowInventory : IWindowInventory
 
         bool ButtonCallback(IntPtr hWnd, IntPtr lParam)
         {
+            // Honor the same overall budget as the rest of the pass (TopLevelCallback / CollectChildText):
+            // stop looking once it lapses. Giving up leaves target == Zero, so nothing is clicked -- the
+            // safe outcome. Bounds the abandoned background thread's lifetime (#136/#138 protect the wire).
+            if (budget.ElapsedMilliseconds > OverallBudgetMs)
+            {
+                return false; // stop enumerating -- see OverallBudgetMs
+            }
+
             if (!string.Equals(GetClassNameOf(hWnd), ButtonClassName, StringComparison.OrdinalIgnoreCase))
             {
                 return true; // not a button control
@@ -215,7 +223,10 @@ public sealed class Win32WindowInventory : IWindowInventory
     // Button captions carry a mnemonic ampersand ("&Cancel") and can be padded; the allowlist stores the
     // human label ("Cancel"). Strip ampersands and trim so the match is against the visible caption. (A
     // literal ampersand in a caption is "&&"; none of the §07 buttons use one, so a plain strip is fine.)
-    private static string NormalizeButtonText(string text) => text.Replace("&", "").Trim();
+    // internal (not private) purely so it is unit-testable: it's the one pure, safety-relevant piece of
+    // this P/Invoke class (the caption match that decides whether we click), and RevitAdapter already
+    // grants InternalsVisibleTo to MCPBridge.Core.Tests.
+    internal static string NormalizeButtonText(string text) => text.Replace("&", "").Trim();
 
     private static IReadOnlyList<string> CollectChildText(IntPtr parent, System.Diagnostics.Stopwatch budget, ref bool truncated)
     {
