@@ -136,7 +136,9 @@ public sealed class RequestDispatcherTests
         h.Host.RefuseCommands = false;
         var deadline = DateTime.UtcNow.AddSeconds(5);
         while (h.Host.CommandsRun == 0 && DateTime.UtcNow < deadline) await Task.Delay(10);
-        var polled = await h.Call("poll_execution", new { execution_id = "exec-1", timeout_ms = 0 });
+        // CommandsRun flips when the command starts, not when it finishes; give the poll a real wait
+        // so it observes the terminal state (was racy on the Windows CI runner).
+        var polled = await h.Call("poll_execution", new { execution_id = "exec-1", timeout_ms = 5000 });
         Assert.Equal("success", Status(polled));
     }
 
