@@ -50,6 +50,13 @@ This is the finding that changes the design, so it is spelled out.
 - Quitting with an unsaved document raises a keep/delete sheet; its `Delete` button is reachable through System Events by walking the sheet's `entire contents` (it is not addressable by name). A restart helper that does quit-discard-relaunch-new-model is in the spike scratch and should become a harness fixture.
 - **A locked screen stops both GUI automation and script execution** (scripts are received by the RhinoCode server and not run). Harness runs need an unlocked session, and a wrapper should check `CGSSessionScreenIsLocked` before starting.
 
+## Addenda from phase 1 PR 2 (2026-09-10)
+
+- **`RhinoApp.InvokeOnUiThread` blocks the calling thread until the action has run.** A run posted from the connection thread made `execute_script` unable to answer `running` for a looping script and the wire call timed out. The launcher now calls it from a pool thread. (`RhinoApp.InvokeAndWait` exists too; the naming misled.)
+- **`Document.Export("x.obj")` opens the OBJ options prompt inside the run** and blocks the main thread until a person answers -- PRD §08's case in the flesh, from an API call with no "interactive" in its name. `Write3dmFile(path, new FileWriteOptions { SuppressDialogBoxes = true, SuppressAllInput = true })` writes silently. The denylist's gated list is the right place to note per-member prompt behaviour as it is found.
+- **The undo entry is always named after the command** (`MCPBridgeRun`); an inner `BeginUndoRecord(label)` does not rename it. §17.10 closed.
+- **A run this server did not mint is routable**: the plug-in owns the record, so a fresh server finds an execution id by asking each connected instance; a cancel from a different server process than the one that started the run worked live.
+
 ## Still open after this pass
 
 Items 4 (a pre-show dialog hook), 5 (Windows single-document, re-confirmed on 8.x), 6 (unsaved-title uniquification), 8 (off-main-thread `Phase` reads during a Grasshopper solve), and the size half of 9.

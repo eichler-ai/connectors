@@ -51,6 +51,10 @@ that section. What Rhino adds:
 - **An `&&` chain that includes the restart helper hides a failed restart** and then runs the tests
   against the old build (or nothing). The deploy script fails loudly; keep it that way and do not
   inline its steps into ad-hoc chains.
+- **A crashed test host reports "Passed!" for whatever ran before it died.** Compare the trx's
+  executed count with `--list-tests` (CI does); a RhinoCommon type whose initializer calls native
+  (`RhinoDoc`, anything in `Rhino.DocObjects`) kills the host with `DllNotFoundException: rhcommon_c`.
+  Tier 1 never materialises those; Core's run seam carries the document as an opaque object.
 - **Confirm the plug-in Rhino loaded is the one you built.** Rhino loads from the yak package folder,
   which is only rescanned at startup, and a hand-copied `.rhp` without yak's `manifest.txt` is
   ignored. The Status command prints the bridge version (which carries the source revision); check it

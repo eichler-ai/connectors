@@ -21,6 +21,7 @@ import (
 	"github.com/eichler-ai/connectors/internal/servercore/buildinfo"
 	"github.com/eichler-ai/connectors/rhino/mcp-server/internal/appdata"
 	"github.com/eichler-ai/connectors/rhino/mcp-server/internal/dialer"
+	"github.com/eichler-ai/connectors/rhino/mcp-server/internal/execution"
 	"github.com/eichler-ai/connectors/rhino/mcp-server/internal/mcpserver"
 	"github.com/eichler-ai/connectors/rhino/mcp-server/internal/registry"
 )
@@ -98,6 +99,7 @@ func run(appDataDir string, logger *log.Logger) error {
 
 	s := mcp.NewServer(&mcp.Implementation{Name: serverName, Version: versionLine()}, nil)
 	mcpserver.RegisterInstances(s, reg, nil, nil)
+	mcpserver.RegisterExecution(s, execution.NewRouter(dial, serverID))
 
 	err := s.Run(ctx, &mcp.StdioTransport{})
 	if err != nil && ctx.Err() == nil {

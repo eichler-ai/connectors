@@ -10,7 +10,10 @@
     <PackageReference Include="xunit" Version="2.9.2" />
     <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
     <PackageReference Include="System.IO.Pipelines" Version="8.0.0" />
+    <!-- Managed metadata only: the type ScriptGlobals binds. Never called into here (see Fakes/TestGlobals). -->
+    <PackageReference Include="RhinoCommon" Version="$(RhinoCommonVersion)" />
     <ProjectReference Include="../../src/Rhino.MCPBridge.Core/Rhino.MCPBridge.Core.csproj" />
     <ProjectReference Include="../../src/Rhino.MCPBridge.RhinoAdapter/Rhino.MCPBridge.RhinoAdapter.csproj" />
+    <ProjectReference Include="../../src/Eichler.Connectors.Rhino/Eichler.Connectors.Rhino.csproj" />
   </ItemGroup>
 </Project>
