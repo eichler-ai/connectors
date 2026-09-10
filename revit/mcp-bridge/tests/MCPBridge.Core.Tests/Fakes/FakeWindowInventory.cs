@@ -11,10 +11,10 @@ public sealed class FakeWindowInventory : IWindowInventory
     public bool ThrowOnEnumerate { get; set; }
 
     // §07 v2: a test configures the dialogs the real adapter would auto-dismiss (the fake does not run the
-    // P/Invoke WM_CLOSE); each is delivered through onDismissed, the same side channel the real adapter uses.
-    // Inspect LastShouldDismiss to assert which predicate the caller passed in.
+    // P/Invoke WM_CLOSE / button click); each is delivered through onDismissed, the same side channel the
+    // real adapter uses. Inspect LastResolveDismiss to assert which decision function the caller passed in.
     public IReadOnlyList<DismissedDialog> Dismissed { get; set; } = Array.Empty<DismissedDialog>();
-    public Func<string, string, bool>? LastShouldDismiss { get; private set; }
+    public Func<string, string, DialogDismissAction?>? LastResolveDismiss { get; private set; }
 
     // #136: simulate the real pass's blocking cost (Win32WindowInventory reads window text against a busy
     // UI thread). When set, EnumerateOwnedTopLevelWindows blocks this long before returning, and records
@@ -28,10 +28,10 @@ public sealed class FakeWindowInventory : IWindowInventory
     public System.Threading.ManualResetEventSlim? Gate { get; set; }
 
     public WindowInventorySnapshot EnumerateOwnedTopLevelWindows(
-        Func<string, string, bool> shouldDismiss,
+        Func<string, string, DialogDismissAction?> resolveDismiss,
         Action<DismissedDialog> onDismissed)
     {
-        LastShouldDismiss = shouldDismiss;
+        LastResolveDismiss = resolveDismiss;
         System.Threading.Interlocked.Increment(ref EnumerateCallCount);
 
         // Fire the side channel BEFORE any block, mirroring the real adapter (which dismisses the modal
