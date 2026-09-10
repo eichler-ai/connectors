@@ -56,6 +56,27 @@ has entries". Rollback is `RhinoApp.ExecuteCommand(doc, "_Undo")` after the run'
 `RhinoApp.SendKeystrokes(..., true)` appended an Enter, and Enter on Rhino's command line **repeats the
 last command**. Do not use keystroke injection; use `ExecuteCommand`.
 
+## Symptom: `execute_script` returns `wire-call-failed` / `context deadline exceeded` for a long script
+
+The bridge could not answer `running`: `RhinoApp.InvokeOnUiThread` **blocks the caller** until the
+action completes, so a launcher that calls it on the dispatcher's thread cannot return until the
+script ends. `RhinoRunLauncher` calls it from a pool thread. If this reappears, something else on the
+response path is waiting on the main thread.
+
+## Symptom: every call answers `busy` with the same old execution_id, and Rhino will not quit
+
+A script is still running on the main thread -- most likely an earlier case's loop that outlived a
+failed wire call (`max_duration_ms` is 10 minutes by default). Cancel it: any server can, even one
+that did not start it (`cancel_execution` with the id from the `busy` answer). Then redeploy. And
+note the deploy script's exit code is invisible behind `| grep`; run it on its own.
+
+## Symptom: a script that calls a plain-looking API never returns (Export, Import, Print…)
+
+It opened a **command-line options prompt or a dialog** inside the run. `Document.Export("x.obj")`
+prompts for OBJ options. Escape in Rhino's window ends it (`osascript … key code 53`). Use the
+non-interactive form (`Write3dmFile` with `FileWriteOptions.SuppressDialogBoxes`), and add the
+member to the PRD §08 notes.
+
 ## Symptom: a Python script ran on the wrong thread and touched the document
 
 `RhinoCode.RunScript` **does not marshal**: called from a background thread it runs there. Only the
@@ -82,11 +103,28 @@ the keyring login, which has it (memory: `gh-workflow-scope`).
 `Process.PrivateMemorySize64` is 0 on macOS. Assert the working set; guard private-bytes assertions
 with `OperatingSystem.IsWindows() || OperatingSystem.IsLinux()`.
 
-## Symptom: tests are green but prove nothing
+## Symptom: tests are green but prove nothing (or the executed count changes between runs)
 
-Same trap as Revit's, different mechanism. Here the C# test assembly always loads (RhinoCommon is
-managed), so the risk is a test that *skips* on the platform it ran on — every platform-conditional
-test must assert something on both branches, and CI asserts the executed count from the trx.
+Same trap as Revit's, a different mechanism, and it happened on the second day: `dotnet test`
+printed `Passed! … Total: 218` while `--list-tests` listed 289. **The test host had crashed** with
+`DllNotFoundException: Unable to load shared library 'rhcommon_c'` — RhinoCommon's native core —
+and the runner reported whatever had completed before the crash as a pass. The trigger was a fake
+that materialised a `RhinoDoc` (`RuntimeHelpers.GetUninitializedObject`), which runs `RhinoDoc`'s
+type initializer, which calls native.
+
+Rules: tier 1 must never instantiate a RhinoCommon type whose initializer or constructor calls
+native — `RhinoDoc`, `RhinoObject`, anything under `Rhino.DocObjects`. Core's execution seam passes
+the document as an opaque `RunDocument.Raw` (null in tests) for exactly this reason. Geometry value
+types (`Point3d`, `Sphere`) are pure managed and safe. CI compares the trx executed count with the
+`--list-tests` count and fails on a shortfall; run the same check locally when a count looks odd:
+
+```
+dotnet test --list-tests | grep -c '^\s*Rhino\.MCPBridge\.Core\.Tests\.'   # discovered
+dotnet test --logger trx …                                          # trx total must match
+```
+
+Also: every platform-conditional test must assert something on both branches; a leg that returns
+early is a vacuous pass on the platform the matrix exists for.
 
 ## Techniques index
 

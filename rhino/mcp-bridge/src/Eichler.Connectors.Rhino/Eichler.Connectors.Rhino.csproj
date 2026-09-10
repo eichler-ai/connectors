@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- The connector's own script API (CONVENTIONS.md "Agent-facing namespace"): exactly one public
+       type, Connector, alone in its own assembly, bound into script scope as the `Connector` global.
+       Discovery indexes it as an add-in API beside RhinoCommon. Its members are XML-documented here
+       because that documentation is what describe_function serves. -->
+  <PropertyGroup>
+    <TargetFramework>$(BridgeTargetFramework)</TargetFramework>
+    <RootNamespace>Eichler.Connectors.Rhino</RootNamespace>
+    <AssemblyName>Eichler.Connectors.Rhino</AssemblyName>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="RhinoCommon" Version="$(RhinoCommonVersion)" ExcludeAssets="runtime" PrivateAssets="all" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Rhino.MCPBridge.Core" />
+    <InternalsVisibleTo Include="Rhino.MCPBridge.Core.Tests" />
+  </ItemGroup>
+</Project>

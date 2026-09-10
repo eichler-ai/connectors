@@ -27,7 +27,7 @@ internal sealed class RhinoDocumentSnapshotSource : IDocumentSnapshotSource
         foreach (var doc in RhinoDoc.OpenDocuments())
         {
             if (doc is null) continue;
-            string? path = string.IsNullOrEmpty(doc.Path) ? null : ResolvePath(doc.Path, _log);
+            string? path = string.IsNullOrEmpty(doc.Path) ? null : ResolvePathForIdentity(doc.Path, _log);
             var title = string.IsNullOrEmpty(doc.Name) ? "Untitled" : doc.Name;
             var id = path is null
                 ? DocumentIdentity.ForUnsaved(_processSalt, title)
@@ -43,7 +43,7 @@ internal sealed class RhinoDocumentSnapshotSource : IDocumentSnapshotSource
     /// project folders must not yield two ids for one file). A resolution failure keeps the full path
     /// AND is logged, because it means this document may get a different id than the same file opened
     /// elsewhere -- an identity split that must not be silent (review of #281).</summary>
-    private static string ResolvePath(string p, Action<string> log)
+    internal static string ResolvePathForIdentity(string p, Action<string> log)
     {
         string full;
         try

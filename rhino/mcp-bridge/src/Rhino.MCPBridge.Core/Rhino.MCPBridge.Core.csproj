@@ -12,6 +12,14 @@
     <AssemblyName>Rhino.MCPBridge.Core</AssemblyName>
   </PropertyGroup>
   <ItemGroup>
+    <!-- The one deliberate exception to Core's RhinoCommon decoupling, scoped to ScriptGlobals.cs
+         (see its doc): the script-facing globals ARE the real RhinoDoc. Compile-time only. -->
+    <PackageReference Include="RhinoCommon" Version="$(RhinoCommonVersion)" ExcludeAssets="runtime" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp.Scripting" Version="4.11.0" />
+    <ProjectReference Include="../Eichler.Connectors.Rhino/Eichler.Connectors.Rhino.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Rhino.MCPBridge.RhinoAdapter" />
     <InternalsVisibleTo Include="Rhino.MCPBridge.PlugIn" />
     <InternalsVisibleTo Include="Rhino.MCPBridge.Core.Tests" />
   </ItemGroup>

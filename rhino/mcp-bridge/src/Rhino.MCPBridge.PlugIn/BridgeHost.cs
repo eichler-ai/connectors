@@ -3,6 +3,8 @@ using System.Net;
 using System.Net.Sockets;
 using Rhino.MCPBridge.Core.Connection;
 using Rhino.MCPBridge.Core.Diagnostics;
+using Rhino.MCPBridge.Core.Dispatch;
+using Rhino.MCPBridge.Core.Execution;
 using DiagnosticSource = Rhino.MCPBridge.Core.Diagnostics.DiagnosticSource;
 using Rhino.MCPBridge.Core.Protocol;
 using Rhino.MCPBridge.RhinoAdapter;
@@ -32,6 +34,9 @@ internal sealed class BridgeHost : ISessionEnvironment
     private readonly string _bridgeVersion;
     private readonly IMainThread _mainThread;
     private readonly IDocumentSnapshotSource _documents;
+    private readonly RequestDispatcher _dispatcher;
+    private readonly TransactionlessWarmup _warmup;
+    private Timer? _tickTimer;
     private readonly string _instancesDir;
     private readonly Action<string> _log;
     private readonly SessionSet _sessions = new();
@@ -49,8 +54,12 @@ internal sealed class BridgeHost : ISessionEnvironment
     public string? InstanceFilePath { get; private set; }
     public int ConnectionCount => _sessions.Count;
 
-    public BridgeHost(Guid instanceId, string rhinoVersion, string bridgeVersion, IMainThread mainThread, IDocumentSnapshotSource documents, string instancesDir, Action<string> log)
+    public BridgeHost(Guid instanceId, string rhinoVersion, string bridgeVersion, IMainThread mainThread, IDocumentSnapshotSource documents, IRunHost runHost, IRunLauncher launcher, string instancesDir, Action<string> log)
     {
+        var runner = new RoslynScriptRunner();
+        var executor = new UndoRunExecutor(runner, runHost);
+        _dispatcher = new RequestDispatcher(ExecutionManager.CreateDefault(ExecutionRingBuffer.CreateDefault()), executor, launcher, log);
+        _warmup = new TransactionlessWarmup(runner, log);
         _instanceId = instanceId;
         _rhinoVersion = rhinoVersion;
         _bridgeVersion = bridgeVersion;
@@ -76,12 +85,17 @@ internal sealed class BridgeHost : ISessionEnvironment
         _acceptThread = new Thread(AcceptLoop) { IsBackground = true, Name = "MCPBridge accept" };
         _acceptThread.Start();
         _pingTimer = new Timer(_ => _ = PingAsync(), null, PingInterval, PingInterval);
+        _tickTimer = new Timer(_ => { try { _dispatcher.Tick(); } catch (Exception ex) { _log("tick failed: " + ex.Message); } }, null, RequestDispatcher.TickInterval, RequestDispatcher.TickInterval);
+        // Warm the Roslyn pipeline off the main thread so the first script's compile is not on the
+        // response path (Revit #67/#136). Scripts arriving before it finishes take the slow path.
+        _warmup.Start();
     }
 
     public void Stop()
     {
         _stop.Cancel();
         _pingTimer?.Dispose();
+        _tickTimer?.Dispose();
         try { _listener?.Stop(); } catch { }
         // Close every live socket now rather than waiting for each session's read to notice the
         // cancellation: a plug-in unload must leave no server holding a half-open connection.
@@ -188,15 +202,8 @@ internal sealed class BridgeHost : ISessionEnvironment
     /// <summary>The cache; never blocks (see the class doc).</summary>
     public RegisterSnapshot Snapshot() => _snapshot;
 
-    public Task<string> DispatchAsync(JsonRpcRequest request, CancellationToken cancellationToken)
-    {
-        // Phase 1 PR 1: no methods yet. Every request gets the method-not-found record the Revit
-        // dispatcher sends, so a server built ahead of the plug-in sees a legible answer.
-        var record = DiagnosticRecord.Create(DiagnosticSeverity.Error, "unknown-method", DiagnosticSource.Connection,
-            $"unknown method '{request.Method}'", detail: new Dictionary<string, object?> { ["method"] = request.Method, ["supported_methods"] = Array.Empty<string>() },
-            remedy: new[] { "This bridge build serves no request methods yet; update the bridge." });
-        return Task.FromResult(JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.MethodNotFound, $"unknown method '{request.Method}'", record));
-    }
+    public Task<string> DispatchAsync(JsonRpcRequest request, CancellationToken cancellationToken) =>
+        _dispatcher.DispatchAsync(request, cancellationToken);
 
     public void Log(string message) => _log(message);
 }
