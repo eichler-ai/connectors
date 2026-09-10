@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Rhino.MCPBridge.Core.Dispatch;
 using Rhino.MCPBridge.Core.Execution;
+using Rhino.MCPBridge.Core.Execution.Python;
 using Rhino.MCPBridge.Core.Protocol;
 using Rhino.MCPBridge.Core.Tests.Fakes;
 using Xunit;
@@ -20,11 +21,12 @@ public sealed class RequestDispatcherTests
         public DateTimeOffset Now = new(2026, 9, 10, 0, 0, 0, TimeSpan.Zero);
         public RequestDispatcher Dispatcher { get; }
 
-        public Harness(IRunLauncher? launcher = null)
+        public Harness(IRunLauncher? launcher = null, FakePythonHost? python = null)
         {
             var runner = new RoslynScriptRunner();
             runner.WarmupCompile();
-            Dispatcher = new RequestDispatcher(Manager, new UndoRunExecutor(runner, Host), launcher ?? Launcher, Logs.Add, () => Now, _ => Task.CompletedTask);
+            var runners = python is null ? new ScriptRunners(runner) : new ScriptRunners(runner, new PythonScriptRunner(python));
+            Dispatcher = new RequestDispatcher(Manager, new UndoRunExecutor(runners, Host), launcher ?? Launcher, Logs.Add, () => Now, _ => Task.CompletedTask);
         }
 
         public async Task<JsonElement> Call(string method, object @params)
@@ -65,12 +67,90 @@ public sealed class RequestDispatcherTests
     }
 
     [Fact]
-    public async Task LanguageOtherThanCSharp_IsRefusedLoudly_BeforeAnythingStarts()
+    public async Task UnknownLanguage_IsRefusedLoudly_BeforeAnythingStarts()
     {
         var h = new Harness();
-        var r = await h.Call("execute_script", new { execution_id = "e", language = "python", script = "1" });
+        var r = await h.Call("execute_script", new { execution_id = "e", language = "ruby", script = "1" });
         Assert.Equal("language-not-available", Code(r));
+        Assert.Contains("csharp", r.GetProperty("error").GetProperty("data").GetProperty("message").GetString());
         Assert.Equal(0, h.Launcher.Posted);
+    }
+
+    [Fact]
+    public async Task PythonWhileTheHostIsLoading_IsRefusedWithTheReason_AndRunsOnceLoaded()
+    {
+        var python = new FakePythonHost { UnavailableReason = "the Python 3 language has not finished loading" };
+        var h = new Harness(python: python);
+        var r = await h.Call("execute_script", new { execution_id = "e", language = "python", script = "result = 1" });
+        Assert.Equal("language-not-available", Code(r));
+        Assert.Contains("not finished loading", r.GetProperty("error").GetProperty("data").GetProperty("message").GetString());
+        Assert.Equal(0, h.Launcher.Posted);
+
+        python.EnsureLoaded();
+        python.OnRun = (_, _) => new PythonRunResult { Result = "ok", StdOut = "hi\n" };
+        var r2 = await h.Call("execute_script", new { execution_id = "e2", language = "python", script = "print('hi')\nresult = 'ok'" });
+        Assert.Equal("success", Status(r2));
+        Assert.Equal("ok", r2.GetProperty("result").GetProperty("return_value").GetString());
+        Assert.Equal("hi\n", r2.GetProperty("result").GetProperty("output").GetString());
+        Assert.Equal(1, h.Host.CommandsRun);
+    }
+
+    [Fact]
+    public async Task WithBothRunners_CSharpStillGoesToRoslyn_AndPythonToTheHost()
+    {
+        var python = new FakePythonHost();
+        python.EnsureLoaded();
+        python.OnRun = (_, _) => new PythonRunResult { Result = "py" };
+        var h = new Harness(python: python);
+        var cs = await h.Execute("return \"cs\";", id: "a");
+        Assert.Equal("cs", cs.GetProperty("result").GetProperty("return_value").GetString());
+        Assert.Empty(python.Runs);
+        var py = await h.Call("execute_script", new { execution_id = "b", language = "python", script = "result = 'py'" });
+        Assert.Equal("py", py.GetProperty("result").GetProperty("return_value").GetString());
+        // The script plus the scriptcontext restore that follows every run.
+        Assert.Equal(2, python.Runs.Count);
+        Assert.Equal(2, h.Host.CommandsRun);
+    }
+
+    [Fact]
+    public async Task PythonPreflight_RefusesDeniedAndGatedScripts_WithoutLaunching()
+    {
+        var python = new FakePythonHost();
+        python.EnsureLoaded();
+        var h = new Harness(python: python);
+        Assert.Equal("script-api-denied", Code(await h.Call("execute_script", new { execution_id = "a", language = "python", script = "import rhinoscriptsyntax as rs\nrs.GetObject()" })));
+        Assert.Equal("script-lifecycle-confirmation-required", Code(await h.Call("execute_script", new { execution_id = "b", language = "python", script = "doc.Save()" })));
+        Assert.Equal(0, h.Launcher.Posted);
+        Assert.Empty(python.Runs);
+    }
+
+    [Fact]
+    public async Task PythonError_CarriesTheTraceback_AndRollsBack()
+    {
+        var python = new FakePythonHost();
+        python.EnsureLoaded();
+        python.OnRun = (_, _) => new PythonRunResult { Error = new Exception("boom"), StdErr = "Traceback (most recent call last):\n  File \"<string>\", line 3, in <module>\nRuntimeError: boom\n" };
+        var h = new Harness(python: python);
+        h.Host.DuringRun = on => on(new DocumentChange(DocumentChange.Kind.Added, Guid.NewGuid(), "Brep", "Default"));
+        var r = await h.Call("execute_script", new { execution_id = "a", language = "python", script = "raise RuntimeError('boom')" });
+        Assert.Equal("error", Status(r));
+        Assert.Equal("script-execution-failed", Code(r));
+        var err = r.GetProperty("result").GetProperty("error");
+        Assert.Equal("boom", err.GetProperty("message").GetString());
+        Assert.Contains("line 1, in <module>", err.GetProperty("detail").GetProperty("traceback").GetString());
+        Assert.Equal("script-rolled-back", r.GetProperty("result").GetProperty("notices")[0].GetProperty("code").GetString());
+        Assert.Equal(1, h.Host.UndoCalls);
+    }
+
+    [Fact]
+    public async Task PythonSyntaxError_MapsToTheCompileCode()
+    {
+        var python = new FakePythonHost();
+        python.EnsureLoaded();
+        python.OnRun = (_, _) => new PythonRunResult { Error = new Exception("invalid syntax"), StdErr = "  File \"<string>\", line 3\n    x = = 1\nSyntaxError: invalid syntax\n" };
+        var h = new Harness(python: python);
+        var r = await h.Call("execute_script", new { execution_id = "a", language = "python", script = "x = = 1" });
+        Assert.Equal("script-compilation-failed", Code(r));
     }
 
     [Theory]
@@ -155,7 +235,7 @@ public sealed class RequestDispatcherTests
         // With one, a queued run makes it busy.
         var deferred = new DeferredLauncher();
         var runner = new RoslynScriptRunner(); runner.WarmupCompile();
-        var d = new RequestDispatcher(h.Manager, new UndoRunExecutor(runner, h.Host), deferred, h.Logs.Add, () => h.Now, _ => Task.CompletedTask,
+        var d = new RequestDispatcher(h.Manager, new UndoRunExecutor(new ScriptRunners(runner), h.Host), deferred, h.Logs.Add, () => h.Now, _ => Task.CompletedTask,
             capture: new Core.Capture.ViewCaptureService(new NoViewports()), onMainThread: f => f());
         var first = await d.DispatchAsync(JsonRpcRequest.Parse("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"execute_script\",\"params\":{\"execution_id\":\"a\",\"language\":\"csharp\",\"script\":\"return 1;\",\"timeout_ms\":0}}"), CancellationToken.None);
         Assert.Contains("\"status\":\"pending\"", first);

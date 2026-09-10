@@ -60,3 +60,13 @@ This is the finding that changes the design, so it is spelled out.
 ## Still open after this pass
 
 Items 4 (a pre-show dialog hook), 5 (Windows single-document, re-confirmed on 8.x), 6 (unsaved-title uniquification), 8 (off-main-thread `Phase` reads during a Grasshopper solve), and the size half of 9.
+
+### PR 4 addendum (2026-09-10): the Python host in production
+
+- `RunContext` has no parameterless constructor: `RunContext(bool defaultOutputStream = false, bool defaultErrorStream = false)` plus `(string name, …)` and `(ContextIdentity, …)` overloads. `RhinoCode.RunScript(string, RunContext)` is the text overload (also `Code`, `ICode`, `IStorage`, `Uri`).
+- `WaitStatusComplete(LanguageSpec.Python3)` called from a plug-in's `OnLoad` returns in ~60 ms with nothing loaded; `QueryLatest(Python3)` is null for ~2.4 s after load, then the language registers and `Status.WaitReady()` completes. The plug-in polls.
+- The `ILanguage` object is an internal type; C# `dynamic` cannot bind its members. Reflection through the public interfaces works.
+- Bound `Inputs.Set("doc", RhinoDoc)` is visible as `doc`; `scriptcontext.doc = doc` in a preamble makes `rhinoscriptsyntax` act on the routed document (verified: `sc.doc is doc`).
+- A syntax error is `ExecuteException("Compile Error")` with `invalid syntax  (Error CPYC01) file:///…/.rhinocode/stage/<x>:[line:col]` on stderr. Runtime tracebacks name the staged file `file:///…/.rhinocode/stage/<x>` with the line numbers of the prefixed text.
+- A .NET exception raised by a bound object's method (`cancel.Check()` → `OperationCanceledException`) propagates out of `RunScript` as the Python-side error; the executor maps it to `cancelled` when the token is set.
+- A Python `dict` result comes back as a .NET dictionary and formats as JSON; `None` as null.

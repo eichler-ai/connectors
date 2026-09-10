@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -211,7 +212,9 @@ func TestSearchFunctionsFallsBackToAddInWhileIndexBuilds(t *testing.T) {
 	r := discovery.NewRouter(reg)
 	// dump_members stalls, so the index stays in StateBuilding for the test.
 	attachFakeDiscoveryInstance(t, r, "inst-1", fakeAddIn(t, testCorpus(), 30*time.Second))
-	m := manager.New(r, nil, nil, t.Logf)
+	// The stalled build outlives the test; a t.Logf from it after the test returns is a data race
+	// (seen on CI under -race), so the logger goes quiet at cleanup.
+	m := manager.New(r, nil, nil, quietAfterCleanup(t))
 	m.OnAttach("inst-1")
 	cs := connectDiscoveryClient(t, r, m)
 
@@ -237,5 +240,20 @@ func TestSearchFunctionsNoInstanceIsToolErrorOnIndexPath(t *testing.T) {
 	out, isErr := callSearch(t, cs, map[string]any{"query": "wall"})
 	if !isErr || out.Error == nil {
 		t.Fatalf("expected a tool error with no instance, got %+v", out)
+	}
+}
+
+// quietAfterCleanup returns a t.Logf that becomes a no-op once the test has finished, for
+// goroutines the test deliberately leaves running.
+func quietAfterCleanup(t *testing.T) func(string, ...any) {
+	var mu sync.Mutex
+	done := false
+	t.Cleanup(func() { mu.Lock(); done = true; mu.Unlock() })
+	return func(format string, args ...any) {
+		mu.Lock()
+		defer mu.Unlock()
+		if !done {
+			t.Logf(format, args...)
+		}
 	}
 }

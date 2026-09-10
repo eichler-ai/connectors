@@ -17,22 +17,24 @@ internal sealed class UndoRunExecutor
     /// <summary>The name of the bridge's run command; the host's MostRecentCommandName must match it before an undo.</summary>
     public const string RunCommandName = "MCPBridgeRun";
 
-    private readonly RoslynScriptRunner _runner;
+    private readonly ScriptRunners _runners;
     private readonly IRunHost _host;
 
-    public UndoRunExecutor(RoslynScriptRunner runner, IRunHost host)
+    public UndoRunExecutor(ScriptRunners runners, IRunHost host)
     {
-        _runner = runner;
+        _runners = runners;
         _host = host;
     }
 
-    internal RoslynScriptRunner Runner => _runner;
+    internal ScriptRunners Runners => _runners;
     internal IRunHost Host => _host;
 
     public sealed class Request
     {
         public required string ExecutionId { get; init; }
         public required string ScriptText { get; init; }
+        /// <summary>"csharp" or "python"; the dispatcher has already checked the runner exists.</summary>
+        public required string Language { get; init; }
         public required string DocumentId { get; init; }
         public required CancellationToken CancellationToken { get; init; }
         public bool ConfirmLifecycleActions { get; init; }
@@ -63,7 +65,8 @@ internal sealed class UndoRunExecutor
             {
                 subscription = _host.SubscribeChanges(document, mutations.Record, () => changed = true);
                 var globals = new ScriptGlobals((RhinoDoc)document.Raw!, request.CancellationToken, _host.BridgeVersion, request.Label);
-                outcome = _runner.RunAsync(request.ScriptText, globals, request.CancellationToken, request.ConfirmLifecycleActions).GetAwaiter().GetResult();
+                var runner = _runners.Get(request.Language) ?? throw new InvalidOperationException($"no runner for language '{request.Language}'");
+                outcome = runner.RunAsync(request.ScriptText, globals, request.CancellationToken, request.ConfirmLifecycleActions).GetAwaiter().GetResult();
             }
             catch (Exception ex)
             {

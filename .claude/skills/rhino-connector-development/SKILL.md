@@ -71,8 +71,19 @@ that section. What Rhino adds:
 - **`RhinoApp.RunScript` from outside a command context does nothing** and `SendKeystrokes` repeats
   the last command. `ExecuteCommand` is the one way to run a command from a plug-in thread.
 - **Language registries load lazily.** A fresh Rhino has only the built-in languages;
-  `Languages.WaitStatusComplete(LanguageSpec.Python3)` (~1.75 s) must precede the first run or every
-  run fails with a `CodeLanguageNotFoundException` that reads like a shebang problem.
+  `Languages.WaitStatusComplete(LanguageSpec.Python3)` must precede the first run or every run fails
+  with a `CodeLanguageNotFoundException` that reads like a shebang problem. Called at plug-in load it
+  returns at once with nothing loaded: `RhinoCodePythonHost` polls `QueryLatest` until Python is
+  registered (~2.4 s after load) and then waits on its `Status.WaitReady()`.
+- **`Rhino.Runtime.Code` is bound at run time, not referenced.** It is not on NuGet, so the adapter
+  loads it by name and uses `dynamic` for the public `RunContext`/`ContextParams` surface. The
+  language object behind `ILanguage` is an internal type: `dynamic` fails on it (`'object' does not
+  contain a definition for 'Status'`); go through the interfaces with reflection. `RunContext` has no
+  parameterless constructor (optional parameters), so `Activator.CreateInstance` needs the two bools.
+- **Python guard is a token walk, not a type walk** (`PythonScriptGuard`): import aliases, star
+  imports, `doc`/`scriptcontext.doc`/`RhinoDoc.ActiveDoc` idioms, `getattr` string literals and
+  command strings are resolved; a value copied into another variable first is not. Dynamic-code
+  builtins (`exec`, `eval`, `__import__`, `importlib`, computed `getattr`) are refused for that reason.
 
 ### Correctness
 

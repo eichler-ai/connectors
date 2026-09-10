@@ -42,7 +42,19 @@ Not a shebang problem. **The Python language is not loaded yet** — a fresh Rhi
 built-in text/JSON/YAML/dotfile languages. Call
 `RhinoCode.Languages.WaitStatusComplete(LanguageSpec.Python3)` once (≈1.75 s); the plug-in does this
 at load. It worked "sometimes" during the spikes only because a `rhinocode script` run had loaded the
-language first (method §13).
+language first (method §13). **At plug-in load the call returns immediately with nothing loaded**
+(63 ms, then this exception on the first run): the registry has not queued Python yet. The host
+polls `QueryLatest(Python3)` until it is non-null, then `Status.WaitReady()`; the connection.log line
+`python warm-up done in N ms` (≈2400 ms) confirms it.
+
+## Symptom: Python tracebacks point at the wrong line, or at a `~/.rhinocode/stage/…` file
+
+The runner prefixes two lines (shebang + `scriptcontext.doc = doc`) and RhinoCode stages the text
+as a file. `PythonScriptRunner.ShiftTraceback` rewrites the script's own frames to `<script>` with
+the prefix subtracted and leaves library frames alone; a syntax error arrives as an
+`ExecuteException("Compile Error")` with `invalid syntax (Error CPYC01) file:///…/stage/x.y:[4:1]`
+on stderr, mapped to `script-compilation-failed`. If numbers are off, the prefix line count and
+`PrefixLines` have drifted apart.
 
 ## Symptom: `Undo()` returned true and nothing was reverted
 
@@ -155,6 +167,9 @@ early is a vacuous pass on the platform the matrix exists for.
 - `rhinocode command <cmd>` to run a plug-in command from a shell; `rhinocode script` for a probe.
 - Reflection-dump an undocumented API (`Rhino.Runtime.Code`) to a file from a spike command before
   designing against it; the spike plug-in source shows how.
+- Once the C# host runs, reflect from the connector itself: a throwaway harness case that sends a
+  `PROBE_SCRIPT` file as `csharp` and logs the result is faster than a spike plug-in
+  (`typeof(X).GetConstructors()` found `RunContext`'s optional-parameter constructor this way).
 
 ## Every script stays `pending`; capture_view answers `instance-busy` forever
 
