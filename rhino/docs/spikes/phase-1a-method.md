@@ -1,0 +1,41 @@
+# Phase 1a spikes — method and run log
+
+How the findings in [`phase-1a-findings.md`](phase-1a-findings.md) were obtained, in the order they were obtained, including the runs that produced nothing or produced something misleading. The probe scripts, the throwaway plug-in and the raw output files are in [`phase-1a/`](phase-1a/). Written so the next person can repeat any single step in under a minute, and so a finding can be traced to the run that produced it rather than taken on trust.
+
+**Environment:** macOS (arm64), Rhino 8.35.26251.13002 for Mac (build 2026-09-08), evaluation licence, launched normally by the user; no dotnet SDK present at the start; Go toolchain present. Date 2026-09-10.
+
+## Tools
+
+| Tool | What it did | Limits found |
+|---|---|---|
+| `rhinocode` CLI (`/Applications/Rhino 8.app/Contents/Resources/bin/rhinocode`) | `list` shows running Rhinos; `script <path>` runs a Python 3 file in the running Rhino on its main thread; `command <name>` runs a Rhino command | Relays no stdout; a script reports by writing a file. Needs an open document for commands. |
+| `yak` CLI (same folder) | `build` a package from `manifest.yml` + `.rhp`; `install ./x.yak`; `uninstall name`; `list` | A hand-made package folder without yak's `manifest.txt` is not scanned. Install takes effect at next Rhino start. |
+| Homebrew `dotnet@8` (SDK 8.0.131) | Built the plug-in against the app bundle's `RhinoCommon.dll` and `Rhino.Runtime.Code.dll` by `HintPath` | Installed during the spike (~10 min download); `DOTNET_ROOT=/opt/homebrew/opt/dotnet@8/libexec`. |
+| `osascript` / System Events | Clicked the template chooser's "New Model", found and clicked the keep/delete sheet's "Delete" (only reachable by walking `entire contents` by index — `button "Delete"` by name fails), read window lists | Stops working when the screen is locked. |
+| `screencapture` + reading the PNG | Seeing what Rhino was actually showing when automation stalled | Captures the front Space only; `activate` Rhino first. |
+| `~/.rhinocode/logs/rhinocode_<pid>` | RhinoCode's own log: language loading, script requests received | Its timestamps are ahead of the system clock; do not `sleep`-wait on them. |
+
+## Run log
+
+1. **Probe, CLI** — `phase-1a/probe.py`. First `rhinocode script` on this machine triggered Rhino's one-time CPython runtime deployment (~35 s, visible in the RhinoCode log as pip installs and stub building). Result: CPython 3.9.10, `MainThread`, one unsaved document, zero objects. → findings §1 (implementation), §6.
+2. **Undo probe 1, CLI** — `phase-1a/undo_probe.py`, output `undo_probe.out.json`. Record with two adds, `Undo()` returned true, objects stayed 2; `Redo()` false; empty record then `Undo()` false; nested `BeginUndoRecord` returned 0. The RhinoCommon undo API surface was dumped from `dir(doc)`. **Misread at first** as "undo does nothing"; the command history later showed `Undoing MCP: spike record` after the script ended — the first sign undo is deferred.
+3. **Undo probe 2, CLI** — `phase-1a/undo_probe2.py`, output `undo_probe2.out.json`. `UndoRecordingIsActive` true, `RhinoApp.RunScript("_-Undo")` mid-script also revert-less, `UndoActive` reads true *after* the previous script (later understood as "an undo is pending", not "stack non-empty").
+4. **SDK install** and **plug-in v1** (`MCPSpike.csproj`, `PlugIn.cs` commands `MCPSpikeApi`, `MCPSpikePy`, `MCPSpikeUndo`, `MCPSpikeThread`). Built first try after one type fix (`RunContext.OutputStream` is a `Stream`, not a `TextWriter`).
+5. **Loading the plug-in — three dead ends.** `PlugIn.LoadPlugIn(path)` from Python bound the Guid overload; `RhinoApp.RunScript("_-PlugInManager _Load <path>")` returned true but the history said `Unknown command: _Load` and it opened the Plug-ins window; a hand-made `packages/8.0/mcpspike/0.1.0/` folder was ignored across a restart. `yak build` + `yak install` + restart worked. Restart itself needed the keep/delete sheet handled — the first quit hung on it (AppleEvent timeout) until the sheet's `Delete` was found by index; `phase-1a/rhino-restart.sh` is the resulting helper. Note the fresh Rhino sits at the template chooser with no document; commands then fail silently.
+6. **API dump** — `MCPSpikeApi`, ~1,000 members of `Rhino.Runtime.Code` public types to `report.json` (the run's dump is summarised in findings §1; it is too large to keep verbatim). Read for anything named cancel/interrupt/abort/stop: none on `Code`/`RunContext`; the only `CancellationToken`s are on `RunProcess` (external processes). `RunContext.RecordDocumentUndo` noticed here.
+7. **Python run** — `MCPSpikePy` reading `py_in.py`: stdout captured, `x` input bound, `result` dict read back as a .NET dictionary, 36.6 ms. Note the plug-in reads its report directory from an env var that Python's `os.environ` cannot set for the .NET side (.NET caches the environment on Unix), so the report landed in `$TMPDIR/mcpspike/` instead — the path in findings.
+8. **Threading** — `MCPSpikeThread`: `RunScript` from a `new Thread` ran on `Dummy-1`; via `InvokeOnUiThread` on `MainThread` with `Command.InCommand() == false`.
+9. **Undo v1, plug-in** — `MCPSpikeUndo`: mid-command `Undo()` returned true; after the command the entry was gone (`UndoActive` false) and the objects remained. → "mid-command `Undo()` discards without reverting".
+10. **Undo B/C/D, first attempt — invalid.** Three variants (own record then `_-Undo` after; Python with `RecordDocumentUndo`; adds from `InvokeOnUiThread` outside a command). C failed with `CodeLanguageNotFoundException`. Before the results could be trusted the screen locked; the run's output was a stale report from the previous build (the `&&` chain broke at the restart helper). **Discarded.**
+11. **Undo B/C/D, second attempt.** Same three, plus a rewritten probe trying `doc.Undo()`, `RunScript("_Undo")` and `RunScript(serial, "_Undo")` after the command. All three left the objects; `doc.Undo()` flipped `UndoActive` to true (pending) and a later `EndUndoRecord` returned false while it was pending. Early suspects `ClearUndoRecords` and `Objects.Clear()` were removed between attempts and made no difference.
+12. **E — `ExecuteCommand`.** A minimal `MCPSpikeAddTwo` command, run from a background thread via `RhinoApp.ExecuteCommand(doc, name)` inside `InvokeOnUiThread`; then `ExecuteCommand(doc, "_Undo")`; then `SendKeystrokes`. First run ambiguous (counts only); second run named objects `run<N>-a/b`: after AddTwo, `_Undo`, AddTwo the document held `run2-*` only → the undo reverted run1. `SendKeystrokes("_Undo", true)` produced `run3-*` — its Enter repeated the last command. One snapshot closure went missing from the report; the named-object evidence stands without it.
+13. **C2 — language detection.** Five `RunContext` shapes all failed on a fresh Rhino, though the same call had worked in step 7. Difference: in step 7 the CLI had already run a script. `MCPSpikeLang` dumped `LanguageRegistry`; `MCPSpikeLangInit` showed 4 built-in languages before, `WaitStatusComplete(LanguageSpec.Python3)` taking 1,748 ms, Python registered after, then runs of 44 ms and 19 ms.
+14. **F — end to end.** `MCPSpikePyAdd` (waits for the language, runs Python that adds two named objects, raises on the second run) driven by `MCPSpikeF` from a background thread: run1, run2 (throws after adding), `_Undo`, `_Undo`, `_Redo`. The report's snapshots after the undos went missing again (a quirk of `InvokeOnUiThread` closures posted around `ExecuteCommand`, not investigated), so the final state was read with a separate CLI script: `["py1-a","py1-b"]`; the command history read `Undoing MCPSpikePyAdd`, `Undoing MCPSpikePyAdd`, `Redoing MCPSpikePyAdd`. Raw report: `phase-1a/report-final-F.json`.
+15. **Cleanup** — `yak uninstall mcpspike`; Rhino left running with an empty untitled document; SDK left installed for phase 1.
+
+## What to carry into phase 1's harness
+
+- Report from Rhino by file, never by stdout; read the report *after* the last step, and record names or ids, never counts alone.
+- Check `CGSSessionScreenIsLocked` before a live run; a locked screen turns every step into a silent no-op.
+- `&&`-chained restart-then-test commands hide a failed restart; the fixture must fail loudly.
+- The first `rhinocode script` on a machine deploys the Python runtime; budget a minute and do it in setup.

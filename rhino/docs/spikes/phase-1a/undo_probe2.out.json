@@ -1,0 +1,33 @@
+{
+ "steps": [
+  {
+   "objects": 2,
+   "undo_active": true,
+   "redo_active": false,
+   "rec_enabled": true,
+   "rec_is_active": true,
+   "cur_serial": 5,
+   "next_serial": 6,
+   "in_command": false,
+   "in_script": false,
+   "name": "state-after-previous-script"
+  },
+  {
+   "rec_is_active": true,
+   "cur_serial": 6,
+   "name": "inside-record"
+  },
+  {
+   "objects": 1,
+   "undo_active": false,
+   "name": "after-end"
+  },
+  {
+   "ok": true,
+   "objects": 1,
+   "undo_active": false,
+   "redo_active": false,
+   "name": "runscript-undo"
+  }
+ ]
+}

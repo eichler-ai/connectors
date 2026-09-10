@@ -1,0 +1,36 @@
+[
+  {
+    "name": "pyadd-run1",
+    "data": {
+      "ok": true
+    }
+  },
+  {
+    "name": "pyadd-run2-exception",
+    "data": {
+      "type": "Rhino.Runtime.Code.Execution.ExecuteException",
+      "message": "boom from python",
+      "stderr": "Traceback (most recent call last):\n  File \u0022file:///Users/nicholas/.rhinocode/stage/mcunwnpe.cie\u0022, line 8, in \u003Cmodule\u003E\nValueError: boom from python\n",
+      "inner": null
+    }
+  },
+  {
+    "name": "F",
+    "data": {
+      "steps": [
+        {
+          "what": "start",
+          "names": ""
+        },
+        {
+          "what": "after-py-run1",
+          "names": "py1-a,py1-b"
+        },
+        {
+          "what": "after-py-run2-which-throws-after-adding",
+          "names": "py1-a,py1-b,py2-a,py2-b"
+        }
+      ]
+    }
+  }
+]

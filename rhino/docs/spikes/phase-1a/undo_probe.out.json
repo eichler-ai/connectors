@@ -1,0 +1,90 @@
+{
+ "steps": [
+  {
+   "objects": 0,
+   "undo_active": false,
+   "redo_active": false,
+   "name": "start"
+  },
+  {
+   "serial": 1,
+   "end_ok": true,
+   "objects": 2,
+   "undo_active": false,
+   "name": "record-with-2-adds"
+  },
+  {
+   "undo_returned": true,
+   "objects": 2,
+   "redo_active": false,
+   "name": "undo-after-record"
+  },
+  {
+   "redo_returned": false,
+   "objects": 2,
+   "name": "redo"
+  },
+  {
+   "objects": 2,
+   "name": "undo-again"
+  },
+  {
+   "undo_active": false,
+   "name": "cleared"
+  },
+  {
+   "serial": 3,
+   "end_ok": true,
+   "undo_active": false,
+   "name": "empty-record"
+  },
+  {
+   "undo_returned": false,
+   "objects": 0,
+   "name": "undo-after-empty"
+  },
+  {
+   "outer": 4,
+   "inner": 0,
+   "inner_end": false,
+   "outer_end": true,
+   "objects": 2,
+   "name": "nested"
+  },
+  {
+   "undo_returned": true,
+   "objects": 2,
+   "name": "undo-after-nested"
+  },
+  {
+   "undo_returned": false,
+   "objects": 2,
+   "name": "undo-after-nested-2"
+  },
+  {
+   "members": [
+    "AddCustomUndoEvent",
+    "BeginUndoRecord",
+    "ClearRedoRecords",
+    "ClearUndoRecords",
+    "CurrentUndoRecordSerialNumber",
+    "EndUndoRecord",
+    "NextUndoRecordSerialNumber",
+    "Redo",
+    "RedoActive",
+    "Undo",
+    "UndoActive",
+    "UndoRecordingEnabled",
+    "UndoRecordingIsActive",
+    "get_CurrentUndoRecordSerialNumber",
+    "get_NextUndoRecordSerialNumber",
+    "get_RedoActive",
+    "get_UndoActive",
+    "get_UndoRecordingEnabled",
+    "get_UndoRecordingIsActive",
+    "set_UndoRecordingEnabled"
+   ],
+   "name": "undo-api-surface"
+  }
+ ]
+}

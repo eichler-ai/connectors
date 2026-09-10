@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <TargetExt>.rhp</TargetExt>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+    <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="RhinoCommon"><HintPath>/Applications/Rhino 8.app/Contents/Frameworks/RhCore.framework/Resources/RhinoCommon.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Rhino.Runtime.Code"><HintPath>/Applications/Rhino 8.app/Contents/Frameworks/RhCore.framework/Resources/Rhino.Runtime.Code.dll</HintPath><Private>false</Private></Reference>
+  </ItemGroup>
+</Project>
