@@ -26,7 +26,9 @@ public sealed class PythonScriptRunnerTests
         Assert.True(outcome.Success);
         Assert.Equal(42, outcome.ReturnValue);
         Assert.Equal("hello\n", outcome.StdOut);
-        var run = Assert.Single(host.Runs);
+        Assert.Equal(2, host.Runs.Count);
+        var run = host.Runs[0];
+        Assert.Equal(PythonScriptRunner.RestoreScriptContext, host.Runs[1].Text);
         Assert.StartsWith(PythonScriptRunner.Prefix, run.Text);
         Assert.EndsWith("result = 42\nprint('hello')", run.Text);
         Assert.Equal("result", run.ResultName);
@@ -106,6 +108,42 @@ public sealed class PythonScriptRunnerTests
     }
 
     [Fact]
+    public async Task ErrorThatIsNotACancellation_KeepsItsOwnError_EvenWhenTheTokenIsSet()
+    {
+        var (runner, host) = Make();
+        using var cts = new CancellationTokenSource();
+        host.OnRun = (_, _) => { cts.Cancel(); return new PythonRunResult { Error = new Exception("boom"), StdErr = "ValueError: boom" }; };
+        var outcome = await runner.RunAsync("raise ValueError('boom')", TestGlobals.Create(cts.Token), cts.Token, false);
+        Assert.False(outcome.WasCancelled);
+        Assert.Equal("boom", outcome.Exception!.Message);
+    }
+
+    [Fact]
+    public async Task StdErrOnASuccessfulRun_IsAppendedToOutput_Marked()
+    {
+        var (runner, host) = Make();
+        host.OnRun = (_, _) => new PythonRunResult { StdOut = "out\n", StdErr = "warn\n" };
+        var outcome = await runner.RunAsync("pass", TestGlobals.Create(), default, false);
+        Assert.Equal("out\n[stderr]\nwarn\n", outcome.StdOut);
+    }
+
+    [Fact]
+    public void ScriptContextIsRestored_EvenWhenTheHostThrows()
+    {
+        var (runner, host) = Make();
+        host.OnRun = (_, _) => throw new InvalidOperationException("host broke");
+        Assert.Throws<InvalidOperationException>(() => runner.RunAsync("pass", TestGlobals.Create(), default, false).GetAwaiter().GetResult());
+        Assert.Equal(PythonScriptRunner.RestoreScriptContext, host.Runs[^1].Text);
+    }
+
+    [Fact]
+    public void AMessageMentioningSyntaxError_IsNotASyntaxError()
+    {
+        Assert.False(new PythonScriptException(new Exception("SyntaxError in the input file"), "Traceback...\nValueError: SyntaxError in the input file\n").IsSyntaxError);
+        Assert.True(new PythonScriptException(new Exception("x"), "  File \"<script>\", line 1\n    x = = 1\n        ^\nSyntaxError: invalid syntax\n").IsSyntaxError);
+    }
+
+    [Fact]
     public async Task UnavailableHost_IsAFailedOutcome_NotACrash()
     {
         var host = new FakePythonHost { UnavailableReason = "still loading" };
@@ -123,6 +161,9 @@ public sealed class PythonScriptRunnerTests
     [InlineData("File \"<string>\", line 2, in <module>", "File \"<string>\", line 2, in <module>")]
     [InlineData("File \"<string>\", line 3, in <module>", "File \"<script>\", line 1, in <module>")]
     [InlineData("File \"file:///Users/me/.rhinocode/stage/5i05zwmq.4ha\", line 6, in <module>", "File \"<script>\", line 4, in <module>")]
+    [InlineData("File \"file:///Users/me/.rhinocode/stage/5i05zwmq.4ha\", line 2, in <module>", "File \"file:///Users/me/.rhinocode/stage/5i05zwmq.4ha\", line 2, in <module>")]
+    [InlineData("invalid syntax  (Error CPYC01) file:///Users/me/.rhinocode/stage/x.y:[5:3]", "invalid syntax  (Error CPYC01) <script>:[3:3]")]
+    [InlineData("invalid syntax  (Error CPYC01) file:///Users/me/.rhinocode/stage/x.y:[1:1]", "invalid syntax  (Error CPYC01) file:///Users/me/.rhinocode/stage/x.y:[1:1]")]
     [InlineData("File \"C:\\Users\\me\\.rhinocode\\stage\\ab.cd\", line 5, in f", "File \"<script>\", line 3, in f")]
     [InlineData("File \"/site-rhinopython/rhinoscript/curve.py\", line 176, in AddCircle", "File \"/site-rhinopython/rhinoscript/curve.py\", line 176, in AddCircle")]
     public void ShiftTraceback_LeavesPrefixFramesAlone(string input, string expected)

@@ -19,7 +19,11 @@ namespace Rhino.MCPBridge.Core.Execution.Python;
 /// through a call's return value. The runtime cannot close that gap for RhinoCommon either, so the
 /// denylist is what Revit §14 calls it -- a guard against the common accident, with the dynamic-code
 /// builtins (<c>exec</c>, <c>eval</c>, <c>__import__</c>, computed <c>getattr</c>) refused so the
-/// obvious workaround is not silent.
+/// obvious workaround is not silent. The trade-offs in the other direction, wrong refusals: a
+/// variable named <c>doc</c> holding something else (an XML document's <c>Save</c> is gated as
+/// RhinoDoc's), and under <c>from rhinoscriptsyntax import *</c> a script's own function named like
+/// an interactive one (<c>def GetLayer</c>) is refused at its call. f-string interpolations are
+/// tokenized and walked like the rest of the text.
 /// </summary>
 internal static class PythonScriptGuard
 {
@@ -51,10 +55,12 @@ internal static class PythonScriptGuard
     /// <summary>Builtins that load or evaluate code the walk cannot see.</summary>
     private static readonly IReadOnlySet<string> DynamicCodeBuiltins = new HashSet<string> { "exec", "eval", "compile", "__import__" };
 
-    /// <summary>Names that end the process or the interpreter, by qualified name.</summary>
+    /// <summary>Names that end the Rhino process. <c>sys.exit</c>/<c>exit()</c>/<c>SystemExit</c> are NOT
+    /// here: inside the embedded interpreter they raise SystemExit, which ends the run, not Rhino
+    /// (verified live), so they are the ordinary "stop early" idiom.</summary>
     private static readonly IReadOnlySet<string> ExitNames = new HashSet<string>
     {
-        RhinoApp + ".Exit", RhinoScriptSyntax + ".Exit", "sys.exit", "os._exit", "os.abort", "os.kill", "exit", "quit", "SystemExit",
+        RhinoApp + ".Exit", RhinoScriptSyntax + ".Exit", "os._exit", "os.abort", "os.kill",
     };
 
     public sealed class Analysis
@@ -130,13 +136,15 @@ internal static class PythonScriptGuard
             return;
         }
 
-        if (ExitNames.Contains(qualified) && (called || (qualified != "exit" && qualified != "quit")))
+        if (ExitNames.Contains(qualified))
         {
-            // The bare builtins exit/quit only when called: `exit` is a plausible variable name.
             throw ScriptApiDenylistViolationException.UndoOrExitMember(qualified);
         }
 
-        var bare = qualified.StartsWith("builtins.", StringComparison.Ordinal) ? qualified.Substring("builtins.".Length) : qualified;
+        // 2: `builtins.exec` and `__builtins__.exec` are the same call.
+        var bare = qualified.StartsWith("builtins.", StringComparison.Ordinal) ? qualified.Substring("builtins.".Length)
+            : qualified.StartsWith("__builtins__.", StringComparison.Ordinal) ? qualified.Substring("__builtins__.".Length)
+            : qualified;
         if (DynamicCodeBuiltins.Contains(bare) || qualified == "importlib" || qualified.StartsWith("importlib.", StringComparison.Ordinal))
         {
             throw DynamicCode(qualified);
@@ -212,9 +220,9 @@ internal static class PythonScriptGuard
                 continue;
             }
 
-            if (t.Kind != PythonTokenKind.String || depth != 1)
+            if (t.Kind != PythonTokenKind.String)
             {
-                continue;
+                continue; // any depth: str('_Exit') and ('_Exi' + 't') fragments are scanned too
             }
 
             foreach (var token in ScriptApiDenylist.CommandTokens(t.Text))
@@ -248,12 +256,40 @@ internal static class PythonScriptGuard
     /// <summary>Reads <c>Name(.Name)*</c> starting at <paramref name="i"/>; returns the dotted chain and the index after it.</summary>
     private static (string Chain, int End) ReadChain(List<PythonToken> tokens, int i)
     {
+        // `(doc).Undo()` is `doc.Undo()`: count the parens that directly wrap the chain's head so the
+        // matching closers can be stepped over when a `.Name` follows them.
+        var wrapping = 0;
+        for (var k = i - 1; k >= 0 && tokens[k].IsOp("("); k--) wrapping++;
+
         var parts = new List<string> { tokens[i].Text };
         var j = i + 1;
-        while (j + 1 < tokens.Count && tokens[j].IsOp(".") && tokens[j + 1].Kind == PythonTokenKind.Name)
+        while (j + 1 < tokens.Count)
         {
-            parts.Add(tokens[j + 1].Text);
-            j += 2;
+            if (tokens[j].IsOp(".") && tokens[j + 1].Kind == PythonTokenKind.Name)
+            {
+                parts.Add(tokens[j + 1].Text);
+                j += 2;
+            }
+            else if (wrapping > 0 && tokens[j].IsOp(")"))
+            {
+                // Step over up to `wrapping` closers when a `.Name` follows them.
+                var k = j;
+                var closed = 0;
+                while (closed < wrapping && k < tokens.Count && tokens[k].IsOp(")")) { k++; closed++; }
+                if (k + 1 < tokens.Count && tokens[k].IsOp(".") && tokens[k + 1].Kind == PythonTokenKind.Name)
+                {
+                    wrapping -= closed;
+                    j = k;
+                }
+                else
+                {
+                    break;
+                }
+            }
+            else
+            {
+                break;
+            }
         }
 
         return (string.Join(".", parts), j);
@@ -268,26 +304,51 @@ internal static class PythonScriptGuard
     {
         var open = i + 1;
         var close = MatchingParen(tokens, open);
-        var inner = open + 1;
-        if (inner >= close || tokens[inner].Kind != PythonTokenKind.Name)
+        // The receiver: a dotted chain the walk can resolve, or any other expression (a call, a
+        // subscript), which resolves to nothing and is allowed -- the member name is what matters.
+        string? chain = null;
+        var afterReceiver = open + 1;
+        if (afterReceiver < close && tokens[afterReceiver].Kind == PythonTokenKind.Name)
         {
-            return ("", close + 1);
+            (chain, afterReceiver) = ReadChain(tokens, afterReceiver);
         }
 
-        var (chain, afterChain) = ReadChain(tokens, inner);
-        if (afterChain >= close || !tokens[afterChain].IsOp(",") || afterChain + 1 >= close)
+        if (chain is null || afterReceiver >= close || !tokens[afterReceiver].IsOp(","))
         {
-            // Not the getattr(obj, ...) shape the walk understands: treat as computed.
-            throw DynamicCode("getattr(" + chain + ", <expression>)");
+            afterReceiver = SkipToTopLevelComma(tokens, open + 1, close);
+            chain = null;
         }
 
-        var arg = tokens[afterChain + 1];
-        if (arg.Kind != PythonTokenKind.String)
+        var describe = "getattr(" + (chain ?? "<expression>") + ", <expression>)";
+        if (afterReceiver >= close)
         {
-            throw DynamicCode("getattr(" + chain + ", <expression>)");
+            throw DynamicCode(describe);
         }
 
-        return (scope.Resolve(chain + "." + arg.Text), close + 1);
+        // The member name must be ONE string literal that is the whole argument: "Und" + "o",
+        // "Und" "o" (implicit concatenation) and name variables are computed names.
+        var arg = tokens[afterReceiver + 1];
+        var afterArg = afterReceiver + 2;
+        if (arg.Kind != PythonTokenKind.String || afterArg > close || !(tokens[afterArg].IsOp(")") || tokens[afterArg].IsOp(",")))
+        {
+            throw DynamicCode(describe);
+        }
+
+        return (chain is null ? "" : scope.Resolve(chain + "." + arg.Text), close + 1);
+    }
+
+    /// <summary>The index of the first top-level comma in (from, to), or to when there is none.</summary>
+    private static int SkipToTopLevelComma(List<PythonToken> tokens, int from, int to)
+    {
+        var depth = 0;
+        for (var j = from; j < to; j++)
+        {
+            if (tokens[j].IsOp("(") || tokens[j].IsOp("[") || tokens[j].IsOp("{")) depth++;
+            else if (tokens[j].IsOp(")") || tokens[j].IsOp("]") || tokens[j].IsOp("}")) depth--;
+            else if (depth == 0 && tokens[j].IsOp(",")) return j;
+        }
+
+        return to;
     }
 
     private static int MatchingParen(List<PythonToken> tokens, int open)

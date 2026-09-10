@@ -289,7 +289,7 @@ func TestUnknownLanguageIsRefused_Loudly(t *testing.T) {
 	inst := waitForInstance(t, c)
 	// The server's schema refuses anything but csharp/python before the bridge sees it.
 	out := callExecute(t, c, map[string]any{"instance_id": inst.InstanceID, "language": "ruby", "script": "puts 1"}, 30*time.Second)
-	if out.Error == nil {
+	if out.Error == nil || out.Error.Code != "invalid-param" || !strings.Contains(out.Error.Message, "language") {
 		t.Fatalf("%+v", out)
 	}
 }

@@ -27,12 +27,15 @@ public sealed class PythonScriptGuardTests
     [InlineData("import Rhino as R\nR.RhinoApp.Exit()", "Rhino.RhinoApp.Exit")]
     [InlineData("from Rhino import RhinoApp as app\napp.Exit()", "Rhino.RhinoApp.Exit")]
     [InlineData("import rhinoscriptsyntax as rs\nrs.Exit()", "rhinoscriptsyntax.Exit")]
-    [InlineData("import sys\nsys.exit(0)", "sys.exit")]
     [InlineData("import os\nos._exit(0)", "os._exit")]
-    [InlineData("exit()", "exit")]
-    [InlineData("raise SystemExit", "SystemExit")]
+    [InlineData("import os\nos.abort()", "os.abort")]
     [InlineData("u = getattr(doc, 'Undo')\nu()", "Rhino.RhinoDoc.Undo")]
+    [InlineData("(doc).Undo()", "Rhino.RhinoDoc.Undo")]
+    [InlineData("import scriptcontext\n((scriptcontext.doc)).Redo()", "Rhino.RhinoDoc.Redo")]
+    [InlineData("x = f'{doc.Undo()}'", "Rhino.RhinoDoc.Undo")]
     [InlineData("import rhinoscriptsyntax as rs\nrs.Command('_-Undo')", "rhinoscriptsyntax.Command(\"undo\")")]
+    [InlineData("import rhinoscriptsyntax as rs\nrs.Command(str('_Exit'))", "rhinoscriptsyntax.Command(\"exit\")")]
+    [InlineData("import rhinoscriptsyntax as rs\nrs.Command('_-Undo' + 'Multiple')", "rhinoscriptsyntax.Command(\"undo\")")]
     [InlineData("import rhinoscriptsyntax as rs\nrs.Command(\"_Line 0,0,0 1,1,1 _Enter _Exit\", False)", "rhinoscriptsyntax.Command(\"exit\")")]
     [InlineData("import Rhino\nRhino.RhinoApp.RunScript('_Redo', False)", "Rhino.RhinoApp.RunScript(\"redo\")")]
     [InlineData("import Rhino\nRhino.RhinoApp.ExecuteCommand(doc, '_Quit')", "Rhino.RhinoApp.ExecuteCommand(\"quit\")")]
@@ -64,6 +67,9 @@ public sealed class PythonScriptGuardTests
     [InlineData("import Rhino\nRhino.UI.Dialogs.ShowMessage('x', 'y')", "Rhino.UI.Dialogs.ShowMessage")]
     [InlineData("from Rhino.UI import Dialogs\nDialogs.ShowColorDialog(None)", "Rhino.UI.Dialogs.ShowColorDialog")]
     [InlineData("import rhinoscriptsyntax as rs\ngetattr(rs, 'GetPoint')('x')", "rhinoscriptsyntax.GetPoint")]
+    [InlineData("import rhinoscriptsyntax as rs\nprint(f'{rs.GetPoint()}')", "rhinoscriptsyntax.GetPoint")]
+    [InlineData("import rhinoscriptsyntax as rs\nprint(f'{rs.GetPoint()!r:>10}')", "rhinoscriptsyntax.GetPoint")]
+    [InlineData("import rhinoscriptsyntax as rs\nprint(f'{{literal}} {rs.GetPoint()}')", "rhinoscriptsyntax.GetPoint")]
     public void InteractiveGetters_AreDenied(string script, string member)
     {
         var ex = Denied(script);
@@ -81,7 +87,11 @@ public sealed class PythonScriptGuardTests
     [InlineData("m = __import__('Rhino')", "__import__")]
     [InlineData("import importlib\nimportlib.import_module('os')", "importlib.import_module")]
     [InlineData("import builtins\nbuiltins.exec('x')", "builtins.exec")]
+    [InlineData("__builtins__.eval('doc.Undo()')", "__builtins__.eval")]
     [InlineData("name = 'Undo'\ngetattr(doc, name)()", "getattr(doc, <expression>)")]
+    [InlineData("getattr(doc, 'Und' + 'o')()", "getattr(doc, <expression>)")]
+    [InlineData("getattr(doc, 'Und' 'o')()", "getattr(doc, <expression>)")]
+    [InlineData("getattr(objs[0], nm)", "getattr(<expression>, <expression>)")]
     public void DynamicCode_IsDenied(string script, string member)
     {
         var ex = Denied(script);
@@ -145,6 +155,10 @@ public sealed class PythonScriptGuardTests
     [InlineData("from Rhino.Geometry import Sphere, Point3d\ns = Sphere(Point3d.Origin, 1)")]
     [InlineData("import System\nSystem.Console.WriteLine('x')")]
     [InlineData("while not cancel.IsRequested:\n    cancel.Check()\n    break")]
+    [InlineData("import sys\nif not doc.Objects.Count:\n    sys.exit()\ntry:\n    pass\nexcept SystemExit:\n    pass\nexit()")]
+    [InlineData("import rhinoscriptsyntax as rs\nv = getattr(rs.coercerhinoobject(id), 'Attributes')\nn = getattr(objs[0], 'Name')")]
+    [InlineData("print(f'{doc.Name} has {doc.Objects.Count:>4} objects')")]
+    [InlineData("s = f'{{doc.Undo()}}'")]
     public void OrdinaryScripts_AreAllowed(string script)
     {
         var analysis = PythonScriptGuard.Analyze(script);
@@ -170,7 +184,7 @@ public sealed class PythonScriptGuardTests
     public void MultipleImportsOnOneLine_AndSemicolons_AreResolved()
     {
         Denied("import os, rhinoscriptsyntax as rs; rs.GetPoint()");
-        Denied("import Rhino, sys; sys.exit()");
+        Denied("import Rhino, os; os._exit(0)");
         Denied("from Rhino.Input import (RhinoGet,\n    Custom)\nRhinoGet.GetPoint('x', False)");
     }
 }

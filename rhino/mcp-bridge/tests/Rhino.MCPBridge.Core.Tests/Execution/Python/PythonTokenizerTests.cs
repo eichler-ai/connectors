@@ -59,6 +59,23 @@ public sealed class PythonTokenizerTests
         Assert.Equal("a **= 2 NL b := c != d NL NL", Render("a **= 2\nb := c != d\n"));
     }
 
+    [Theory]
+    [InlineData("{a.b()} and {{x}}", "a.b()")]
+    [InlineData("{v!r:>10}", "v")]
+    [InlineData("{d['k']:{w}}", "d['k']")]
+    [InlineData("{x != y}", "x != y")]
+    [InlineData("plain", "")]
+    public void FStringExpressions_AreExtracted(string body, string expected)
+    {
+        Assert.Equal(expected, string.Join("|", PythonTokenizer.FStringExpressions(body)));
+    }
+
+    [Fact]
+    public void FStringTokensFollowTheLiteral()
+    {
+        Assert.Equal("print ( S({rs.GetPoint()}) rs . GetPoint ( ) ) NL NL", Render("print(f'{rs.GetPoint()}')\n"));
+    }
+
     [Fact]
     public void UnterminatedStringDoesNotThrow()
     {

@@ -96,6 +96,23 @@ public sealed class RequestDispatcherTests
     }
 
     [Fact]
+    public async Task WithBothRunners_CSharpStillGoesToRoslyn_AndPythonToTheHost()
+    {
+        var python = new FakePythonHost();
+        python.EnsureLoaded();
+        python.OnRun = (_, _) => new PythonRunResult { Result = "py" };
+        var h = new Harness(python: python);
+        var cs = await h.Execute("return \"cs\";", id: "a");
+        Assert.Equal("cs", cs.GetProperty("result").GetProperty("return_value").GetString());
+        Assert.Empty(python.Runs);
+        var py = await h.Call("execute_script", new { execution_id = "b", language = "python", script = "result = 'py'" });
+        Assert.Equal("py", py.GetProperty("result").GetProperty("return_value").GetString());
+        // The script plus the scriptcontext restore that follows every run.
+        Assert.Equal(2, python.Runs.Count);
+        Assert.Equal(2, h.Host.CommandsRun);
+    }
+
+    [Fact]
     public async Task PythonPreflight_RefusesDeniedAndGatedScripts_WithoutLaunching()
     {
         var python = new FakePythonHost();
@@ -218,7 +235,7 @@ public sealed class RequestDispatcherTests
         // With one, a queued run makes it busy.
         var deferred = new DeferredLauncher();
         var runner = new RoslynScriptRunner(); runner.WarmupCompile();
-        var d = new RequestDispatcher(h.Manager, new UndoRunExecutor(runner, h.Host), deferred, h.Logs.Add, () => h.Now, _ => Task.CompletedTask,
+        var d = new RequestDispatcher(h.Manager, new UndoRunExecutor(new ScriptRunners(runner), h.Host), deferred, h.Logs.Add, () => h.Now, _ => Task.CompletedTask,
             capture: new Core.Capture.ViewCaptureService(new NoViewports()), onMainThread: f => f());
         var first = await d.DispatchAsync(JsonRpcRequest.Parse("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"execute_script\",\"params\":{\"execution_id\":\"a\",\"language\":\"csharp\",\"script\":\"return 1;\",\"timeout_ms\":0}}"), CancellationToken.None);
         Assert.Contains("\"status\":\"pending\"", first);

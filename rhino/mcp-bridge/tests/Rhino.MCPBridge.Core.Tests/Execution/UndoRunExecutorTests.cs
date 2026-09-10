@@ -12,7 +12,7 @@ public sealed class UndoRunExecutorTests
 
     private static UndoRunExecutor.Request Req(string script, string docId = "", string? label = null, CancellationToken ct = default) => new()
     {
-        ExecutionId = "exec-1", ScriptText = script, DocumentId = docId, CancellationToken = ct, Label = label,
+        ExecutionId = "exec-1", ScriptText = script, Language = "csharp", DocumentId = docId, CancellationToken = ct, Label = label,
     };
 
     private static void OneAdd(Action<DocumentChange> on) => on(new DocumentChange(DocumentChange.Kind.Added, Guid.NewGuid(), "Brep", "Default"));
@@ -21,7 +21,7 @@ public sealed class UndoRunExecutorTests
     public void Success_RunsInOneCommand_WithTheLabel_AndReportsMutations()
     {
         var host = new FakeRunHost { DuringRun = OneAdd };
-        var outcome = new UndoRunExecutor(Runner, host).Execute(Req("return 42;", label: "make things"))!;
+        var outcome = new UndoRunExecutor(new ScriptRunners(Runner), host).Execute(Req("return 42;", label: "make things"))!;
         Assert.True(outcome.Success, outcome.Exception?.ToString());
         Assert.Equal(42, outcome.ReturnValue);
         Assert.Equal(1, host.CommandsRun);
@@ -33,7 +33,7 @@ public sealed class UndoRunExecutorTests
     [Fact]
     public void ReadOnlySuccess_HasNoMutationReport()
     {
-        var outcome = new UndoRunExecutor(Runner, new FakeRunHost()).Execute(Req("return 1;"))!;
+        var outcome = new UndoRunExecutor(new ScriptRunners(Runner), new FakeRunHost()).Execute(Req("return 1;"))!;
         Assert.True(outcome.Success);
         Assert.Null(outcome.Mutations);
     }
@@ -42,7 +42,7 @@ public sealed class UndoRunExecutorTests
     public void Throw_AfterChanging_IsUndone_AndReported()
     {
         var host = new FakeRunHost { DuringRun = OneAdd };
-        var outcome = new UndoRunExecutor(Runner, host).Execute(Req("throw new System.InvalidOperationException(\"boom\");"))!;
+        var outcome = new UndoRunExecutor(new ScriptRunners(Runner), host).Execute(Req("throw new System.InvalidOperationException(\"boom\");"))!;
         Assert.False(outcome.Success);
         Assert.Equal(1, host.UndoCalls);
         var notice = Assert.Single(outcome.Notices);
@@ -54,7 +54,7 @@ public sealed class UndoRunExecutorTests
     public void Throw_WithoutChanging_DoesNotUndo()
     {
         var host = new FakeRunHost();
-        var outcome = new UndoRunExecutor(Runner, host).Execute(Req("throw new System.Exception(\"x\");"))!;
+        var outcome = new UndoRunExecutor(new ScriptRunners(Runner), host).Execute(Req("throw new System.Exception(\"x\");"))!;
         Assert.False(outcome.Success);
         Assert.Equal(0, host.UndoCalls);
         Assert.Empty(outcome.Notices);
@@ -65,7 +65,7 @@ public sealed class UndoRunExecutorTests
     {
         // A person acted between the run and the rollback: never revert their action (PRD §07).
         var host = new FakeRunHost { DuringRun = OneAdd, LastWasOurs = false };
-        var outcome = new UndoRunExecutor(Runner, host).Execute(Req("throw new System.Exception(\"x\");"))!;
+        var outcome = new UndoRunExecutor(new ScriptRunners(Runner), host).Execute(Req("throw new System.Exception(\"x\");"))!;
         Assert.Equal(0, host.UndoCalls);
         var notice = Assert.Single(outcome.Notices);
         Assert.Equal("script-rollback-skipped", notice.Code);
@@ -78,7 +78,7 @@ public sealed class UndoRunExecutorTests
         // review of #282: a layer or attribute change is a change; the rollback keys off ANY document
         // event, not off the object counts the report can net.
         var host = new FakeRunHost { NonObjectChangeDuringRun = true };
-        var outcome = new UndoRunExecutor(Runner, host).Execute(Req("throw new System.Exception(\"x\");"))!;
+        var outcome = new UndoRunExecutor(new ScriptRunners(Runner), host).Execute(Req("throw new System.Exception(\"x\");"))!;
         Assert.Equal(1, host.UndoCalls);
         Assert.Equal("script-rolled-back", Assert.Single(outcome.Notices).Code);
         Assert.Null(outcome.Mutations);
@@ -89,7 +89,7 @@ public sealed class UndoRunExecutorTests
     {
         // review of #282: the body runs inside Rhino's native command dispatcher; a throw there is a crash class.
         var host = new FakeRunHost { DuringRun = _ => throw new InvalidOperationException("subscribe exploded") };
-        var outcome = new UndoRunExecutor(Runner, host).Execute(Req("return 1;"))!;
+        var outcome = new UndoRunExecutor(new ScriptRunners(Runner), host).Execute(Req("return 1;"))!;
         Assert.False(outcome.Success);
         Assert.Contains("subscribe exploded", outcome.Exception!.Message);
     }
@@ -98,7 +98,7 @@ public sealed class UndoRunExecutorTests
     public void Rollback_ReportsWhenRhinoHadNothingToUndo()
     {
         var host = new FakeRunHost { DuringRun = OneAdd, UndoSucceeds = false };
-        var outcome = new UndoRunExecutor(Runner, host).Execute(Req("throw new System.Exception(\"x\");"))!;
+        var outcome = new UndoRunExecutor(new ScriptRunners(Runner), host).Execute(Req("throw new System.Exception(\"x\");"))!;
         Assert.Equal(1, host.UndoCalls);
         Assert.Equal("script-rollback-skipped", Assert.Single(outcome.Notices).Code);
     }
@@ -108,7 +108,7 @@ public sealed class UndoRunExecutorTests
     {
         using var cts = new CancellationTokenSource();
         var host = new FakeRunHost { DuringRun = on => { OneAdd(on); cts.Cancel(); } };
-        var outcome = new UndoRunExecutor(Runner, host).Execute(Req("CancellationToken.ThrowIfCancellationRequested(); return 1;", ct: cts.Token))!;
+        var outcome = new UndoRunExecutor(new ScriptRunners(Runner), host).Execute(Req("CancellationToken.ThrowIfCancellationRequested(); return 1;", ct: cts.Token))!;
         Assert.True(outcome.WasCancelled);
         Assert.Equal(1, host.UndoCalls);
         Assert.Equal("script-rolled-back", Assert.Single(outcome.Notices).Code);
@@ -118,7 +118,7 @@ public sealed class UndoRunExecutorTests
     public void UnknownDocument_FailsWithCandidates_WithoutRunningACommand()
     {
         var host = new FakeRunHost();
-        var outcome = new UndoRunExecutor(Runner, host).Execute(Req("return 1;", docId: "doc-nope"))!;
+        var outcome = new UndoRunExecutor(new ScriptRunners(Runner), host).Execute(Req("return 1;", docId: "doc-nope"))!;
         Assert.False(outcome.Success);
         var ex = Assert.IsType<DocumentNotFoundException>(outcome.Exception);
         Assert.Equal("document-not-found", ex.Record.Code);
@@ -129,7 +129,7 @@ public sealed class UndoRunExecutorTests
     public void RhinoBusyWithAnotherCommand_ReturnsNull_ForTheLauncherToRetry()
     {
         var host = new FakeRunHost { RefuseCommands = true };
-        Assert.Null(new UndoRunExecutor(Runner, host).Execute(Req("return 1;")));
+        Assert.Null(new UndoRunExecutor(new ScriptRunners(Runner), host).Execute(Req("return 1;")));
     }
 
     [Theory]

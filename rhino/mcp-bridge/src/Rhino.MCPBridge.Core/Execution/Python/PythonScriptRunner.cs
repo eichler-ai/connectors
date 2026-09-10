@@ -29,6 +29,22 @@ internal sealed class PythonScriptRunner : IScriptRunner
     internal const string Prefix = "#! python 3\nimport scriptcontext as __mcp_sc; __mcp_sc.doc = doc\n";
     internal const int PrefixLines = 2;
 
+    /// <summary>Run after every script (see RunAsync).</summary>
+    internal const string RestoreScriptContext = "#! python 3\nimport scriptcontext as __mcp_sc, Rhino as __mcp_rh; __mcp_sc.doc = __mcp_rh.RhinoDoc.ActiveDoc\n";
+
+    /// <summary>A cancellation, not a script error that happened to coincide with one: the .NET
+    /// OperationCanceledException from cancel.Check() somewhere in the chain, or its Python spelling
+    /// on stderr. A script that swallowed the cancel and then failed on its own keeps its own error.</summary>
+    private static bool IsCancellation(Exception error, string stderr)
+    {
+        for (var e = error; e is not null; e = e.InnerException)
+        {
+            if (e is OperationCanceledException) return true;
+        }
+
+        return stderr.Contains("OperationCanceledException", StringComparison.Ordinal) || error.Message.Contains("operation was canceled", StringComparison.OrdinalIgnoreCase);
+    }
+
     /// <summary>A traceback frame in the script itself. RhinoCode stages the text as a file under
     /// ~/.rhinocode/stage/ (verified live); "&lt;string&gt;" is the host-neutral spelling.</summary>
     private static readonly Regex ScriptFrame = new(@"File ""(?<file>[^""]*(?:[/\\]stage[/\\][^""]*|<string>))"", line (?<line>\d+)", RegexOptions.Compiled);
@@ -91,15 +107,29 @@ internal sealed class PythonScriptRunner : IScriptRunner
             ["cancel"] = new CancelSignal(cancellationToken),
         };
 
-        var run = _host.Run(Prefix + scriptText, inputs, ResultName);
-        if (run.Error is null)
+        PythonRunResult run;
+        try
         {
-            return Task.FromResult(ScriptExecutionOutcome.Completed(run.Result, run.StdOut));
+            run = _host.Run(Prefix + scriptText, inputs, ResultName);
+        }
+        finally
+        {
+            // scriptcontext is one module in the one interpreter Rhino's own editor shares (a .NET
+            // module with a `doc` property, verified live): point it back at the active document so a
+            // run routed to another document does not leave the person's next editor script on it.
+            try { _host.Run(RestoreScriptContext, new Dictionary<string, object?>(), ResultName); } catch { }
         }
 
-        if (cancellationToken.IsCancellationRequested)
+        if (run.Error is null)
         {
-            // cancel.Check() raised inside the script (or the script observed IsRequested and raised itself).
+            // stderr on a successful run (warnings, sys.stderr writes) is worth seeing, marked as such.
+            var stdout = run.StdErr.Length == 0 ? run.StdOut : run.StdOut + "[stderr]\n" + run.StdErr;
+            return Task.FromResult(ScriptExecutionOutcome.Completed(run.Result, stdout));
+        }
+
+        if (cancellationToken.IsCancellationRequested && IsCancellation(run.Error, run.StdErr))
+        {
+            // cancel.Check() raised inside the script.
             return Task.FromResult(ScriptExecutionOutcome.Cancelled(run.StdOut));
         }
 
@@ -168,7 +198,15 @@ public sealed class PythonScriptException : Exception
     /// <summary>RhinoCode reports a script that does not parse as an ExecuteException with the message
     /// "Compile Error" and the CPython message on stderr (verified live); a script-raised SyntaxError
     /// (from exec of a bad string, say) would carry the usual traceback.</summary>
-    public bool IsSyntaxError =>
-        Message.StartsWith("Compile Error", StringComparison.Ordinal)
-        || Traceback.Contains("SyntaxError", StringComparison.Ordinal) || Traceback.Contains("IndentationError", StringComparison.Ordinal);
+    public bool IsSyntaxError => Message.StartsWith("Compile Error", StringComparison.Ordinal) || HasErrorLine(Traceback, "SyntaxError:") || HasErrorLine(Traceback, "IndentationError:");
+
+    private static bool HasErrorLine(string traceback, string prefix)
+    {
+        foreach (var line in traceback.Split('\n'))
+        {
+            if (line.TrimStart().StartsWith(prefix, StringComparison.Ordinal)) return true;
+        }
+
+        return false;
+    }
 }

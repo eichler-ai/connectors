@@ -115,7 +115,9 @@ internal sealed class RhinoCodePythonHost : IPythonHost
 
         // RunContext(bool defaultOutputStream = false, bool defaultErrorStream = false): the optional
         // parameters are compile-time sugar, so CreateInstance needs them spelled out.
-        dynamic ctx = Activator.CreateInstance(_runContext, new object[] { false, false })!;
+        // RunContext is IDisposable (verified live); disposed after the streams have been read.
+        using var ctxDisposable = (IDisposable)Activator.CreateInstance(_runContext, new object[] { false, false })!;
+        dynamic ctx = ctxDisposable;
         ctx.AutoApplyParams = true;
         foreach (var kv in inputs)
         {

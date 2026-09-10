@@ -26,9 +26,6 @@ internal sealed class UndoRunExecutor
         _host = host;
     }
 
-    /// <summary>Convenience for a C#-only executor (tests).</summary>
-    public UndoRunExecutor(RoslynScriptRunner runner, IRunHost host) : this(new ScriptRunners(runner), host) { }
-
     internal ScriptRunners Runners => _runners;
     internal IRunHost Host => _host;
 
@@ -37,7 +34,7 @@ internal sealed class UndoRunExecutor
         public required string ExecutionId { get; init; }
         public required string ScriptText { get; init; }
         /// <summary>"csharp" or "python"; the dispatcher has already checked the runner exists.</summary>
-        public string Language { get; init; } = "csharp";
+        public required string Language { get; init; }
         public required string DocumentId { get; init; }
         public required CancellationToken CancellationToken { get; init; }
         public bool ConfirmLifecycleActions { get; init; }

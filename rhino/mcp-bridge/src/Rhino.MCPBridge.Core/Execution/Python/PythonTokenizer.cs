@@ -84,6 +84,18 @@ internal static class PythonTokenizer
                 var start = line;
                 var (value, next, newlines) = ReadString(text, p, raw: prefix.Contains('r'));
                 tokens.Add(new PythonToken(PythonTokenKind.String, value, start));
+                if (prefix.Contains('f'))
+                {
+                    // The {expressions} of an f-string are code: emit their tokens so the guard walks them.
+                    foreach (var expr in FStringExpressions(value))
+                    {
+                        foreach (var inner in Tokenize(expr))
+                        {
+                            if (inner.Kind != PythonTokenKind.Newline) tokens.Add(inner with { Line = start });
+                        }
+                    }
+                }
+
                 line += newlines;
                 i = next;
                 continue;
@@ -114,6 +126,51 @@ internal static class PythonTokenizer
 
         tokens.Add(new PythonToken(PythonTokenKind.Newline, "\n", line));
         return tokens;
+    }
+
+    /// <summary>The expression parts of an f-string body: the text inside each single-brace group
+    /// ({{ and }} are literal braces), up to a top-level format spec or conversion.</summary>
+    internal static IEnumerable<string> FStringExpressions(string body)
+    {
+        var i = 0;
+        while (i < body.Length)
+        {
+            if (body[i] == '{')
+            {
+                if (i + 1 < body.Length && body[i + 1] == '{') { i += 2; continue; }
+                var depth = 1;
+                var j = i + 1;
+                while (j < body.Length && depth > 0)
+                {
+                    if (body[j] == '{') depth++;
+                    else if (body[j] == '}') depth--;
+                    j++;
+                }
+
+                var expr = body.Substring(i + 1, Math.Max(0, j - i - 2));
+                // Strip a trailing !r/!s conversion and :format spec at the top level.
+                var cut = TopLevelIndexOf(expr, '!', ':');
+                yield return cut < 0 ? expr : expr.Substring(0, cut);
+                i = j;
+                continue;
+            }
+
+            i++;
+        }
+    }
+
+    private static int TopLevelIndexOf(string s, char a, char b)
+    {
+        var depth = 0;
+        for (var i = 0; i < s.Length; i++)
+        {
+            var c = s[i];
+            if (c == '(' || c == '[' || c == '{') depth++;
+            else if (c == ')' || c == ']' || c == '}') depth--;
+            else if (depth == 0 && (c == a || c == b) && !(c == '!' && i + 1 < s.Length && s[i + 1] == '=')) return i;
+        }
+
+        return -1;
     }
 
     private static bool IsStringPrefix(ReadOnlySpan<char> prefix)
