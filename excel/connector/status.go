@@ -62,7 +62,7 @@ func registerGetStatus(reg *hub.ToolRegistry, c *Connector) {
 		if rec != nil {
 			return fail(rec), GetStatusOut{Error: rec}, nil
 		}
-		out := GetStatusOut{InstanceID: res.Instance.InstanceID, Host: res.Instance.Host, SignedInAs: reg.Host.SignedInLabel(ctx, user)}
+		out := GetStatusOut{InstanceID: res.Instance.InstanceID, Host: res.Instance.Host}
 		if !res.Reply.OK {
 			out.Error = scriptError(res.Reply.Error)
 			return fail(out.Error), out, nil
@@ -71,6 +71,10 @@ func registerGetStatus(reg *hub.ToolRegistry, c *Connector) {
 			out.Error = diag.New(diag.SeverityError, "bad-status", Source, "the bridge's status reply was not the expected shape: "+err.Error())
 			return fail(out.Error), out, nil
 		}
+		// After the bridge's reply is decoded, never before: signed_in_as is the
+		// hub's authoritative session identity (#251), so a reply that carried a
+		// signed_in_as key must not be able to overwrite it.
+		out.SignedInAs = reg.Host.SignedInLabel(ctx, user)
 		return nil, out, nil
 	})
 }

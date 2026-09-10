@@ -130,8 +130,10 @@ func (h *Host) User(req *mcp.CallToolRequest) (string, *diag.Record) {
 // the user can compare it against what the pane's own "Signed in as …" shows
 // (issue #251: an account mismatch between the pane and the session otherwise
 // looks like "no bridge" with no hint why). Best-effort and read-only: a nil
-// store or an unknown user returns "" and the caller falls back to generic
-// wording. Mirrors authserver.signedInLabel, the consent page's version.
+// store or an unknown user returns "" and the caller supplies its own generic
+// wording (accountMismatchHint). Modelled on authserver.signedInLabel (the
+// consent page's version), which instead falls back to "your Microsoft
+// account" because it renders straight into a page rather than into JSON.
 func (h *Host) SignedInLabel(ctx context.Context, user string) string {
 	if h.store == nil || user == "" {
 		return ""
