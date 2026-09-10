@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Thin interfaces Core depends on, plus the real adapters over RhinoCommon. The only product
+       assembly besides the plug-in that references RhinoCommon. -->
+  <PropertyGroup>
+    <TargetFramework>$(BridgeTargetFramework)</TargetFramework>
+    <RootNamespace>Rhino.MCPBridge.RhinoAdapter</RootNamespace>
+    <AssemblyName>Rhino.MCPBridge.RhinoAdapter</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="RhinoCommon" Version="$(RhinoCommonVersion)" ExcludeAssets="runtime" PrivateAssets="all" />
+    <ProjectReference Include="../Rhino.MCPBridge.Core/Rhino.MCPBridge.Core.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Rhino.MCPBridge.PlugIn" />
+    <InternalsVisibleTo Include="Rhino.MCPBridge.Core.Tests" />
+  </ItemGroup>
+</Project>

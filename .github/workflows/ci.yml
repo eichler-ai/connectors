@@ -187,6 +187,93 @@ jobs:
           }
           Write-Host "All 4 legs executed tests with 0 failures."
 
+  rhino-mcp-server:
+    name: Rhino MCP Server (Go)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rhino/mcp-server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: rhino/mcp-server/go.mod
+          cache-dependency-path: rhino/mcp-server/go.sum
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "gofmt needed on:" && echo "$unformatted" && exit 1
+          fi
+      - name: go vet
+        run: go vet ./...
+      - name: go test -race
+        run: go test -race ./...
+      - name: cross-compile the Windows and macOS builds
+        run: |
+          GOOS=windows GOARCH=amd64 go build ./...
+          GOOS=darwin GOARCH=arm64 go build ./...
+      - name: assert a plain build carries its source revision
+        run: |
+          go build -o /tmp/rhino-mcp-server-provenance-check ./cmd/mcp-server
+          line="$(/tmp/rhino-mcp-server-provenance-check -version)"
+          echo "$line"
+          case "$line" in
+            *unknown*) echo "the built server reports no source revision -- VCS stamping is off; see internal/servercore/buildinfo" && exit 1 ;;
+          esac
+
+  rhino-mcp-bridge:
+    name: Rhino MCP Bridge (C#) tier-1 tests
+    # RhinoCommon is a managed NuGet package, so the tier-1 suite builds and runs on any OS with no
+    # Rhino install (rhino/docs/implementation-plan.md "Tiers") -- the difference from the Revit job
+    # above. Both platforms the product ships on, because the suite has platform-conditional cases
+    # (file permissions, memory sampling) and a leg that silently skips is the trap this repo knows.
+    strategy:
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: rhino/mcp-bridge
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - name: dotnet test, asserting on the executed count
+        run: |
+          $results = Join-Path $PWD 'TestResults'
+          Remove-Item -Recurse -Force $results -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path $results | Out-Null
+          dotnet test tests/Rhino.MCPBridge.Core.Tests/Rhino.MCPBridge.Core.Tests.csproj `
+            --logger "trx;LogFileName=core.trx" --results-directory $results
+          if ($LASTEXITCODE -ne 0) { throw "dotnet test failed" }
+          $trx = @(Get-ChildItem $results -Filter *.trx)
+          if ($trx.Count -ne 1) { throw "expected 1 trx file, found $($trx.Count)" }
+          [xml]$doc = Get-Content $trx[0].FullName
+          $c = $doc.TestRun.ResultSummary.Counters
+          $total = [int]$c.total; $passed = [int]$c.passed; $failed = [int]$c.failed
+          Write-Host ("core.trx: total={0} passed={1} failed={2}" -f $total, $passed, $failed)
+          if ($total -le 0) { throw "executed 0 tests -- a green job that tests nothing" }
+          if ($failed -gt 0) { throw "$failed failing test(s)" }
+      - name: build the plug-in (Release, the artifact the deploy script packages)
+        run: dotnet build src/Rhino.MCPBridge.PlugIn/Rhino.MCPBridge.PlugIn.csproj -c Release -nologo -v q
+
+  rhino-test-harness:
+    name: Rhino test harness type-check (Go)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rhino/test-harness
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: rhino/test-harness/go.mod
+      - name: go vet (harness build tag; the tier-2 cases need a live Rhino)
+        run: go vet -tags harness ./...
+
   test-harness:
     name: Test harness type-check (Go)
     runs-on: ubuntu-latest

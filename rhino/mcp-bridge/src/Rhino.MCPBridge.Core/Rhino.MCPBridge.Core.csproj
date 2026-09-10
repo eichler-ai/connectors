@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    Decision logic only, behind the Rhino.MCPBridge.RhinoAdapter seam (CONVENTIONS.md "Testing
+    philosophy"): protocol framing, the diagnostic record, the instance file, the connection session
+    state machine, document identity. No RhinoCommon reference — everything here is tier-1 testable
+    with fakes, and `public` here means script-reachable once execute_script exists (PRD §07), so
+    default new types to internal.
+  -->
+  <PropertyGroup>
+    <TargetFramework>$(BridgeTargetFramework)</TargetFramework>
+    <RootNamespace>Rhino.MCPBridge.Core</RootNamespace>
+    <AssemblyName>Rhino.MCPBridge.Core</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Rhino.MCPBridge.PlugIn" />
+    <InternalsVisibleTo Include="Rhino.MCPBridge.Core.Tests" />
+  </ItemGroup>
+</Project>
