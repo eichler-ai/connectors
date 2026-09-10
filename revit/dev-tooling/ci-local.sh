@@ -30,6 +30,18 @@ run_step() {
     fi
 }
 
+echo "### Server core (Go) -- internal/servercore (shared by every desktop connector's MCP Server)"
+cd "$REPO_ROOT/internal/servercore" || exit 1
+unformatted="$(gofmt -l .)"
+if [[ -n "$unformatted" ]]; then
+    echo "gofmt needed on:"
+    echo "$unformatted"
+    FAILED=1
+fi
+run_step "go vet ./..." go vet ./...
+run_step "go test -race ./..." go test -race ./...
+
+echo
 echo "### MCP Server (Go) -- revit/mcp-server"
 cd "$REPO_ROOT/revit/mcp-server" || exit 1
 

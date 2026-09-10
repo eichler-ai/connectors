@@ -18,10 +18,10 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/eichler-ai/connectors/revit/mcp-server/internal/diag"
+	"github.com/eichler-ai/connectors/internal/servercore/diag"
+	"github.com/eichler-ai/connectors/internal/servercore/semsearch"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/howto"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/howtosearch"
-	"github.com/eichler-ai/connectors/revit/mcp-server/internal/semsearch"
 )
 
 // Paging bounds for search_howtos. A hit is a paragraph, not a one-line

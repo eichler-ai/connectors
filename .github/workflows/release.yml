@@ -110,13 +110,13 @@ jobs:
           cache-dependency-path: revit/mcp-server/go.sum
 
       # The broker embeds search_functions' two ranking models (go:embed of
-      # internal/semsearch/models/assets, fetched here and verified against
+      # internal/servercore/semsearch/models/assets (the shared module), fetched here and verified against
       # sha256 pins). A release built without them would still compile and
       # would silently ship keyword-only ranking, so the fetch is unconditional
       # and the step after the build asserts the models really are inside.
       - name: Fetch search_functions models
         working-directory: revit/mcp-server
-        run: .\internal\semsearch\models\fetch-models.ps1
+        run: ..\..\internal\servercore\semsearch\models\fetch-models.ps1
 
       - name: Build MCP Server broker (windows/amd64)
         working-directory: revit/mcp-server

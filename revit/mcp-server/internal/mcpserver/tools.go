@@ -21,7 +21,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/eichler-ai/connectors/revit/mcp-server/internal/diag"
+	"github.com/eichler-ai/connectors/internal/servercore/diag"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/execution"
 )
 

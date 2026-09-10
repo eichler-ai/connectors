@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/eichler-ai/connectors/revit/mcp-server/internal/diag"
+	"github.com/eichler-ai/connectors/internal/servercore/diag"
+	"github.com/eichler-ai/connectors/internal/servercore/transport"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/registry"
-	"github.com/eichler-ai/connectors/revit/mcp-server/internal/transport"
 )
 
 // fakeInstance simulates the add-in side of one instance's wire connection:

@@ -6,10 +6,10 @@ import (
 	"log"
 	"testing"
 
+	"github.com/eichler-ai/connectors/internal/servercore/semsearch/manager"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/discovery"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/execution"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/registry"
-	"github.com/eichler-ai/connectors/revit/mcp-server/internal/semsearch/manager"
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )

@@ -28,9 +28,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/eichler-ai/connectors/revit/mcp-server/internal/diag"
+	"github.com/eichler-ai/connectors/internal/servercore/diag"
+	"github.com/eichler-ai/connectors/internal/servercore/transport"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/registry"
-	"github.com/eichler-ai/connectors/revit/mcp-server/internal/transport"
 )
 
 const source = "mcp-server.internal.discovery"

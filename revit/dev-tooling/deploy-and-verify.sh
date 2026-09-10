@@ -314,7 +314,7 @@ if ! $SKIP_BROKER_RESTART; then
     echo "Go toolchain not found on PATH -- required to rebuild the broker (issue #116: a stale broker serves a stale skill.md and stale tool schemas)." >&2
     exit 1
   fi
-  buildinfo_pkg="github.com/eichler-ai/connectors/revit/mcp-server/internal/buildinfo"
+  buildinfo_pkg="github.com/eichler-ai/connectors/internal/servercore/buildinfo"
   broker_ldflags=()
   if broker_rev="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null)"; then
     broker_rev_time="$(git -C "$REPO_ROOT" show -s --format=%cI HEAD 2>/dev/null || true)"
@@ -339,7 +339,7 @@ if ! $SKIP_BROKER_RESTART; then
   # rank identically. Offline / to reuse an existing models-bundled binary, pass --skip-broker-restart
   # (which skips this whole rebuild block).
   say "fetching pinned search models so the broker builds WITH semantic ranking (idempotent)"
-  if ! ( "$REPO_ROOT/revit/mcp-server/internal/semsearch/models/fetch-models.sh" ); then
+  if ! ( "$REPO_ROOT/internal/servercore/semsearch/models/fetch-models.sh" ); then
     echo "fetch-models FAILED -- the broker would build lexical-only (no semantic ranking). Fix the fetch (network? sha256 pins?), or pass --skip-broker-restart to reuse an existing models-bundled binary." >&2
     exit 1
   fi

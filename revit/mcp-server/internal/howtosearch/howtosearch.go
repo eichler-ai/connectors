@@ -22,8 +22,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/eichler-ai/connectors/internal/servercore/semsearch"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/howto"
-	"github.com/eichler-ai/connectors/revit/mcp-server/internal/semsearch"
 )
 
 // Entry is one served document: the document, where it came from, what

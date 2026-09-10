@@ -14,12 +14,12 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/eichler-ai/connectors/revit/mcp-server/internal/diag"
+	"github.com/eichler-ai/connectors/internal/servercore/diag"
+	"github.com/eichler-ai/connectors/internal/servercore/transport"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/discovery"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/execution"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/howto"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/registry"
-	"github.com/eichler-ai/connectors/revit/mcp-server/internal/transport"
 )
 
 func connectHowToClient(t *testing.T, deps HowToDeps) *mcp.ClientSession {

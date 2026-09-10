@@ -7,7 +7,7 @@ package transport
 import (
 	"encoding/json"
 
-	"github.com/eichler-ai/connectors/revit/mcp-server/internal/diag"
+	"github.com/eichler-ai/connectors/internal/servercore/diag"
 )
 
 // Version is the JSON-RPC protocol version string used on every message.

@@ -127,7 +127,7 @@ fi
 # "Modified" here counts uncommitted changes to TRACKED files only -- `git status --porcelain` would
 # also flip on any stray untracked scratch file, and a warning that is permanently on stops being
 # read.
-BUILDINFO_PKG="github.com/eichler-ai/connectors/revit/mcp-server/internal/buildinfo"
+BUILDINFO_PKG="github.com/eichler-ai/connectors/internal/servercore/buildinfo"
 BROKER_LDFLAGS=()
 if BROKER_REV="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null)"; then
     BROKER_REV_TIME="$(git -C "$REPO_ROOT" show -s --format=%cI HEAD 2>/dev/null || true)"

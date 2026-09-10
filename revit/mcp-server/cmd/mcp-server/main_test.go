@@ -11,7 +11,7 @@ import (
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/execution"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/registry"
 
-	"github.com/eichler-ai/connectors/revit/mcp-server/internal/buildinfo"
+	"github.com/eichler-ai/connectors/internal/servercore/buildinfo"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/mcpserver"
 	"github.com/eichler-ai/connectors/revit/mcp-server/internal/singleton"
 )

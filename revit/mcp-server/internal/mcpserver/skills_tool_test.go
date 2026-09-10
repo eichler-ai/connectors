@@ -10,7 +10,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/eichler-ai/connectors/revit/mcp-server/internal/buildinfo"
+	"github.com/eichler-ai/connectors/internal/servercore/buildinfo"
 )
 
 // The skill file is shipped content, not code, so these tests pin the

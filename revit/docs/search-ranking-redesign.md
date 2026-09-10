@@ -347,7 +347,7 @@ third-party dependency, pinned to the Python implementation by `TestParityWithPy
 | 8.4 Corpus freshness | The fingerprint. A fingerprint change between pages fails the build (the add-in re-synced mid-dump) and the next attach rebuilds; a failed build never blocks search (fallback). |
 | 8.5 How-to-docs corpus | **Not shipped**; the merge point in §4 remains open. |
 
-**Model bundling.** Both models are `go:embed`ded by `internal/semsearch/models`, fetched at build
+**Model bundling.** Both models are `go:embed`ded by `internal/servercore/semsearch/models` (the repo-level shared server module since the Rhino connector's phase 0; before that `revit/mcp-server/internal/semsearch/models`), fetched at build
 time by `fetch-models.{sh,ps1}` against sha256 pins and never committed; CI and the release workflow
 fetch them, and the release asserts `mcp-server -search-models` reports them bundled. A build
 without them compiles and ranks lexical-only (`ranker: lexical`, said in every `guidance`).
