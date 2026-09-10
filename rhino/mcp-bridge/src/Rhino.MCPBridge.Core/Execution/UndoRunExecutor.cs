@@ -27,6 +27,7 @@ internal sealed class UndoRunExecutor
     }
 
     internal RoslynScriptRunner Runner => _runner;
+    internal IRunHost Host => _host;
 
     public sealed class Request
     {

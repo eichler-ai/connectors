@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
+using Rhino.MCPBridge.Core.Capture;
 using Rhino.MCPBridge.Core.Connection;
 using Rhino.MCPBridge.Core.Diagnostics;
 using Rhino.MCPBridge.Core.Dispatch;
@@ -54,11 +55,12 @@ internal sealed class BridgeHost : ISessionEnvironment
     public string? InstanceFilePath { get; private set; }
     public int ConnectionCount => _sessions.Count;
 
-    public BridgeHost(Guid instanceId, string rhinoVersion, string bridgeVersion, IMainThread mainThread, IDocumentSnapshotSource documents, IRunHost runHost, IRunLauncher launcher, string instancesDir, Action<string> log)
+    public BridgeHost(Guid instanceId, string rhinoVersion, string bridgeVersion, IMainThread mainThread, IDocumentSnapshotSource documents, IRunHost runHost, IRunLauncher launcher, IViewCapture viewCapture, string instancesDir, Action<string> log)
     {
         var runner = new RoslynScriptRunner();
         var executor = new UndoRunExecutor(runner, runHost);
-        _dispatcher = new RequestDispatcher(ExecutionManager.CreateDefault(ExecutionRingBuffer.CreateDefault()), executor, launcher, log);
+        _dispatcher = new RequestDispatcher(ExecutionManager.CreateDefault(ExecutionRingBuffer.CreateDefault()), executor, launcher, log,
+            capture: new ViewCaptureService(viewCapture), onMainThread: f => mainThread.Invoke(f));
         _warmup = new TransactionlessWarmup(runner, log);
         _instanceId = instanceId;
         _rhinoVersion = rhinoVersion;

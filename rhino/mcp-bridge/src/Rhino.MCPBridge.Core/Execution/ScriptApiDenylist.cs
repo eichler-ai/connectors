@@ -58,9 +58,10 @@ internal static class ScriptApiDenylist
     internal static readonly IReadOnlyDictionary<string, IReadOnlySet<string>> LifecycleMembersByType = new Dictionary<string, IReadOnlySet<string>>
     {
         // Signatures verified against RhinoCommon 8.35's XML: Save/SaveAs/SaveAsTemplate/Export/ExportSelected/
-        // Write3dmFile/WriteFile (filesystem); Close (the person's session); Open/OpenFile/OpenHeadless/Create/
-        // CreateHeadless (which documents are open); ReadFile/Import (content from outside the document).
-        [RhinoDoc] = new HashSet<string> { "Save", "SaveAs", "SaveAsTemplate", "Export", "ExportSelected", "Write3dmFile", "WriteFile", "Close", "Open", "OpenFile", "OpenHeadless", "Create", "CreateHeadless", "ReadFile", "Import" },
+        // Write3dmFile/WriteFile (filesystem); Open/OpenFile/OpenHeadless/Create/CreateHeadless (which documents
+        // are open); ReadFile/Import (content from outside the document). RhinoDoc has NO Close member -- a
+        // document is closed with the _Close command, which the command-token table gates.
+        [RhinoDoc] = new HashSet<string> { "Save", "SaveAs", "SaveAsTemplate", "Export", "ExportSelected", "Write3dmFile", "WriteFile", "Open", "OpenFile", "OpenHeadless", "Create", "CreateHeadless", "ReadFile", "Import" },
     };
 
     /// <summary>Command tokens (lower-cased, leading `_`/`-` stripped) that make a RunScript/ExecuteCommand

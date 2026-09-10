@@ -141,6 +141,35 @@ public sealed class RequestDispatcherTests
     }
 
     [Fact]
+    public async Task CaptureView_IsBusyWhileAScriptRuns_AndUnknownWithoutACaptureService()
+    {
+        // Without a capture service the method is unknown (a bridge build without it answers legibly).
+        var h = new Harness();
+        Assert.Equal("unknown-method", Code(await h.Call("capture_view", new { target = "active" })));
+        // With one, a queued run makes it busy.
+        var deferred = new DeferredLauncher();
+        var runner = new RoslynScriptRunner(); runner.WarmupCompile();
+        var d = new RequestDispatcher(h.Manager, new UndoRunExecutor(runner, h.Host), deferred, h.Logs.Add, () => h.Now, _ => Task.CompletedTask,
+            capture: new Core.Capture.ViewCaptureService(new NoViewports()), onMainThread: f => f());
+        var first = await d.DispatchAsync(JsonRpcRequest.Parse("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"execute_script\",\"params\":{\"execution_id\":\"a\",\"language\":\"csharp\",\"script\":\"return 1;\",\"timeout_ms\":0}}"), CancellationToken.None);
+        Assert.Contains("\"status\":\"pending\"", first);
+        var cap = await d.DispatchAsync(JsonRpcRequest.Parse("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"capture_view\",\"params\":{\"target\":\"active\"}}"), CancellationToken.None);
+        Assert.Contains("\"status\":\"busy\"", cap);
+        deferred.RunAll();
+        // Idle again: the fake has no viewports, so the request reaches the service and gets its record.
+        var cap2 = await d.DispatchAsync(JsonRpcRequest.Parse("{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"capture_view\",\"params\":{\"target\":\"active\"}}"), CancellationToken.None);
+        Assert.Contains("no-viewports", cap2);
+    }
+
+    private sealed class NoViewports : Core.Capture.IViewCapture
+    {
+        public IReadOnlyList<string> ViewportNames(object document) => Array.Empty<string>();
+        public (int Width, int Height) ViewportSize(object document, string viewport) => (1, 1);
+        public IReadOnlyList<string> DisplayModeNames() => Array.Empty<string>();
+        public (byte[] Png, string? RestoreFailure) Capture(object document, string viewport, int width, int height, string? displayMode, string zoom, bool transparent, bool grid, bool axes) => (Array.Empty<byte>(), null);
+    }
+
+    [Fact]
     public async Task UnknownExecutionId_OnPollAndCancel()
     {
         var h = new Harness();

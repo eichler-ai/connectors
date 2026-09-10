@@ -15,7 +15,6 @@ package harness_test
 import (
 	"encoding/json"
 	"flag"
-	"fmt"
 	"os"
 	"os/exec"
 	"runtime"
@@ -206,32 +205,24 @@ func TestDocumentEventsRefreshTheRegistry(t *testing.T) {
 	// A new document opened in Rhino appears in list_instances without a reconnect (PRD §05 live
 	// snapshot). Drives Rhino through the rhinocode CLI (spikes §6), macOS only for now.
 	if runtime.GOOS != "darwin" {
-		t.Skip("uses the macOS rhinocode CLI")
+		t.Skip("Windows Rhino holds one document per instance (PRD §05); a second document is a second instance there")
 	}
-	rc := "/Applications/Rhino 8.app/Contents/Resources/bin/rhinocode"
-	if _, err := os.Stat(rc); err != nil {
-		t.Skip("rhinocode CLI not found")
-	}
+	rc := ""
 	c := startServer(t)
 	before := waitForInstance(t, c)
 
-	// Open a second document via a script: New on the Mac creates another window/document.
-	script := fmt.Sprintf("#! python 3\nimport Rhino\nRhino.RhinoDoc.Create(None)\n")
-	path := fmt.Sprintf("%s/harness-new-doc-%d.py", t.TempDir(), time.Now().UnixNano())
-	if err := os.WriteFile(path, []byte(script), 0o600); err != nil {
-		t.Fatal(err)
+	// Open a second document through the connector itself (RhinoDoc.Create is lifecycle-gated, so
+	// the flag is passed): on the Mac that is another window/document in the same instance. No
+	// rhinocode Python here -- two CPython crashes traced to CLI-driven scripts (caveats.md).
+	_ = rc
+	created := csharp(t, c, before, `var d = Rhino.RhinoDoc.Create(null); return d == null ? "null" : d.RuntimeSerialNumber.ToString();`, map[string]any{"confirm_lifecycle_actions": true})
+	if created.Status != "success" || created.ReturnValue == "null" {
+		t.Fatalf("RhinoDoc.Create through the connector: %+v (error %+v)", created, created.Error)
 	}
-	if out, err := exec.Command(rc, "script", path).CombinedOutput(); err != nil {
-		t.Fatalf("rhinocode script: %v\n%s", err, out)
-	}
-	t.Cleanup(func() {
-		// Close the document we created: the newest untitled one. Best effort.
-		closeScript := "#! python 3\nimport Rhino\ndocs = list(Rhino.RhinoDoc.OpenDocuments())\nif len(docs) > 1:\n    d = docs[-1]\n    d.Modified = False\n    Rhino.RhinoApp.InvokeOnUiThread(lambda: None)\n"
-		p := path + ".close.py"
-		os.WriteFile(p, []byte(closeScript), 0o600)
-		exec.Command(rc, "script", p).Run()
-	})
-
+	// Not cleaned up: RhinoDoc has no Close member, a nested _Close inside our run command is
+	// refused, and on the Mac the created document is a tab in the merged window that neither the
+	// CLI's _-Close nor Cmd+W closed in testing. Each run leaves one more untitled tab; the deploy
+	// script's restart clears them. Revisit with the undo/close tooling in PR 5.
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		now := waitForInstance(t, c)

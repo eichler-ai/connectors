@@ -77,6 +77,26 @@ prompts for OBJ options. Escape in Rhino's window ends it (`osascript … key co
 non-interactive form (`Write3dmFile` with `FileWriteOptions.SuppressDialogBoxes`), and add the
 member to the PRD §08 notes.
 
+## Symptom: Rhino crashed (SIGABRT) during a harness run
+
+Twice on 2026-09-10, same signature in `~/Library/Logs/DiagnosticReports/Rhinoceros-*.ips`: main
+thread, `libpython3.9 … _Py_FatalError_TstateNULL ← PyEval_RestoreThread`, under a Python script
+frame -- Rhino's embedded CPython aborting on a null thread state. Both times the harness was driving
+Rhino with `rhinocode script <file.py>` (Python) interleaved with the connector's own main-thread
+runs. The mechanism is not pinned down; the correlation was enough to remove every `rhinocode
+script` call from the harness (the document-creation case now uses `execute_script` with the
+lifecycle flag, and the history read is gone). Two full runs afterwards: no crash. If it recurs
+without Python in play, that is new information -- capture the `.ips` and the RhinoCode log
+(`~/.rhinocode/logs/rhinocode_<pid>`). Relevant to PR 4 (the Python host): the bridge will drive
+CPython itself, on the main thread, and must never touch it from another thread.
+
+## Symptom: `RhinoDoc.Create(null)` documents pile up and nothing closes them
+
+On the Mac each `Create` is a tab in the merged document window. `RhinoDoc` has no `Close`
+member; a nested `_Close` inside our run command is refused; `rhinocode command _-Close` and Cmd+W
+did not remove them in testing. The deploy script's restart clears them. A close tool is a PR 5
+question.
+
 ## Symptom: a Python script ran on the wrong thread and touched the document
 
 `RhinoCode.RunScript` **does not marshal**: called from a background thread it runs there. Only the

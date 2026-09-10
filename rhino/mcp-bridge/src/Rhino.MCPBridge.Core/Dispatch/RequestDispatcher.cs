@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Rhino.MCPBridge.Core.Capture;
 using Rhino.MCPBridge.Core.Diagnostics;
 using Rhino.MCPBridge.Core.Execution;
 using Rhino.MCPBridge.Core.Protocol;
@@ -26,18 +27,26 @@ internal sealed class RequestDispatcher
     private readonly ExecutionManager _executionManager;
     private readonly UndoRunExecutor _executor;
     private readonly IRunLauncher _launcher;
+    private readonly ViewCaptureService? _capture;
+    private readonly Func<Func<object>, object>? _onMainThread;
     private readonly Func<DateTimeOffset> _now;
     private readonly Func<TimeSpan, Task> _delay;
     private readonly Action<string> _log;
 
-    public static readonly string[] SupportedMethods = { "execute_script", "poll_execution", "cancel_execution" };
+    public static readonly string[] SupportedMethods = { "execute_script", "poll_execution", "cancel_execution", "capture_view" };
 
+    /// <param name="capture">capture_view's policy; null disables the method (unknown-method).</param>
+    /// <param name="onMainThread">Runs a function on the main thread and waits, bounded (the adapter's
+    /// IMainThread); capture needs the main thread but no command, since it changes nothing.</param>
     public RequestDispatcher(ExecutionManager executionManager, UndoRunExecutor executor, IRunLauncher launcher, Action<string> log,
-        Func<DateTimeOffset>? now = null, Func<TimeSpan, Task>? delay = null)
+        Func<DateTimeOffset>? now = null, Func<TimeSpan, Task>? delay = null,
+        ViewCaptureService? capture = null, Func<Func<object>, object>? onMainThread = null)
     {
         _executionManager = executionManager;
         _executor = executor;
         _launcher = launcher;
+        _capture = capture;
+        _onMainThread = onMainThread;
         _log = log;
         _now = now ?? (() => DateTimeOffset.UtcNow);
         _delay = delay ?? Task.Delay;
@@ -48,8 +57,74 @@ internal sealed class RequestDispatcher
         "execute_script" => HandleExecuteScriptAsync(request),
         "poll_execution" => HandlePollExecutionAsync(request),
         "cancel_execution" => Task.FromResult(HandleCancelExecution(request)),
+        "capture_view" when _capture is not null && _onMainThread is not null => Task.FromResult(HandleCaptureView(request)),
         _ => Task.FromResult(UnknownMethod(request)),
     };
+
+    /// <summary>capture_view (PRD §11): serialised with scripts by refusing while one runs (`busy`),
+    /// then executed on the main thread with the adapter's bounded wait. Changes nothing in the
+    /// document, so it needs no command and no undo entry. The PNGs ride the wire base64-encoded.</summary>
+    private string HandleCaptureView(JsonRpcRequest request)
+    {
+        CaptureRequest req;
+        string documentId;
+        try
+        {
+            documentId = request.GetOptionalString("document_id") ?? "";
+            req = new CaptureRequest
+            {
+                Target = request.GetOptionalString("target") ?? "active",
+                DisplayMode = request.GetOptionalString("display_mode"),
+                Zoom = request.GetOptionalString("zoom") ?? "none",
+                Width = request.GetOptionalInt32("width", 0),
+                Height = request.GetOptionalInt32("height", 0),
+                TransparentBackground = request.GetOptionalBool("transparent_background", false),
+                DrawGrid = request.GetOptionalBool("draw_grid", true),
+                DrawAxes = request.GetOptionalBool("draw_axes", true),
+            };
+        }
+        catch (JsonRpcParamException ex)
+        {
+            return JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InvalidParams, ex.Message, ex.Diagnostic);
+        }
+
+        if (_executionManager.ActiveExecutionId is { } active)
+        {
+            return ExecutionResultMessage.Busy(request.Id, active);
+        }
+
+        try
+        {
+            var result = (ViewCaptureService.Result)_onMainThread!(() =>
+            {
+                var document = _executor.Host.ResolveDocument(documentId);
+                if (document is null)
+                {
+                    throw new DocumentNotFoundException(DiagnosticRecord.Create(DiagnosticSeverity.Error, "document-not-found", DiagnosticSource.Execution,
+                        documentId.Length == 0 ? "this Rhino instance has no active document" : $"no open document has document_id '{documentId}'",
+                        new Dictionary<string, object?> { ["requested_document_id"] = documentId }, new[] { "call list_instances and pick a document_id" }));
+                }
+
+                return _capture!.Capture(document.Raw!, req);
+            });
+            return CaptureResultMessage.ToJson(request.Id, result);
+        }
+        catch (CaptureRequestException ex)
+        {
+            return JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InvalidParams, ex.Message, ex.Record);
+        }
+        catch (DocumentNotFoundException ex)
+        {
+            return JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InvalidParams, ex.Message, ex.Record);
+        }
+        catch (Exception ex)
+        {
+            var rec = DiagnosticRecord.Create(DiagnosticSeverity.Error, "capture-failed", DiagnosticSource.Execution,
+                $"capture_view failed: {ex.GetType().Name}: {ex.Message}", null,
+                new[] { "if Rhino's main thread is inside a modal or a long command, wait and retry; otherwise the viewport may not be capturable in this display mode" });
+            return JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InternalError, rec.Message, rec);
+        }
+    }
 
     /// <summary>The periodic sweep the host drives: max_duration auto-cancel and cancellation grace expiry (PRD §06).</summary>
     public void Tick()

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -162,9 +161,7 @@ throw new System.InvalidOperationException("harness boom");`, tag), nil)
 
 func TestOneRunIsOneUndoEntry_NamedByTheLabel(t *testing.T) {
 	// PRD §07 / §17.10: does an inner undo record name the entry? Read Rhino's command history.
-	if runtime.GOOS != "darwin" {
-		t.Skip("reads the history via rhinocode")
-	}
+	t.Skip("answered §17.10 (the entry is always MCPBridgeRun) while it ran against a single document; the CLI's _Undo acts on whichever document is active, so with several open it is not a valid oracle. Re-enable through the undo tool (PR 5), routed by document_id.")
 	c := startServer(t)
 	inst := waitForInstance(t, c)
 	tag := fmt.Sprintf("h3-%d", time.Now().UnixNano()%100000)
@@ -186,20 +183,9 @@ return 3;`, tag), map[string]any{"label": "three points " + tag})
 			t.Fatalf("one _Undo should revert the whole run; %s-%d survived", tag, i)
 		}
 	}
-	// And what did the history call the entry? Recorded in the log, not asserted: §17.10's question.
-	histPath := t.TempDir() + "/hist.txt"
-	histScript := fmt.Sprintf("#! python 3\nimport Rhino\nopen(%q, 'w').write(Rhino.RhinoApp.CommandHistoryWindowText[-1500:])\n", histPath)
-	p := t.TempDir() + "/hist.py"
-	os.WriteFile(p, []byte(histScript), 0o600)
-	exec.Command(rc, "script", p).Run()
-	time.Sleep(time.Second)
-	if hist, err := os.ReadFile(histPath); err == nil {
-		lines := strings.Split(strings.TrimSpace(string(hist)), "\n")
-		if len(lines) > 6 {
-			lines = lines[len(lines)-6:]
-		}
-		t.Logf("command history tail:\n%s", strings.Join(lines, "\n"))
-	}
+	// The entry's name was read from the history once (§17.10, closed: always "MCPBridgeRun"); the
+	// Python read that did it is gone from the harness after two CPython crashes with rhinocode
+	// scripts in play (caveats.md "Rhino crashed").
 	// Redo so the objects come back for later cases' object-count sanity (best effort).
 	exec.Command(rc, "command", "_Redo").Run()
 }
