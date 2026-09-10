@@ -64,8 +64,10 @@
        Revit assembly, so this compiles with no Revit install (issue #39; see Directory.Build.props).
        This assembly names only Autodesk.Revit.DB types, so only the RevitAPI package is needed.
        ExcludeAssets="runtime" preserves the Private=false intent above. -->
+  <!-- PrivateAssets="all": keep this off the test projects' reference table. See MCPBridge.Core.csproj's
+       NuGet block for the full rationale (parity with the non-transitive real-Revit assembly reference). -->
   <ItemGroup Condition="'$(UseNuGetRevitApi)' == 'true'">
-    <PackageReference Include="Nice3point.Revit.Api.RevitAPI" Version="$(NiceRevitApiVersion)" ExcludeAssets="runtime" />
+    <PackageReference Include="Nice3point.Revit.Api.RevitAPI" Version="$(NiceRevitApiVersion)" ExcludeAssets="runtime" PrivateAssets="all" />
   </ItemGroup>
 
   <!--

@@ -58,9 +58,12 @@
        the real RevitAPI/RevitAPIUI are already loaded, so nothing here should ever be copied next to the
        add-in and risk shadowing Revit's own copies. These packages are never in a shipped build; the
        add-in is built on the VM against the installed assemblies. -->
+  <!-- PrivateAssets="all": keep these off the test projects' reference table (they consume RevitAdapter
+       via ProjectReference). See MCPBridge.Core.csproj's NuGet block for the full rationale — a
+       transitive PackageReference would otherwise give CI a different reference graph than the VM. -->
   <ItemGroup Condition="'$(UseNuGetRevitApi)' == 'true'">
-    <PackageReference Include="Nice3point.Revit.Api.RevitAPI" Version="$(NiceRevitApiVersion)" ExcludeAssets="runtime" />
-    <PackageReference Include="Nice3point.Revit.Api.RevitAPIUI" Version="$(NiceRevitApiVersion)" ExcludeAssets="runtime" />
+    <PackageReference Include="Nice3point.Revit.Api.RevitAPI" Version="$(NiceRevitApiVersion)" ExcludeAssets="runtime" PrivateAssets="all" />
+    <PackageReference Include="Nice3point.Revit.Api.RevitAPIUI" Version="$(NiceRevitApiVersion)" ExcludeAssets="runtime" PrivateAssets="all" />
   </ItemGroup>
 
   <!--
