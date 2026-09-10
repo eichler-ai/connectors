@@ -364,6 +364,28 @@ function Get-SurvivingPaths([string[]]$Paths) {
     @($Paths | Where-Object { $_ -and (Test-Path $_) })
 }
 
+function Remove-AppDirExceptSelf([string]$AppDir, [string]$SelfPath) {
+    # Uninstall removes everything under $AppDir EXCEPT the running uninstaller script ($SelfPath, the
+    # deployed install.ps1, which lives IN $AppDir). Removing the whole tree in one shot would delete the
+    # script mid-run, so the "close Revit / quit the client and re-run this uninstaller" recovery that
+    # Format-UninstallResult prints when a file is still locked would point at a path that no longer exists
+    # (issue #240): the intended two-step uninstall could never complete from the deployed copy. PowerShell
+    # doesn't lock a running .ps1, so it IS deletable mid-run -- which is exactly the trap. The caller drops
+    # the preserved script and the dir itself only once it knows the uninstall is complete.
+    #
+    # Returns the paths that survived removal OTHER than $SelfPath -- what a running Revit (a mapped
+    # addin\<v>\<year> folder), a client's still-running broker (mcp-server.exe), or a transient AV lock
+    # still holds -- so the caller can tell a clean pass from one that needs a re-run. Best-effort
+    # throughout: a locked child simply stays and is reported, never throwing out of uninstall.
+    if (-not (Test-Path $AppDir)) { return @() }
+    Get-ChildItem $AppDir -Force -ErrorAction SilentlyContinue |
+        Where-Object { $_.FullName -ne $SelfPath } |
+        ForEach-Object { Remove-Item $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
+    @(Get-ChildItem $AppDir -Force -ErrorAction SilentlyContinue |
+        Where-Object { $_.FullName -ne $SelfPath } |
+        ForEach-Object { $_.FullName })
+}
+
 function Format-UninstallResult([string[]]$LeftoverVersions, [int]$RunningServerCount, [string[]]$SurvivingPaths) {
     $parts = @()
     if ($LeftoverVersions.Count -gt 0) {
@@ -821,6 +843,20 @@ function Invoke-ClaudeMcp([string[]]$CliArgs) {
     }
 }
 
+function Unregister-McpServer {
+    # Uninstall-time deregistration, the twin of Register-McpServer: drop the broker entry from the Claude
+    # clients install registered it with -- Claude Code CLI at the same user scope, and Claude Desktop's
+    # config (Cowork reads the same file) -- leaving any other MCP servers there intact. Via Invoke-ClaudeMcp
+    # (never throws): a raw `& claude mcp remove` under this script's $ErrorActionPreference='Stop' can abort
+    # the whole uninstall when nothing is registered (stderr + non-zero exit, even with 2>$null) -- the #37
+    # residual. Invoke-ClaudeMcp already supplies the `mcp` subcommand root, so the args start at `remove`
+    # (matching Register-McpServer's own remove call). A function so install.tests.ps1 can pin that shape.
+    if (Get-Command claude -ErrorAction SilentlyContinue) {
+        Invoke-ClaudeMcp @('remove', 'revit', '--scope', 'user') | Out-Null
+    }
+    try { Remove-DesktopMcpServer (Get-DesktopConfigPath) 'revit' | Out-Null } catch { }
+}
+
 function Register-McpServer([string]$ServerExe, [switch]$OnlyIfMissing) {
     # Connect the broker (a local stdio MCP server, mcp-server.exe --mode local -- PRD §05) to this
     # user's Claude clients: Claude Code CLI, and Claude Desktop (which is also what Cowork reads).
@@ -968,9 +1004,13 @@ if ($Uninstall) {
     # they hold will survive the removals below. Counted BEFORE removing, while their .Path still
     # resolves cleanly; never stopped -- they belong to a live client session (Get-BrokerProcess).
     $runningServers = @(Get-BrokerProcess $appDir)
-    # Takes the whole addin\<version>\<year>\ tree and current.json with it. A running Revit's mapped
-    # version folder survives (silently) and is reported via $leftoverVersions' shim signal above.
-    Remove-Item $appDir -Recurse -Force -ErrorAction SilentlyContinue
+    # Takes the whole addin\<version>\<year>\ tree, the server exe, the markers and current.json with it --
+    # but NOT the deployed install.ps1 ($selfCopyPath) yet: it is the script the summary tells the user to
+    # re-run, and deleting it here is what broke that recovery (#240). A running Revit's mapped version
+    # folder and a client's running server exe survive (silently) and are reported below; install.ps1 is
+    # preserved deliberately and does NOT count as a survivor. The final self-delete happens only on a
+    # complete pass, further down.
+    $appDirSurvivors = Remove-AppDirExceptSelf $appDir $selfCopyPath
     # The broker keeps its private app-data root at %LOCALAPPDATA%\Connectors\Revit -- what
     # singleton.AppDataDir() resolves on Windows: the materialized search+how-to ranking models
     # (~24MB, a copy of bytes embedded in the exe being removed), the local how-to corpus, the
@@ -997,16 +1037,29 @@ if ($Uninstall) {
     # What was meant to go but is still here (#215). The data root counts only when this run tried to
     # remove all of it; with a Revit leftover it is deliberately kept for the broker that Revit may
     # still be talking to, and the Revit sentence already covers the re-run.
-    $removedRoots = @($appDir)
+    # $appDir counts as surviving only if something OTHER than the deliberately-preserved install.ps1 is
+    # still under it (a Revit-mapped version folder, a running server exe, an AV lock) -- keeping the
+    # re-run script is not a leftover to report.
+    $removedRoots = @()
+    if ($appDirSurvivors.Count -gt 0) { $removedRoots += $appDir }
     if ($leftoverVersions.Count -eq 0) { $removedRoots += $dataRoot }
     $survivingPaths = Get-SurvivingPaths $removedRoots
-    Remove-Item $uninstallKeyPath -Recurse -Force -ErrorAction SilentlyContinue
-    # Deregister from the Claude clients install registered it with -- CLI at the same user scope, and
-    # Claude Desktop's config (Cowork reads the same file), leaving any other MCP servers there intact.
-    if (Get-Command claude -ErrorAction SilentlyContinue) {
-        & claude mcp remove revit --scope user 2>$null | Out-Null
+    # Deregister the broker from the Claude clients (Claude Code CLI + Claude Desktop config, leaving other
+    # MCP servers intact). Unconditional -- the server is going regardless, so a dangling entry pointing at
+    # a deleted exe must not be left behind. See Unregister-McpServer for the $ErrorActionPreference='Stop'
+    # hazard it neutralizes (issue #37 residual).
+    Unregister-McpServer
+    # #240: the uninstall is complete when nothing is left holding on -- no Revit-locked shim
+    # ($leftoverVersions), no client-held server ($runningServers), and nothing under $appDir but the
+    # preserved script ($survivingPaths). Only then drop the preserved re-run script, the now-empty app
+    # dir, AND the Add/Remove Programs entry. On an INCOMPLETE pass all three stay, so the user can still
+    # re-run the uninstaller -- including from Apps & Features, whose UninstallString points at the
+    # preserved install.ps1.
+    $uninstallComplete = ($leftoverVersions.Count -eq 0) -and ($runningServers.Count -eq 0) -and ($survivingPaths.Count -eq 0)
+    if ($uninstallComplete) {
+        Remove-Item $appDir -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item $uninstallKeyPath -Recurse -Force -ErrorAction SilentlyContinue
     }
-    try { Remove-DesktopMcpServer (Get-DesktopConfigPath) 'revit' | Out-Null } catch { }
     # One honest line: clean, or exactly which holder (Revit, a client's server, or nothing nameable)
     # kept which paths, and that a re-run finishes it -- a second run with the holders gone finds no
     # server, removes what is left, and reports clean.
