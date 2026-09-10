@@ -28,10 +28,22 @@ const PruneAfterSilence = 5 * time.Minute
 
 // Document is one open Rhino document as `register` reports it.
 type Document struct {
-	ID     string `json:"document_id"`
-	Title  string `json:"title"`
-	Path   string `json:"path"`
-	Active bool   `json:"active"`
+	ID      string   `json:"document_id"`
+	Title   string   `json:"title"`
+	Path    string   `json:"path"`
+	Active  bool     `json:"active"`
+	LastRun *LastRun `json:"last_run,omitempty"`
+}
+
+// LastRun is the connector's last completed run on a document (PRD §05 "observability only"):
+// the plug-in records it and reports it in register and on every execution result.
+type LastRun struct {
+	ExecutionID     string `json:"execution_id"`
+	AgentClientID   string `json:"agent_client_id"`
+	FinishedAt      string `json:"finished_at"`
+	Status          string `json:"status"`
+	Label           string `json:"label,omitempty"`
+	ChangedDocument bool   `json:"changed_document"`
 }
 
 // MemorySample rides on the ping (same shape as the Revit connector's).
@@ -51,6 +63,9 @@ type Instance struct {
 	Documents      []Document    `json:"documents"`
 	ConnectedSince time.Time     `json:"connected_since"`
 	Memory         *MemorySample `json:"memory,omitempty"`
+	// ExecutionState is what the plug-in last reported (register and every ping): idle, busy or
+	// unrecoverable (PRD §05: busy state lives in the plug-in). "" from an older bridge reads idle.
+	ExecutionState string `json:"execution_state,omitempty"`
 }
 
 // Registry is safe for concurrent use.
@@ -128,6 +143,11 @@ func (r *Registry) RemoveIfEpoch(instanceID string, epoch uint64) bool {
 
 // RecordPing notes a heartbeat; a nil sample keeps the previous one.
 func (r *Registry) RecordPing(instanceID string, epoch uint64, now time.Time, mem *MemorySample) {
+	r.RecordPingState(instanceID, epoch, now, mem, "")
+}
+
+// RecordPingState is RecordPing with the plug-in's execution_state; "" leaves the state as it was.
+func (r *Registry) RecordPingState(instanceID string, epoch uint64, now time.Time, mem *MemorySample, state string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	inst, ok := r.instances[instanceID]
@@ -138,6 +158,9 @@ func (r *Registry) RecordPing(instanceID string, epoch uint64, now time.Time, me
 	if mem != nil {
 		m := *mem
 		inst.Memory = &m
+	}
+	if state != "" {
+		inst.ExecutionState = state
 	}
 }
 

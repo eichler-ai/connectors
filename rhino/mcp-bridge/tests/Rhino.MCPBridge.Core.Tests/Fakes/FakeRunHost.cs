@@ -38,6 +38,16 @@ internal sealed class FakeRunHost : IRunHost
     public bool UndoLast(RunDocument document) { UndoCalls++; return UndoSucceeds; }
 
     public bool LastCommandWasOurs() => LastWasOurs;
+    public int RedoCalls { get; private set; }
+    public bool RedoSucceeds { get; set; } = true;
+    /// <summary>What LastCommand() reports (named in the undo tool's refusal).</summary>
+    public (Guid Id, string Name) Last { get; set; } = (Guid.NewGuid(), "Line");
+    public bool RedoLast(RunDocument document) { RedoCalls++; return RedoSucceeds; }
+    public (Guid Id, string Name) LastCommand() => Last;
+
+    /// <summary>The global monitor's callback, so a test can report a "person's" change.</summary>
+    public Action<string>? Monitor { get; private set; }
+    public IDisposable MonitorChanges(Action<string> onChange) { Monitor = onChange; return new Unsub(() => Monitor = null); }
 
     public IDisposable SubscribeChanges(RunDocument document, Action<DocumentChange> onChange, Action onAnyChange)
     {

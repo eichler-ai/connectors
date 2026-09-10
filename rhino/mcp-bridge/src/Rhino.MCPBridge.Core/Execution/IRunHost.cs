@@ -26,10 +26,22 @@ internal interface IRunHost
     /// (spikes §3: a mid-command undo destroys the entry). Returns false when nothing was undone.</summary>
     bool UndoLast(RunDocument document);
 
+    /// <summary>Issues Rhino's _Redo on <paramref name="document"/>. Returns false when nothing was redone.</summary>
+    bool RedoLast(RunDocument document);
+
+    /// <summary>The command Rhino ran most recently: its id (Command.LastCommandId) and English name.
+    /// The undo tool compares the id with the bridge's run command and with its own last undo/redo to
+    /// decide whether the top of the stack is the connector's work (PRD §07).</summary>
+    (Guid Id, string Name) LastCommand();
+
     /// <summary>Whether the command Rhino ran most recently is the bridge's own run command
     /// (Command.LastCommandId, exact and order-free -- review of #282). The executor checks it before
     /// undoing, so a person's action landing between the run and the rollback is never reverted.</summary>
     bool LastCommandWasOurs();
+
+    /// <summary>Subscribes to EVERY document's change events for the life of the plug-in and reports
+    /// each with its document id, for the undo tool's gate (<see cref="ChangeClock"/>).</summary>
+    IDisposable MonitorChanges(Action<string> onChange);
 
     /// <summary>Subscribes to the document's events for the run's duration. <paramref name="onChange"/>
     /// receives the object events the mutation report nets; <paramref name="onAnyChange"/> fires for

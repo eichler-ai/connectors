@@ -111,3 +111,20 @@ func TestPruneStaleReturnsEpochsAndListOrders(t *testing.T) {
 		t.Fatal("List must return copies")
 	}
 }
+
+func TestExecutionStateComesFromRegisterAndPing_AndAnEmptyPingKeepsIt(t *testing.T) {
+	r := New()
+	now := time.Now()
+	e := r.Register(&Instance{InstanceID: "i", ExecutionState: "busy"}, 0, now)
+	if got, _ := r.Get("i"); got.ExecutionState != "busy" {
+		t.Fatalf("after register: %q", got.ExecutionState)
+	}
+	r.RecordPingState("i", e, now, nil, "")
+	if got, _ := r.Get("i"); got.ExecutionState != "busy" {
+		t.Fatalf("an empty state on a ping must not clear it: %q", got.ExecutionState)
+	}
+	r.RecordPingState("i", e, now, nil, "idle")
+	if got, _ := r.Get("i"); got.ExecutionState != "idle" {
+		t.Fatalf("after ping: %q", got.ExecutionState)
+	}
+}

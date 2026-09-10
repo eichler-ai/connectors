@@ -102,6 +102,7 @@ func run(appDataDir string, logger *log.Logger) error {
 	router := execution.NewRouter(dial, serverID)
 	mcpserver.RegisterExecution(s, router)
 	mcpserver.RegisterCapture(s, router)
+	mcpserver.RegisterUndoRedo(s, router)
 
 	err := s.Run(ctx, &mcp.StdioTransport{})
 	if err != nil && ctx.Err() == nil {

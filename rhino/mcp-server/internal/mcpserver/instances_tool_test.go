@@ -58,7 +58,8 @@ func TestInstancesCarryEveryFieldAndStatus(t *testing.T) {
 	reg := registry.New()
 	now := time.Now()
 	e := reg.Register(&registry.Instance{InstanceID: "i1", PID: 7, RhinoVersion: "8.35", Platform: "macos", BridgeVersion: "dev",
-		Documents: []registry.Document{{ID: "doc-x", Title: "Tower", Path: "/t.3dm", Active: true}}}, 0, now)
+		Documents: []registry.Document{{ID: "doc-x", Title: "Tower", Path: "/t.3dm", Active: true,
+			LastRun: &registry.LastRun{ExecutionID: "exec-1", AgentClientID: "srvB", FinishedAt: "t", Status: "success", Label: "box", ChangedDocument: true}}}}, 0, now)
 	reg.RecordPing("i1", e, now, &registry.MemorySample{WorkingSetMB: 9})
 	reg.Register(&registry.Instance{InstanceID: "i2", PID: 8, RhinoVersion: "8.35", Platform: "windows"}, 0, now.Add(time.Second))
 
@@ -77,6 +78,9 @@ func TestInstancesCarryEveryFieldAndStatus(t *testing.T) {
 	}
 	if len(a.Documents) != 1 || a.Documents[0].DocumentID != "doc-x" || !a.Documents[0].Active || a.Documents[0].Path != "/t.3dm" {
 		t.Fatalf("docs = %+v", a.Documents)
+	}
+	if lr := a.Documents[0].LastRun; lr == nil || lr.ExecutionID != "exec-1" || lr.AgentClientID != "srvB" || lr.Label != "box" {
+		t.Fatalf("last_run = %+v (PRD §05)", a.Documents[0].LastRun)
 	}
 	if out.Instances[1].Status != "busy" || out.Instances[1].Documents == nil {
 		t.Fatalf("i2 = %+v", out.Instances[1])

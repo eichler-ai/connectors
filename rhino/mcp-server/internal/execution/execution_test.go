@@ -64,8 +64,41 @@ func TestExecuteScriptMintsANamespacedIdAndForwardsEveryParam(t *testing.T) {
 	if p["language"] != "csharp" || p["document_id"] != "doc-1" || p["confirm_lifecycle_actions"] != true || p["label"] != "lbl" || p["script"] != "return 42;" {
 		t.Fatalf("params = %v", p)
 	}
+	if p["agent_client_id"] != "srvA" {
+		t.Fatalf("agent_client_id = %v (PRD §05: the server names itself so last_run can be attributed)", p["agent_client_id"])
+	}
 	if p["timeout_ms"].(float64) != 1000 || p["max_duration_ms"].(float64) != 5000 {
 		t.Fatalf("timeouts = %v", p)
+	}
+}
+
+func TestUndoRedoForwardsDirectionConfirmAndDocument_AndDecodesLastRun(t *testing.T) {
+	f := newFake(t, func(method string, p map[string]any) (any, *transport.RPCError) {
+		if method == "poll_execution" {
+			return map[string]any{"status": "success", "execution_id": p["execution_id"]}, nil
+		}
+		if method != "undo_redo" {
+			t.Errorf("method = %s", method)
+		}
+		return map[string]any{"status": "success", "execution_id": p["execution_id"],
+			"notices":  []map[string]any{{"code": "undo-reverted-connector-work", "severity": "info", "message": "m", "source": "s"}},
+			"last_run": map[string]any{"execution_id": "exec-old", "agent_client_id": "srvB", "finished_at": "t", "status": "success", "changed_document": true}}, nil
+	})
+	r := NewRouter(f, "srvA")
+	res, drec := r.UndoRedo(context.Background(), "inst", "redo", true, 5000, "doc-1")
+	if drec != nil {
+		t.Fatal(drec.Message)
+	}
+	p := f.last.params
+	if p["direction"] != "redo" || p["confirm"] != true || p["document_id"] != "doc-1" || p["timeout_ms"].(float64) != 5000 || !strings.HasPrefix(p["execution_id"].(string), "exec-srvA-") {
+		t.Fatalf("params = %v", p)
+	}
+	if res.Status != "success" || len(res.Notices) != 1 || res.LastRun == nil || res.LastRun.AgentClientID != "srvB" || !res.LastRun.ChangedDocument {
+		t.Fatalf("res = %+v", res)
+	}
+	// The minted id is remembered, so a poll for it routes without asking every instance.
+	if _, drec := r.PollExecution(context.Background(), res.ExecutionID, 0); drec != nil {
+		t.Fatal(drec.Message)
 	}
 }
 

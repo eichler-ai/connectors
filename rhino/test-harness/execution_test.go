@@ -22,6 +22,16 @@ type executionOut struct {
 	Notices     []notice        `json:"notices"`
 	Mutations   json.RawMessage `json:"mutations"`
 	Error       *notice         `json:"error"`
+	LastRun     *lastRun        `json:"last_run"`
+}
+
+type lastRun struct {
+	ExecutionID     string `json:"execution_id"`
+	AgentClientID   string `json:"agent_client_id"`
+	FinishedAt      string `json:"finished_at"`
+	Status          string `json:"status"`
+	Label           string `json:"label"`
+	ChangedDocument bool   `json:"changed_document"`
 }
 
 type notice struct {
@@ -168,9 +178,9 @@ throw new System.InvalidOperationException("harness boom");`, tag), nil)
 	}
 }
 
-func TestOneRunIsOneUndoEntry_NamedByTheLabel(t *testing.T) {
-	// PRD §07 / §17.10: does an inner undo record name the entry? Read Rhino's command history.
-	t.Skip("answered §17.10 (the entry is always MCPBridgeRun) while it ran against a single document; the CLI's _Undo acts on whichever document is active, so with several open it is not a valid oracle. Re-enable through the undo tool (PR 5), routed by document_id.")
+func TestOneRunIsOneUndoEntry_UndoneAndRedoneByTheTools(t *testing.T) {
+	// PRD §07: one run is one undo entry; the undo tool reverts exactly it without confirm (the
+	// plug-in sees its own command on top), names the run, and redo restores it.
 	c := startServer(t)
 	inst := waitForInstance(t, c)
 	tag := fmt.Sprintf("h3-%d", time.Now().UnixNano()%100000)
@@ -180,23 +190,126 @@ return 3;`, tag), map[string]any{"label": "three points " + tag})
 	if out.Status != "success" {
 		t.Fatalf("%+v", out)
 	}
-	// Undo once through Rhino itself (not our tool: that is PR 5) and see whether all three go together.
-	rc := "/Applications/Rhino 8.app/Contents/Resources/bin/rhinocode"
-	if err := exec.Command(rc, "command", "_Undo").Run(); err != nil {
-		t.Fatalf("rhinocode: %v", err)
+	undo := undoRedo(t, c, "undo", map[string]any{"instance_id": inst.InstanceID})
+	if undo.Status != "success" {
+		t.Fatalf("undo: %+v (error %+v)", undo, undo.Error)
 	}
-	time.Sleep(1500 * time.Millisecond)
+	if len(undo.Notices) != 1 || undo.Notices[0].Code != "undo-reverted-connector-work" || !strings.Contains(undo.Notices[0].Message, out.ExecutionID) || !strings.Contains(undo.Notices[0].Message, "three points") {
+		t.Fatalf("undo notices: %+v", undo.Notices)
+	}
+	var m struct {
+		NetDeleted int `json:"net_deleted"`
+	}
+	json.Unmarshal(undo.Mutations, &m)
+	if m.NetDeleted != 3 {
+		t.Fatalf("undo mutations = %s", undo.Mutations)
+	}
 	names := objectNames(t, c, inst)
 	for i := 0; i < 3; i++ {
 		if has(names, fmt.Sprintf("%s-%d", tag, i)) {
-			t.Fatalf("one _Undo should revert the whole run; %s-%d survived", tag, i)
+			t.Fatalf("one undo should revert the whole run; %s-%d survived", tag, i)
 		}
 	}
-	// The entry's name was read from the history once (§17.10, closed: always "MCPBridgeRun"); the
-	// Python read that did it is gone from the harness after two CPython crashes with rhinocode
-	// scripts in play (caveats.md "Rhino crashed").
-	// Redo so the objects come back for later cases' object-count sanity (best effort).
-	exec.Command(rc, "command", "_Redo").Run()
+	// objectNames ran a script (a read-only run leaves no undo entry, so the redo stack is intact).
+	redo := undoRedo(t, c, "redo", map[string]any{"instance_id": inst.InstanceID})
+	if redo.Status != "success" {
+		t.Fatalf("redo: %+v (error %+v)", redo, redo.Error)
+	}
+	names = objectNames(t, c, inst)
+	for i := 0; i < 3; i++ {
+		if !has(names, fmt.Sprintf("%s-%d", tag, i)) {
+			t.Fatalf("redo should restore the run; %s-%d missing", tag, i)
+		}
+	}
+}
+
+func TestUndoAfterSomeoneElsesCommand_NeedsConfirm(t *testing.T) {
+	// A person's change on top of the stack: the tool refuses without confirm, naming the last
+	// command, and acts with confirm under a warning. The "person" is a Rhino command run from
+	// outside the connector (rhinocode's command relay -- not a Python script, which is the shape
+	// that crashed CPython; caveats.md). A change made INSIDE one of our runs, even through a nested
+	// RunScript, is the connector's own and would not stage this.
+	c := startServer(t)
+	inst := waitForInstance(t, c)
+	tag := fmt.Sprintf("h7-%d", time.Now().UnixNano()%100000)
+	out := csharp(t, c, inst, fmt.Sprintf(`Document.Objects.AddPoint(Rhino.Geometry.Point3d.Origin, new Rhino.DocObjects.ObjectAttributes { Name = "%s" }); return 1;`, tag), nil)
+	if out.Status != "success" {
+		t.Fatalf("%+v", out)
+	}
+	rc := "/Applications/Rhino 8.app/Contents/Resources/bin/rhinocode"
+	if _, err := os.Stat(rc); err != nil {
+		t.Skip("no rhinocode CLI on this machine to stage a foreign command")
+	}
+	if outb, err := exec.Command(rc, "command", "_Point 5,5,0").CombinedOutput(); err != nil {
+		t.Fatalf("rhinocode: %v\n%s", err, outb)
+	}
+	time.Sleep(1500 * time.Millisecond)
+	refused := undoRedo(t, c, "undo", map[string]any{"instance_id": inst.InstanceID})
+	if refused.Status == "success" {
+		t.Fatalf("an undo after a foreign change must need confirm: %+v", refused)
+	}
+	if refused.Error == nil || refused.Error.Code != "undo-confirmation-required" {
+		t.Fatalf("refused: %+v", refused)
+	}
+	t.Logf("refusal: %s", refused.Error.Message)
+	forced := undoRedo(t, c, "undo", map[string]any{"instance_id": inst.InstanceID, "confirm": true})
+	if forced.Status != "success" || len(forced.Notices) != 1 || forced.Notices[0].Code != "undo-reverted-other-work" {
+		t.Fatalf("forced: %+v (error %+v)", forced, forced.Error)
+	}
+	// The person's point is gone; ours (below it) is still there.
+	if !has(objectNames(t, c, inst), tag) {
+		t.Fatal("the confirmed undo reverted more than the top entry")
+	}
+}
+
+func TestLastRun_IsReportedPerDocument_AndOnTheNextResult(t *testing.T) {
+	c := startServer(t)
+	inst := waitForInstance(t, c)
+	first := csharp(t, c, inst, `Document.Objects.AddPoint(new Rhino.Geometry.Point3d(9, 9, 9)); return 1;`, map[string]any{"label": "last-run probe"})
+	if first.Status != "success" {
+		t.Fatalf("%+v", first)
+	}
+	// list_instances: the active document carries last_run for this execution.
+	var found bool
+	for _, i := range listInstances(t, c).Instances {
+		if i.InstanceID != inst.InstanceID {
+			continue
+		}
+		for _, d := range i.Documents {
+			if d.LastRun != nil && d.LastRun.ExecutionID == first.ExecutionID {
+				found = true
+				if d.LastRun.Label != "last-run probe" || !d.LastRun.ChangedDocument || d.LastRun.AgentClientID == "" {
+					t.Fatalf("last_run = %+v", d.LastRun)
+				}
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("no document carries last_run %s", first.ExecutionID)
+	}
+	second := csharp(t, c, inst, `return 2;`, nil)
+	if second.LastRun == nil || second.LastRun.ExecutionID != first.ExecutionID {
+		t.Fatalf("the second result should carry the first run as last_run: %+v", second.LastRun)
+	}
+}
+
+func undoRedo(t *testing.T, c *mcpclient.Client, direction string, args map[string]any) executionOut {
+	t.Helper()
+	raw, err := c.CallTool(direction, args, 30*time.Second)
+	if err != nil {
+		t.Fatalf("%s: %v", direction, err)
+	}
+	var tr toolResult
+	json.Unmarshal(raw, &tr)
+	var out executionOut
+	src := tr.StructuredContent
+	if len(src) == 0 && len(tr.Content) > 0 {
+		src = json.RawMessage(tr.Content[0].Text)
+	}
+	if err := json.Unmarshal(src, &out); err != nil {
+		t.Fatalf("decode %s: %v\n%s", direction, err, src)
+	}
+	return out
 }
 
 func TestInteractiveGetterIsRefused(t *testing.T) {

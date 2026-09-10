@@ -21,6 +21,8 @@ type DocumentOut struct {
 	Title      string `json:"title"`
 	Path       string `json:"path,omitempty"`
 	Active     bool   `json:"active"`
+	// LastRun is the connector's last completed run on this document, from any server (PRD §05).
+	LastRun *registry.LastRun `json:"last_run,omitempty"`
 }
 
 // InstanceOut is one connected Rhino (PRD §05 "Instance discovery").
@@ -62,6 +64,9 @@ func RegisterInstances(s *mcp.Server, reg *registry.Registry, execStatus StatusF
 		var out ListInstancesOut
 		for _, inst := range reg.List() {
 			status := "idle"
+			if inst.ExecutionState != "" {
+				status = inst.ExecutionState // the plug-in owns busy state (PRD §05)
+			}
 			if execStatus != nil {
 				status = execStatus(inst.InstanceID)
 			}
@@ -70,7 +75,7 @@ func RegisterInstances(s *mcp.Server, reg *registry.Registry, execStatus StatusF
 			}
 			docs := make([]DocumentOut, 0, len(inst.Documents))
 			for _, d := range inst.Documents {
-				docs = append(docs, DocumentOut{DocumentID: d.ID, Title: d.Title, Path: d.Path, Active: d.Active})
+				docs = append(docs, DocumentOut{DocumentID: d.ID, Title: d.Title, Path: d.Path, Active: d.Active, LastRun: d.LastRun})
 			}
 			out.Instances = append(out.Instances, InstanceOut{
 				InstanceID: inst.InstanceID, RhinoVersion: inst.RhinoVersion, Platform: inst.Platform, BridgeVersion: inst.BridgeVersion,

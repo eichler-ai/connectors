@@ -16,9 +16,12 @@ public sealed class RegisterSnapshot
     public string Platform { get; }
     public string BridgeVersion { get; }
     public IReadOnlyList<RegisteredDocument> Documents { get; }
+    /// <summary>"idle" | "busy" | "unrecoverable" at the time the snapshot was built (PRD §05).</summary>
+    public string ExecutionState { get; }
 
-    public RegisterSnapshot(Guid instanceId, int pid, string rhinoVersion, string platform, string bridgeVersion, IReadOnlyList<RegisteredDocument> documents)
+    public RegisterSnapshot(Guid instanceId, int pid, string rhinoVersion, string platform, string bridgeVersion, IReadOnlyList<RegisteredDocument> documents, string executionState = "idle")
     {
+        ExecutionState = executionState;
         InstanceId = instanceId;
         Pid = pid;
         RhinoVersion = rhinoVersion;

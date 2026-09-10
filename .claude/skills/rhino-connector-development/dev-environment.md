@@ -104,7 +104,19 @@ cd rhino/test-harness && go test -tags harness ./... -v -broker-exe ../mcp-serve
 ```
 
 Skips (never fails) when no Rhino is connected; fails loudly on a locked screen. Cases that drive
-Rhino use `rhinocode` and are macOS-only until the Windows pass grows its own driver.
+Rhino use `rhinocode command` (never `rhinocode script`, see caveats) and are macOS-only until the
+Windows pass grows its own driver.
+
+One case is destructive and opt-in: `TestNonCooperatingScriptGoesUnrecoverable` wedges Rhino's main
+thread on purpose, checks the grace-period → `unrecoverable` path, then kills and relaunches Rhino
+through the restart helper. Run it alone, after the rest, and expect ~30 s plus a restart:
+
+```sh
+MCP_HARNESS_DESTRUCTIVE=1 go test -tags harness ./... -run Unrecoverable -v -broker-exe ../mcp-server/mcp-server-mac
+```
+
+Give a freshly relaunched Rhino ~10 s before the next run: a case that starts while the template
+chooser is still up fails with an error result instead of `running`.
 
 ### Quitting Rhino from a script
 

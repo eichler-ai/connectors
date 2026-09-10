@@ -31,6 +31,13 @@ public sealed class ScriptExecutionOutcome
     /// </summary>
     public MutationReport? Mutations { get; init; }
 
+    /// <summary>The document the run was routed to (set by the executor once resolved); "" when none was.</summary>
+    public string DocumentId { get; set; } = "";
+
+    /// <summary>Whether the run left the document changed (an undo entry exists): any document event
+    /// during a successful run, counted or not. Set by the executor.</summary>
+    public bool ChangedDocument { get; set; }
+
     public static ScriptExecutionOutcome Completed(object? returnValue, string stdOut, IReadOnlyList<DiagnosticRecord>? notices = null, IReadOnlyList<PublishedFileRecord>? files = null, MutationReport? mutations = null) =>
         new() { Success = true, ReturnValue = returnValue, StdOut = stdOut, Notices = notices ?? Array.Empty<DiagnosticRecord>(), Files = files ?? Array.Empty<PublishedFileRecord>(), Mutations = mutations };
 

@@ -31,10 +31,11 @@ var (
 )
 
 type document struct {
-	DocumentID string `json:"document_id"`
-	Title      string `json:"title"`
-	Path       string `json:"path"`
-	Active     bool   `json:"active"`
+	DocumentID string   `json:"document_id"`
+	Title      string   `json:"title"`
+	Path       string   `json:"path"`
+	Active     bool     `json:"active"`
+	LastRun    *lastRun `json:"last_run"`
 }
 
 type instance struct {

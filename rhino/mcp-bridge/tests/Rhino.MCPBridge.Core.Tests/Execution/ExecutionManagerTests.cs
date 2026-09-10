@@ -14,6 +14,27 @@ public class ExecutionManagerTests
     private static string NewId() => "exec-" + Guid.NewGuid();
 
     [Fact]
+    public void ExecutionState_FollowsTheRecord()
+    {
+        var manager = NewManager();
+        var now = DateTimeOffset.UtcNow;
+        Assert.Equal("idle", manager.ExecutionState);
+        var id = NewId();
+        manager.Start(id, "x", 600_000, now);
+        Assert.Equal("busy", manager.ExecutionState);
+        manager.MarkRunning(id, now);
+        Assert.Equal("busy", manager.ExecutionState);
+        manager.CompleteSuccess(id, now, null, null, Array.Empty<Rhino.MCPBridge.Core.Diagnostics.DiagnosticRecord>());
+        Assert.Equal("idle", manager.ExecutionState);
+        var id2 = NewId();
+        manager.Start(id2, "loop", 600_000, now);
+        manager.MarkRunning(id2, now);
+        manager.RequestCancellation(id2, now);
+        manager.CheckGraceExpiry(now.AddSeconds(6));
+        Assert.Equal("unrecoverable", manager.ExecutionState);
+    }
+
+    [Fact]
     public void Start_WhenIdle_ReturnsNewPendingExecution()
     {
         var manager = NewManager();
