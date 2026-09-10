@@ -17,9 +17,10 @@ internal static class DuplexPipeStream
 
     private sealed class PipeStream : Stream
     {
+        private readonly PipeReader _reader;
         private readonly Stream _read;
         private readonly Stream _write;
-        public PipeStream(PipeReader reader, PipeWriter writer) { _read = reader.AsStream(); _write = writer.AsStream(); }
+        public PipeStream(PipeReader reader, PipeWriter writer) { _reader = reader; _read = reader.AsStream(); _write = writer.AsStream(); }
         public override bool CanRead => true;
         public override bool CanSeek => false;
         public override bool CanWrite => true;
@@ -33,6 +34,8 @@ internal static class DuplexPipeStream
         public override void SetLength(long value) => throw new NotSupportedException();
         public override void Write(byte[] buffer, int offset, int count) => _write.Write(buffer, offset, count);
         public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken ct = default) => _write.WriteAsync(buffer, ct);
-        protected override void Dispose(bool disposing) { if (disposing) { _write.Dispose(); _read.Dispose(); } base.Dispose(disposing); }
+        // Like a socket: disposing ends a pending read on this side (a real NetworkStream throws from
+        // the read once the socket is closed; the pipe's stream would otherwise stay pending forever).
+        protected override void Dispose(bool disposing) { if (disposing) { _write.Dispose(); _reader.CancelPendingRead(); _read.Dispose(); } base.Dispose(disposing); }
     }
 }

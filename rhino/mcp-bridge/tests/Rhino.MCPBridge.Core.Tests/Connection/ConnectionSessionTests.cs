@@ -138,6 +138,35 @@ public sealed class ConnectionSessionTests
     }
 
     [Fact]
+    public async Task APeerThatStopsReading_IsTornDownByTheWriteTimeout_NotQueuedForever()
+    {
+        // review of #281: one wedged server must not stall the broadcast to the others or accumulate
+        // writes without bound. The pipe pair has a bounded buffer; fill it without reading.
+        var (pluginSide, serverSide) = DuplexPipeStream.CreatePair();
+        var env = new Env();
+        var session = new ConnectionSession(pluginSide, env);
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+        var run = session.RunAsync(cts.Token);
+        using var peer = new Peer(serverSide);
+        await peer.SendAsync(Auth()); await peer.ReadAsync(); await peer.ReadAsync();
+
+        var big = new string('x', 256 * 1024);
+        var payload = "{\"jsonrpc\":\"2.0\",\"method\":\"ping\",\"params\":{\"pad\":\"" + big + "\"}}";
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        Exception? thrown = null;
+        // Keep writing until the pipe is full and a send has to wait for the timeout.
+        for (int i = 0; i < 64 && thrown is null; i++)
+        {
+            try { await session.SendAsync(payload, cts.Token); }
+            catch (Exception ex) { thrown = ex; }
+        }
+        Assert.IsType<TimeoutException>(thrown);
+        Assert.True(sw.Elapsed < ConnectionSession.WriteTimeout + TimeSpan.FromSeconds(5), "must give up at the write timeout, not later");
+        await run.WaitAsync(TimeSpan.FromSeconds(5)); // the stream was closed, so the session ended
+        Assert.Contains(env.Logs, l => l.Contains("stopped reading"));
+    }
+
+    [Fact]
     public async Task SendAsync_InterleavesWithResponses_LineAtATime()
     {
         var (pluginSide, serverSide) = DuplexPipeStream.CreatePair();

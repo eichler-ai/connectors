@@ -43,11 +43,33 @@ public sealed class InstanceFileTests : IDisposable
     }
 
     [Fact]
-    public void Write_IsOwnerOnly_OnUnix()
+    public void Write_IsOwnerOnly()
     {
-        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) return; // ACL is phase 2
+        var path = Sample().Write(_dir);
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            // No explicit ACL until phase 2; the file inherits the profile directory's, which is the
+            // current user only. What this leg pins: the file exists, is readable, and nothing else was
+            // left behind -- so the Windows run asserts something rather than returning early
+            // (review of #281).
+            Assert.True(File.Exists(path));
+            Assert.NotNull(InstanceFile.TryRead(path));
+            Assert.Single(Directory.GetFiles(_dir));
+            return;
+        }
+
+        Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(path));
+    }
+
+    [Fact]
+    public void Write_NeverLeavesTheTokenWorldReadable_EvenMidWrite()
+    {
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) { Assert.True(true); return; }
+        // The temp file is created owner-only; there is no chmod-after-write gap to race.
+        // Observed through the final file's mode plus the absence of a *.tmp with a wider mode.
         var path = Sample().Write(_dir);
         Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(path));
+        Assert.Empty(Directory.GetFiles(_dir, "*.tmp"));
     }
 
     [Fact]

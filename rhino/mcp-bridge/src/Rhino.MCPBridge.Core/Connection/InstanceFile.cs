@@ -40,10 +40,19 @@ public sealed class InstanceFile
         var path = PathFor(instancesDir, Pid);
         var tmp = path + ".tmp";
         var json = JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true });
-        File.WriteAllText(tmp, json);
+        // Created owner-only from the first byte (review of #281): a write-then-chmod would leave the
+        // token world-readable for the gap between the two. On Windows the file inherits
+        // %LOCALAPPDATA%'s ACL, which is already the current user only; an explicit ACL is phase 2.
+        var options = new FileStreamOptions { Mode = FileMode.Create, Access = FileAccess.Write, Share = FileShare.None };
         if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
         {
-            File.SetUnixFileMode(tmp, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+            options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+        }
+
+        using (var fs = new FileStream(tmp, options))
+        using (var w = new StreamWriter(fs))
+        {
+            w.Write(json);
         }
 
         File.Move(tmp, path, overwrite: true);
@@ -61,6 +70,10 @@ public sealed class InstanceFile
             return null;
         }
     }
+
+    /// <summary>True when the file for pid is present; the host re-asserts a missing one on its heartbeat
+    /// so a server's mistaken stale-deletion self-heals (review of #281).</summary>
+    public static bool Exists(string instancesDir, int pid) => File.Exists(PathFor(instancesDir, pid));
 
     /// <summary>Best-effort delete at unload; a failure here is logged by the caller, never thrown — the
     /// server's liveness check reclaims the file anyway.</summary>

@@ -18,14 +18,23 @@ internal sealed class ConnectionSession
 {
     public static readonly TimeSpan AuthTimeout = TimeSpan.FromSeconds(15);
 
+    /// <summary>A write that does not complete in this long means the peer has stopped reading (its
+    /// socket buffer is full); the session is torn down rather than queueing writes without bound
+    /// (review of #281). Generous: a healthy server drains a line in microseconds.</summary>
+    public static readonly TimeSpan WriteTimeout = TimeSpan.FromSeconds(10);
+
     private readonly Stream _stream;
     private readonly ISessionEnvironment _env;
     private readonly SemaphoreSlim _writeLock = new(1, 1);
     private readonly NdjsonLineBuffer _lines = new();
 
+    private volatile bool _authenticated;
+
     public string? ServerId { get; private set; }
     public string? ServerVersion { get; private set; }
-    public bool Authenticated { get; private set; }
+
+    /// <summary>Read by the host's broadcast from other threads; written once, on the session's own task.</summary>
+    public bool Authenticated => _authenticated;
 
     public ConnectionSession(Stream stream, ISessionEnvironment env)
     {
@@ -68,9 +77,9 @@ internal sealed class ConnectionSession
             return;
         }
 
-        Authenticated = true;
         ServerId = verdict.ServerId;
         ServerVersion = verdict.ServerVersion;
+        _authenticated = true;
         _env.Log($"auth ok: server {ServerId ?? "(unnamed)"} {ServerVersion ?? ""}".TrimEnd());
 
         // 2. Register, immediately — the server's registry is empty until this arrives.
@@ -112,19 +121,39 @@ internal sealed class ConnectionSession
         }
     }
 
-    /// <summary>Writes one JSON line. Safe from any thread; used by the host for register refreshes and pings.</summary>
+    /// <summary>Closes the underlying stream, which ends <see cref="RunAsync"/>. Idempotent.</summary>
+    public void Close()
+    {
+        try { _stream.Dispose(); } catch { }
+    }
+
+    /// <summary>Writes one JSON line. Safe from any thread; used by the host for register refreshes and
+    /// pings. Bounded by <see cref="WriteTimeout"/> including the wait for the write lock: on timeout the
+    /// stream is closed, which ends <see cref="RunAsync"/> and removes the session, and a
+    /// <see cref="TimeoutException"/> is thrown to the caller.</summary>
     public async Task SendAsync(string json, CancellationToken cancellationToken)
     {
         var bytes = Encoding.UTF8.GetBytes(NdjsonLineBuffer.Encode(json));
-        await _writeLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(WriteTimeout);
         try
         {
-            await _stream.WriteAsync(bytes, cancellationToken).ConfigureAwait(false);
-            await _stream.FlushAsync(cancellationToken).ConfigureAwait(false);
+            await _writeLock.WaitAsync(timeout.Token).ConfigureAwait(false);
+            try
+            {
+                await _stream.WriteAsync(bytes, timeout.Token).ConfigureAwait(false);
+                await _stream.FlushAsync(timeout.Token).ConfigureAwait(false);
+            }
+            finally
+            {
+                _writeLock.Release();
+            }
         }
-        finally
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
-            _writeLock.Release();
+            _env.Log($"write timed out after {WriteTimeout.TotalSeconds}s; the server {ServerId ?? "(unnamed)"} stopped reading -- closing the connection");
+            try { _stream.Dispose(); } catch { }
+            throw new TimeoutException("the peer stopped reading");
         }
     }
 
@@ -132,7 +161,18 @@ internal sealed class ConnectionSession
     {
         while (pending.Count == 0)
         {
-            int n = await _stream.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
+            int n;
+            try
+            {
+                n = await _stream.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is IOException or ObjectDisposedException || (ex is OperationCanceledException && !cancellationToken.IsCancellationRequested))
+            {
+                // A reset socket, or our own Close()/write-timeout teardown: the connection is gone.
+                // Reported as EOF so the caller logs "closed" and returns, instead of faulting the task.
+                return null;
+            }
+
             if (n == 0)
             {
                 return null;

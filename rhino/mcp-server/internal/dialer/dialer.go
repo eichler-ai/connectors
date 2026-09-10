@@ -28,6 +28,12 @@ const (
 	DefaultScanInterval = 2 * time.Second
 	dialTimeout         = 3 * time.Second
 	authTimeout         = 10 * time.Second
+	// registerTimeout bounds the wait for the plug-in's register after auth. The
+	// plug-in serves register from a cache and never blocks on Rhino's main
+	// thread, so a register that does not arrive promptly is a bridge that is
+	// wedged or a different build; the connection is closed and the pid backed
+	// off rather than held open forever (review of #281).
+	registerTimeout = 15 * time.Second
 	// retryBackoff is how long a pid that refused or failed auth is left alone
 	// before the next scan tries it again. The instance file is the source of
 	// truth for "should be reachable"; this only stops a broken plug-in from
@@ -43,7 +49,9 @@ type Options struct {
 	Registry      *registry.Registry
 	Alive         instancefile.Alive // nil: instancefile.ProcessAlive
 	ScanInterval  time.Duration      // 0: DefaultScanInterval
-	Logf          func(format string, args ...any)
+	// RegisterTimeout bounds the wait for register after auth; 0: registerTimeout.
+	RegisterTimeout time.Duration
+	Logf            func(format string, args ...any)
 	// Now is injectable for tests.
 	Now func() time.Time
 }
@@ -73,6 +81,9 @@ func New(opts Options) *Manager {
 	}
 	if opts.ScanInterval == 0 {
 		opts.ScanInterval = DefaultScanInterval
+	}
+	if opts.RegisterTimeout == 0 {
+		opts.RegisterTimeout = registerTimeout
 	}
 	if opts.Logf == nil {
 		opts.Logf = func(string, ...any) {}
@@ -179,6 +190,7 @@ func (m *Manager) connect(ctx context.Context, f *instancefile.File) {
 
 	conn := transport.NewConn(nc)
 	lk := &link{file: f, conn: conn}
+	registered := make(chan struct{}, 1)
 	var instanceID string
 	conn.SetNotificationHandler(func(method string, params json.RawMessage) {
 		switch method {
@@ -189,8 +201,9 @@ func (m *Manager) connect(ctx context.Context, f *instancefile.File) {
 				return
 			}
 			if rp.InstanceID != f.InstanceID {
-				// The file and the process disagree about who this is; trust neither.
-				m.opts.Logf("dialer: pid %d registered as %s but its instance file says %s; closing", f.PID, rp.InstanceID, f.InstanceID)
+				// The file and the process disagree about who this is; trust neither,
+				// and back the pid off so it is not redialled every scan.
+				m.fail(f, fmt.Errorf("registered as %s but the instance file says %s", rp.InstanceID, f.InstanceID))
 				conn.Close()
 				return
 			}
@@ -202,6 +215,13 @@ func (m *Manager) connect(ctx context.Context, f *instancefile.File) {
 				InstanceID: rp.InstanceID, PID: rp.PID, RhinoVersion: rp.RhinoVersion, Platform: rp.Platform,
 				BridgeVersion: rp.BridgeVersion, Documents: rp.Documents,
 			}, epoch, m.opts.Now())
+			if newEpoch == 0 {
+				// The registry refused a stale epoch: another connection owns this
+				// instance now. This link is the displaced one; end it.
+				m.opts.Logf("dialer: instance %s re-registered from a connection that no longer owns it; closing", rp.InstanceID)
+				conn.Close()
+				return
+			}
 			m.mu.Lock()
 			lk.epoch = newEpoch
 			instanceID = rp.InstanceID
@@ -218,9 +238,18 @@ func (m *Manager) connect(ctx context.Context, f *instancefile.File) {
 			m.mu.Unlock()
 			if first {
 				m.opts.Logf("dialer: connected to Rhino %s pid %d (%s, %s) with %d document(s)", rp.RhinoVersion, rp.PID, rp.Platform, rp.BridgeVersion, len(rp.Documents))
-				for _, h := range hooks {
-					h(instanceID, conn, true)
+				select {
+				case registered <- struct{}{}:
+				default:
 				}
+				// Hooks run off the read loop: one that calls back into the
+				// connection (conn.Call) would deadlock inline, and a slow one
+				// (an index build) would stall this connection's pings (review of #281).
+				go func() {
+					for _, h := range hooks {
+						h(instanceID, conn, true)
+					}
+				}()
 			}
 		case "ping":
 			m.mu.Lock()
@@ -256,6 +285,25 @@ func (m *Manager) connect(ctx context.Context, f *instancefile.File) {
 		return
 	}
 
+	// Register must follow promptly (the plug-in sends it right after the auth
+	// answer, from a cache). Wait for it, bounded; a connection that never
+	// registers is closed and backed off, never held open (review of #281).
+	select {
+	case <-registered:
+	case err = <-serveErr:
+		m.fail(f, fmt.Errorf("connection ended before register: %w", err))
+		return
+	case <-time.After(m.opts.RegisterTimeout):
+		conn.Close()
+		<-serveErr
+		m.fail(f, fmt.Errorf("no register within %s after auth", m.opts.RegisterTimeout))
+		return
+	case <-ctx.Done():
+		conn.Close()
+		<-serveErr
+		return
+	}
+
 	// Serve until the connection ends, then tear down under the epoch guard.
 	err = <-serveErr
 	m.mu.Lock()
@@ -271,9 +319,11 @@ func (m *Manager) connect(ctx context.Context, f *instancefile.File) {
 		if !errors.Is(err, net.ErrClosed) {
 			m.opts.Logf("dialer: connection to %s (pid %d) ended: %v (registry entry removed: %v)", id, f.PID, err, removed)
 		}
-		for _, h := range hooks {
-			h(id, conn, false)
-		}
+		go func() {
+			for _, h := range hooks {
+				h(id, conn, false)
+			}
+		}()
 	} else {
 		m.opts.Logf("dialer: connection to pid %d ended before it registered: %v", f.PID, err)
 	}
@@ -302,8 +352,9 @@ func (m *Manager) Conn(instanceID string) (*transport.Conn, bool) {
 func (m *Manager) CloseInstance(instanceID string, epoch uint64) {
 	m.mu.Lock()
 	lk, ok := m.links[instanceID]
+	current := ok && lk.epoch == epoch
 	m.mu.Unlock()
-	if ok && lk.epoch == epoch {
+	if current {
 		lk.conn.Close()
 	}
 }

@@ -82,13 +82,22 @@ func clone(inst *Instance) *Instance {
 
 // Register inserts or replaces the entry and returns the epoch that owns it.
 // A re-register from the SAME connection (a document event) passes the epoch
-// it holds and keeps it; a fresh connection passes 0 and mints a new one. The
-// connected-since timestamp and memory sample survive a same-epoch replace.
+// it holds and keeps it; a fresh connection passes 0 and mints a new one. A
+// non-zero epoch that no longer owns the entry is a STALE connection's
+// re-register: it is refused (returns 0, nothing changes), because letting it
+// mint a new epoch would hand a displaced connection ownership of the live
+// one's entry -- the inversion of the invariant this package exists for
+// (review of #281). The connected-since timestamp and memory sample survive a
+// same-epoch replace.
 func (r *Registry) Register(inst *Instance, epoch uint64, now time.Time) uint64 {
 	cp := clone(inst)
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if prev, ok := r.instances[cp.InstanceID]; ok && epoch != 0 && r.epochs[cp.InstanceID] == epoch {
+	if epoch != 0 {
+		prev, ok := r.instances[cp.InstanceID]
+		if !ok || r.epochs[cp.InstanceID] != epoch {
+			return 0
+		}
 		cp.ConnectedSince = prev.ConnectedSince
 		cp.Memory = prev.Memory
 		r.instances[cp.InstanceID] = cp
@@ -121,13 +130,14 @@ func (r *Registry) RemoveIfEpoch(instanceID string, epoch uint64) bool {
 func (r *Registry) RecordPing(instanceID string, epoch uint64, now time.Time, mem *MemorySample) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.epochs[instanceID] != epoch {
+	inst, ok := r.instances[instanceID]
+	if !ok || r.epochs[instanceID] != epoch {
 		return
 	}
 	r.lastPingAt[instanceID] = now
 	if mem != nil {
 		m := *mem
-		r.instances[instanceID].Memory = &m
+		inst.Memory = &m
 	}
 }
 

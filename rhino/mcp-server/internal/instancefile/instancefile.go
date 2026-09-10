@@ -111,7 +111,9 @@ func Scan(dir string, alive Alive) (ScanResult, error) {
 		}
 		path := filepath.Join(dir, e.Name())
 		pid, ok := pidFromName(path)
-		if !ok {
+		if !ok || pid <= 0 {
+			// Validated BEFORE the liveness probe: kill(0, 0) / kill(-1, 0) address a
+			// process group or every process, not a pid (review of #281).
 			res.Skipped = append(res.Skipped, path+": not named <pid>.json")
 			continue
 		}

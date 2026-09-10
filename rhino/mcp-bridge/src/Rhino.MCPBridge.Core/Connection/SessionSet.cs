@@ -16,15 +16,25 @@ internal sealed class SessionSet
 
     public void Remove(ConnectionSession s) { lock (_lock) { _sessions.Remove(s); } }
 
-    /// <summary>Best-effort fan-out; a session whose write fails is left for its own RunAsync to tear down.</summary>
-    public async Task BroadcastAsync(string json, CancellationToken cancellationToken)
+    /// <summary>Best-effort fan-out, in parallel: one server that has stopped reading must not delay
+    /// the ping every other server is waiting for (review of #281). A send that fails or times out is
+    /// torn down by <see cref="ConnectionSession.SendAsync"/> itself.</summary>
+    public Task BroadcastAsync(string json, CancellationToken cancellationToken)
     {
+        var sends = new List<Task>();
         foreach (var s in Snapshot())
         {
             if (!s.Authenticated) continue;
-            try { await s.SendAsync(json, cancellationToken).ConfigureAwait(false); }
-            catch (OperationCanceledException) { throw; }
-            catch { /* the session's own loop reports and removes it */ }
+            sends.Add(SendOne(s, json, cancellationToken));
         }
+
+        return Task.WhenAll(sends);
+    }
+
+    private static async Task SendOne(ConnectionSession s, string json, CancellationToken cancellationToken)
+    {
+        try { await s.SendAsync(json, cancellationToken).ConfigureAwait(false); }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch { /* the session's own loop reports and removes it */ }
     }
 }

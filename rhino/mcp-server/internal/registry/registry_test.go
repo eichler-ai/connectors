@@ -33,6 +33,32 @@ func TestRegisterMintsEpochAndSameEpochReplaceKeepsConnectedSince(t *testing.T) 
 	}
 }
 
+func TestStaleEpochRegisterIsRefused(t *testing.T) {
+	// A displaced connection re-registering (a document event on a half-open socket) must not
+	// take ownership of the live entry (review of #281).
+	r := New()
+	now := time.Now()
+	old := r.Register(inst("a"), 0, now)
+	live := r.Register(inst("a"), 0, now.Add(time.Second))
+	stale := inst("a")
+	stale.Documents = nil
+	if got := r.Register(stale, old, now.Add(2*time.Second)); got != 0 {
+		t.Fatalf("stale epoch register returned %d, want 0", got)
+	}
+	cur, _ := r.Get("a")
+	if len(cur.Documents) != 1 || r.epochs["a"] != live {
+		t.Fatalf("live entry was disturbed: %+v epoch %d", cur, r.epochs["a"])
+	}
+	if r.Register(inst("zzz"), 42, now) != 0 {
+		t.Fatal("an epoch for an unknown instance is refused too")
+	}
+}
+
+func TestRecordPingForUnknownInstanceDoesNotPanic(t *testing.T) {
+	r := New()
+	r.RecordPing("ghost", 1, time.Now(), &MemorySample{})
+}
+
 func TestRemoveIfEpochGuardsAgainstStaleTeardown(t *testing.T) {
 	r := New()
 	now := time.Now()
