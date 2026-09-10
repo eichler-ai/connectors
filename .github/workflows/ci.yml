@@ -11,14 +11,20 @@
 #     (excel/); the Revit modules and excel/poc have their own go.mod and are excluded. Everything
 #     here is pure logic over sockets and a fake bridge; the one thing CI cannot do is drive Excel
 #     for the web, which stays a live test against a running hub (hub/README.md).
-#   - MCP Bridge (C#): NOT built here at all — every project hard-references RevitAPI.dll /
-#     RevitAPIUI.dll from a real Revit install, which GitHub runners don't have. Running the
-#     tier-1 C# suites in CI via NuGet-packaged Revit API references is tracked as
-#     https://github.com/eichler-ai/connectors/issues/39; until then the C# tiers run in the
-#     documented VM-side dev loop. Do not add a C# job that "builds" without the Revit
-#     references or skips the test assemblies — a green job that tests nothing is worse than
-#     no job (this repo has already been bitten by `dotnet test` exiting 0 while silently
-#     skipping an entire assembly; see the revit-connector-development skill).
+#   - MCP Bridge (C#): the tier-1 test suites (MCPBridge.Core.Tests, MCPBridge.Discovery.Tests) on
+#     both TFMs (net8.0-windows -> Revit 2025, net10.0-windows -> Revit 2027), built against the
+#     Nice3point.Revit.Api.* NuGet reference assemblies instead of a real Revit install (issue #39,
+#     -p:UseNuGetRevitApi=true; see revit/mcp-bridge/Directory.Build.props). Runs on windows-latest,
+#     the product's own platform; only the tier-1 test closure is built (Core, RevitAdapter,
+#     Eichler.Connectors.Revit), never MCPBridge.AddIn/Shim (WPF + code signing, Windows-Revit-only).
+#     What CI still cannot cover: anything needing a live Revit process (tier 2, the test-harness) and
+#     the Discovery real-corpus tests that reflect over the actual installed RevitAPI.dll — those skip
+#     with no install, exactly as they do on any dev Mac, and stay part of the VM-side release gate.
+#     The job asserts on the executed-test COUNT per leg, not just the exit code: this repo has been
+#     bitten by `dotnet test` exiting 0 while silently skipping an entire assembly (see the
+#     revit-connector-development skill), and a green job that tests nothing is worse than no job. Do
+#     not weaken that assertion, and do not add a job that "builds" the add-in without the real Revit
+#     references (a NuGet-referenced add-in is not what ships).
 
 name: CI
 
@@ -100,6 +106,61 @@ jobs:
         run: |
           $r = Invoke-Pester -Path revit/install.tests.ps1 -Output Detailed -PassThru
           if ($r.FailedCount -gt 0 -or $r.PassedCount -eq 0) { throw "installer tests: $($r.PassedCount) passed, $($r.FailedCount) failed" }
+
+  mcp-bridge:
+    name: MCP Bridge (C#) tier-1 tests
+    # windows-latest, not ubuntu: the C# add-in is a Windows-only product (PRD §04), so its tier-1
+    # suites run on their own platform. The runner has no Revit install, so -p:UseNuGetRevitApi=true
+    # swaps every RevitAPI/RevitAPIUI file reference for the Nice3point reference-assembly packages
+    # (issue #39; revit/mcp-bridge/Directory.Build.props).
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: revit/mcp-bridge
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          # Both runtimes the suites execute on: the net8.0-windows leg (Revit 2025) runs on the .NET 8
+          # runtime and the net10.0-windows leg (Revit 2027) on .NET 10 -- the same two-runtime setup the
+          # dev VM uses so the legs genuinely differ (see MCPBridge.Core.Tests.csproj's RollForward note).
+          dotnet-version: |
+            8.0.x
+            10.0.x
+      - name: dotnet test — both suites, both TFMs, NuGet Revit API (no Revit install)
+        run: |
+          $projects = @(
+            'tests/MCPBridge.Core.Tests/MCPBridge.Core.Tests.csproj',
+            'tests/MCPBridge.Discovery.Tests/MCPBridge.Discovery.Tests.csproj'
+          )
+          $tfms = @('net8.0-windows', 'net10.0-windows')
+          $results = Join-Path $PWD 'TestResults'
+          Remove-Item -Recurse -Force $results -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path $results | Out-Null
+          # Run each (suite x TFM) leg explicitly so a missing leg is a missing trx, not a silent gap.
+          foreach ($p in $projects) {
+            foreach ($tfm in $tfms) {
+              $name = "$([IO.Path]::GetFileNameWithoutExtension($p)).$tfm.trx"
+              dotnet test $p -f $tfm -p:UseNuGetRevitApi=true `
+                --logger "trx;LogFileName=$name" --results-directory $results
+              if ($LASTEXITCODE -ne 0) { throw "dotnet test failed: $p ($tfm)" }
+            }
+          }
+          # Assert on the executed COUNT, not the exit code: `dotnet test` exits 0 even when it ran zero
+          # tests (e.g. an assembly silently skipped for an unresolved reference), the exact trap this
+          # repo has been bitten by. Require all four legs present, each with tests run and none failing.
+          $trx = @(Get-ChildItem $results -Filter *.trx)
+          if ($trx.Count -ne 4) { throw "expected 4 trx files (2 suites x 2 TFMs), found $($trx.Count)" }
+          foreach ($f in $trx) {
+            [xml]$doc = Get-Content $f.FullName
+            $c = $doc.TestRun.ResultSummary.Counters
+            $total = [int]$c.total; $passed = [int]$c.passed; $failed = [int]$c.failed
+            Write-Host ("{0}: total={1} passed={2} failed={3}" -f $f.Name, $total, $passed, $failed)
+            if ($total -le 0) { throw "$($f.Name) executed 0 tests — a green job that tests nothing" }
+            if ($failed -gt 0) { throw "$($f.Name) had $failed failing test(s)" }
+          }
+          Write-Host "All 4 legs executed tests with 0 failures."
 
   test-harness:
     name: Test harness type-check (Go)

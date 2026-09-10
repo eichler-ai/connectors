@@ -16,9 +16,11 @@
   <!-- Revit-version mapping, mirroring MCPBridge.RevitAdapter.csproj (PRD §11). -->
   <PropertyGroup Condition="'$(TargetFramework)'=='net10.0-windows'">
     <RevitVersion>2027</RevitVersion>
+    <NiceRevitApiVersion>$(NiceRevitApiVersion_2027)</NiceRevitApiVersion>
   </PropertyGroup>
   <PropertyGroup Condition="'$(TargetFramework)'=='net8.0-windows'">
     <RevitVersion>2025</RevitVersion>
+    <NiceRevitApiVersion>$(NiceRevitApiVersion_2025)</NiceRevitApiVersion>
   </PropertyGroup>
   <PropertyGroup>
     <RevitInstallDir>C:\Program Files\Autodesk\Revit $(RevitVersion)</RevitInstallDir>
@@ -34,8 +36,12 @@
 
     Private=false matches RevitAdapter: inside a live Revit process RevitAPI/RevitAPIUI are already
     loaded, so copying them next to the add-in would only risk shadowing Revit's own copies.
+
+    UseNuGetRevitApi swaps the installed-Revit file references for the Nice3point reference-assembly
+    packages so this compiles with no Revit install in CI (issue #39; see Directory.Build.props).
+    ExcludeAssets="runtime" preserves the Private=false intent (nothing copied next to the add-in).
   -->
-  <ItemGroup>
+  <ItemGroup Condition="'$(UseNuGetRevitApi)' != 'true'">
     <Reference Include="RevitAPI">
       <HintPath>$(RevitInstallDir)\RevitAPI.dll</HintPath>
       <Private>false</Private>
@@ -44,6 +50,10 @@
       <HintPath>$(RevitInstallDir)\RevitAPIUI.dll</HintPath>
       <Private>false</Private>
     </Reference>
+  </ItemGroup>
+  <ItemGroup Condition="'$(UseNuGetRevitApi)' == 'true'">
+    <PackageReference Include="Nice3point.Revit.Api.RevitAPI" Version="$(NiceRevitApiVersion)" ExcludeAssets="runtime" />
+    <PackageReference Include="Nice3point.Revit.Api.RevitAPIUI" Version="$(NiceRevitApiVersion)" ExcludeAssets="runtime" />
   </ItemGroup>
 
   <ItemGroup>

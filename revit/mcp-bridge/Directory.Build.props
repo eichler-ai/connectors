@@ -1,0 +1,34 @@
+<Project>
+
+  <!--
+    Shared knob for building/running the C# tier-1 suites WITHOUT a real Revit install (issue #39).
+
+    Every product project normally references RevitAPI.dll / RevitAPIUI.dll by HintPath from
+    C:\Program Files\Autodesk\Revit <ver>\, which exists only on a machine with Revit installed (the
+    dev VM). Setting UseNuGetRevitApi=true swaps those file references for the community
+    Nice3point.Revit.Api.* NuGet packages —pure-managed reference assemblies carrying the same
+    public metadata —so the compile-only tier-1 tests build and run on a stock CI runner with no
+    Revit. See .github/workflows/ci.yml's "MCP Bridge (C#)" job.
+
+    Default false, deliberately: a normal dev / VM / release build keeps referencing the real installed
+    Revit assemblies, so the release gate's VM build stays the genuine article and a broken install can
+    never be masked by a silent fall-through to NuGet. CI opts in explicitly with
+    -p:UseNuGetRevitApi=true. The switch is scoped to the tier-1 closure only —MCPBridge.Core,
+    MCPBridge.RevitAdapter, Eichler.Connectors.Revit and MCPBridge.Core.Tests. MCPBridge.AddIn and
+    MCPBridge.Shim (the actual Revit plugin assemblies: WPF, code signing) are not part of that closure,
+    are not built in CI, and keep their installed-Revit references untouched.
+  -->
+  <PropertyGroup>
+    <UseNuGetRevitApi Condition="'$(UseNuGetRevitApi)' == ''">false</UseNuGetRevitApi>
+
+    <!-- Pinned Nice3point package versions per Revit year, mirroring every project's RevitVersion
+         mapping (net8.0-windows -> Revit 2025, net10.0-windows -> Revit 2027; PRD §11). The 2025
+         package's lib TFM is net8.0-windows7.0 and the 2027 package's is net10.0-windows7.0, so NuGet
+         resolves the right assembly for each build leg with no per-TFM path knowledge. Bump these
+         deliberately; a floating range would let a CI run silently change which API surface it compiles
+         against. -->
+    <NiceRevitApiVersion_2025>2025.4.60</NiceRevitApiVersion_2025>
+    <NiceRevitApiVersion_2027>2027.2.0</NiceRevitApiVersion_2027>
+  </PropertyGroup>
+
+</Project>

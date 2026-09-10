@@ -43,9 +43,11 @@
   <!-- Revit-version mapping, mirroring MCPBridge.RevitAdapter.csproj / MCPBridge.Core.csproj (PRD §11). -->
   <PropertyGroup Condition="'$(TargetFramework)'=='net10.0-windows'">
     <RevitVersion>2027</RevitVersion>
+    <NiceRevitApiVersion>$(NiceRevitApiVersion_2027)</NiceRevitApiVersion>
   </PropertyGroup>
   <PropertyGroup Condition="'$(TargetFramework)'=='net8.0-windows'">
     <RevitVersion>2025</RevitVersion>
+    <NiceRevitApiVersion>$(NiceRevitApiVersion_2025)</NiceRevitApiVersion>
   </PropertyGroup>
   <PropertyGroup>
     <RevitInstallDir>C:\Program Files\Autodesk\Revit $(RevitVersion)</RevitInstallDir>
@@ -71,8 +73,15 @@
   -->
 
   <!-- The per-TFM Revit assembly paths, so tests can hand Roslyn a metadata reference without
-       hardcoding a Revit version. net10.0-windows resolves to 2027, net8.0-windows to 2025. -->
-  <ItemGroup>
+       hardcoding a Revit version. net10.0-windows resolves to 2027, net8.0-windows to 2025.
+       RevitApiReference.cs reads these back and hard-fails if the file is missing.
+
+       Normal build: the installed Revit assemblies. In CI (-p:UseNuGetRevitApi=true) there is no Revit
+       install, so the MCPBridgeCoreTestsRevitApiNuGetPaths target below writes these same two metadata
+       keys pointing at the restored Nice3point reference assemblies instead (issue #39). Roslyn only
+       reads their managed metadata, exactly as it does the installed DLLs, so every compile-time check
+       stays covered with no Revit present. -->
+  <ItemGroup Condition="'$(UseNuGetRevitApi)' != 'true'">
     <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
       <_Parameter1>RevitApiPath</_Parameter1>
       <_Parameter2>$(RevitInstallDir)\RevitAPI.dll</_Parameter2>
@@ -88,6 +97,47 @@
     <PackageReference Include="xunit" Version="2.9.2" />
     <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
   </ItemGroup>
+
+  <!-- CI-only: restore the Nice3point reference-assembly packages purely to obtain their on-disk paths.
+       ExcludeAssets="all" is load-bearing: this project deliberately carries NO RevitAPI reference in its
+       own reference table (see the big comment above the removed <Reference> block; a direct reference to
+       the mixed-mode installed DLL makes xunit skip the entire assembly). These packages are restored for
+       their DLL PATH only —handed to Roslyn as a metadata reference by RevitApiReference.cs —never
+       compiled or referenced. GeneratePathProperty exposes $(Pkg...) for the target below. -->
+  <ItemGroup Condition="'$(UseNuGetRevitApi)' == 'true'">
+    <PackageReference Include="Nice3point.Revit.Api.RevitAPI" Version="$(NiceRevitApiVersion)" GeneratePathProperty="true" ExcludeAssets="all" PrivateAssets="all" />
+    <PackageReference Include="Nice3point.Revit.Api.RevitAPIUI" Version="$(NiceRevitApiVersion)" GeneratePathProperty="true" ExcludeAssets="all" PrivateAssets="all" />
+  </ItemGroup>
+
+  <!-- Runs after restore (so $(Pkg...) is populated) and before the assembly-attribute generation that
+       bakes AssemblyMetadata into the DLL, mirroring MCPBridge.AddIn's own BeforeTargets="GetAssemblyAttributes"
+       targets. Globs each restored package for its RevitAPI(UI).dll under lib/ —one hit per package, since
+       each targets a single TFM (net8.0-windows7.0 for 2025, net10.0-windows7.0 for 2027) —and writes the
+       RevitApiPath / RevitApiUiPath metadata RevitApiReference.cs expects. Fails loudly if a package layout
+       change means the DLL isn't found, rather than baking an empty path that surfaces later as a confusing
+       "built without RevitApiPath" test error. -->
+  <Target Name="MCPBridgeCoreTestsRevitApiNuGetPaths"
+          BeforeTargets="GetAssemblyAttributes"
+          Condition="'$(UseNuGetRevitApi)' == 'true' And '$(TargetFramework)' != ''">
+    <ItemGroup>
+      <_RevitApiDll Include="$(PkgNice3point_Revit_Api_RevitAPI)/lib/**/RevitAPI.dll" />
+      <_RevitApiUiDll Include="$(PkgNice3point_Revit_Api_RevitAPIUI)/lib/**/RevitAPIUI.dll" />
+    </ItemGroup>
+    <Error Condition="'@(_RevitApiDll)' == ''"
+           Text="UseNuGetRevitApi is set but no RevitAPI.dll was found under '$(PkgNice3point_Revit_Api_RevitAPI)/lib'. Check the Nice3point.Revit.Api.RevitAPI package layout / version ($(NiceRevitApiVersion))." />
+    <Error Condition="'@(_RevitApiUiDll)' == ''"
+           Text="UseNuGetRevitApi is set but no RevitAPIUI.dll was found under '$(PkgNice3point_Revit_Api_RevitAPIUI)/lib'. Check the Nice3point.Revit.Api.RevitAPIUI package layout / version ($(NiceRevitApiVersion))." />
+    <ItemGroup>
+      <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+        <_Parameter1>RevitApiPath</_Parameter1>
+        <_Parameter2>@(_RevitApiDll)</_Parameter2>
+      </AssemblyAttribute>
+      <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+        <_Parameter1>RevitApiUiPath</_Parameter1>
+        <_Parameter2>@(_RevitApiUiDll)</_Parameter2>
+      </AssemblyAttribute>
+    </ItemGroup>
+  </Target>
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\MCPBridge.Core\MCPBridge.Core.csproj" />
