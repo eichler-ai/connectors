@@ -57,6 +57,25 @@ Describe 'Remove-AppDirExceptSelf (uninstall self-preservation, issue #240)' {
         $missing = Join-Path $TestDrive 'does-not-exist'
         @(Remove-AppDirExceptSelf $missing (Join-Path $missing 'install.ps1')) | Should -BeNullOrEmpty
     }
+
+    # The survivor->gate path (a child that can't be removed keeps install.ps1 + $appDir for the re-run)
+    # needs a file removal to actually fail. That is what a running Revit / broker / AV lock does live and
+    # cannot be simulated on Windows here; on non-Windows a permission-locked directory reproduces it, so
+    # this leg runs only there. The Windows leg's equivalent stays a live (tier-2) check.
+    It 'returns a child it could not remove as a survivor, keeping the running script' -Skip:(-not ($IsWindows -eq $false)) {
+        $appDir = Join-Path $TestDrive 'MCPBridge3'
+        New-Payload $appDir @{ 'install.ps1' = 'x'; 'locked/inner.txt' = 'y' }
+        $self = Join-Path $appDir 'install.ps1'
+        $lockedDir = Join-Path $appDir 'locked'
+        & chmod 555 $lockedDir   # r-x, no write: its contents can't be unlinked, so the dir survives removal
+        try {
+            $survivors = Remove-AppDirExceptSelf $appDir $self
+            Test-Path $self | Should -BeTrue           # #240: script preserved when a re-run is needed
+            @($survivors) | Should -Contain $lockedDir  # the leftover IS reported, so the gate stays incomplete
+        } finally {
+            & chmod 755 $lockedDir   # restore so Pester's TestDrive cleanup can remove it
+        }
+    }
 }
 
 Describe 'Get-DirectoryContentHash' {
@@ -563,6 +582,34 @@ Describe 'Get-DesktopConfigPath' {
     }
     It 'falls back to the standard %APPDATA% path when no Claude package exists' {
         Get-DesktopConfigPath | Should -Be (Join-Path $env:APPDATA 'Claude\claude_desktop_config.json')
+    }
+}
+
+Describe 'Unregister-McpServer (uninstall deregistration, issue #37)' {
+    It 'deregisters via `claude mcp remove` with the args starting at remove (no doubled mcp subcommand)' {
+        Mock Get-Command { [pscustomobject]@{ Name = 'claude' } } -ParameterFilter { $Name -eq 'claude' }
+        Mock Invoke-ClaudeMcp { @{ ExitCode = 0; Output = @() } }
+        Mock Get-DesktopConfigPath { Join-Path $TestDrive 'no-desktop\claude_desktop_config.json' }
+        Mock Remove-DesktopMcpServer { $false }
+
+        Unregister-McpServer
+
+        # Invoke-ClaudeMcp already supplies the `mcp` root (& claude mcp @CliArgs), so the args must begin
+        # at `remove` -- an extra leading 'mcp' would run `claude mcp mcp remove` and silently no-op.
+        Should -Invoke Invoke-ClaudeMcp -Times 1 -Exactly -ParameterFilter { $CliArgs[0] -eq 'remove' -and ($CliArgs -contains 'revit') -and ($CliArgs -contains '--scope') }
+        Should -Invoke Invoke-ClaudeMcp -Times 0 -Exactly -ParameterFilter { $CliArgs[0] -eq 'mcp' }
+    }
+
+    It 'skips the CLI when claude is not installed but still clears the Claude Desktop config' {
+        Mock Get-Command { $null } -ParameterFilter { $Name -eq 'claude' }
+        Mock Invoke-ClaudeMcp { @{ ExitCode = 0; Output = @() } }
+        Mock Get-DesktopConfigPath { Join-Path $TestDrive 'no-desktop\claude_desktop_config.json' }
+        Mock Remove-DesktopMcpServer { $false }
+
+        Unregister-McpServer
+
+        Should -Invoke Invoke-ClaudeMcp -Times 0 -Exactly
+        Should -Invoke Remove-DesktopMcpServer -Times 1 -Exactly
     }
 }
 

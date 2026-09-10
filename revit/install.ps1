@@ -843,6 +843,20 @@ function Invoke-ClaudeMcp([string[]]$CliArgs) {
     }
 }
 
+function Unregister-McpServer {
+    # Uninstall-time deregistration, the twin of Register-McpServer: drop the broker entry from the Claude
+    # clients install registered it with -- Claude Code CLI at the same user scope, and Claude Desktop's
+    # config (Cowork reads the same file) -- leaving any other MCP servers there intact. Via Invoke-ClaudeMcp
+    # (never throws): a raw `& claude mcp remove` under this script's $ErrorActionPreference='Stop' can abort
+    # the whole uninstall when nothing is registered (stderr + non-zero exit, even with 2>$null) -- the #37
+    # residual. Invoke-ClaudeMcp already supplies the `mcp` subcommand root, so the args start at `remove`
+    # (matching Register-McpServer's own remove call). A function so install.tests.ps1 can pin that shape.
+    if (Get-Command claude -ErrorAction SilentlyContinue) {
+        Invoke-ClaudeMcp @('remove', 'revit', '--scope', 'user') | Out-Null
+    }
+    try { Remove-DesktopMcpServer (Get-DesktopConfigPath) 'revit' | Out-Null } catch { }
+}
+
 function Register-McpServer([string]$ServerExe, [switch]$OnlyIfMissing) {
     # Connect the broker (a local stdio MCP server, mcp-server.exe --mode local -- PRD §05) to this
     # user's Claude clients: Claude Code CLI, and Claude Desktop (which is also what Cowork reads).
@@ -1030,25 +1044,21 @@ if ($Uninstall) {
     if ($appDirSurvivors.Count -gt 0) { $removedRoots += $appDir }
     if ($leftoverVersions.Count -eq 0) { $removedRoots += $dataRoot }
     $survivingPaths = Get-SurvivingPaths $removedRoots
-    Remove-Item $uninstallKeyPath -Recurse -Force -ErrorAction SilentlyContinue
-    # Deregister from the Claude clients install registered it with -- CLI at the same user scope, and
-    # Claude Desktop's config (Cowork reads the same file), leaving any other MCP servers there intact.
-    # Via Invoke-ClaudeMcp, which never throws: a raw `& claude mcp remove revit` under this script's
-    # $ErrorActionPreference='Stop' can abort the whole uninstall when nothing is registered -- it prints
-    # "No MCP server named 'revit'..." to stderr and exits non-zero, and under Stop that surfaces as a
-    # terminating NativeCommandError even with a 2>$null redirect (issue #37 residual). The helper
-    # neutralizes EAP locally and drives off the exit code, so the not-registered case is a no-op.
-    if (Get-Command claude -ErrorAction SilentlyContinue) {
-        Invoke-ClaudeMcp @('mcp', 'remove', 'revit', '--scope', 'user') | Out-Null
-    }
-    try { Remove-DesktopMcpServer (Get-DesktopConfigPath) 'revit' | Out-Null } catch { }
+    # Deregister the broker from the Claude clients (Claude Code CLI + Claude Desktop config, leaving other
+    # MCP servers intact). Unconditional -- the server is going regardless, so a dangling entry pointing at
+    # a deleted exe must not be left behind. See Unregister-McpServer for the $ErrorActionPreference='Stop'
+    # hazard it neutralizes (issue #37 residual).
+    Unregister-McpServer
     # #240: the uninstall is complete when nothing is left holding on -- no Revit-locked shim
     # ($leftoverVersions), no client-held server ($runningServers), and nothing under $appDir but the
-    # preserved script ($survivingPaths). Only then drop install.ps1 and the now-empty app dir; there is
-    # nothing left to re-run for. Otherwise keep them so the "re-run this uninstaller" recovery works.
+    # preserved script ($survivingPaths). Only then drop the preserved re-run script, the now-empty app
+    # dir, AND the Add/Remove Programs entry. On an INCOMPLETE pass all three stay, so the user can still
+    # re-run the uninstaller -- including from Apps & Features, whose UninstallString points at the
+    # preserved install.ps1.
     $uninstallComplete = ($leftoverVersions.Count -eq 0) -and ($runningServers.Count -eq 0) -and ($survivingPaths.Count -eq 0)
     if ($uninstallComplete) {
         Remove-Item $appDir -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item $uninstallKeyPath -Recurse -Force -ErrorAction SilentlyContinue
     }
     # One honest line: clean, or exactly which holder (Revit, a client's server, or nothing nameable)
     # kept which paths, and that a re-run finishes it -- a second run with the holders gone finds no
