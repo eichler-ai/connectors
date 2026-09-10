@@ -93,6 +93,19 @@ public sealed class ExecutionManager
     /// path is reserved for a duplicate against a DIFFERENT (already-terminal, or otherwise not the
     /// current _active) execution, which has no such legitimate explanation.
     /// </summary>
+    /// <summary>The id of the non-terminal run occupying this instance, or null when idle -- what
+    /// capture_view checks so it is serialised with scripts (PRD §11).</summary>
+    public string? ActiveExecutionId
+    {
+        get
+        {
+            lock (_lock)
+            {
+                return _active is { Status: var status } && !status.IsTerminal() ? _active.ExecutionId : null;
+            }
+        }
+    }
+
     public ExecuteOutcome Start(string executionId, string scriptText, long maxDurationMs, DateTimeOffset now)
     {
         if (string.IsNullOrWhiteSpace(executionId))

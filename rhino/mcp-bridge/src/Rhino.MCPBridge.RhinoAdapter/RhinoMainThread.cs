@@ -39,7 +39,10 @@ internal sealed class RhinoMainThread : IMainThread
 
         if (error is not null)
         {
-            throw new InvalidOperationException("main-thread work failed: " + error.Message, error);
+            // Rethrow the ORIGINAL so typed exceptions (a capture refusal, document-not-found) keep
+            // their type and record across the thread hop; a wrapper turned every one into a generic
+            // capture-failed (found live).
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error).Throw();
         }
 
         return result;

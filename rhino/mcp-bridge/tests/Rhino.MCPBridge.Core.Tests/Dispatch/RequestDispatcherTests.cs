@@ -129,15 +129,50 @@ public sealed class RequestDispatcherTests
         var h = new Harness();
         h.Host.RefuseCommands = true;
         var r = await h.Execute("return 1;", extra: new { timeout_ms = 0 });
-        Assert.Equal("pending", Status(r));
+        // Each refused attempt marks the record running for the duration of the attempt and then
+        // pending again, and the delay hook is a no-op here so attempts run back to back: the
+        // response may land in either state. What is pinned is that nothing completed and no
+        // command ran.
+        Assert.Contains(Status(r), new[] { "pending", "running" });
         Assert.Equal(0, h.Host.CommandsRun);
-        // The retry is scheduled through the delay hook (completed instantly here); once Rhino is
-        // free the next attempt runs the command.
+        // Once Rhino is free the next attempt runs the command.
         h.Host.RefuseCommands = false;
         var deadline = DateTime.UtcNow.AddSeconds(5);
-        while (h.Host.CommandsRun == 0 && DateTime.UtcNow < deadline) await Task.Delay(10);
+        // CommandsRun flips when the command starts, not when it finishes, and the harness clock is
+        // frozen (a poll with a timeout would spin rather than wait), so wait for the terminal state
+        // here with a real deadline (was racy on the Windows CI runner).
+        while (!(h.Manager.Poll("exec-1")?.Status.IsTerminal() ?? false) && DateTime.UtcNow < deadline) await Task.Delay(10);
         var polled = await h.Call("poll_execution", new { execution_id = "exec-1", timeout_ms = 0 });
         Assert.Equal("success", Status(polled));
+    }
+
+    [Fact]
+    public async Task CaptureView_IsBusyWhileAScriptRuns_AndUnknownWithoutACaptureService()
+    {
+        // Without a capture service the method is unknown (a bridge build without it answers legibly).
+        var h = new Harness();
+        Assert.Equal("unknown-method", Code(await h.Call("capture_view", new { target = "active" })));
+        // With one, a queued run makes it busy.
+        var deferred = new DeferredLauncher();
+        var runner = new RoslynScriptRunner(); runner.WarmupCompile();
+        var d = new RequestDispatcher(h.Manager, new UndoRunExecutor(runner, h.Host), deferred, h.Logs.Add, () => h.Now, _ => Task.CompletedTask,
+            capture: new Core.Capture.ViewCaptureService(new NoViewports()), onMainThread: f => f());
+        var first = await d.DispatchAsync(JsonRpcRequest.Parse("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"execute_script\",\"params\":{\"execution_id\":\"a\",\"language\":\"csharp\",\"script\":\"return 1;\",\"timeout_ms\":0}}"), CancellationToken.None);
+        Assert.Contains("\"status\":\"pending\"", first);
+        var cap = await d.DispatchAsync(JsonRpcRequest.Parse("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"capture_view\",\"params\":{\"target\":\"active\"}}"), CancellationToken.None);
+        Assert.Contains("\"status\":\"busy\"", cap);
+        deferred.RunAll();
+        // Idle again: the fake has no viewports, so the request reaches the service and gets its record.
+        var cap2 = await d.DispatchAsync(JsonRpcRequest.Parse("{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"capture_view\",\"params\":{\"target\":\"active\"}}"), CancellationToken.None);
+        Assert.Contains("no-viewports", cap2);
+    }
+
+    private sealed class NoViewports : Core.Capture.IViewCapture
+    {
+        public IReadOnlyList<string> ViewportNames(object document) => Array.Empty<string>();
+        public (int Width, int Height) ViewportSize(object document, string viewport) => (1, 1);
+        public IReadOnlyList<string> DisplayModeNames() => Array.Empty<string>();
+        public (byte[] Bytes, string? RestoreFailure) Capture(object document, string viewport, int width, int height, string? displayMode, string zoom, bool transparent, bool grid, bool axes, string mimeType) => (Array.Empty<byte>(), null);
     }
 
     [Fact]

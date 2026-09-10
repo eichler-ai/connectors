@@ -135,6 +135,10 @@ cd ../test-harness && go test -tags harness ./... -v -broker-exe ../mcp-server/m
 Driving Rhino from a test: the `rhinocode` CLI (`script <file>`, `command <name>`) runs on Rhino's
 main thread; results come back by file. `TestDocumentEventsRefreshTheRegistry` is the pattern.
 
+Seeing what a case produced: `captureForDiagnostics(t, c, inst, label)` in `capture_test.go` calls
+`capture_view` and, with `MCP_HARNESS_CAPTURES=<dir>` set, writes the PNGs there; `sips -Z 640` shrinks
+one for reading. Object assertions still go by name; the picture is for the human.
+
 ## Per-stage workflow
 
 As the Revit skill's, with the environment differences:
