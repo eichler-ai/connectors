@@ -1,6 +1,6 @@
 # Phase 1a spikes — findings
 
-Live findings against **Rhino 8.35.26251.13002 for Mac (2026-09-08 build), macOS arm64**, on 2026-09-10. Everything below was observed, not read: the probe scripts ran through the `rhinocode` CLI against the running Rhino, and the plug-in probes ran from a throwaway `net8.0` plug-in (`phase-1a-spike-plugin.cs.txt` beside this file) installed through `yak`. The plug-in code is kept as a record of what was tried, not as a starting point.
+Live findings against **Rhino 8.35.26251.13002 for Mac (2026-09-08 build), macOS arm64**, on 2026-09-10. Everything below was observed, not read: the probe scripts ran through the `rhinocode` CLI against the running Rhino, and the plug-in probes ran from a throwaway `net8.0` plug-in (`phase-1a/PlugIn.cs`); the run order, dead ends and raw outputs are in [`phase-1a-method.md`](phase-1a-method.md) installed through `yak`. The plug-in code is kept as a record of what was tried, not as a starting point.
 
 Each item names the PRD question it answers (§17 numbering) and the PRD section amended.
 
