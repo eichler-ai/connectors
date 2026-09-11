@@ -5,12 +5,14 @@ using Rhino.MCPBridge.Core.Diagnostics;
 namespace Rhino.MCPBridge.Core.Execution;
 
 /// <summary>
-/// The <c>undo</c>/<c>redo</c> tools (PRD §07). Rhino gives the connector one piece of evidence Revit
-/// never had: <c>Command.LastCommandId</c> says which command produced the top undo entry. So the
-/// gate is by evidence, not by blanket confirmation -- an undo whose top entry is the bridge's own run
-/// command, or a redo right after the connector's own undo, runs without <c>confirm</c>; anything
-/// else (a person acted since) is refused with <c>undo-confirmation-required</c> naming that command,
-/// and runs with <c>confirm: true</c> under a warning. Runs on the main thread after the busy gate,
+/// The <c>undo</c>/<c>redo</c> tools (PRD §07). The gate is by evidence, not by blanket confirmation,
+/// and the evidence is the connector's own (<see cref="ChangeClock"/>): whether the document changed
+/// outside the connector's commands since the connector's last run that changed it. An undo of the
+/// connector's own entry, or a redo right after the connector's own undo, runs without <c>confirm</c>;
+/// anything else (a person acted since) is refused with <c>undo-confirmation-required</c> naming
+/// Rhino's last command, and runs with <c>confirm: true</c> under a warning. Rhino's own
+/// <c>Command.LastCommandId</c> is NOT the oracle: a read-only run of ours also leaves the run
+/// command as the last one (verified live). Runs on the main thread after the busy gate,
 /// as a script does; the reverted change is reported through the same mutation report.
 /// </summary>
 internal sealed class UndoRedoExecutor
@@ -19,6 +21,10 @@ internal sealed class UndoRedoExecutor
 
     public sealed class Outcome
     {
+        /// <summary>The document acted on (resolved), for the ledger; "" when not resolved.</summary>
+        public string DocumentId { get; init; } = "";
+        /// <summary>Whether the operation acted on the connector's own work.</summary>
+        public bool OnOurWork { get; init; }
         public DiagnosticRecord? Error { get; init; }
         public IReadOnlyList<DiagnosticRecord> Notices { get; init; } = Array.Empty<DiagnosticRecord>();
         public MutationReport? Mutations { get; init; }
@@ -33,6 +39,7 @@ internal sealed class UndoRedoExecutor
     // happened since" is a tick comparison.
     private Direction? _lastToolDirection;
     private long _lastToolTick;
+    private bool _lastToolOnOurWork;
 
     public UndoRedoExecutor(IRunHost host, RunLedger ledger, ChangeClock clock)
     {
@@ -44,10 +51,11 @@ internal sealed class UndoRedoExecutor
     /// <summary>
     /// Whether the operation acts on the connector's own work, from the clock (PRD §07):
     /// - undo: the connector's last run on the document changed it and nothing foreign changed the
-    ///   document since (nor did the connector undo it already); or the connector's own redo was the
-    ///   last thing to touch the document.
-    /// - redo: the connector's own undo was the last thing to touch the document, and no run of the
-    ///   connector's changed it since (which would have emptied the redo stack).
+    ///   document since (nor did the connector undo it already); or the connector's own redo OF ITS
+    ///   OWN WORK was the last thing to touch the document.
+    /// - redo: the connector's own undo OF ITS OWN WORK was the last thing to touch the document, and
+    ///   no run of the connector's changed it since (which would have emptied the redo stack).
+    /// A tool operation made with confirm on a person's entry never makes the next one "ours".
     /// </summary>
     private bool IsOurs(Direction direction, string documentId, LastRun? lastRun)
     {
@@ -55,10 +63,10 @@ internal sealed class UndoRedoExecutor
         lock (_lock)
         {
             var runTick = lastRun is { ChangedDocument: true } ? lastRun.Tick : 0;
+            var toolOnOurs = _lastToolOnOurWork && _lastToolTick > foreign && _lastToolTick > runTick;
             return direction == Direction.Undo
-                ? (runTick > foreign && runTick > _lastToolTick)
-                    || (_lastToolDirection == Direction.Redo && _lastToolTick > foreign && _lastToolTick > runTick)
-                : _lastToolDirection == Direction.Undo && _lastToolTick > foreign && _lastToolTick > runTick;
+                ? (runTick > foreign && runTick > _lastToolTick) || (_lastToolDirection == Direction.Redo && toolOnOurs)
+                : _lastToolDirection == Direction.Undo && toolOnOurs;
         }
     }
 
@@ -102,21 +110,16 @@ internal sealed class UndoRedoExecutor
         var mutations = new MutationTracker();
         var changed = false;
         bool done;
-        using (_clock.EnterConnectorWork())
+        using (_clock.EnterConnectorWork(document.DocumentId))
         using (_host.SubscribeChanges(document, mutations.Record, () => changed = true))
         {
             done = direction == Direction.Undo ? _host.UndoLast(document) : _host.RedoLast(document);
         }
 
-        lock (_lock)
-        {
-            _lastToolDirection = direction;
-            _lastToolTick = _clock.Next();
-        }
-
         var report = mutations.Build();
         if (!done && !changed && report.IsEmpty)
         {
+            // Nothing happened: the gate's evidence must not move (review of #285).
             return new Outcome
             {
                 Error = DiagnosticRecord.Create(DiagnosticSeverity.Error, $"{word}-nothing-to-{word}", DiagnosticSource.Execution,
@@ -124,6 +127,13 @@ internal sealed class UndoRedoExecutor
                     new Dictionary<string, object?> { ["document_id"] = document.DocumentId, ["last_command"] = lastName },
                     new[] { "Nothing was changed. Check the Undo menu in Rhino if this is unexpected." }),
             };
+        }
+
+        lock (_lock)
+        {
+            _lastToolDirection = direction;
+            _lastToolTick = _clock.Next();
+            _lastToolOnOurWork = ours;
         }
 
         var detail = new Dictionary<string, object?>
@@ -141,6 +151,6 @@ internal sealed class UndoRedoExecutor
                 $"{word} acted on '{lastName}', which was NOT the connector's work -- a person's action was reverted or restored, as confirmed.",
                 detail, new[] { $"If that was not intended, call {(direction == Direction.Undo ? "redo" : "undo")} now, before anything else changes." });
 
-        return new Outcome { Notices = new[] { notice }, Mutations = report.IsEmpty ? null : report };
+        return new Outcome { DocumentId = document.DocumentId, OnOurWork = ours, Notices = new[] { notice }, Mutations = report.IsEmpty ? null : report };
     }
 }

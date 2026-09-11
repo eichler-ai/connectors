@@ -80,16 +80,64 @@ public sealed class UndoRedoExecutorTests
     }
 
     [Fact]
-    public void ChangesDuringConnectorWork_AreNotForeign()
+    public void ChangesDuringConnectorWork_AreNotForeign_ButOnlyOnTheDocumentBeingWorkedOn()
     {
         var w = new World();
-        using (w.Clock.EnterConnectorWork())
+        using (w.Clock.EnterConnectorWork(Doc))
         {
             w.Clock.NoteChange(Doc); // the run's own events arrive through the same monitor
+            w.Clock.NoteChange("doc-other"); // a person working in another window meanwhile: foreign
         }
 
         w.OurRun(changed: true);
         Assert.Null(w.Undo().Error);
+        Assert.NotEqual(0, w.Clock.LastForeignChange("doc-other"));
+        Assert.Equal(0, w.Clock.LastForeignChange(Doc));
+    }
+
+    [Fact]
+    public void EvidenceIsKeyedPerDocument()
+    {
+        var w = new World();
+        w.Host.KnownDocumentIds.Add("doc-b");
+        w.OurRun(changed: true);
+        w.Clock.NoteChange("doc-b"); // a person's change on ANOTHER document
+        Assert.Null(w.Undo().Error); // does not gate this one
+        Assert.Equal("undo-confirmation-required", w.Exec.Execute(UndoRedoExecutor.Direction.Undo, "doc-b", false, "u", Now).Error!.Code);
+    }
+
+    [Fact]
+    public void ANoOpUndoOrRedo_DoesNotMoveTheGate()
+    {
+        // Review of #285: a refused/empty redo after a person's change must not make the next undo "ours".
+        var w = new World();
+        w.OurRun(changed: true);
+        w.PersonChanges();
+        w.Host.RedoSucceeds = false;
+        Assert.Equal("undo-confirmation-required", w.Redo().Error!.Code);
+        Assert.Equal("redo-nothing-to-redo", w.Redo(confirm: true).Error!.Code);
+        Assert.Equal("undo-confirmation-required", w.Undo().Error!.Code);
+    }
+
+    [Fact]
+    public void AConfirmedUndoOfAPersonsWork_DoesNotMakeTheRedoOurs()
+    {
+        var w = new World();
+        w.OurRun(changed: true);
+        w.PersonChanges();
+        Assert.Equal("undo-reverted-other-work", w.Undo(confirm: true).Notices[0].Code);
+        Assert.Equal("undo-confirmation-required", w.Redo().Error!.Code);
+        Assert.Equal("undo-reverted-other-work", w.Redo(confirm: true).Notices[0].Code);
+    }
+
+    [Fact]
+    public void ForgettingADocument_DropsItsEvidence()
+    {
+        var w = new World();
+        w.OurRun(changed: true);
+        w.Ledger.Forget(Doc);
+        w.Clock.Forget(Doc);
+        Assert.Equal("undo-confirmation-required", w.Undo().Error!.Code);
     }
 
     [Fact]

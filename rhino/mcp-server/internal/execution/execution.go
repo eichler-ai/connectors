@@ -18,7 +18,6 @@ import (
 
 	"github.com/eichler-ai/connectors/internal/servercore/diag"
 	"github.com/eichler-ai/connectors/internal/servercore/transport"
-	"github.com/eichler-ai/connectors/rhino/mcp-server/internal/registry"
 )
 
 const source = "mcp-server.internal.execution"
@@ -45,7 +44,7 @@ type Result struct {
 	ErrorDetail *diag.Record    `json:"error,omitempty"`
 	// LastRun is the run that completed on the same document before this one (PRD §05), so a
 	// caller can see another client's work since its own last call.
-	LastRun *registry.LastRun `json:"last_run,omitempty"`
+	LastRun *LastRun `json:"last_run,omitempty"`
 }
 
 // MutationReport mirrors the plug-in's MutationReport (rhino/docs/PRD.md §07): what a successful
@@ -152,8 +151,9 @@ func (r *Router) ExecuteScript(ctx context.Context, instanceID, script string, o
 }
 
 // UndoRedo posts the plug-in's undo_redo method (PRD §07): direction "undo" or "redo", confirm,
-// and the document. The plug-in decides from Command.LastCommandId whether the top entry is the
-// connector's own work and refuses (undo-confirmation-required) otherwise unless confirmed.
+// and the document. The plug-in decides from its own record of document changes made outside its
+// runs whether the top entry is the connector's work and refuses (undo-confirmation-required)
+// otherwise unless confirmed.
 func (r *Router) UndoRedo(ctx context.Context, instanceID, direction string, confirm bool, timeoutMs int, documentID string) (*Result, *diag.Record) {
 	conn, ok := r.conns.Conn(instanceID)
 	if !ok {

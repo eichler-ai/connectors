@@ -134,6 +134,13 @@ internal sealed class BridgeHost : ISessionEnvironment
     private void RebuildSnapshot()
     {
         var docs = _mainThread.Invoke(() => _documents.Snapshot());
+        // A document that is gone takes its ledger and clock evidence with it (review of #285).
+        var open = new HashSet<string>(docs.Select(d => d.DocumentId));
+        foreach (var gone in _snapshot.Documents.Select(d => d.DocumentId).Where(id => !open.Contains(id)))
+        {
+            _dispatcher.ForgetDocument(gone);
+        }
+
         // PRD §05: each document carries the connector's last completed run on it.
         docs = docs.Select(d => d.WithLastRun(_dispatcher.Ledger.Get(d.DocumentId))).ToList();
         _snapshot = new RegisterSnapshot(_instanceId, Environment.ProcessId, _rhinoVersion, AppDataPaths.PlatformName(), _bridgeVersion, docs, _dispatcher.ExecutionState);

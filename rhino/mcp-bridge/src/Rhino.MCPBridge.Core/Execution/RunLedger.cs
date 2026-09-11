@@ -64,6 +64,15 @@ internal sealed class RunLedger
         }
     }
 
+    /// <summary>Records an undo/redo as the document's latest run WITHOUT touching the last changing run.</summary>
+    public void RecordTool(string documentId, LastRun op)
+    {
+        lock (_lock)
+        {
+            _byDocument[documentId] = op;
+        }
+    }
+
     public void Forget(string documentId)
     {
         lock (_lock)

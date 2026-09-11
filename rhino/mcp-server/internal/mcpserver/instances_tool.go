@@ -9,6 +9,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/eichler-ai/connectors/rhino/mcp-server/internal/execution"
 	"github.com/eichler-ai/connectors/rhino/mcp-server/internal/registry"
 )
 
@@ -22,7 +23,7 @@ type DocumentOut struct {
 	Path       string `json:"path,omitempty"`
 	Active     bool   `json:"active"`
 	// LastRun is the connector's last completed run on this document, from any server (PRD §05).
-	LastRun *registry.LastRun `json:"last_run,omitempty"`
+	LastRun *execution.LastRun `json:"last_run,omitempty"`
 }
 
 // InstanceOut is one connected Rhino (PRD §05 "Instance discovery").
@@ -45,12 +46,9 @@ type ListInstancesOut struct {
 	Guidance string `json:"guidance,omitempty"`
 }
 
-// StatusFunc answers the execution-state half of an instance's status
-// (idle/pending/busy/unrecoverable); nil until the executor exists, which reads idle.
-type StatusFunc func(instanceID string) string
-
-// RegisterInstances adds list_instances.
-func RegisterInstances(s *mcp.Server, reg *registry.Registry, execStatus StatusFunc, now func() time.Time) {
+// RegisterInstances adds list_instances. The execution half of an instance's status comes from
+// the plug-in (register and every ping carry execution_state; PRD §05: busy state lives there).
+func RegisterInstances(s *mcp.Server, reg *registry.Registry, now func() time.Time) {
 	if now == nil {
 		now = time.Now
 	}
@@ -65,10 +63,7 @@ func RegisterInstances(s *mcp.Server, reg *registry.Registry, execStatus StatusF
 		for _, inst := range reg.List() {
 			status := "idle"
 			if inst.ExecutionState != "" {
-				status = inst.ExecutionState // the plug-in owns busy state (PRD §05)
-			}
-			if execStatus != nil {
-				status = execStatus(inst.InstanceID)
+				status = inst.ExecutionState
 			}
 			if !reg.IsResponsive(inst.InstanceID, t) {
 				status = "unresponsive"

@@ -38,6 +38,10 @@ public sealed class ScriptExecutionOutcome
     /// during a successful run, counted or not. Set by the executor.</summary>
     public bool ChangedDocument { get; set; }
 
+    /// <summary>The ChangeClock tick taken the instant the run's connector-work scope closed, so nothing
+    /// Rhino raises for the run afterwards can outrank it. Set by the executor.</summary>
+    public long Tick { get; set; }
+
     public static ScriptExecutionOutcome Completed(object? returnValue, string stdOut, IReadOnlyList<DiagnosticRecord>? notices = null, IReadOnlyList<PublishedFileRecord>? files = null, MutationReport? mutations = null) =>
         new() { Success = true, ReturnValue = returnValue, StdOut = stdOut, Notices = notices ?? Array.Empty<DiagnosticRecord>(), Files = files ?? Array.Empty<PublishedFileRecord>(), Mutations = mutations };
 

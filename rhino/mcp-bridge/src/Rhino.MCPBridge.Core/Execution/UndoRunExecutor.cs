@@ -54,9 +54,21 @@ internal sealed class UndoRunExecutor
     {
         var document = _host.ResolveDocument(request.DocumentId);
         ScriptExecutionOutcome? outcome;
-        using (_clock.EnterConnectorWork())
+        if (document is null)
         {
             outcome = ExecuteResolved(request, document);
+        }
+        else
+        {
+            using (_clock.EnterConnectorWork(document.DocumentId))
+            {
+                outcome = ExecuteResolved(request, document);
+            }
+
+            if (outcome is not null)
+            {
+                outcome.Tick = _clock.Next();
+            }
         }
 
         if (outcome is not null && document is not null)
@@ -125,14 +137,21 @@ internal sealed class UndoRunExecutor
         // observability over silence). Nothing to revert only when NO document event fired -- the
         // report counts objects, but a layer, attribute or material change is a change too.
         var notices = new List<DiagnosticRecord>(outcome.Notices);
+        var entryRemains = false;
         if (changed || !report.IsEmpty)
         {
-            notices.Add(Rollback(document, request.ExecutionId, report));
+            var rollback = Rollback(document, request.ExecutionId, report);
+            notices.Add(rollback);
+            // A skipped rollback leaves the run's entry on the stack: the ledger must know the run changed
+            // the document, so the undo tool the notice points at can act on it.
+            entryRemains = rollback.Code == "script-rollback-skipped";
         }
 
-        return outcome.WasCancelled
+        var failed = outcome.WasCancelled
             ? ScriptExecutionOutcome.Cancelled(outcome.StdOut, notices, outcome.Files)
             : ScriptExecutionOutcome.Failed(outcome.Exception!, outcome.StdOut, notices, outcome.Files);
+        failed.ChangedDocument = entryRemains;
+        return failed;
     }
 
     private DiagnosticRecord Rollback(RunDocument document, string executionId, MutationReport report)

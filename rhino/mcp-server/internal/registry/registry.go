@@ -13,6 +13,7 @@
 package registry
 
 import (
+	"github.com/eichler-ai/connectors/rhino/mcp-server/internal/execution"
 	"sort"
 	"sync"
 	"time"
@@ -28,22 +29,11 @@ const PruneAfterSilence = 5 * time.Minute
 
 // Document is one open Rhino document as `register` reports it.
 type Document struct {
-	ID      string   `json:"document_id"`
-	Title   string   `json:"title"`
-	Path    string   `json:"path"`
-	Active  bool     `json:"active"`
-	LastRun *LastRun `json:"last_run,omitempty"`
-}
-
-// LastRun is the connector's last completed run on a document (PRD §05 "observability only"):
-// the plug-in records it and reports it in register and on every execution result.
-type LastRun struct {
-	ExecutionID     string `json:"execution_id"`
-	AgentClientID   string `json:"agent_client_id"`
-	FinishedAt      string `json:"finished_at"`
-	Status          string `json:"status"`
-	Label           string `json:"label,omitempty"`
-	ChangedDocument bool   `json:"changed_document"`
+	ID      string             `json:"document_id"`
+	Title   string             `json:"title"`
+	Path    string             `json:"path"`
+	Active  bool               `json:"active"`
+	LastRun *execution.LastRun `json:"last_run,omitempty"`
 }
 
 // MemorySample rides on the ping (same shape as the Revit connector's).

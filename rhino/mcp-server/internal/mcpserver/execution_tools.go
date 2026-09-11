@@ -8,7 +8,6 @@ import (
 
 	"github.com/eichler-ai/connectors/internal/servercore/diag"
 	"github.com/eichler-ai/connectors/rhino/mcp-server/internal/execution"
-	"github.com/eichler-ai/connectors/rhino/mcp-server/internal/registry"
 )
 
 const (
@@ -49,14 +48,14 @@ type ExecutionOut struct {
 	Files       []execution.FileRecord    `json:"files,omitempty"`
 	Mutations   *execution.MutationReport `json:"mutations,omitempty"`
 	Error       *diag.Record              `json:"error,omitempty"`
-	LastRun     *registry.LastRun         `json:"last_run,omitempty"`
+	LastRun     *execution.LastRun        `json:"last_run,omitempty"`
 }
 
 // UndoRedoIn is the input shared by the undo and redo tools (PRD §07).
 type UndoRedoIn struct {
 	InstanceID string `json:"instance_id" jsonschema:"instance_id of the target Rhino, from list_instances"`
 	DocumentID string `json:"document_id,omitempty" jsonschema:"the document to act on; omit for the active document. Refused loudly (document-not-found) when no open document has this id"`
-	Confirm    bool   `json:"confirm,omitempty" jsonschema:"needed only when the top of the undo stack is NOT the connector's own work: the plug-in checks which command produced it, and an undo of its own run (or a redo right after its own undo) runs without confirm. Otherwise the call is refused (undo-confirmation-required) naming the command that would be reverted; resend with confirm: true if that is intended"`
+	Confirm    bool   `json:"confirm,omitempty" jsonschema:"needed only when the top of the undo stack is NOT the connector's own work: the plug-in tracks document changes made outside its own runs, and an undo of its own run (or a redo right after its own undo) with none since runs without confirm. Otherwise the call is refused (undo-confirmation-required) naming the last command Rhino ran; resend with confirm: true if reverting that is intended"`
 	TimeoutMs  int    `json:"timeout_ms,omitempty" jsonschema:"how long to wait for the main thread; default 10000, max 30000"`
 }
 
@@ -73,7 +72,7 @@ func RegisterUndoRedo(s *mcp.Server, router *execution.Router) {
 			Description: "Run Rhino's " + direction + " command on a document and report what it did: mutations carries the net change and " +
 				"notices[] says whose work it was -- undo-reverted-connector-work (info) names the connector's run and label; " +
 				"undo-reverted-other-work (warning) means a person's action was " + direction + "ne, as confirmed: call " + opposite + " at once if unintended. " +
-				"Unlike Revit, Rhino tells the connector which command produced the top undo entry, so an " + direction + " of its own work needs no confirm. " +
+				"The plug-in tracks document changes made outside its own runs, so an " + direction + " of its own work with none since needs no confirm. " +
 				"For a mistake INSIDE a script, roll back there instead (raise/throw; the connector reverts the run). " +
 				"Busy while a script runs, and scripts are busy while this runs.",
 		}, func(ctx context.Context, req *mcp.CallToolRequest, in UndoRedoIn) (*mcp.CallToolResult, ExecutionOut, error) {

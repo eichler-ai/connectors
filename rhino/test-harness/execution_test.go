@@ -240,10 +240,16 @@ func TestUndoAfterSomeoneElsesCommand_NeedsConfirm(t *testing.T) {
 	if _, err := os.Stat(rc); err != nil {
 		t.Skip("no rhinocode CLI on this machine to stage a foreign command")
 	}
+	countBefore := len(objectNames(t, c, inst))
 	if outb, err := exec.Command(rc, "command", "_Point 5,5,0").CombinedOutput(); err != nil {
 		t.Fatalf("rhinocode: %v\n%s", err, outb)
 	}
-	time.Sleep(1500 * time.Millisecond)
+	// Wait for the person's point to exist rather than sleeping a fixed time (objectNames is a
+	// read-only run and adds nothing itself).
+	want := countBefore + 1
+	for deadline := time.Now().Add(10 * time.Second); len(objectNames(t, c, inst)) < want && time.Now().Before(deadline); {
+		time.Sleep(200 * time.Millisecond)
+	}
 	refused := undoRedo(t, c, "undo", map[string]any{"instance_id": inst.InstanceID})
 	if refused.Status == "success" {
 		t.Fatalf("an undo after a foreign change must need confirm: %+v", refused)
@@ -256,7 +262,14 @@ func TestUndoAfterSomeoneElsesCommand_NeedsConfirm(t *testing.T) {
 	if forced.Status != "success" || len(forced.Notices) != 1 || forced.Notices[0].Code != "undo-reverted-other-work" {
 		t.Fatalf("forced: %+v (error %+v)", forced, forced.Error)
 	}
-	// The person's point is gone; ours (below it) is still there.
+	// Exactly the person's point is gone; ours (below it) is still there.
+	var m struct {
+		NetDeleted int `json:"net_deleted"`
+	}
+	json.Unmarshal(forced.Mutations, &m)
+	if m.NetDeleted != 1 {
+		t.Fatalf("confirmed undo mutations = %s", forced.Mutations)
+	}
 	if !has(objectNames(t, c, inst), tag) {
 		t.Fatal("the confirmed undo reverted more than the top entry")
 	}

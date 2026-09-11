@@ -48,6 +48,7 @@ func TestNonCooperatingScriptGoesUnrecoverable(t *testing.T) {
 		if final.Status == "unrecoverable" {
 			break
 		}
+		time.Sleep(500 * time.Millisecond)
 	}
 	if final.Status != "unrecoverable" || final.Error == nil || final.Error.Code != "execution-cancellation-grace-expired" {
 		t.Fatalf("after the grace period: %+v (error %+v)", final, final.Error)

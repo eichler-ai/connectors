@@ -279,6 +279,37 @@ public sealed class RequestDispatcherTests
     }
 
     [Fact]
+    public async Task UndoRedo_CancelledWhileQueued_NeverRuns()
+    {
+        var deferred = new DeferredLauncher();
+        var h = new Harness(deferred);
+        h.Host.DuringRun = on => on(new DocumentChange(DocumentChange.Kind.Added, Guid.NewGuid(), "Brep", "Default"));
+        await h.Execute("return 1;", id: "a", extra: new { timeout_ms = 0 });
+        deferred.RunAll();
+        var undo = await h.Call("undo_redo", new { execution_id = "u-1", direction = "undo", timeout_ms = 0 });
+        Assert.Equal("pending", Status(undo));
+        Assert.Equal("cancelled", Status(await h.Call("cancel_execution", new { execution_id = "u-1" })));
+        deferred.RunAll();
+        Assert.Equal(0, h.Host.UndoCalls);
+        Assert.Equal("cancelled", Status(await h.Call("poll_execution", new { execution_id = "u-1", timeout_ms = 0 })));
+    }
+
+    [Fact]
+    public async Task UndoRedo_UpdatesLastRun_ButNotTheGatesEvidence()
+    {
+        var h = new Harness();
+        h.Host.DuringRun = on => on(new DocumentChange(DocumentChange.Kind.Added, Guid.NewGuid(), "Brep", "Default"));
+        await h.Execute("return 1;", id: "a");
+        var undo = await h.Call("undo_redo", new { execution_id = "u-1", direction = "undo" });
+        Assert.Equal("success", Status(undo));
+        Assert.Equal("undo", h.Dispatcher.Ledger.Get("tmp-known")!.Status);
+        Assert.Equal("a", h.Dispatcher.Ledger.LastChanging("tmp-known")!.ExecutionId);
+        // The run after the undo sees the undo as last_run.
+        var next = await h.Execute("return 2;", id: "b");
+        Assert.Equal("u-1", next.GetProperty("result").GetProperty("last_run").GetProperty("execution_id").GetString());
+    }
+
+    [Fact]
     public async Task UndoRedo_BadDirection_AndRefusalCode()
     {
         var h = new Harness();

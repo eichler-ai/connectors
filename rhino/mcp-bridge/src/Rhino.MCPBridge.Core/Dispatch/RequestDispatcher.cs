@@ -49,6 +49,14 @@ internal sealed class RequestDispatcher
     /// <summary>Raised after the ledger changed, so the plug-in can re-send register with the new last_run.</summary>
     public event Action? LedgerChanged;
 
+    /// <summary>A document closed: drop its ledger entries and its clock evidence, so a reopened saved
+    /// document (same id) starts clean against its new, empty undo stack (review of #285).</summary>
+    public void ForgetDocument(string documentId)
+    {
+        _ledger.Forget(documentId);
+        _executor.Clock.Forget(documentId);
+    }
+
     /// <param name="capture">capture_view's policy; null disables the method (unknown-method).</param>
     /// <param name="onMainThread">Runs a function on the main thread and waits, bounded (the adapter's
     /// IMainThread); capture needs the main thread but no command, since it changes nothing.</param>
@@ -341,7 +349,7 @@ internal sealed class RequestDispatcher
             Status = record is null ? "" : ExecutionResultMessage.ToWireStatus(record.Status),
             Label = label,
             ChangedDocument = outcome.ChangedDocument,
-            Tick = _executor.Clock.Next(),
+            Tick = outcome.Tick,
         });
         record?.SetPreviousRun(previous);
         try { LedgerChanged?.Invoke(); } catch (Exception ex) { _log("ledger listener failed: " + ex.Message); }
@@ -398,11 +406,20 @@ internal sealed class RequestDispatcher
                 return ExecutionResultMessage.FromInstanceUnrecoverable(request.Id, started.Diagnostic!);
         }
 
+        var token = _executionManager.GetCancellationToken(executionId);
         _launcher.Post(() =>
         {
-            if (_executionManager.MarkRunning(executionId, _now()) is not null)
+            // Cancelled while queued: never touch the model (as the script path).
+            if (token.IsCancellationRequested)
             {
-                return; // cancelled while queued
+                _executionManager.CompleteCancelled(executionId, _now(), stdOut: null);
+                return;
+            }
+
+            if (_executionManager.MarkRunning(executionId, _now()) is { } notStarted)
+            {
+                _log($"undo_redo {executionId} not started: {notStarted.Message}");
+                return; // already terminal (cancelled in the gap)
             }
 
             UndoRedoExecutor.Outcome outcome;
@@ -419,13 +436,25 @@ internal sealed class RequestDispatcher
                 };
             }
 
-            if (outcome.Error is not null)
+            var now = _now();
+            var dropped = outcome.Error is not null
+                ? _executionManager.CompleteError(executionId, now, outcome.Error, null, outcome.Notices)
+                : _executionManager.CompleteSuccess(executionId, now, null, null, outcome.Notices, null, outcome.Mutations);
+            if (dropped is not null)
             {
-                _executionManager.CompleteError(executionId, _now(), outcome.Error, null, outcome.Notices);
+                _log($"undo_redo {executionId} completed after its record went terminal: {dropped.Message}");
             }
-            else
+
+            if (outcome.Error is null && outcome.DocumentId.Length > 0)
             {
-                _executionManager.CompleteSuccess(executionId, _now(), null, null, outcome.Notices, null, outcome.Mutations);
+                // Observability (PRD §05): another client must see that work here was reverted or restored.
+                // The last CHANGING run is left alone -- the gate's evidence is the tool's own tick.
+                _ledger.RecordTool(outcome.DocumentId, new LastRun
+                {
+                    ExecutionId = executionId, AgentClientId = "", FinishedAt = now.ToString("o"), Status = directionText,
+                    Label = outcome.OnOurWork ? "the connector's own work" : "another actor's work (confirmed)", ChangedDocument = true,
+                });
+                try { LedgerChanged?.Invoke(); } catch (Exception ex) { _log("ledger listener failed: " + ex.Message); }
             }
         });
 
