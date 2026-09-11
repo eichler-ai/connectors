@@ -113,6 +113,22 @@ internal sealed class BridgeHost : ISessionEnvironment
             {
                 _dispatcher.SetDiscoveryService(service);
             }
+
+            // rhinoscript (PRD §09): its Python source only exists once Rhino's CPython runtime has been
+            // deployed (during the #287 warm-up), which races this build on a fresh machine. Retry a few
+            // times so it lands without a Rhino restart; RhinoCommon discovery is already live regardless.
+            if (cache is not null)
+            {
+                for (var attempt = 0; attempt < 7; attempt++)
+                {
+                    if (DiscoveryBootstrap.SyncRhinoScript(cache, _log))
+                    {
+                        break;
+                    }
+
+                    System.Threading.Thread.Sleep(5000);
+                }
+            }
         }) { IsBackground = true, Name = "MCPBridge discovery build" }.Start();
     }
 

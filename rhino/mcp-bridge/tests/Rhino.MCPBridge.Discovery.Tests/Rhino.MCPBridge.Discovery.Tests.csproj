@@ -37,6 +37,10 @@
 
   <ItemGroup>
     <!-- Hand-authored doc-id XML asset for direct XmlDocIndex parsing tests. -->
+    <None Include="Fixtures\rhinoscript\*.py">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>Fixtures\rhinoscript\%(Filename)%(Extension)</Link>
+    </None>
     <None Include="Fixtures\SampleDocs.xml">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>

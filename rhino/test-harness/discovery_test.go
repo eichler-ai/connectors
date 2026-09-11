@@ -193,3 +193,51 @@ func searchModelsLine(t *testing.T) string {
 	}
 	return string(out)
 }
+
+
+// The rhinoscript kind (PR3): rhinoscriptsyntax functions are indexed with kind=rhinoscript and must
+// flow end-to-end through dump_members -> the broker index -> search/describe, beside RhinoCommon.
+func TestDiscoveryRhinoScriptFunctionsAreIndexed(t *testing.T) {
+	c := startServer(t)
+	waitForInstance(t, c)
+
+	// describe_function on a known rs function resolves with its docstring summary.
+	d, isErr := discCall[describeFunctionOut](t, c, "describe_function", map[string]any{"member": "rhinoscriptsyntax.AddCircle"})
+	if isErr {
+		t.Fatalf("describe rhinoscriptsyntax.AddCircle: %+v", d.Error)
+	}
+	blob, _ := json.Marshal(d.Result)
+	if !strings.Contains(strings.ToLower(string(blob)), "circle") {
+		t.Fatalf("describe of rhinoscriptsyntax.AddCircle lacks a circle summary: %s", blob)
+	}
+
+	// search surfaces at least one kind=rhinoscript member for a task phrase. Poll until the broker
+	// index is ready (rhinoscript members ride the same dump_members corpus as RhinoCommon).
+	deadline := time.Now().Add(120 * time.Second)
+	var out searchFunctionsOut
+	for {
+		out, isErr = discCall[searchFunctionsOut](t, c, "search_functions", map[string]any{"query": "add a circle to the document"})
+		if isErr {
+			t.Fatalf("%+v", out.Error)
+		}
+		if out.Ranker == "semantic" || out.Ranker == "semantic-no-rerank" || out.Ranker == "lexical" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("broker index never became ready (ranker=%s)", out.Ranker)
+		}
+		time.Sleep(2 * time.Second)
+	}
+	var sawRhinoScript bool
+	for _, m := range out.Results {
+		// m.Kind is the MEMBER category (rhinoscript functions carry "function"), never the corpus
+		// kind -- rhinoscript provenance rides the member-id prefix / synthetic namespace (#297, #2).
+		if strings.HasPrefix(m.MemberID, "rhinoscript:") || m.Namespace == "rhinoscriptsyntax" {
+			sawRhinoScript = true
+		}
+	}
+	if !sawRhinoScript {
+		t.Fatalf("no kind=rhinoscript member in the results for 'add a circle' (ranker=%s, %d results) -- the rhinoscript corpus is not reaching the broker index", out.Ranker, len(out.Results))
+	}
+	t.Logf("rhinoscript indexed: describe + search both surface rs functions (ranker=%s)", out.Ranker)
+}
