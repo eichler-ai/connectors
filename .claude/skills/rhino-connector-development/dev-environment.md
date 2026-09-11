@@ -190,8 +190,8 @@ because there is no VM topology to automate (PRD §05) and the Mac's `deploy-plu
   confirms an active document; tracked as #289.
 - **Live pass — one command**: `powershell -ExecutionPolicy Bypass -File
   rhino\dev-tooling\deploy-plugin-windows.ps1` builds, kills Rhino (DLL lock), yak-reinstalls, restarts
-  (plain, **no ScriptEditor** — the #287 force-load brings RhinoCode up), waits for `force-load
-  RhinoCodePlugin: True` + `python warm-up done`, and materialises a document (#289). Then build the
+  (plain, **no ScriptEditor** — the #287 force-load brings RhinoCode up), waits for `python warm-up done`
+  (which follows that force-load), and materialises a document (#289). Then build the
   server and run the harness: `cd rhino\mcp-server && go build -o mcp-server.exe ./cmd/mcp-server`
   (native Go; winget `GoLang.Go` is windows/arm64; the cold build pulls the shared/ML deps once) → `cd
   ..\test-harness && go test -tags harness ./... -v -broker-exe ..\mcp-server\mcp-server.exe`. **Result

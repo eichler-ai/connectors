@@ -15,7 +15,8 @@
     "Could not load file or assembly 'Eichler.Connectors.Rhino'"; RhinoCommon.dll must never ship.
   - Rhino 8 runs x64-under-emulation on Windows-on-ARM, so cold start is slow (~2 min): poll generously.
   - #287: the plug-in force-loads the demand-loaded RhinoCodePlugin so Python 3 registers with no
-    ScriptEditor; this waits for "force-load RhinoCodePlugin ...: True" and "python warm-up done".
+    ScriptEditor; this waits for the "python warm-up done" line, which follows that force-load (a failed
+    force-load instead surfaces as "python warm-up failed", which this reports).
   - #289: a programmatic launch intermittently opens NO document, and the connector faithfully reports
     zero — so doc-dependent cases fail with document-not-found. Running one `rhinocode` script after
     launch materialises an untitled document deterministically (rhinocode works once #287 loads
@@ -69,11 +70,19 @@ url: https://github.com/eichler-ai/connectors
 Push-Location $pkg
 try {
     & $yak build | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "yak build failed (exit $LASTEXITCODE)" }
+    $yakFile = Get-ChildItem *.yak | Select-Object -First 1
+    if ($null -eq $yakFile) { throw 'yak build produced no .yak package' }
     & $yak uninstall rhino-mcp-bridge | Out-Null   # ignore "not installed"; native non-zero does not throw
-    & $yak install (Get-ChildItem *.yak | Select-Object -First 1).FullName
+    & $yak install $yakFile.FullName
+    if ($LASTEXITCODE -ne 0) { throw "yak install failed (exit $LASTEXITCODE)" }
 } finally {
     Pop-Location
 }
+# Best-effort cleanup of the staging dir. yak can briefly hold a handle on it right after install, so a
+# Win32 "Access is denied" here must not fail the deploy (-ErrorAction doesn't catch that provider
+# exception under ErrorActionPreference=Stop, so swallow it explicitly); a leftover temp dir is harmless.
+try { Remove-Item -Recurse -Force $pkg -ErrorAction Stop } catch { Write-Host "    (left staging dir $pkg -- $($_.Exception.Message))" }
 
 if ($NoRestart) {
     Write-Host '==> --NoRestart set: installed; Rhino will load it at its next start.'
@@ -87,8 +96,8 @@ Write-Host '==> restart Rhino'
 $launchUtc = (Get-Date).ToUniversalTime().AddSeconds(-5)
 Start-Process -FilePath $rhinoExe -ArgumentList '/nosplash'
 
-Write-Host '    waiting for RhinoCode force-load + python warm-up (x64 emulation is slow; up to 5 min)'
-$deadline = (Get-Date).AddSeconds(300)
+Write-Host '    waiting for python warm-up done (which follows the #287 RhinoCode force-load; a failed force-load surfaces as python warm-up failed). x64 emulation is slow; up to ~6 min.'
+$deadline = (Get-Date).AddSeconds(420)
 $pythonReady = $false
 $pythonSeen  = $false
 while ((Get-Date) -lt $deadline) {
