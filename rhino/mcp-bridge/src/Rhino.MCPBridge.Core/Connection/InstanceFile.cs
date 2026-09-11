@@ -1,5 +1,8 @@
 using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
+using System.Security.AccessControl;
 using System.Security.Cryptography;
+using System.Security.Principal;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -41,15 +44,11 @@ public sealed class InstanceFile
         var tmp = path + ".tmp";
         var json = JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true });
         // Created owner-only from the first byte (review of #281): a write-then-chmod would leave the
-        // token world-readable for the gap between the two. On Windows the file inherits
-        // %LOCALAPPDATA%'s ACL, which is already the current user only; an explicit ACL is phase 2.
-        var options = new FileStreamOptions { Mode = FileMode.Create, Access = FileAccess.Write, Share = FileShare.None };
-        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-        {
-            options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
-        }
-
-        using (var fs = new FileStream(tmp, options))
+        // token world-readable for the gap between the two. Unix uses the 0600 create mode; Windows
+        // gets an explicit, non-inherited owner-only ACL (PRD §13) rather than trusting the ACL the
+        // file would inherit from %LOCALAPPDATA%, so the token stays protected even if that directory's
+        // ACL is ever widened.
+        using (var fs = CreateOwnerOnly(tmp))
         using (var w = new StreamWriter(fs))
         {
             w.Write(json);
@@ -57,6 +56,45 @@ public sealed class InstanceFile
 
         File.Move(tmp, path, overwrite: true);
         return path;
+    }
+
+    /// <summary>Opens <paramref name="path"/> for writing such that only the current user can read it,
+    /// from the first byte. Unix: the 0600 create mode. Windows: the explicit DACL from
+    /// <see cref="OwnerOnlyDacl"/>.</summary>
+    private static FileStream CreateOwnerOnly(string path)
+    {
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            return CreateOwnerOnlyWindows(path);
+        }
+
+        var options = new FileStreamOptions
+        {
+            Mode = FileMode.Create,
+            Access = FileAccess.Write,
+            Share = FileShare.None,
+            UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite,
+        };
+        return new FileStream(path, options);
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static FileStream CreateOwnerOnlyWindows(string path) =>
+        new FileInfo(path).Create(FileMode.Create, FileSystemRights.Write, FileShare.None, 4096, FileOptions.None, OwnerOnlyDacl());
+
+    /// <summary>The owner-only security descriptor written on Windows: the DACL is protected (inherited
+    /// ACEs dropped) and carries a single ACE granting the current user full control, so no other
+    /// identity can read the auth token (PRD §13) — the Windows counterpart of the 0600 Unix mode.
+    /// Internal for the tier-1 ACL-policy test.</summary>
+    [SupportedOSPlatform("windows")]
+    internal static FileSecurity OwnerOnlyDacl()
+    {
+        var me = WindowsIdentity.GetCurrent().User
+            ?? throw new InvalidOperationException("the current Windows user has no SID");
+        var security = new FileSecurity();
+        security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+        security.AddAccessRule(new FileSystemAccessRule(me, FileSystemRights.FullControl, AccessControlType.Allow));
+        return security;
     }
 
     public static InstanceFile? TryRead(string path)

@@ -47,6 +47,40 @@ language first (method §13). **At plug-in load the call returns immediately wit
 polls `QueryLatest(Python3)` until it is non-null, then `Status.WaitReady()`; the connection.log line
 `python warm-up done in N ms` (≈2400 ms) confirms it.
 
+## Symptom: on Windows, `python warm-up failed … Python 3 was not registered by RhinoCode within 180 s`
+
+**Windows RhinoCode does not register Python 3 on its own** (verified 2026-09-11, Rhino 8.35 on Windows
+11 ARM64 under x64 emulation; [[issue #287]]). Unlike the Mac — where the language registers ≈2.4 s
+after load — on Windows a normal launch never registers Python 3, never deploys the CPython runtime
+(`~/.rhinocode/py39-rh8` stays absent), and never starts the RhinoCode remote-pipe server, so
+`WaitStatusComplete`/`QueryLatest` poll until the 3-minute timeout. **Engaging the ScriptEditor once**
+(`_ScriptEditor`, e.g. in the launch runscript) triggers all three at once: CPython deploys, the next
+`python warm-up done` follows (≈28–100 s), and `rhinocode.exe` can then see the instance. A trivial
+`RhinoCode.RunScript("#! python 3\n…")` at warm-up does **not** substitute — it needs the language
+already registered, so it throws "can't determine language" before deployment (ruled out live). Until
+#287 lets the plug-in activate RhinoCode headlessly, the Windows harness/live setup must open the
+ScriptEditor once per session. C# (Roslyn) is unaffected and warms up with no ScriptEditor.
+Tell: `rhinocode list` empty while Rhino is up = the RhinoCode server is not engaged.
+
+Two further facts for the #287 fix, found on the reruns: **engaging the ScriptEditor is not a reliable
+workaround** — a *fast/cached* warm-up (≈10 s, runtime already deployed) can finish with `scriptcontext`
+and the rest of Rhino's Python module path still off `sys.path`, where a *slow* first-time warm-up
+(≈100 s) leaves them available; and because `PythonScriptRunner.Prefix` imports `scriptcontext`
+**unconditionally**, an absent `scriptcontext` makes *every* Python run hard-fail with
+`No module named 'scriptcontext'`, even a `Rhino.Geometry`-only script that never touches it. The fix
+should both drive RhinoCode's full init (not just deploy the runtime) and make that preamble import
+best-effort. Until then the Windows harness **skips the live-Python cases** (`skipPythonExecutionOnWindows`),
+keeping only the compile/analysis-only ones.
+
+## Symptom: on Windows the build stalls for minutes, or `yak uninstall` says "Access denied"
+
+**Rhino is running and holding the plug-in DLLs open.** `dotnet build` then retries the copy of
+`Rhino.MCPBridge.Core.dll`/`RhinoAdapter.dll`/`Eichler.Connectors.Rhino.dll` into the output for a long
+time (a 1-minute build was seen taking 16), and `yak uninstall rhino-mcp-bridge` fails with "Access
+denied. If Rhino is running, close it and try again." **Kill Rhino before building or reinstalling on
+Windows** (`Stop-Process -Name Rhino -Force`); there is no live-reload, the package is only rescanned at
+startup anyway.
+
 ## Symptom: Python tracebacks point at the wrong line, or at a `~/.rhinocode/stage/…` file
 
 The runner prefixes two lines (shebang + `scriptcontext.doc = doc`) and RhinoCode stages the text
