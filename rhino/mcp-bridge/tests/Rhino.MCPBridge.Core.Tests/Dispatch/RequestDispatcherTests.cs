@@ -129,7 +129,7 @@ public sealed class RequestDispatcherTests
     {
         var python = new FakePythonHost();
         python.EnsureLoaded();
-        python.OnRun = (_, _) => new PythonRunResult { Error = new Exception("boom"), StdErr = "Traceback (most recent call last):\n  File \"<string>\", line 3, in <module>\nRuntimeError: boom\n" };
+        python.OnRun = (_, _) => new PythonRunResult { Error = new Exception("boom"), StdErr = "Traceback (most recent call last):\n  File \"<string>\", line 4, in <module>\nRuntimeError: boom\n" };
         var h = new Harness(python: python);
         h.Host.DuringRun = on => on(new DocumentChange(DocumentChange.Kind.Added, Guid.NewGuid(), "Brep", "Default"));
         var r = await h.Call("execute_script", new { execution_id = "a", language = "python", script = "raise RuntimeError('boom')" });

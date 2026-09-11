@@ -16,21 +16,26 @@ namespace Rhino.MCPBridge.Core.Execution.Python;
 ///   <c>script-compilation-failed</c> from the traceback (<see cref="PythonScriptException.IsSyntaxError"/>).
 /// - A module has no return statement: the script assigns <c>result</c> and the runner reads it back.
 /// - Cancellation is cooperative through <c>cancel</c> (<see cref="CancelSignal"/>); the host cannot interrupt.
-/// - The script is prefixed with the <c>#! python 3</c> shebang the host requires and one preamble line
-///   that points <c>scriptcontext.doc</c> at the routed document, so the rhinoscriptsyntax layer acts on
-///   the same document the C# host would. Traceback line numbers are shifted back by those two lines.
+/// - The script is prefixed with the <c>#! python 3</c> shebang the host requires and a best-effort
+///   preamble (try/except) that points <c>scriptcontext.doc</c> at the routed document, so the
+///   rhinoscriptsyntax layer acts on the same document the C# host would; a partially-initialised
+///   RhinoCode without scriptcontext on sys.path (issue #287) does not then fail the run. Traceback line
+///   numbers are shifted back by the preamble's line count (<see cref="PrefixLines"/>).
 /// </summary>
 internal sealed class PythonScriptRunner : IScriptRunner
 {
     public const string ResultName = "result";
     public static IReadOnlyList<string> GlobalNames { get; } = new[] { "doc", "ghdoc", "connector", "cancel" };
 
-    /// <summary>The lines placed before the script: shebang, then the preamble. Tracebacks are shifted by their count.</summary>
-    internal const string Prefix = "#! python 3\nimport scriptcontext as __mcp_sc; __mcp_sc.doc = doc\n";
-    internal const int PrefixLines = 2;
+    /// <summary>The lines placed before the script: shebang, then the preamble. Tracebacks are shifted by
+    /// their count (<see cref="PrefixLines"/>). The scriptcontext import is best-effort: on Windows a
+    /// partially-initialised RhinoCode can leave scriptcontext off sys.path (issue #287), and a hard
+    /// import there would fail every run, even a Rhino.Geometry-only one; try/except keeps such runs alive.</summary>
+    internal const string Prefix = "#! python 3\ntry: import scriptcontext as __mcp_sc; __mcp_sc.doc = doc\nexcept Exception: pass\n";
+    internal const int PrefixLines = 3;
 
-    /// <summary>Run after every script (see RunAsync).</summary>
-    internal const string RestoreScriptContext = "#! python 3\nimport scriptcontext as __mcp_sc, Rhino as __mcp_rh; __mcp_sc.doc = __mcp_rh.RhinoDoc.ActiveDoc\n";
+    /// <summary>Run after every script (see RunAsync). Best-effort for the same #287 reason as the preamble.</summary>
+    internal const string RestoreScriptContext = "#! python 3\ntry: import scriptcontext as __mcp_sc, Rhino as __mcp_rh; __mcp_sc.doc = __mcp_rh.RhinoDoc.ActiveDoc\nexcept Exception: pass\n";
 
     /// <summary>A cancellation, not a script error that happened to coincide with one: the .NET
     /// OperationCanceledException from cancel.Check() somewhere in the chain, or its Python spelling

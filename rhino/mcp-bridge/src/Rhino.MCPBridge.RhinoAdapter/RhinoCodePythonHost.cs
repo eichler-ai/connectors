@@ -22,11 +22,17 @@ internal sealed class RhinoCodePythonHost : IPythonHost
     private static readonly TimeSpan LoadTimeout = TimeSpan.FromMinutes(3);
 
     private volatile string? _unavailable = "the Python 3 language has not finished loading";
+    private volatile string? _activationFailure;
     private Type? _rhinoCode;
     private Type? _runContext;
     private MethodInfo? _runScript;
 
     public string? UnavailableReason => _unavailable;
+
+    /// <summary>Called on the main thread by the plug-in when it could not force-load the demand-loaded
+    /// RhinoCodePlugin (issue #287). The warm-up's poll notices this and fails fast with the reason
+    /// rather than waiting out the full load timeout — QueryLatest would never return without RhinoCode.</summary>
+    public void NoteRhinoCodeLoadFailed(string reason) => _activationFailure = reason;
 
     public void EnsureLoaded()
     {
@@ -52,6 +58,13 @@ internal sealed class RhinoCodePythonHost : IPythonHost
             object? language = null;
             while (language is null)
             {
+                // The plug-in force-loads the demand-loaded RhinoCodePlugin on the main thread (#287);
+                // if that failed, QueryLatest will never return, so fail with that reason now.
+                if (_activationFailure is { } af)
+                {
+                    throw new InvalidOperationException(af);
+                }
+
                 languages.WaitStatusComplete((dynamic)python3);
                 language = languages.QueryLatest((dynamic)python3);
                 if (language is null)

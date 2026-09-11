@@ -161,39 +161,41 @@ because there is no VM topology to automate (PRD §05) and the Mac's `deploy-plu
   Windows** (`InstanceFile.OwnerOnlyDacl`, phase 2): `Get-Acl` shows `AreAccessRulesProtected: True` and
   a single full-control ACE for the current user — the Windows counterpart of the Unix `0600`.
 
-- **⚠️ Python needs the RhinoCode server engaged, once per session — #287.** On a normal
-  launch the plug-in's Python warm-up **times out at 180 s** ("Python 3 was not registered by RhinoCode
-  within 180 s"): on Windows, RhinoCode does **not** register the Python 3 language, deploy its CPython
-  runtime (`~/.rhinocode/py39-rh8`), or start the remote-pipe server on its own — `WaitStatusComplete`/
-  `QueryLatest` poll forever. **Opening the ScriptEditor once** (`… _ScriptEditor _Enter` in the
-  runscript, or the command) triggers all three: CPython deploys, `python warm-up done` follows
-  (≈28–100 s), and `rhinocode.exe` can then see the instance. A trivial `RhinoCode.RunScript` at warm-up
-  does **not** substitute (it needs the language already registered — ruled out live). And engaging the
-  editor is **not even a reliable workaround**: a fast/cached warm-up (≈10 s) can leave `scriptcontext`
-  off `sys.path`, and the runner imports it unconditionally, so every live Python run then hard-fails
-  (`No module named 'scriptcontext'`). So the Windows harness **skips the live-Python cases**
-  (`skipPythonExecutionOnWindows`, citing #287) and keeps only the compile/analysis-only ones; it still
-  opens the ScriptEditor once because `rhinocode` (used by the foreign-command undo case) needs the
-  RhinoCode server up. C# execution is unaffected and works with no ScriptEditor.
+- **Python on Windows — fixed by force-loading RhinoCode (#287).** The root cause: `RhinoCodePlugin`
+  (McNeel's Python 3 / ScriptEditor host, GUID `c9cba87a-…`) is **demand-loaded** on Windows (registry
+  `LoadMode=2`, the lone `WhenNeeded` among plug-ins that are all `AtStartup`), so it never loads at
+  startup and Python 3 never registers — the plug-in's warm-up polled `QueryLatest` until the 180 s
+  timeout. Before the fix, only opening the ScriptEditor loaded it (and even that was unreliable: a
+  fast/cached warm-up could leave `scriptcontext` off `sys.path`, and the runner imported it
+  unconditionally, hard-failing every run). **The fix:** `OnLoad` force-loads `RhinoCodePlugin` on the
+  first `RhinoApp.Idle` tick (`PlugIn.LoadPlugIn(guid)`, main thread; deferred off `OnLoad` to avoid
+  reentrancy), and the runner's `scriptcontext` import is best-effort (try/except). **Verified** on a
+  launch with NO ScriptEditor: `force-load RhinoCodePlugin (…): True`, then `python warm-up done in
+  ~11 s`. C# execution never needed any of this.
 - **Driving Rhino / `rhinocode`**: `C:\Program Files\Rhino 8\System\rhinocode.exe`. It discovers Rhino
-  only after the RhinoCode server is up (i.e. after ScriptEditor is engaged, per above) — an empty
-  `rhinocode list` means the server isn't engaged, not that Rhino is down. The harness's
-  `rhinocodePath()` returns this path on Windows. The System Events pieces of the Mac restart helper
-  have no Windows equivalent; kill+relaunch manually (`Stop-Process`, then the launch line above).
+  through the RhinoCode remote-pipe server, which the #287 force-load now brings up at plug-in load, so
+  `rhinocode list` sees the instance with no ScriptEditor. The harness's `rhinocodePath()` returns this
+  path on Windows. The System Events pieces of the Mac restart helper have no Windows equivalent;
+  kill+relaunch manually (`Stop-Process`, then the launch line above).
 - **Documents**: one per process (PRD §05). `TestDocumentEventsRefreshTheRegistry` (opens a second
   document) skips with a reason on Windows; `TestOmittedDocumentIdIsActive` runs on both.
-- **Live pass — the loop that works**: build → kill Rhino → yak reinstall → launch **with ScriptEditor**
-  → wait for `python warm-up done` + `rhinocode list` showing the instance → `cd rhino\mcp-server && go
-  build -o mcp-server.exe ./cmd/mcp-server` (native Go; winget `GoLang.Go` is windows/arm64; the cold
-  build pulls the shared/ML deps once) → `cd ..\test-harness && go test -tags harness ./... -v
-  -broker-exe ..\mcp-server\mcp-server.exe`. **Result 2026-09-11: 3 consecutive clean runs, 24 pass /
-  7 skip / 0 fail.** The 7 skips are the one-document case, the destructive opt-in, and the 5
-  live-Python-execution cases (skipped on Windows pending #287; the compile/analysis-only Python cases
-  run). C#, capture, undo (incl. the `rhinocode`-driven foreign-command case), single-document
-  addressing and the owner-only ACL are all green. Paste this into the PR and say plainly it is green
-  **with the live-Python cases skipped pending #287** — the plan's exit ("phase-1 suite green on
-  Windows") is fully met only when the #287 fix re-enables and proves those cases; don't let the green
-  hide the defect.
+- **⚠️ Programmatic launch may leave no open document (#289).** On this VM, `Rhino.exe` launched with a
+  runscript (`_-New _None`) or a `.3dm` file arg **intermittently ends with zero open documents** — the
+  connector then correctly reports 0 documents (verified: `RhinoDoc.OpenDocuments()` is empty and
+  `rhinocode`'s DOC column blank; the connector's registry is faithful, so it is a launch-procedure
+  issue, not a connector bug). Doc-dependent cases (all script execution) need a document. **Deterministic
+  doc-open step:** after launch, run any `rhinocode script` once — executing a script materialises an
+  untitled document if none is open (observer effect, used deliberately). Post-#287, `rhinocode` works
+  with no ScriptEditor, so this is a clean step. Tracked as #289.
+- **Live pass — the loop that works**: build → **kill Rhino** (it locks the plug-in DLLs) → yak reinstall
+  → launch (plain, **no ScriptEditor** — the #287 force-load brings RhinoCode up) → wait for `force-load
+  RhinoCodePlugin: True` + `python warm-up done` in connection.log → **materialise a document** (`rhinocode
+  script` once, #289) → `cd rhino\mcp-server && go build -o mcp-server.exe ./cmd/mcp-server` (native Go;
+  winget `GoLang.Go` is windows/arm64; the cold build pulls the shared/ML deps once) → `cd
+  ..\test-harness && go test -tags harness ./... -v -broker-exe ..\mcp-server\mcp-server.exe`. **Result
+  2026-09-11 (with #287): 29 pass / 2 skip / 0 fail**, the full Python suite included, no ScriptEditor.
+  The 2 skips are the one-document case (`TestDocumentEventsRefreshTheRegistry`, PRD §05) and the
+  destructive opt-in. This is the plan's phase-2 exit — the phase-1 suite green on Windows.
 
 ---
 

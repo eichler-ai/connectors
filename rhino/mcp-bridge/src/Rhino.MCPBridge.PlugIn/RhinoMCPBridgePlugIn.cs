@@ -40,9 +40,15 @@ public sealed class RhinoMCPBridgePlugIn : Rhino.PlugIns.PlugIn
             var runHost = new RhinoRunHost(InstanceId, caseInsensitive, BridgeVersion, Core.Execution.UndoRunExecutor.RunCommandName, () => MCPBridgeRunCommand.Instance?.Id ?? Guid.Empty, LogConnection);
             var launcher = new RhinoRunLauncher(LogConnection);
             RoslynAssemblyIsolation.EnsureInitialized();
-            var host = new BridgeHost(InstanceId, RhinoApp.Version.ToString(), BridgeVersion, mainThread, documents, runHost, launcher, new RhinoViewCapture(), new RhinoCodePythonHost(), AppDataPaths.InstancesDir(), LogConnection);
+            var pythonHost = new RhinoCodePythonHost();
+            var host = new BridgeHost(InstanceId, RhinoApp.Version.ToString(), BridgeVersion, mainThread, documents, runHost, launcher, new RhinoViewCapture(), pythonHost, AppDataPaths.InstancesDir(), LogConnection);
             host.Start();
             CurrentHost = host;
+
+            // #287: RhinoCodePlugin is demand-loaded on Windows, so Python 3 never registers until it is
+            // loaded; force it, or the Python warm-up times out. Deferred to the first Idle tick and run
+            // on the main thread (see ForceLoadRhinoCode).
+            ForceLoadRhinoCode(pythonHost);
 
             RhinoDoc.EndOpenDocument += OnDocumentsChanged;
             RhinoDoc.CloseDocument += OnDocumentsChanged;
@@ -73,6 +79,40 @@ public sealed class RhinoMCPBridgePlugIn : Rhino.PlugIns.PlugIn
     }
 
     private static void OnDocumentsChanged(object? sender, EventArgs e) => CurrentHost?.PushRegisterRefresh();
+
+    /// <summary>McNeel's RhinoCodePlugin — the Python 3 / ScriptEditor host. Verified 2026-09-11 to be
+    /// demand-loaded on Windows (registry LoadMode=2 / WhenNeeded) while every other plug-in, ours
+    /// included, is AtStartup; on Mac it loads at startup. Its GUID is stable across installs.</summary>
+    private static readonly Guid RhinoCodePluginId = new("c9cba87a-23ce-4f15-a918-97645c05cde7");
+
+    /// <summary>Force-loads RhinoCodePlugin so the Python host can initialise without the person opening
+    /// the ScriptEditor (issue #287). Deferred to the first Idle tick — loading another plug-in from
+    /// inside our own OnLoad, while Rhino is still bringing plug-ins up, risks reentrancy — and run on
+    /// the main thread, which LoadPlugIn requires. A load failure becomes the Python host's unavailable
+    /// reason rather than a silent 180 s warm-up timeout. No-op on Mac, where it is already loaded.</summary>
+    private static void ForceLoadRhinoCode(RhinoCodePythonHost pythonHost)
+    {
+        EventHandler? onIdle = null;
+        onIdle = (_, _) =>
+        {
+            RhinoApp.Idle -= onIdle;
+            try
+            {
+                var loaded = Rhino.PlugIns.PlugIn.LoadPlugIn(RhinoCodePluginId);
+                LogConnection($"force-load RhinoCodePlugin ({RhinoCodePluginId}): {loaded}");
+                if (!loaded)
+                {
+                    pythonHost.NoteRhinoCodeLoadFailed($"could not force-load RhinoCodePlugin {RhinoCodePluginId} (issue #287)");
+                }
+            }
+            catch (Exception ex)
+            {
+                LogConnection("force-load RhinoCodePlugin threw: " + ex.Message);
+                pythonHost.NoteRhinoCodeLoadFailed($"force-loading RhinoCodePlugin threw: {ex.Message} (issue #287)");
+            }
+        };
+        RhinoApp.Idle += onIdle;
+    }
 
     /// <summary>connection.log under the connector root, size-capped like Revit's (issue #11 there).</summary>
     internal static void LogConnection(string message) =>
