@@ -151,7 +151,7 @@ usable from either language.
   `Rhino.Geometry.Curve.Offset`) or a `member_id`. It returns **both call shapes** — the C#
   `signature` and the CPython `python_call` — plus parameters, returns and summary. `python_call`
   spells out where Python interop differs from C#: an `out`/`ref` parameter comes back in a **return
-  tuple** (`rc, plane = curve.TryGetPlane()`), a generic method takes explicit `[T]` arguments, a
+  tuple** (`result, plane = TryGetPlane()`), a generic method takes explicit `[T]` arguments, a
   constructor drops `new`, and a `rhinoscriptsyntax` function shows its `rs.` form. An overloaded
   member with no `member_id` returns its overload list to pick from — re-call with the one you want.
 
