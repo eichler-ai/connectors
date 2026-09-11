@@ -99,6 +99,22 @@ func assertGhdocBinds(t *testing.T, c *mcpclient.Client, instanceID, documentID,
 		t.Errorf("gh_document_id should bind ghdoc to the definition, got status=%s return=%q", bound.Status, bound.ReturnValue)
 	}
 
+	// The C# path is the one PR #305's review flagged: GrasshopperDocument is typed object and the script
+	// casts it to a Grasshopper type -- which only compiles if the Roslyn runner picked up Grasshopper.dll
+	// after it was demand-loaded (the runner snapshots references at startup). This is the exact cast the
+	// skill/schema instruct, so it must actually compile and run live.
+	cs := callExecute(t, c, map[string]any{
+		"instance_id": instanceID, "document_id": documentID, "gh_document_id": ghDocID, "language": "csharp",
+		"script": "var gh = (Grasshopper.Kernel.GH_Document)GrasshopperDocument; return \"cs-bound:\" + gh.ObjectCount;",
+	}, 30*time.Second)
+	t.Logf("ghdoc C# cast: status=%s return=%q", cs.Status, cs.ReturnValue)
+	if cs.Error != nil {
+		t.Logf("  error: code=%s msg=%s", cs.Error.Code, cs.Error.Message)
+	}
+	if cs.Status != "success" || !strings.HasPrefix(cs.ReturnValue, "cs-bound:") {
+		t.Errorf("C# cast to GH_Document should compile and run once Grasshopper is loaded, got status=%s return=%q", cs.Status, cs.ReturnValue)
+	}
+
 	bogus := callExecute(t, c, map[string]any{
 		"instance_id": instanceID, "document_id": documentID, "gh_document_id": "gh-nope", "language": "python",
 		"script": "result = 1",
