@@ -41,7 +41,13 @@ public sealed class RhinoMCPBridgePlugIn : Rhino.PlugIns.PlugIn
             var launcher = new RhinoRunLauncher(LogConnection);
             RoslynAssemblyIsolation.EnsureInitialized();
             var pythonHost = new RhinoCodePythonHost();
-            var host = new BridgeHost(InstanceId, RhinoApp.Version.ToString(), BridgeVersion, mainThread, documents, runHost, launcher, new RhinoViewCapture(), pythonHost, AppDataPaths.InstancesDir(), LogConnection);
+            // §08 v1 modal-dialog diagnostic: the platform window inventory (null on any other OS turns the
+            // feature off). Win32 EnumWindows on Windows, Core Graphics CGWindowList on Mac — both enumerate
+            // off the main thread, which the §08 fallback requires.
+            Core.Diagnostics.IWindowInventory? windowInventory = null;
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) windowInventory = new Win32WindowInventory();
+            else if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX)) windowInventory = new MacWindowInventory();
+            var host = new BridgeHost(InstanceId, RhinoApp.Version.ToString(), BridgeVersion, mainThread, documents, runHost, launcher, new RhinoViewCapture(), pythonHost, windowInventory, AppDataPaths.InstancesDir(), LogConnection);
             host.Start();
             CurrentHost = host;
 

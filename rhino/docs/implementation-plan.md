@@ -75,7 +75,7 @@ The PRD's §17 items 1–3 block phase 1. Each is a throwaway harness-shaped Go 
 
 ## Phase 2 — Windows
 
-**Work.** Windows CI job building the plug-in; a live harness pass on a Windows machine; `Win32WindowInventory` ported and `MacWindowInventory` written (`NSApplication.windows` via the Cocoa bridge Eto exposes) behind one `IWindowInventory`; owner-only ACL on the instance file.
+**Work.** Windows CI job building the plug-in; a live harness pass on a Windows machine; `Win32WindowInventory` (`EnumWindows`) and `MacWindowInventory` behind one **diagnosis-only** `IWindowInventory` (no auto-dismiss — §08 v1 takes no action); owner-only ACL on the instance file. **Note (2026-09-11):** the Mac side uses Core Graphics `CGWindowListCopyWindowInfo`, **not** `NSApplication.windows` as originally written here — the §08 fallback exists precisely because the main thread may be blocked, so the enumeration must run off the main thread, and AppKit (`NSApplication`) is main-thread-only. `IWindowInventory` bakes in no main-thread assumption and the dispatcher runs it on the connection thread, never the `capture_view` main-thread hop.
 
 **Tests.** Tier 1: `IWindowInventory` policy with a fake; ACL helper. Tier 2: phase 1's suite on Windows, with the single-document-per-instance assertions (`TestDocumentIdRouting` becomes a skip-with-reason on Windows and a new `TestOmittedDocumentIdIsActive` runs on both).
 
