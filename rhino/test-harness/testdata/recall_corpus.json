@@ -1,0 +1,29 @@
+{
+  "comment": "Labelled recall corpus for the Rhino API discovery ranker (PRD §09 success criterion: Revit's TestRealCorpusRecall equivalent over a labelled Rhino query set, both languages). Each case is a task sentence and the ONE member that best answers it, expressed as a Type.Member (or rhinoscriptsyntax.Name) suffix of the member's declaring-type + name. `language` records which script language the task is phrased for -- python tasks expect a rhinoscriptsyntax function, csharp tasks a RhinoCommon member -- so recall is reported per language too. This is a labelled set, NOT a hit list: cases that MISS are kept (a corpus tuned to 100%% recall is cherry-picked and measures nothing), exactly as Revit's TestRealCorpusRecall keeps its misses. Measured live against Rhino 8.35 by TestDiscoveryRecallCorpus: recall @1=10/24 (0.42), @3=16/24 (0.67), @10=23/24 (0.96); csharp @1=7/12 @3=9/12 @10=12/12, python @1=3/12 @3=7/12 @10=11/12. The test's floors sit below these to catch a broken ranker/port, not to pin any single query.",
+  "cases": [
+    {"query": "add a circle to the document", "member": "rhinoscriptsyntax.AddCircle", "language": "python"},
+    {"query": "add a line to the document", "member": "rhinoscriptsyntax.AddLine", "language": "python"},
+    {"query": "add a point object", "member": "rhinoscriptsyntax.AddPoint", "language": "python"},
+    {"query": "create a new layer", "member": "rhinoscriptsyntax.AddLayer", "language": "python"},
+    {"query": "add a polyline through points", "member": "rhinoscriptsyntax.AddPolyline", "language": "python"},
+    {"query": "add a text object to the model", "member": "rhinoscriptsyntax.AddText", "language": "python"},
+    {"query": "move an object by a vector", "member": "rhinoscriptsyntax.MoveObject", "language": "python"},
+    {"query": "delete an object from the document", "member": "rhinoscriptsyntax.DeleteObject", "language": "python"},
+    {"query": "add a sphere", "member": "rhinoscriptsyntax.AddSphere", "language": "python"},
+    {"query": "rotate an object around a point", "member": "rhinoscriptsyntax.RotateObject", "language": "python"},
+    {"query": "scale an object", "member": "rhinoscriptsyntax.ScaleObject", "language": "python"},
+    {"query": "add an interpolated curve through points", "member": "rhinoscriptsyntax.AddInterpCurve", "language": "python"},
+    {"query": "create a mesh from a bounding box", "member": "Mesh.CreateFromBox", "language": "csharp"},
+    {"query": "find the closest point on a curve", "member": "Curve.ClosestPoint", "language": "csharp"},
+    {"query": "join a set of curves into one", "member": "Curve.JoinCurves", "language": "csharp"},
+    {"query": "offset a curve by a distance", "member": "Curve.Offset", "language": "csharp"},
+    {"query": "loft a surface through a set of curves", "member": "Brep.CreateFromLoft", "language": "csharp"},
+    {"query": "divide a curve into equal segments", "member": "Curve.DivideByCount", "language": "csharp"},
+    {"query": "transform geometry by a matrix", "member": "GeometryBase.Transform", "language": "csharp"},
+    {"query": "get the bounding box of geometry", "member": "GeometryBase.GetBoundingBox", "language": "csharp"},
+    {"query": "rebuild a curve with fewer control points", "member": "Curve.Rebuild", "language": "csharp"},
+    {"query": "fit a plane to a set of points", "member": "Plane.FitPlaneToPoints", "language": "csharp"},
+    {"query": "duplicate the segments of a curve", "member": "Curve.DuplicateSegments", "language": "csharp"},
+    {"query": "extrude a curve to create a surface", "member": "Surface.CreateExtrusion", "language": "csharp"}
+  ]
+}
