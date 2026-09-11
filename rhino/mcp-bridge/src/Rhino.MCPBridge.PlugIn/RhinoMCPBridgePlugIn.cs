@@ -45,10 +45,14 @@ public sealed class RhinoMCPBridgePlugIn : Rhino.PlugIns.PlugIn
             host.Start();
             CurrentHost = host;
 
-            // #287: RhinoCodePlugin is demand-loaded on Windows, so Python 3 never registers until it is
-            // loaded; force it, or the Python warm-up times out. Deferred to the first Idle tick and run
-            // on the main thread (see ForceLoadRhinoCode).
-            ForceLoadRhinoCode(pythonHost);
+            // #287: RhinoCodePlugin is demand-loaded ONLY on Windows, so Python 3 never registers there
+            // until it is loaded; force it, or the Python warm-up times out. On Mac it is AtStartup and
+            // already loaded, so this is skipped rather than relying on LoadPlugIn's idempotency (and the
+            // Mac path stays untouched). Deferred to the first Idle tick, on the main thread.
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            {
+                ForceLoadRhinoCode(pythonHost);
+            }
 
             RhinoDoc.EndOpenDocument += OnDocumentsChanged;
             RhinoDoc.CloseDocument += OnDocumentsChanged;
