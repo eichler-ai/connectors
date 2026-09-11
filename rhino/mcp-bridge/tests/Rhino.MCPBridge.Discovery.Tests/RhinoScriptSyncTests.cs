@@ -85,7 +85,7 @@ public class RhinoScriptSyncTests
         var path = Path.Combine(Path.GetTempPath(), $"discovery-oldschema-{System.Guid.NewGuid():N}.db");
         try
         {
-            using (var conn = new SqliteConnection($"Data Source={path}"))
+            using (var conn = new SqliteConnection($"Data Source={path};Pooling=False"))
             {
                 conn.Open();
                 using var cmd = conn.CreateCommand();
@@ -115,5 +115,26 @@ public class RhinoScriptSyncTests
         {
             if (File.Exists(path)) File.Delete(path);
         }
+    }
+
+    [Fact]
+    public void AssemblySync_DoesNotPruneTheRhinoScriptSource()
+    {
+        // Regression (review #297): Sync(assemblies) diffs against the loaded-assembly list and prunes rows
+        // not in it. The synthetic rhinoscript row (kind=rhinoscript) must NOT be a pruning candidate, or it
+        // is deleted on every launch and the content-hash no-op is defeated.
+        var indexed = RhinoScriptIndexer.Index(FixtureDir)!.Value;
+        using var cache = new DiscoveryCache(":memory:");
+        cache.SyncSource("rhinoscript", RhinoScriptIndexer.SourceId, indexed.ContentHash, indexed.Types);
+
+        // A subsequent assembly Sync with a DIFFERENT set (here: empty) would, if unscoped, remove everything.
+        var result = cache.Sync(System.Array.Empty<(string, System.Reflection.Assembly)>());
+        Assert.Equal(0, result.Removed); // the rhinoscript row is not an assembly-sync pruning candidate
+
+        // The rhinoscript members survive and a re-SyncSource with the unchanged hash is a no-op.
+        Assert.Contains(cache.ListNamespaces(), n => n.Namespace == "rhinoscriptsyntax");
+        var again = cache.SyncSource("rhinoscript", RhinoScriptIndexer.SourceId, indexed.ContentHash, indexed.Types);
+        Assert.Equal(0, again.Added);
+        Assert.Equal(0, again.Updated);
     }
 }

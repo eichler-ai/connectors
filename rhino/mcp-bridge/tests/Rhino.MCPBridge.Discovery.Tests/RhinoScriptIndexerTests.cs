@@ -101,4 +101,87 @@ public class RhinoScriptIndexerTests
         Assert.Null(RhinoScriptIndexer.Index(Path.Combine(AppContext.BaseDirectory, "no-such-dir")));
         Assert.Null(RhinoScriptIndexer.Index(null));
     }
+
+    // ----- parser edge cases (review #297, #4/#5): the line/regex scanner must not mis-index a def-like
+    // line that is actually inside a string, must keep class methods out, must survive *args/**kwargs and
+    // CRLF, and must not re-trip on a function's own docstring. -----
+
+    [Fact]
+    public void ParseModule_DefInsideAModuleDocstring_IsNotIndexed()
+    {
+        // A module-level triple-quoted string whose body contains a column-0 `def` line. The scanner must
+        // recognise it as string content, not a function (else rs.NotAFunction becomes a phantom an agent
+        // could try to call).
+        var src = "\"\"\"\ndef NotAFunction(x):\n    pass\n\"\"\"\n\ndef RealOne(x):\n    \"\"\"A real function.\"\"\"\n    return x\n";
+        var members = RhinoScriptIndexer.ParseModule(src).ToList();
+        Assert.Equal(new[] { "RealOne" }, members.Select(m => m.Name).ToArray());
+    }
+
+    [Fact]
+    public void ParseModule_DefInsideAFunctionDocstring_IsNotIndexed()
+    {
+        // The docstring of a real function contains an example that begins with `def`. The function is
+        // indexed once; the example line inside its docstring is not a second function.
+        var src = "def AddThing(x):\n    \"\"\"Adds a thing.\n\n    Example:\n    def Helper(y):\n        return y\n    \"\"\"\n    return x\n";
+        var members = RhinoScriptIndexer.ParseModule(src).ToList();
+        Assert.Equal(new[] { "AddThing" }, members.Select(m => m.Name).ToArray());
+    }
+
+    [Fact]
+    public void ParseModule_IndentedAndNestedDefs_AreExcluded()
+    {
+        // Only column-0 defs are module-level functions; a class method (indented) is not part of the
+        // rhinoscriptsyntax surface an agent addresses as rs.*.
+        var src = "class Foo:\n    def Method(self):\n        pass\n\ndef TopLevel():\n    def Inner():\n        pass\n    return 1\n";
+        var members = RhinoScriptIndexer.ParseModule(src).ToList();
+        Assert.Equal(new[] { "TopLevel" }, members.Select(m => m.Name).ToArray());
+    }
+
+    [Fact]
+    public void ParseModule_VarargsAndKwargs_AreCapturedInTheSignature()
+    {
+        var src = "def DoMany(first, *args, **kwargs):\n    \"\"\"Does many things.\"\"\"\n    pass\n";
+        var m = Assert.Single(RhinoScriptIndexer.ParseModule(src).ToList());
+        Assert.Equal("DoMany(first, *args, **kwargs)", m.Signature);
+    }
+
+    [Fact]
+    public void ParseModule_CrlfLineEndings_ParseTheSameAsLf()
+    {
+        var lf = "def AddThing(x):\n    \"\"\"Adds a thing.\"\"\"\n    return x\n";
+        var crlf = lf.Replace("\n", "\r\n");
+        var fromLf = Assert.Single(RhinoScriptIndexer.ParseModule(lf).ToList());
+        var fromCrlf = Assert.Single(RhinoScriptIndexer.ParseModule(crlf).ToList());
+        Assert.Equal(fromLf.Signature, fromCrlf.Signature);
+        Assert.Equal("Adds a thing.", fromCrlf.Summary);
+    }
+
+    [Fact]
+    public void Index_ContentHash_TracksContent_NotSizeOrMtime()
+    {
+        // review #297, #6: the hash must change when the bytes change (even at equal length) and must NOT
+        // depend on mtime, so a touch does not force a re-index and an equal-length edit is not missed.
+        var dir = Path.Combine(Path.GetTempPath(), "rs-hash-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var file = Path.Combine(dir, "mod.py");
+            File.WriteAllText(file, "def AddCircleAAA(x):\n    \"\"\"One.\"\"\"\n    pass\n");
+            var h1 = RhinoScriptIndexer.Index(dir)!.Value.ContentHash;
+
+            // Equal-length edit (same byte count), different content: hash must change.
+            File.WriteAllText(file, "def AddCircleBBB(x):\n    \"\"\"One.\"\"\"\n    pass\n");
+            var h2 = RhinoScriptIndexer.Index(dir)!.Value.ContentHash;
+            Assert.NotEqual(h1, h2);
+
+            // Same content, bumped mtime: hash must NOT change.
+            File.SetLastWriteTimeUtc(file, DateTime.UtcNow.AddHours(1));
+            var h3 = RhinoScriptIndexer.Index(dir)!.Value.ContentHash;
+            Assert.Equal(h2, h3);
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
 }

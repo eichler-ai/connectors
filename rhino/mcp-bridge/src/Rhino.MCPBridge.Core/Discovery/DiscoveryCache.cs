@@ -111,17 +111,25 @@ public sealed class DiscoveryCache : IDisposable
         // throws without disposing it first, the caller's very next File.Delete() hits a Windows sharing
         // violation against a handle nothing will ever release. This try/catch is the fix: any failure past
         // Open() disposes the connection before rethrowing, so the caller's delete actually succeeds.
-        _connection = new SqliteConnection($"Data Source={databasePath}");
+        // Pooling=False so Dispose closes the OS file handle immediately: a pooled connection is returned
+        // to the pool still holding the handle, which on Windows makes the self-heal File.Delete above (and
+        // any later delete of the cache file) fail with a sharing violation. This cache keeps ONE long-lived
+        // connection for the process, so pooling buys nothing anyway (review of #297, Windows CI).
+        _connection = new SqliteConnection($"Data Source={databasePath};Pooling=False");
         try
         {
             _connection.Open();
 
             using (var pragma = _connection.CreateCommand())
             {
-                // Required for the types/members ON DELETE CASCADE below to actually cascade -- SQLite
-                // ignores foreign key actions entirely unless this pragma is set on the connection, every
-                // time it opens.
-                pragma.CommandText = "PRAGMA foreign_keys = ON;";
+                // foreign_keys: required for the types/members ON DELETE CASCADE below to actually cascade
+                // -- SQLite ignores foreign key actions entirely unless this pragma is set on the
+                // connection, every time it opens.
+                // busy_timeout: two Rhino instances share one cache file (Connectors/Rhino/<version>/), so
+                // they can hit it at once. Without this, a second instance's write (notably the one-time
+                // schema migration's BEGIN IMMEDIATE below) fails instantly with SQLITE_BUSY; with it, the
+                // instance waits up to 5 s for the other to finish instead of erroring (review #297, #3).
+                pragma.CommandText = "PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;";
                 pragma.ExecuteNonQuery();
             }
 
@@ -173,6 +181,39 @@ public sealed class DiscoveryCache : IDisposable
 
     private void CreateSchema()
     {
+        // The whole read-decide-migrate sequence runs in ONE transaction. BEGIN IMMEDIATE takes the write
+        // lock up front, so when a second Rhino instance opens the shared cache file concurrently it BLOCKS
+        // here (honouring the busy_timeout set at Open) rather than failing, then re-reads user_version
+        // INSIDE the lock -- seeing the first instance's bump and skipping the rebuild instead of dropping
+        // its freshly-created tables. The transaction also makes the DROP+CREATE atomic: no connection ever
+        // observes a half-dropped schema, and a crash mid-migration rolls the whole thing back, leaving
+        // user_version unbumped so the next open simply re-runs it (review #297, #3).
+        using (var begin = _connection.CreateCommand())
+        {
+            begin.CommandText = "BEGIN IMMEDIATE;";
+            begin.ExecuteNonQuery();
+        }
+
+        try
+        {
+            CreateSchemaInTransaction();
+
+            using var commit = _connection.CreateCommand();
+            commit.CommandText = "COMMIT;";
+            commit.ExecuteNonQuery();
+        }
+        catch
+        {
+            using var rollback = _connection.CreateCommand();
+            rollback.CommandText = "ROLLBACK;";
+            rollback.ExecuteNonQuery();
+            throw;
+        }
+    }
+
+    /// <summary>The schema read-decide-migrate body, run inside the <see cref="CreateSchema"/> transaction.</summary>
+    private void CreateSchemaInTransaction()
+    {
         long userVersion;
         using (var read = _connection.CreateCommand())
         {
@@ -183,8 +224,7 @@ public sealed class DiscoveryCache : IDisposable
         // An older cache predates a schema change that CREATE TABLE IF NOT EXISTS cannot apply (e.g. the
         // kind CHECK gaining 'rhinoscript'/'grasshopper'). SQLite cannot ALTER a CHECK in place, so rebuild
         // the tables; the reflected data comes back on the next Sync. A brand-new file is also version 0,
-        // where these DROPs are harmless no-ops. A crash mid-migration just leaves the version behind, so it
-        // re-runs on the next open.
+        // where these DROPs are harmless no-ops.
         if (userVersion < SchemaVersion)
         {
             using var drop = _connection.CreateCommand();
@@ -310,7 +350,10 @@ public sealed class DiscoveryCache : IDisposable
         var existing = new Dictionary<string, (long Id, string Hash)>(StringComparer.OrdinalIgnoreCase);
         using (var select = _connection.CreateCommand())
         {
-            select.CommandText = "SELECT id, file_path, file_hash FROM assemblies";
+            // Only the assembly-backed kinds: Sync() diffs against the loaded-assembly list and prunes
+            // rows not in it, so it must NOT see synthetic-source rows (kind=rhinoscript/grasshopper),
+            // which SyncSource owns -- otherwise it deletes the rhinoscript row every launch (review #297).
+            select.CommandText = "SELECT id, file_path, file_hash FROM assemblies WHERE kind IN ('core','addin')";
             using var reader = select.ExecuteReader();
             while (reader.Read())
             {

@@ -94,9 +94,14 @@ public static class RhinoScriptIndexer
         {
             try
             {
-                var info = new FileInfo(file);
-                hashInput.Append(Path.GetFileName(file)).Append(':').Append(info.Length).Append(':').Append(info.LastWriteTimeUtc.Ticks).Append('\n');
-                foreach (var m in ParseModule(File.ReadAllText(file)))
+                // Hash the CONTENT, not size+mtime. This hash is what SyncSource compares to decide whether
+                // to re-index (and, since review #297 #1, the rhinoscript row survives each launch, so the
+                // comparison actually governs). size+mtime would miss an equal-length in-place edit and, worse,
+                // would churn a full re-index on a mere touch -- a git checkout rewrites mtime without changing
+                // a byte. Hashing the text we already read to parse is correct and costs nothing extra.
+                var text = File.ReadAllText(file);
+                hashInput.Append(Path.GetFileName(file)).Append('\n').Append(text).Append('\n');
+                foreach (var m in ParseModule(text))
                 {
                     // A duplicate name across modules (rare) keeps the first; member_id must stay unique.
                     if (seen.Add(m.Name))
@@ -135,8 +140,21 @@ public static class RhinoScriptIndexer
     public static IEnumerable<ReflectedMember> ParseModule(string source)
     {
         var lines = source.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n');
+        string? openQuote = null; // the triple-quote delimiter open at the start of the current line, or null
         for (var i = 0; i < lines.Length; i++)
         {
+            // A line only holds a real def when it does not begin inside a triple-quoted string. A module
+            // docstring, or a function docstring with an example like `def Foo(...)` in it, would otherwise
+            // be mis-indexed as a phantom rhinoscript function an agent could try to call (review #297, #4).
+            // Track the triple-quote state across lines; only triple quotes matter, since a column-0 def
+            // cannot fall inside a single-line '...'/"..." string.
+            var startedInString = openQuote is not null;
+            openQuote = AdvanceTripleQuoteState(lines[i], openQuote);
+            if (startedInString)
+            {
+                continue;
+            }
+
             var match = DefLine.Match(lines[i]);
             if (!match.Success)
             {
@@ -147,9 +165,46 @@ public static class RhinoScriptIndexer
             var (paramsText, afterDef) = ReadParams(lines, i);
             var (docstring, _) = ReadDocstring(lines, afterDef);
             yield return BuildMember(name, paramsText, docstring);
-            i = afterDef; // resume after the def line(s); the docstring is re-scanned harmlessly (no def in it)
+            // Resume after the def's signature line(s); the loop's triple-quote tracking then walks the
+            // function's docstring normally and skips its body, so a def-like line inside it is ignored.
+            i = afterDef;
         }
     }
+
+    /// <summary>
+    /// Advances the triple-quoted-string state across one line: given the delimiter open at the START of the
+    /// line (<c>"""</c>, <c>'''</c>, or null when not inside one), returns the delimiter open at its END.
+    /// Scans left to right so several quotes on one line (an open then a close, or a close then a reopen) net
+    /// out. Inside an open block only a matching delimiter closes it; the other kind is literal text. A
+    /// pragmatic scanner, in keeping with the rest of this parser: it does not model escapes or a <c>"""</c>
+    /// embedded in a single-line string, neither of which occurs in rhinoscriptsyntax.
+    /// </summary>
+    private static string? AdvanceTripleQuoteState(string line, string? openQuote)
+    {
+        for (var c = 0; c < line.Length;)
+        {
+            if (openQuote is null)
+            {
+                if (IsTokenAt(line, c, "\"\"\"")) { openQuote = "\"\"\""; c += 3; }
+                else if (IsTokenAt(line, c, "'''")) { openQuote = "'''"; c += 3; }
+                else { c++; }
+            }
+            else if (IsTokenAt(line, c, openQuote))
+            {
+                openQuote = null;
+                c += 3;
+            }
+            else
+            {
+                c++;
+            }
+        }
+
+        return openQuote;
+    }
+
+    private static bool IsTokenAt(string s, int index, string token) =>
+        index + token.Length <= s.Length && string.CompareOrdinal(s, index, token, 0, token.Length) == 0;
 
     /// <summary>Reads the parenthesised parameter text of a def starting at <paramref name="start"/>,
     /// following it across lines until the parens balance. Returns the collapsed params and the index of

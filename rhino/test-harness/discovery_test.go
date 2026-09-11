@@ -230,7 +230,9 @@ func TestDiscoveryRhinoScriptFunctionsAreIndexed(t *testing.T) {
 	}
 	var sawRhinoScript bool
 	for _, m := range out.Results {
-		if m.Kind == "rhinoscript" || strings.HasPrefix(m.MemberID, "rhinoscript:") || m.Namespace == "rhinoscriptsyntax" {
+		// m.Kind is the MEMBER category (rhinoscript functions carry "function"), never the corpus
+		// kind -- rhinoscript provenance rides the member-id prefix / synthetic namespace (#297, #2).
+		if strings.HasPrefix(m.MemberID, "rhinoscript:") || m.Namespace == "rhinoscriptsyntax" {
 			sawRhinoScript = true
 		}
 	}
