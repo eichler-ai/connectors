@@ -27,6 +27,91 @@ internal static class SignatureFormatter
         _ => member.Name,
     };
 
+    /// <summary>
+    /// Renders how a member is CALLED from the Rhino CPython 3 host (PRD §09's "both call shapes" — this is
+    /// the Python half; <see cref="BuildSignature"/> is the C# half). .NET interop differs from C# in ways
+    /// an agent trips over, and this captures the load-bearing ones: a method's <c>out</c>/<c>ref</c>
+    /// parameters come back in a return TUPLE instead of being passed by reference, a generic method takes
+    /// explicit type arguments in square brackets (<c>Method[T](...)</c>), and a constructor is called
+    /// WITHOUT <c>new</c>. Static members and constructors are qualified by the type (that is how both
+    /// languages call them); an instance member is rendered receiver-less, exactly as the C# signature is,
+    /// since the receiver is whatever object the caller holds. rhinoscriptsyntax functions get their own
+    /// <c>rs.</c> form from <see cref="RhinoScriptIndexer"/>, not this method.
+    /// </summary>
+    public static string BuildPythonCall(MemberInfo member) => member switch
+    {
+        ConstructorInfo ci => $"{TypeName(ci.DeclaringType!)}({PyArgList(ci.GetParameters())})",
+        MethodInfo mi => BuildMethodPythonCall(mi),
+        PropertyInfo pi => BuildPropertyPythonCall(pi),
+        FieldInfo fi => fi.IsStatic ? $"{TypeName(fi.DeclaringType!)}.{fi.Name}" : fi.Name,
+        // An event is `obj.Name += handler` in both languages: nothing Python-specific to show.
+        EventInfo ei => ei.Name,
+        _ => member.Name,
+    };
+
+    private static string BuildMethodPythonCall(MethodInfo mi)
+    {
+        var name = mi.Name;
+        if (mi.IsGenericMethodDefinition)
+        {
+            // CPython interop needs the type arguments written explicitly: Method[T1, T2](...).
+            name += $"[{string.Join(", ", mi.GetGenericArguments().Select(a => a.Name))}]";
+        }
+
+        var call = mi.IsStatic
+            ? $"{TypeName(mi.DeclaringType!)}.{name}({PyArgList(mi.GetParameters())})"
+            : $"{name}({PyArgList(mi.GetParameters())})";
+
+        // out/ref parameters are RETURNED (as a tuple with the return value), not passed by reference, in
+        // the CPython host. `in` (readonly-ref) is passed like a normal argument and does not come back.
+        var returned = mi.GetParameters().Where(ComesBackAsReturn).ToList();
+        if (returned.Count == 0)
+        {
+            return call; // an ordinary call; a non-void return is assigned the usual way, nothing to show.
+        }
+
+        var lhs = new List<string>();
+        if (mi.ReturnType != typeof(void))
+        {
+            lhs.Add("result");
+        }
+
+        lhs.AddRange(returned.Select(p => p.Name ?? "value"));
+        return $"{string.Join(", ", lhs)} = {call}";
+    }
+
+    private static string BuildPropertyPythonCall(PropertyInfo pi)
+    {
+        var isStatic = (pi.GetMethod ?? pi.SetMethod)?.IsStatic == true;
+        var indexParams = pi.GetIndexParameters();
+        if (indexParams.Length == 0)
+        {
+            // A plain property is attribute access in both languages.
+            return isStatic ? $"{TypeName(pi.DeclaringType!)}.{pi.Name}" : pi.Name;
+        }
+
+        if (IsDefaultMember(pi))
+        {
+            return $"[{PyArgList(indexParams)}]"; // the indexer: obj[args]
+        }
+
+        // A NAMED indexed property has no attribute/indexer syntax; the get_/set_ accessor methods are the
+        // only spelling, in Python as in C# (issue #186, mirrored in BuildPropertySignature).
+        return pi.CanRead
+            ? $"get_{pi.Name}({PyArgList(indexParams)})"
+            : $"set_{pi.Name}({PyArgList(indexParams)}, value)";
+    }
+
+    /// <summary>An <c>out</c> parameter, or a <c>ref</c> parameter (by-ref but not <c>in</c>), comes back in
+    /// the CPython return tuple; a plain value or <c>in</c> parameter does not.</summary>
+    private static bool ComesBackAsReturn(ParameterInfo p) => p.IsOut || (p.ParameterType.IsByRef && !p.IsIn);
+
+    /// <summary>The Python argument list for a call: parameter NAMES only (Python is untyped at the call
+    /// site), and <c>out</c> parameters dropped since the host supplies them via the return tuple. A
+    /// <c>ref</c>/<c>in</c> parameter is still passed in.</summary>
+    private static string PyArgList(ParameterInfo[] parameters) =>
+        string.Join(", ", parameters.Where(p => !p.IsOut).Select(p => p.Name ?? "_"));
+
     private static string BuildPropertySignature(PropertyInfo pi)
     {
         var indexParams = pi.GetIndexParameters();
@@ -99,7 +184,24 @@ internal static class SignatureFormatter
     public static string ParamTypeName(Type t) => TypeName(t);
 
     private static string ParamList(ParameterInfo[] parameters) =>
-        string.Join(", ", parameters.Select(p => $"{TypeName(p.ParameterType)} {p.Name}"));
+        string.Join(", ", parameters.Select(p => $"{DirectionKeyword(p)}{TypeName(p.ParameterType)} {p.Name}"));
+
+    /// <summary>The C# by-reference keyword a parameter needs so the rendered signature actually compiles:
+    /// <c>out</c>, <c>in</c> (readonly ref), or <c>ref</c>. Empty for an ordinary by-value parameter.</summary>
+    private static string DirectionKeyword(ParameterInfo p)
+    {
+        if (p.IsOut)
+        {
+            return "out ";
+        }
+
+        if (p.ParameterType.IsByRef)
+        {
+            return p.IsIn ? "in " : "ref ";
+        }
+
+        return "";
+    }
 
     private static string TypeName(Type t)
     {

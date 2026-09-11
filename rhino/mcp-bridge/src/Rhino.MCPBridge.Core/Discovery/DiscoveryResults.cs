@@ -131,7 +131,15 @@ public sealed class DescribeFunctionSingle
     public required string Namespace { get; init; }
     public required string DeclaringType { get; init; }
     public required string Name { get; init; }
+
+    /// <summary>The C# signature (PRD §09's C# call shape).</summary>
     public required string Signature { get; init; }
+
+    /// <summary>The CPython call form (PRD §09's Python call shape): out/ref parameters as a return tuple,
+    /// explicit generic arguments, no <c>new</c> for a constructor, and the <c>rs.</c> wrapper for a
+    /// rhinoscriptsyntax function. See <see cref="SignatureFormatter.BuildPythonCall"/>.</summary>
+    public required string PythonCall { get; init; }
+
     public string? Summary { get; init; }
     public required IReadOnlyList<DescribeParameter> Parameters { get; init; }
     public string? Returns { get; init; }

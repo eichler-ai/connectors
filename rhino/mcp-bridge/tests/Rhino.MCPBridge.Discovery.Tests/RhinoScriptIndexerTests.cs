@@ -35,6 +35,7 @@ public class RhinoScriptIndexerTests
         Assert.Equal("function", addCircle.Kind);
         Assert.Equal("rhinoscript:AddCircle", addCircle.MemberId);
         Assert.Equal("AddCircle(plane_or_center, radius)", addCircle.Signature); // multi-line def collapsed
+        Assert.Equal("rs.AddCircle(plane_or_center, radius)", addCircle.PythonCall); // the rs.* Python call shape
         Assert.Equal("Adds a circle curve to the document", addCircle.Summary);
         Assert.Equal("guid: id of the new curve object", addCircle.Returns);
         Assert.Equal(2, addCircle.Parameters.Count);

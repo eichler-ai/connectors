@@ -175,6 +175,9 @@ public static class DiscoveryResultMessage
         [JsonPropertyName("signature")]
         public string Signature { get; set; } = "";
 
+        [JsonPropertyName("python_call")]
+        public string PythonCall { get; set; } = "";
+
         [JsonPropertyName("summary")]
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public string? Summary { get; set; }
@@ -295,6 +298,7 @@ public static class DiscoveryResultMessage
                 DeclaringType = single.DeclaringType,
                 Name = single.Name,
                 Signature = single.Signature,
+                PythonCall = single.PythonCall,
                 Summary = single.Summary,
                 Parameters = single.Parameters.Select(p => new DescribeParameterDto { Name = p.Name, Type = p.Type, Description = p.Description }).ToList(),
                 Returns = single.Returns,

@@ -244,7 +244,7 @@ func RegisterDiscovery(s *mcp.Server, r *discovery.Router, search *manager.Manag
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "describe_function",
-		Description: "Full XML-doc entry (summary, params, returns) for one fully-qualified Rhino API MEMBER (Type.Member, e.g. Rhino.Geometry.Sphere.Radius) -- not a bare type. Requires member and/or member_id. An overloaded member with no member_id returns its overload list to pick from -- re-call with one of those overloads' member_id for its full detail. Use list_functions to browse a type's members.",
+		Description: "Full XML-doc entry for one fully-qualified Rhino API MEMBER (Type.Member, e.g. Rhino.Geometry.Sphere.Radius) -- not a bare type. Returns BOTH call shapes: the C# `signature` and the CPython `python_call` form (out/ref params become a return tuple, generic methods take explicit [T] arguments, a constructor drops `new`, and a rhinoscriptsyntax function shows its rs.* wrapper) -- so a member found once is usable from either language. Also summary, params and returns. Requires member and/or member_id. An overloaded member with no member_id returns its overload list to pick from -- re-call with one of those overloads' member_id for its full detail. Use list_functions to browse a type's members.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in DescribeFunctionIn) (*mcp.CallToolResult, DescribeFunctionOut, error) {
 		if in.Member == "" && in.MemberID == "" {
 			drec := diag.New(diag.SeverityError, "missing-required-param", discoverySource,
