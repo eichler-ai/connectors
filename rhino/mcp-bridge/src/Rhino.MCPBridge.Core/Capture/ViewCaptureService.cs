@@ -4,7 +4,7 @@ namespace Rhino.MCPBridge.Core.Capture;
 
 /// <summary>
 /// The policy half of capture_view (PRD §11): validates the request, bounds the image (default
-/// 1280 px on the long edge, hard cap 2048, so a capture never approaches the client's output
+/// 1024 px on the long edge, hard cap 2048, so a capture never approaches the client's output
 /// ceiling), fans `all` out to every viewport, and turns a restore failure into a notice. Tier-1
 /// tested against a fake <see cref="IViewCapture"/>.
 /// </summary>

@@ -18,7 +18,7 @@ type CaptureViewIn struct {
 	Target                string `json:"target,omitempty" jsonschema:"\"active\" (default), \"all\" (one image per viewport), or a viewport name such as Perspective, Top, Front, Right"`
 	DisplayMode           string `json:"display_mode,omitempty" jsonschema:"display mode for the capture only (Wireframe, Shaded, Rendered, Ghosted, X-Ray, Technical, Artistic, Pen, Arctic, Raytraced); the viewport's own mode is restored after"`
 	Zoom                  string `json:"zoom,omitempty" jsonschema:"\"none\" (default: the viewport as the person sees it), \"extents\" (zoom to everything), or \"selected\"; the previous view is restored after"`
-	Width                 int    `json:"width,omitempty" jsonschema:"pixel width; default keeps the viewport's aspect at 1280 px on the long edge, hard cap 2048"`
+	Width                 int    `json:"width,omitempty" jsonschema:"pixel width; default keeps the viewport's aspect at 1024 px on the long edge, hard cap 2048"`
 	Height                int    `json:"height,omitempty" jsonschema:"pixel height; see width"`
 	TransparentBackground bool   `json:"transparent_background,omitempty"`
 	DrawGrid              *bool  `json:"draw_grid,omitempty" jsonschema:"draw the construction grid; default true"`

@@ -221,6 +221,10 @@ jobs:
           case "$line" in
             *unknown*) echo "the built server reports no source revision -- VCS stamping is off; see internal/servercore/buildinfo" && exit 1 ;;
           esac
+      # Re-runs one test verbosely purely to SURFACE its headroom line. `go test` discards a passing
+      # package's t.Logf, so the skill.md budget's soft-line warning is invisible without this.
+      - name: skill.md budget headroom
+        run: go test -v -run TestSkillFileStaysWithinItsBudget ./internal/mcpserver/
 
   rhino-mcp-bridge:
     name: Rhino MCP Bridge (C#) tier-1 tests
