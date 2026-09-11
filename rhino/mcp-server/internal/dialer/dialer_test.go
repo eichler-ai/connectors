@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/eichler-ai/connectors/internal/servercore/transport"
 	"github.com/eichler-ai/connectors/rhino/mcp-server/internal/registry"
 )
 
@@ -364,5 +365,65 @@ func TestCloseInstanceWithStaleEpochIsANoOp(t *testing.T) {
 	b.mu.Unlock()
 	if n != 1 || len(m.Connected()) != 1 {
 		t.Fatalf("a stale epoch must not close the live connection (dials %d, connected %d)", n, len(m.Connected()))
+	}
+}
+
+// TestAttachHookCompletesBeforeDetachHook pins the #296 fix: for one connection,
+// every attach hook runs to completion before any detach hook, even though the
+// two are delivered on separate goroutines. The bug is a race, so the test
+// FORCES it -- a deliberately slow attach hook plus an immediate disconnect, so
+// the detach goroutine is spawned while the attach hook is still running. Before
+// the fix the detach could be recorded first (the manager would then delete
+// nothing and later insert a stale index for a dead instance); the fix makes the
+// detach goroutine wait on the attach goroutine's completion.
+func TestAttachHookCompletesBeforeDetachHook(t *testing.T) {
+	dir := t.TempDir()
+	b := newFakeBridge(t, dir, 130)
+	reg := registry.New()
+
+	// Build the manager and register the hook BEFORE Run starts dialing, so the
+	// hook is present when the first connection registers (no registration race).
+	m := New(Options{InstancesDir: dir, ServerID: "srv-test", ServerVersion: "test", Registry: reg,
+		Alive: func(int) bool { return true }, ScanInterval: 50 * time.Millisecond, Logf: t.Logf})
+
+	var mu sync.Mutex
+	var events []string
+	attachStarted := make(chan struct{})
+	var once sync.Once
+	m.OnAttach(func(_ string, _ *transport.Conn, attached bool) {
+		if attached {
+			once.Do(func() { close(attachStarted) }) // tell the test the attach hook is running
+			time.Sleep(200 * time.Millisecond)       // stand in for a slow index build
+			mu.Lock()
+			events = append(events, "attach")
+			mu.Unlock()
+			return
+		}
+		mu.Lock()
+		events = append(events, "detach")
+		mu.Unlock()
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go m.Run(ctx)
+
+	// Once the attach hook has STARTED (but is still sleeping), drop the connection
+	// so the detach goroutine races the still-running attach hook. Close the
+	// listener first so the manager cannot redial and produce a second cycle (which
+	// would pollute the single connect->disconnect this test is asserting about).
+	<-attachStarted
+	b.ln.Close()
+	b.closeConns()
+
+	waitFor(t, "both attach and detach hooks", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(events) == 2
+	})
+	mu.Lock()
+	defer mu.Unlock()
+	if events[0] != "attach" || events[1] != "detach" {
+		t.Fatalf("attach must complete before detach runs; got %v", events)
 	}
 }

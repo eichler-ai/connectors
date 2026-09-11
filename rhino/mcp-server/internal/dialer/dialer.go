@@ -60,6 +60,15 @@ type link struct {
 	file  *instancefile.File
 	conn  *transport.Conn
 	epoch uint64
+	// attachDone is closed by the attach-hook goroutine once every attach hook
+	// has run. The detach-hook goroutine waits on it before running the detach
+	// hooks, so a hook consumer always sees this connection's attach strictly
+	// before its detach even though the two run on separate goroutines -- without
+	// it a very fast connect->disconnect could deliver detach first, leaving a
+	// consumer (the semsearch manager) with a stale entry for a dead instance
+	// (issue #296). Set under Manager.mu in the first-register block; nil until
+	// then, so a connection that dies before registering has no ordering to wait on.
+	attachDone chan struct{}
 }
 
 // Manager owns the connections. Safe for concurrent use.
@@ -235,8 +244,10 @@ func (m *Manager) connect(ctx context.Context, f *instancefile.File) {
 					old.conn.Close()
 				}
 				m.links[instanceID] = lk
+				lk.attachDone = make(chan struct{})
 			}
 			hooks := append([]func(string, *transport.Conn, bool){}, m.attachHooks...)
+			attachDone := lk.attachDone
 			m.mu.Unlock()
 			if first {
 				m.opts.Logf("dialer: connected to Rhino %s pid %d (%s, %s) with %d document(s)", rp.RhinoVersion, rp.PID, rp.Platform, rp.BridgeVersion, len(rp.Documents))
@@ -247,7 +258,10 @@ func (m *Manager) connect(ctx context.Context, f *instancefile.File) {
 				// Hooks run off the read loop: one that calls back into the
 				// connection (conn.Call) would deadlock inline, and a slow one
 				// (an index build) would stall this connection's pings (review of #281).
+				// Closing attachDone last is what lets the detach goroutine order
+				// itself strictly after this one (issue #296).
 				go func() {
+					defer close(attachDone)
 					for _, h := range hooks {
 						h(instanceID, conn, true)
 					}
@@ -315,6 +329,7 @@ func (m *Manager) connect(ctx context.Context, f *instancefile.File) {
 		delete(m.links, id)
 	}
 	hooks := append([]func(string, *transport.Conn, bool){}, m.attachHooks...)
+	attachDone := lk.attachDone
 	m.mu.Unlock()
 	if id != "" {
 		removed := m.opts.Registry.RemoveIfEpoch(id, epoch)
@@ -322,6 +337,13 @@ func (m *Manager) connect(ctx context.Context, f *instancefile.File) {
 			m.opts.Logf("dialer: connection to %s (pid %d) ended: %v (registry entry removed: %v)", id, f.PID, err, removed)
 		}
 		go func() {
+			// Order detach strictly after attach for this connection: a fast
+			// connect->disconnect spawns both goroutines, and without this wait the
+			// detach could run first, leaving the hook consumer a stale entry (#296).
+			// id != "" implies the first-register block ran, so attachDone is set.
+			if attachDone != nil {
+				<-attachDone
+			}
 			for _, h := range hooks {
 				h(id, conn, false)
 			}
