@@ -12,6 +12,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -19,8 +20,15 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/eichler-ai/connectors/internal/servercore/buildinfo"
+	"github.com/eichler-ai/connectors/internal/servercore/semsearch"
+	"github.com/eichler-ai/connectors/internal/servercore/semsearch/crossenc"
+	"github.com/eichler-ai/connectors/internal/servercore/semsearch/manager"
+	"github.com/eichler-ai/connectors/internal/servercore/semsearch/models"
+	"github.com/eichler-ai/connectors/internal/servercore/semsearch/staticembed"
+	"github.com/eichler-ai/connectors/internal/servercore/transport"
 	"github.com/eichler-ai/connectors/rhino/mcp-server/internal/appdata"
 	"github.com/eichler-ai/connectors/rhino/mcp-server/internal/dialer"
+	"github.com/eichler-ai/connectors/rhino/mcp-server/internal/discovery"
 	"github.com/eichler-ai/connectors/rhino/mcp-server/internal/execution"
 	"github.com/eichler-ai/connectors/rhino/mcp-server/internal/mcpserver"
 	"github.com/eichler-ai/connectors/rhino/mcp-server/internal/registry"
@@ -37,10 +45,19 @@ func versionLine() string { return version + " (" + buildinfo.Read().Summary() +
 func main() {
 	appDataDir := flag.String("app-data-dir", os.Getenv("RHINO_MCP_APPDATA"), "override the connector's app-data root (instances/ is scanned under it); defaults to the platform directory, PRD §05")
 	showVersion := flag.Bool("version", false, "print this binary's version and source revision, then exit")
+	showSearchModels := flag.Bool("search-models", false, "print whether the search_functions ranking models are bundled in this binary, then exit")
 	flag.Parse()
 
 	if *showVersion {
 		fmt.Println(serverName + " " + versionLine())
+		return
+	}
+	if *showSearchModels {
+		if err := models.Verify(); err != nil {
+			fmt.Println("search models: NOT bundled:", err)
+		} else {
+			fmt.Println("search models: bundled and verified")
+		}
 		return
 	}
 
@@ -76,6 +93,20 @@ func run(appDataDir string, logger *log.Logger) error {
 		Registry:      reg,
 		Logf:          logger.Printf,
 	})
+	// API discovery (PRD §09): the Router reads live connections from the dialer; the shared semsearch
+	// manager builds one index per connected instance, paging the corpus via the Router (its Source).
+	// Hooked to the dialer's attach signal BEFORE Run so no already-registered instance is missed.
+	embedder, reranker := loadSearchModels(root, logger)
+	discoveryRouter := discovery.NewRouter(dial, reg)
+	searchIndex := manager.New(discoveryRouter, embedder, reranker, logger.Printf)
+	dial.OnAttach(func(id string, _ *transport.Conn, attached bool) {
+		if attached {
+			searchIndex.OnAttach(id)
+		} else {
+			searchIndex.OnDetach(id)
+		}
+	})
+
 	go dial.Run(ctx)
 	logger.Printf("scanning %s as %s", instancesDir, serverID)
 
@@ -104,10 +135,44 @@ func run(appDataDir string, logger *log.Logger) error {
 	mcpserver.RegisterCapture(s, router)
 	mcpserver.RegisterUndoRedo(s, router)
 	mcpserver.RegisterSkills(s, version)
+	mcpserver.RegisterDiscovery(s, discoveryRouter, searchIndex)
 
 	err := s.Run(ctx, &mcp.StdioTransport{})
 	if err != nil && ctx.Err() == nil {
 		return fmt.Errorf("stdio MCP session ended: %w", err)
 	}
 	return nil
+}
+
+// loadSearchModels loads the embedded static embedder and cross-encoder for the
+// broker semsearch index (PRD §09). A build without the models fetched, or a
+// model that fails to load, degrades gracefully: a nil embedder ranks
+// lexical-only, a nil reranker ranks without the cross-encoder. Synchronous on
+// the startup path; the log line attributes its cost.
+func loadSearchModels(dataDir string, logger *log.Logger) (semsearch.Embedder, semsearch.Reranker) {
+	start := time.Now()
+	defer func() {
+		logger.Printf("semsearch: search models loaded in %v", time.Since(start).Round(time.Millisecond))
+	}()
+	tok, st, normalize, err := models.Embedder()
+	if err != nil {
+		logger.Printf("semsearch: %v; search ranks lexical-only", err)
+		return nil, nil
+	}
+	emb, err := staticembed.Load(tok, st, normalize)
+	if err != nil {
+		logger.Printf("semsearch: loading static embedder: %v; search ranks lexical-only", err)
+		return nil, nil
+	}
+	modelDir, err := models.Materialize(filepath.Join(dataDir, "models"))
+	if err != nil {
+		logger.Printf("semsearch: materializing reranker model: %v; search ranks without the cross-encoder", err)
+		return emb, nil
+	}
+	rr, err := crossenc.Load(context.Background(), modelDir)
+	if err != nil {
+		logger.Printf("semsearch: loading cross-encoder: %v; search ranks without the cross-encoder", err)
+		return emb, nil
+	}
+	return emb, rr
 }
