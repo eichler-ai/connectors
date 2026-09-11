@@ -354,8 +354,9 @@ public sealed class RequestDispatcherTests
     [Fact]
     public async Task UnknownMethod_ListsTheSupportedOnes()
     {
+        // list_functions/etc. are now routed (discovery), so use a name that is genuinely not a method.
         var h = new Harness();
-        var r = await h.Call("list_functions", new { });
+        var r = await h.Call("no_such_method", new { });
         Assert.Equal("unknown-method", Code(r));
         Assert.Contains("execute_script", r.GetProperty("error").GetProperty("data").GetProperty("remedy")[0].GetString());
     }

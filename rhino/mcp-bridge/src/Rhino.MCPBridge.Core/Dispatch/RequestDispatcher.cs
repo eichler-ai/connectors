@@ -4,6 +4,8 @@ using Rhino.MCPBridge.Core.Diagnostics;
 using Rhino.MCPBridge.Core.Execution;
 using Rhino.MCPBridge.Core.Protocol;
 
+using Rhino.MCPBridge.Core.Discovery;
+
 namespace Rhino.MCPBridge.Core.Dispatch;
 
 /// <summary>
@@ -29,13 +31,16 @@ internal sealed class RequestDispatcher
     private readonly IRunLauncher _launcher;
     private readonly ViewCaptureService? _capture;
     private readonly Func<Func<object>, object>? _onMainThread;
+    // API discovery (PRD §09): pure reflection over Rhino's loaded assemblies, no document access, so it
+    // answers on the connection thread even mid-run. Null when the plug-in wired no cache (tests).
+    private readonly DiscoveryService? _discoveryService;
     private readonly Func<DateTimeOffset> _now;
     private readonly Func<TimeSpan, Task> _delay;
     private readonly Action<string> _log;
     private readonly RunLedger _ledger;
     private readonly UndoRedoExecutor _undoRedo;
 
-    public static readonly string[] SupportedMethods = { "execute_script", "poll_execution", "cancel_execution", "capture_view", "undo_redo" };
+    public static readonly string[] SupportedMethods = { "execute_script", "poll_execution", "cancel_execution", "capture_view", "undo_redo", "list_functions", "search_functions", "describe_function", "dump_members" };
 
     /// <summary>undo_redo's timeout bounds: the command is synchronous on the main thread, the wait is for the main-thread hop.</summary>
     public const long UndoMaxTimeoutMs = 30_000, UndoDefaultTimeoutMs = 10_000;
@@ -63,7 +68,8 @@ internal sealed class RequestDispatcher
     public RequestDispatcher(ExecutionManager executionManager, UndoRunExecutor executor, IRunLauncher launcher, Action<string> log,
         Func<DateTimeOffset>? now = null, Func<TimeSpan, Task>? delay = null,
         ViewCaptureService? capture = null, Func<Func<object>, object>? onMainThread = null, RunLedger? ledger = null,
-        IWindowInventory? windowInventory = null)
+        IWindowInventory? windowInventory = null,
+        DiscoveryService? discoveryService = null)
     {
         _executionManager = executionManager;
         _executor = executor;
@@ -73,6 +79,7 @@ internal sealed class RequestDispatcher
         _capture = capture;
         _onMainThread = onMainThread;
         _windowInventory = windowInventory;
+        _discoveryService = discoveryService;
         _log = log;
         _now = now ?? (() => DateTimeOffset.UtcNow);
         _delay = delay ?? Task.Delay;
@@ -96,6 +103,10 @@ internal sealed class RequestDispatcher
         "cancel_execution" => Task.FromResult(HandleCancelExecution(request)),
         "capture_view" when _capture is not null && _onMainThread is not null => Task.FromResult(HandleCaptureView(request)),
         "undo_redo" => HandleUndoRedoAsync(request),
+        "list_functions" => Task.FromResult(HandleListFunctions(request)),
+        "search_functions" => Task.FromResult(HandleSearchFunctions(request)),
+        "describe_function" => Task.FromResult(HandleDescribeFunction(request)),
+        "dump_members" => Task.FromResult(HandleDumpMembers(request)),
         _ => Task.FromResult(UnknownMethod(request)),
     };
 
@@ -567,4 +578,105 @@ internal sealed class RequestDispatcher
         $"execution_id '{executionId}' is not known to this bridge (never started, or evicted from the ring buffer).",
         new Dictionary<string, object?> { ["execution_id"] = executionId },
         new[] { "Start a new execution with execute_script." });
+
+    // ===== API discovery (PRD §09), ported from the Revit connector =====================================
+    // list_functions/search_functions/describe_function/dump_members are pure reflection over Rhino's
+    // loaded assemblies via DiscoveryService: no document access, no command, no main-thread hop, so they
+    // answer on the connection thread even while a script holds the main thread. instance_id routing has
+    // already happened server-side before the request arrives.
+    private const int DefaultListFunctionsPageSize = 50;
+    private const int DefaultSearchFunctionsTopN = 20;
+    private const int DefaultDumpMembersLimit = 5000;
+    private const int MaxDumpMembersLimit = 10000;
+
+    private string HandleListFunctions(JsonRpcRequest request)
+    {
+        if (_discoveryService is null) return DiscoveryUnavailable(request.Id);
+        try
+        {
+            var namespaceFilter = request.GetOptionalString("namespace");
+            var typeFilter = request.GetOptionalString("type_name");
+            var cursor = request.GetOptionalString("cursor");
+            var pageSize = ClampPageSize(request.GetOptionalInt32("page_size", DefaultListFunctionsPageSize));
+            var result = _discoveryService.ListFunctions(namespaceFilter, typeFilter, cursor, pageSize);
+            return DiscoveryResultMessage.ListFunctions(request.Id, result);
+        }
+        catch (JsonRpcParamException ex) { return JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InvalidParams, ex.Message, ex.Diagnostic); }
+        catch (Exception ex) { return DiscoveryUnexpectedError(request.Id, "list_functions", ex); }
+    }
+
+    private string HandleSearchFunctions(JsonRpcRequest request)
+    {
+        if (_discoveryService is null) return DiscoveryUnavailable(request.Id);
+        try
+        {
+            var query = request.GetRequiredString("query");
+            var namespaceFilter = request.GetOptionalString("namespace");
+            var cursor = request.GetOptionalString("cursor");
+            var topN = ClampPageSize(request.GetOptionalInt32("top_n", DefaultSearchFunctionsTopN));
+            var result = _discoveryService.SearchFunctions(query, namespaceFilter, cursor, topN);
+            return DiscoveryResultMessage.SearchFunctions(request.Id, result);
+        }
+        catch (JsonRpcParamException ex) { return JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InvalidParams, ex.Message, ex.Diagnostic); }
+        catch (Exception ex) { return DiscoveryUnexpectedError(request.Id, "search_functions", ex); }
+    }
+
+    /// <summary>dump_members: the server pages the whole documented corpus to build its own search index.
+    /// Same connection-thread locus; bounded per page (≈300 bytes/member, so 10k members ≈ 3MB, well under
+    /// the NDJSON line cap).</summary>
+    private string HandleDumpMembers(JsonRpcRequest request)
+    {
+        if (_discoveryService is null) return DiscoveryUnavailable(request.Id);
+        try
+        {
+            var offset = Math.Max(0, request.GetOptionalInt32("offset", 0));
+            var limit = Math.Clamp(request.GetOptionalInt32("limit", DefaultDumpMembersLimit), 1, MaxDumpMembersLimit);
+            var result = _discoveryService.DumpMembers(offset, limit);
+            return DiscoveryResultMessage.DumpMembers(request.Id, result);
+        }
+        catch (JsonRpcParamException ex) { return JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InvalidParams, ex.Message, ex.Diagnostic); }
+        catch (Exception ex) { return DiscoveryUnexpectedError(request.Id, "dump_members", ex); }
+    }
+
+    private string HandleDescribeFunction(JsonRpcRequest request)
+    {
+        if (_discoveryService is null) return DiscoveryUnavailable(request.Id);
+        try
+        {
+            // member is optional when member_id is given; the "at least one" rule lives in DescribeFunction.
+            var member = request.GetOptionalString("member");
+            var memberId = request.GetOptionalString("member_id");
+            var result = _discoveryService.DescribeFunction(member, memberId);
+            return DiscoveryResultMessage.DescribeFunction(request.Id, result);
+        }
+        catch (JsonRpcParamException ex) { return JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InvalidParams, ex.Message, ex.Diagnostic); }
+        catch (DiscoveryMemberNotFoundException ex)
+        {
+            var diagnostic = DiagnosticRecord.Create(DiagnosticSeverity.Error, "discovery-member-not-found", DiagnosticSource.Discovery, ex.Message,
+                new Dictionary<string, object?> { ["member"] = request.GetOptionalString("member"), ["member_id"] = request.GetOptionalString("member_id") },
+                new[] { "Use list_functions or search_functions to find the correct namespace/type/member name." });
+            return JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InvalidParams, ex.Message, diagnostic);
+        }
+        catch (Exception ex) { return DiscoveryUnexpectedError(request.Id, "describe_function", ex); }
+    }
+
+    /// <summary>Discovery reflection can throw beyond the typed exceptions (an unresolvable interop type);
+    /// this runs on the connection thread, so an uncaught throw would drop the whole connection rather than
+    /// one call. Surface it as one failed call instead.</summary>
+    private static string DiscoveryUnexpectedError(System.Text.Json.JsonElement id, string method, Exception ex)
+    {
+        var diagnostic = DiagnosticRecord.Create(DiagnosticSeverity.Error, "discovery-unexpected-error", DiagnosticSource.Discovery,
+            $"{method} failed unexpectedly: {ex.Message}", new Dictionary<string, object?> { ["method"] = method }, null);
+        return JsonRpcErrorMessage.ToJson(id, JsonRpcErrorCode.InternalError, diagnostic.Message, diagnostic);
+    }
+
+    /// <summary>Clamp page_size/top_n to [1,500]: &lt;=0 makes a paginating agent loop forever (empty page,
+    /// next_cursor == the cursor it just sent), and a huge value blows past the MCP output ceiling.</summary>
+    private static int ClampPageSize(int pageSize) => Math.Clamp(pageSize, 1, 500);
+
+    private static string DiscoveryUnavailable(System.Text.Json.JsonElement id) => JsonRpcErrorMessage.ToJson(
+        id, JsonRpcErrorCode.InternalError, "discovery is not available on this connection (no DiscoveryService wired up).",
+        DiagnosticRecord.Create(DiagnosticSeverity.Error, "discovery-unavailable", DiagnosticSource.Discovery,
+            "discovery is not available on this connection (no DiscoveryService wired up).", null, null));
+
 }

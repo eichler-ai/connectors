@@ -1,0 +1,799 @@
+using System.Collections.Generic;
+using System.Linq;
+using System.Security.Cryptography;
+using Rhino.MCPBridge.Core.Discovery;
+using Rhino.MCPBridge.Discovery.Tests.Fixtures;
+using Xunit;
+
+namespace Rhino.MCPBridge.Discovery.Tests;
+
+/// <summary>
+/// Coverage of <see cref="DiscoveryCache"/> itself -- Sync's diff/reconcile logic and the query methods
+/// <see cref="DiscoveryService"/> composes into list_functions/search_functions/describe_function. Uses a
+/// fresh in-memory (":memory:") cache per test, synced against this test assembly's own Fixtures/*.cs types
+/// (the same portable, self-contained target <see cref="DiscoveryServiceTests"/> uses) -- real doc-comment
+/// summaries via the compiler-emitted XML sidecar, so the FTS5 summary-only tier is exercisable without a
+/// real RevitAPI.xml.
+/// </summary>
+public class DiscoveryCacheTests
+{
+    private const string FixturesNamespace = "Rhino.MCPBridge.Discovery.Tests.Fixtures";
+
+    private static DiscoveryCache NewCache() => new(":memory:");
+
+    // ---------------------------------------------------------------------------------------------
+    // Whole-corpus dump (issue #107)
+    // ---------------------------------------------------------------------------------------------
+
+    [Fact]
+    public void EnumerateMembers_PagesPartitionTheDocumentedCorpusExactlyOnce()
+    {
+        using var cache = NewCache();
+        cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+
+        var total = cache.CountMembers();
+        Assert.True(total > 0);
+
+        var seen = new List<string>();
+        const int page = 3;
+        for (var offset = 0; ; offset += page)
+        {
+            var rows = cache.EnumerateMembers(offset, page);
+            if (rows.Count == 0) break;
+            Assert.True(rows.Count <= page);
+            seen.AddRange(rows.Select(r => r.MemberId));
+        }
+
+        Assert.Equal(total, seen.Count);
+        Assert.Equal(seen.Count, seen.Distinct().Count());
+        Assert.All(seen, id => Assert.False(string.IsNullOrEmpty(id)));
+        // Same population Search ranks over: a member Search can find is in the dump.
+        var viaSearch = cache.Search("Describe", namespaceFilter: null).Select(s => s.Member.MemberId).First(id => id.Contains("Widget.Describe"));
+        Assert.Contains(viaSearch, seen);
+    }
+
+    [Fact]
+    public void EnumerateMembers_CarriesCoreFlagAndUntruncatedSummary()
+    {
+        using var cache = NewCache();
+        cache.Sync(new[] { ("addin", typeof(Widget).Assembly) });
+
+        var rows = cache.EnumerateMembers(0, 10_000);
+
+        Assert.NotEmpty(rows);
+        Assert.All(rows, r => Assert.False(r.IsCoreAssembly));
+        Assert.Contains(rows, r => r.Name == "Describe" && !string.IsNullOrEmpty(r.Summary));
+    }
+
+    [Fact]
+    public void CorpusFingerprint_IsStableAcrossIdenticalSyncsAndChangesWithAssemblyBytes()
+    {
+        using var cache = NewCache();
+        cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+        var first = cache.CorpusFingerprint();
+        cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+
+        Assert.Equal(64, first.Length); // SHA-256 hex
+        Assert.Equal(first, cache.CorpusFingerprint());
+
+        cache.SetStoredHashForTesting(typeof(Widget).Assembly.Location, "deliberately-stale-hash");
+        Assert.NotEqual(first, cache.CorpusFingerprint());
+    }
+
+    /// <summary>
+    /// Issue #186's independent review: RevitAPI.dll's bytes do not change when the add-in is upgraded, so a
+    /// cache keyed by file hash alone would keep serving the previous reflector's rows forever. The stored
+    /// hash therefore carries DiscoveryReflector.ReflectorVersion, and a row written by an older reflector
+    /// (a bare file hash, the pre-#186 form) must re-reflect on the next sync.
+    /// </summary>
+    [Fact]
+    public void Sync_RowWrittenByAnOlderReflector_IsReReflectedEvenThoughTheFileIsUnchanged()
+    {
+        using var cache = NewCache();
+        var location = typeof(Widget).Assembly.Location;
+        cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+
+        using var stream = File.OpenRead(location);
+        var bareFileHash = Convert.ToHexString(SHA256.HashData(stream));
+        cache.SetStoredHashForTesting(location, bareFileHash);
+
+        var result = cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+
+        Assert.Equal(1, result.Updated);
+        Assert.Equal(0, result.Unchanged);
+    }
+
+    [Fact]
+    public void CorpusFingerprint_DiffersByAssemblyKind()
+    {
+        using var asCore = NewCache();
+        asCore.Sync(new[] { ("core", typeof(Widget).Assembly) });
+        using var asAddin = NewCache();
+        asAddin.Sync(new[] { ("addin", typeof(Widget).Assembly) });
+
+        Assert.NotEqual(asCore.CorpusFingerprint(), asAddin.CorpusFingerprint());
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Sync
+    // ---------------------------------------------------------------------------------------------
+
+    [Fact]
+    public void Sync_NewAssembly_InsertsTypesAndMembers()
+    {
+        using var cache = NewCache();
+
+        var result = cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+
+        Assert.Equal(1, result.Added);
+        Assert.Equal(0, result.Updated);
+        Assert.Equal(0, result.Removed);
+        Assert.Equal(0, result.Unchanged);
+        Assert.Contains("Widget", cache.ListTypeNames(FixturesNamespace));
+        Assert.Contains("Describe", cache.ListMemberNames(FixturesNamespace, "Widget"));
+    }
+
+    [Fact]
+    public void Sync_UnchangedAssembly_NoOpsOnSecondCall()
+    {
+        using var cache = NewCache();
+        cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+
+        var result = cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+
+        Assert.Equal(0, result.Added);
+        Assert.Equal(0, result.Updated);
+        Assert.Equal(0, result.Removed);
+        Assert.Equal(1, result.Unchanged);
+    }
+
+    [Fact]
+    public void Sync_ChangedAssembly_PurgesAndReinserts()
+    {
+        using var cache = NewCache();
+        cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+        cache.SetStoredHashForTesting(typeof(Widget).Assembly.Location, "deliberately-stale-hash");
+
+        var result = cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+
+        Assert.Equal(1, result.Updated);
+        Assert.Equal(0, result.Added);
+        Assert.Equal(0, result.Removed);
+        // The type/member surface is still there after the purge + re-reflect, not just the assembly row.
+        Assert.Contains("Widget", cache.ListTypeNames(FixturesNamespace));
+        Assert.Contains("Describe", cache.ListMemberNames(FixturesNamespace, "Widget"));
+    }
+
+    [Fact]
+    public void Sync_GoneAssembly_CascadesDeleteOfItsTypesAndMembers()
+    {
+        using var cache = NewCache();
+        cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+        Assert.Contains("Widget", cache.ListTypeNames(FixturesNamespace)); // sanity: present before removal
+
+        var result = cache.Sync(System.Array.Empty<(string, System.Reflection.Assembly)>());
+
+        Assert.Equal(1, result.Removed);
+        Assert.Empty(cache.ListNamespaces());
+        Assert.Empty(cache.ListTypeNames(FixturesNamespace));
+        Assert.Empty(cache.ListMemberNames(FixturesNamespace, "Widget"));
+        Assert.False(cache.TypeExists(FixturesNamespace, "Widget"));
+        // The FTS index must be cleaned up too, not just the relational tables -- a search that would have
+        // matched a since-removed member must not find a dangling row.
+        Assert.Empty(cache.Search("Describe", namespaceFilter: null));
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // list_functions' three tiers, at the cache level
+    // ---------------------------------------------------------------------------------------------
+
+    [Fact]
+    public void ListNamespaces_ReturnsEveryDocumentedNamespaceWithACount()
+    {
+        using var cache = NewCache();
+        cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+
+        var namespaces = cache.ListNamespaces();
+
+        Assert.Contains(namespaces, n => n.Namespace == FixturesNamespace && n.TypeCount > 0);
+    }
+
+    [Fact]
+    public void ListNamespaces_ExcludesTheEmptyGlobalNamespace()
+    {
+        // Independent PR review finding: list_functions' tree has no way to scope INTO an empty-string
+        // namespace (namespaceFilter treats "" and null identically), so leaving it in the namespaces tier
+        // created an entry an agent could see but never drill into -- a dead end, not just noise.
+        using var cache = NewCache();
+        cache.Sync(new[] { ("core", typeof(global::GlobalNamespaceType).Assembly) });
+
+        var namespaces = cache.ListNamespaces();
+
+        Assert.DoesNotContain(namespaces, n => n.Namespace == "");
+    }
+
+    [Fact]
+    public void ListNamespaces_CoreNamespacesSortBeforeAddinNamespaces_RegardlessOfAlphabeticalOrder()
+    {
+        // Live finding (coverage-plan Phase A session): on a real dev VM with ~690 loaded namespaces, a
+        // straight alphabetical ORDER BY buries every Autodesk.Revit.* namespace behind dozens of pages of
+        // third-party add-in noise. Fixed to sort core-kind namespaces first; this is the regression guard.
+        //
+        // Rhino.MCPBridge.Core.Discovery (DiscoveryCache's own namespace) sorts ALPHABETICALLY BEFORE
+        // Rhino.MCPBridge.Discovery.Tests.Fixtures ('C' < 'D') -- so the two are synced below with kinds swapped
+        // from what their names suggest (Core.Discovery as "addin", Fixtures as "core"), which means this
+        // test can only pass if kind, not alphabetical position, actually drives the order. Rhino.MCPBridge.Core.dll
+        // has no XML-doc sidecar of its own; its types still count as documented via Sync's own
+        // no-sidecar-still-documented fallback, so they still appear in ListNamespaces() to sort against.
+        using var cache = NewCache();
+        cache.Sync(new[]
+        {
+            ("addin", typeof(DiscoveryCache).Assembly),
+            ("core", typeof(Widget).Assembly),
+        });
+
+        var namespaces = cache.ListNamespaces().Select(n => n.Namespace).ToList();
+        var coreIndex = namespaces.IndexOf(FixturesNamespace);
+        var addinIndex = namespaces.FindIndex(n => n.StartsWith("Rhino.MCPBridge.Core", System.StringComparison.Ordinal));
+
+        Assert.True(coreIndex >= 0, "expected the core-kind fixtures namespace to be present");
+        Assert.True(addinIndex >= 0, "expected the addin-kind Rhino.MCPBridge.Core.* namespace to be present");
+        Assert.True(coreIndex < addinIndex,
+            $"core namespace at index {coreIndex} should sort before addin namespace at index {addinIndex} despite 'Rhino.MCPBridge.Core...' being alphabetically earlier");
+    }
+
+    [Fact]
+    public void ListTypeNames_ScopesToOneNamespaceOnly()
+    {
+        using var cache = NewCache();
+        cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+
+        var types = cache.ListTypeNames(FixturesNamespace);
+
+        Assert.Contains("Widget", types);
+        Assert.Contains("Gadget", types);
+        Assert.DoesNotContain("Thing", types); // Fixtures.Other, not Fixtures itself.
+    }
+
+    [Fact]
+    public void ListMemberNames_ScopesToOneTypeOnly_AndDedupesOverloads()
+    {
+        using var cache = NewCache();
+        cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+
+        var members = cache.ListMemberNames(FixturesNamespace, "Widget");
+
+        Assert.Equal(1, members.Count(m => m == "Describe")); // 2 overloads -> 1 entry.
+        Assert.DoesNotContain("Run", members); // Gadget's member, must not leak into Widget's list.
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // search_functions tiering
+    // ---------------------------------------------------------------------------------------------
+
+    [Fact]
+    public void Search_ExactTypeDotMember_IsTierOne()
+    {
+        using var cache = NewCache();
+        cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+
+        var results = cache.Search("Gadget.Run", namespaceFilter: null);
+
+        var top = results.OrderByDescending(r => r.Score).First();
+        Assert.Equal("Run", top.Member.Name);
+        Assert.True(top.Score >= 1000);
+    }
+
+    [Fact]
+    public void Search_TokensAcrossTypeAndMemberName_OutranksSummaryOnlyMatch()
+    {
+        using var cache = NewCache();
+        cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+
+        // "widg desc" matches {type name, member name} for Widget.Describe (tier 2); "widget" alone (below)
+        // covers the tier-3 (summary-only) case separately.
+        var results = cache.Search("widg desc", namespaceFilter: null);
+
+        var top = results.OrderByDescending(r => r.Score).First();
+        Assert.Equal("Describe", top.Member.Name);
+        Assert.InRange(top.Score, 500, 999);
+    }
+
+    [Fact]
+    public void Search_SummaryOnlyMatch_StillFoundViaFts5Fallback()
+    {
+        using var cache = NewCache();
+        cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+
+        // "padding" appears only in Widget.LongSummaryMethod's XML-doc summary text (its own padding-padding-
+        // padding filler, there specifically to exercise the 300-char truncation threshold) -- it's not a
+        // substring of any type or member name in these fixtures, so this can ONLY be found via the FTS5
+        // summary tier, never tier 1 or 2.
+        var results = cache.Search("padding", namespaceFilter: null);
+
+        Assert.NotEmpty(results);
+        Assert.Contains(results, r => r.Member.Name == "LongSummaryMethod");
+        Assert.All(results, r => Assert.True(r.Score < 500)); // never tier 1 or 2 -- name-based tiers would require "padding" to literally appear in a type/member name, which it doesn't.
+    }
+
+    [Fact]
+    public void Search_Fts5Tier_StrongerMatchScoresHigherThanWeakerMatch()
+    {
+        // Independent PR review finding: bm25() returns a negative value, more negative = better match. An
+        // earlier version of the tier-3 score normalization had the fold backwards -- OrderByDescending
+        // (DiscoveryService's own ranking) actually surfaced the WEAKEST tier-3 hits first. "padding" appears
+        // ~28 times in LongSummaryMethod's summary (a strong, high-term-frequency match) and exactly once in
+        // AdjustLayout's (a weak match) -- neither name contains "padding", so both can only be found via the
+        // FTS5 tier, making this a clean same-query, same-tier comparison.
+        using var cache = NewCache();
+        cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+
+        var results = cache.Search("padding", namespaceFilter: null).OrderByDescending(r => r.Score).ToList();
+
+        var strong = results.Single(r => r.Member.Name == "LongSummaryMethod");
+        var weak = results.Single(r => r.Member.Name == "AdjustLayout");
+        Assert.True(strong.Score > weak.Score, $"stronger match ({strong.Score}) must outrank weaker match ({weak.Score})");
+    }
+
+    [Fact]
+    public void Search_FullyQualifiedTypeDotMember_StillResolvesTierOne()
+    {
+        // Independent PR review finding: a query copied verbatim from a describe_function result or from
+        // Revit's own docs is naturally fully-qualified ("Namespace.Type.Member"), but types.name only ever
+        // stores the bare type name -- without stripping to the type token's own last dotted segment, this
+        // fell all the way through to the loose tier-3 fallback instead of resolving as an exact match.
+        using var cache = NewCache();
+        cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+
+        var results = cache.Search(FixturesNamespace + ".Gadget.Run", namespaceFilter: null);
+
+        var top = results.OrderByDescending(r => r.Score).First();
+        Assert.Equal("Run", top.Member.Name);
+        Assert.True(top.Score >= 1000);
+    }
+
+    [Fact]
+    public void Search_FullyQualifiedQuery_DisambiguatesFromSameBareNameInAnotherNamespace()
+    {
+        // Independent PR review finding (2nd round, M3): an earlier version of the fully-qualified-query
+        // fix stripped straight to the bare type name unconditionally, discarding the one piece of
+        // information that made an already-qualified query unambiguous -- it would tie at score 1000
+        // against Fixtures.Other.Gadget.Run (same bare name, same member name, different namespace --
+        // simulating two add-ins vendoring a same-named helper type) instead of resolving to the SPECIFIC
+        // one actually named.
+        using var cache = NewCache();
+        cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+
+        var results = cache.Search(FixturesNamespace + ".Gadget.Run", namespaceFilter: null);
+        var exactMatches = results.Where(r => r.Score >= 1000).ToList();
+
+        var only = Assert.Single(exactMatches);
+        Assert.Equal(FixturesNamespace, only.Member.Namespace);
+        Assert.Equal("Rhino.MCPBridge.Discovery.Tests.Fixtures.Gadget", only.Member.DeclaringType);
+    }
+
+    [Fact]
+    public void Search_NamespaceFilter_ExcludesOtherNamespaces()
+    {
+        using var cache = NewCache();
+        cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+
+        var results = cache.Search("Do", namespaceFilter: FixturesNamespace);
+
+        Assert.DoesNotContain(results, r => r.Member.Namespace != FixturesNamespace);
+    }
+
+    [Fact]
+    public void Search_CoreAssembly_OutranksAnOtherwiseIdenticalAddinMatch()
+    {
+        // Live finding (coverage-plan Phase A session): an unscoped search_functions query can return
+        // zero core-Revit hits at all, buried under third-party add-in noise -- nothing in Search() used
+        // the assemblies.kind column any query path already carried. Same fixture assembly synced under
+        // both kinds in SEPARATE caches, so this isolates CoreBoost itself rather than depending on two
+        // genuinely different assemblies happening to collide on a type/member name.
+        using var coreCache = NewCache();
+        coreCache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+        using var addinCache = NewCache();
+        addinCache.Sync(new[] { ("addin", typeof(Widget).Assembly) });
+
+        var coreScore = coreCache.Search("Gadget.Run", namespaceFilter: null).OrderByDescending(r => r.Score).First().Score;
+        var addinScore = addinCache.Search("Gadget.Run", namespaceFilter: null).OrderByDescending(r => r.Score).First().Score;
+
+        Assert.True(coreScore > addinScore, $"core match ({coreScore}) must outrank an otherwise-identical addin match ({addinScore})");
+        // The boost must stay small enough to never cross a tier boundary (tiers are 500 points apart) --
+        // a weak core match must never leapfrog a genuinely stronger add-in match in a lower-numbered tier.
+        Assert.True(coreScore - addinScore < 1.0, $"boost ({coreScore - addinScore}) is large enough to risk crossing a tier boundary");
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // search_functions ranking -- issue #65
+    // ---------------------------------------------------------------------------------------------
+
+    [Fact]
+    public void Search_NaturalLanguageQuery_PrefersTheGeneralMethodOverALongerAccidentalTokenMatch()
+    {
+        // Issue #65, reported live from the PRD §13 corpus work: "create sheet place view" returned
+        // ViewSheet.CreatePlaceholder as the #1 result and did not surface ViewSheet.Create at ALL. Tier 2
+        // required every token to be a raw LIKE '%token%' substring of the member or type name, so "place"
+        // matched CreatePlaceholder mid-word (inside "Placeholder") while nothing in Create supplied it --
+        // one accidental substring promoted the wrong method a full tier and demoted the right one below
+        // the 500-point band tier 3 can never cross.
+        using var cache = NewCache();
+        cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+
+        var results = cache.Search("create sheet place view", namespaceFilter: null)
+            .OrderByDescending(r => r.Score)
+            .ToList();
+
+        var create = results.Single(r => r.Member.Name == "Create" && r.Member.DeclaringType.EndsWith("ViewSheet", StringComparison.Ordinal));
+        var placeholder = results.Single(r => r.Member.Name == "CreatePlaceholder");
+
+        Assert.True(
+            create.Score > placeholder.Score,
+            $"ViewSheet.Create ({create.Score}) must outrank ViewSheet.CreatePlaceholder ({placeholder.Score})");
+        Assert.Equal("Create", results[0].Member.Name);
+    }
+
+    [Fact]
+    public void Search_PartialTokenMatch_StaysInTierTwoRatherThanDroppingBelowFts5()
+    {
+        // The half of issue #65 that made the wrong result unrecoverable: it is not enough for Create to
+        // merely outrank CreatePlaceholder, it must stay in tier 2 at all. "place" matches nothing in
+        // ViewSheet.Create, and under the old all-or-nothing rule that single unmatched token dropped it
+        // into tier 3, whose scores are bounded below 500 -- so it could never outrank ANY tier-2 row
+        // however good a match it was. Pinning the floor is what stops a future retune from silently
+        // reintroducing the tier drop while leaving the relative-order assertion above still passing.
+        using var cache = NewCache();
+        cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+
+        var results = cache.Search("create sheet place view", namespaceFilter: null);
+        var create = results.Single(r => r.Member.Name == "Create" && r.Member.DeclaringType.EndsWith("ViewSheet", StringComparison.Ordinal));
+
+        Assert.InRange(create.Score, 500, 999);
+    }
+
+    [Fact]
+    public void Search_StopWordsInTheQueryDoNotPromoteALongerAccidentalMatch()
+    {
+        // Portable cover for stopword filtering (2nd review round). This mechanism was previously pinned
+        // ONLY by a real-RevitAPI test, which self-skips to "passed" wherever MCPBRIDGE_REVITAPI_DLL is
+        // unset -- i.e. everywhere except one hand-configured VM -- so in practice it had no coverage at
+        // all. "a" and "on" are substrings of "WallFoundation" and of nothing in "Wall": unfiltered they
+        // both rank WallFoundation.Create first AND push Wall.Create below the tier-2 floor.
+        using var cache = NewCache();
+        cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+
+        var results = cache.Search("create a wall on a level", namespaceFilter: null).ToList();
+
+        var wall = results.Single(r => r.Member.Name == "Create" && r.Member.DeclaringType.EndsWith(".Wall", StringComparison.Ordinal));
+        var foundation = results.Single(r => r.Member.Name == "Create" && r.Member.DeclaringType.EndsWith("WallFoundation", StringComparison.Ordinal));
+
+        Assert.True(wall.Score > foundation.Score, $"Wall.Create ({wall.Score}) must outrank WallFoundation.Create ({foundation.Score})");
+        Assert.InRange(wall.Score, 500, 999);
+    }
+
+    [Theory]
+    // Three tokens, one unmatched: admitted, because a longer natural-language phrase routinely carries a
+    // word no API name contains -- that is the whole point of the allowance.
+    [InlineData("create sheet zzz", true)]
+    // Two tokens, one unmatched: NOT admitted. With so few tokens every one is load-bearing, and an
+    // allowance here would admit most of the corpus at a score floor tier 3 can never reach.
+    [InlineData("create zzz", false)]
+    public void Search_UnmatchedTokenAllowance_AppliesOnlyToLongerQueries(string query, bool expectedInTierTwo)
+    {
+        // Pins the 2-vs-3 token boundary itself, which nothing covered before (2nd review round). Without
+        // it the threshold could be moved either way and only the two hand-picked queries elsewhere in this
+        // file would notice.
+        using var cache = NewCache();
+        cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+
+        var matches = cache.Search(query, namespaceFilter: null)
+            .Where(r => r.Member.Name == "Create" && r.Member.DeclaringType.EndsWith("ViewSheet", StringComparison.Ordinal))
+            .ToList();
+
+        if (expectedInTierTwo)
+        {
+            var create = Assert.Single(matches);
+            Assert.InRange(create.Score, 500, 999);
+        }
+        else
+        {
+            // Either absent, or present only via the FTS5 tier -- never at the tier-2 floor.
+            Assert.True(
+                matches.Count == 0 || matches[0].Score < 500,
+                $"expected below the tier-2 floor, got {(matches.Count == 0 ? "absent" : matches[0].Score.ToString())}");
+        }
+    }
+
+    [Fact]
+    public void Search_AllowanceRequiresAMemberNameHit_SoATypeNameAloneCannotAdmitEveryMember()
+    {
+        // 2nd review round, measured on the real corpus: without this condition, any query whose DECLARING
+        // TYPE name supplies enough tokens admitted EVERY member of that type at the flat tier-2 floor --
+        // "create family instance" admitted 162 rows and buried Document.NewFamilyInstance at rank 27,
+        // "set the parameter of an element" admitted 855 with ParameterSet.Insert/Erase on page 1. Since
+        // tier 3 is capped below 500, that buries the right answer harder than the original bug did.
+        //
+        // "view sheet zzz": the type name ViewSheet supplies 2 of 3 tokens, clearing `required`, but no
+        // token touches any member name -- so nothing on the type may ride in on the type name alone.
+        //
+        // CONSTRUCTORS ARE INCLUDED, deliberately. An earlier version of this test filtered them out and
+        // its comment rationalized the hole ("it clears the gate on its own merits"), which contradicted
+        // the scoring path's own premise that a constructor contributes no name material of its own. The
+        // next review round found the seam that rationalization was hiding: a constructor's m.name IS the
+        // type name, so the SQL gate handed every constructor a phantom member-hit -- readmitting exactly
+        // the type-name-only rows this gate exists to refuse, and seating them inside the LIMIT ahead of
+        // real member matches.
+        using var cache = NewCache();
+        cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+
+        var tierTwo = cache.Search("view sheet zzz", namespaceFilter: null)
+            .Where(r => r.Member.DeclaringType.EndsWith("ViewSheet", StringComparison.Ordinal) && r.Score >= 500)
+            .ToList();
+
+        Assert.Empty(tierTwo);
+    }
+
+    [Fact]
+    public void Search_TypeNameMatchingEveryToken_IsStillAdmittedWithNoMemberHit()
+    {
+        // The other side of the member-hit gate: it applies only to the ALLOWANCE. A row still matching
+        // every token is admitted regardless, so a query that names a type exactly keeps finding that
+        // type's members even when no member word matches.
+        //
+        // 3rd review round found this branch had no test at all -- deleting `hits >= @all OR` left all 96
+        // tests green, because every other case happened to have a member hit too. It is load-bearing, not
+        // dead: on the real corpus, "external definition creation options" reaches
+        // ExternalDefinitionCreationOptions' members only through this branch.
+        using var cache = NewCache();
+        cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+
+        var results = cache.Search("view sheet", namespaceFilter: null)
+            .Where(r => r.Member.Name == "CreatePlaceholder" && r.Score >= 500)
+            .ToList();
+
+        Assert.Single(results);
+    }
+
+    [Fact]
+    public void Search_ConstructorIsNotInflatedByScoringItsTypeNameTwice()
+    {
+        // A constructor's reflected Name IS its declaring type's name, so scoring both counts the same
+        // words at member weight AND type weight. 2nd review round, real corpus: "set the parameter of an
+        // element" returned the CONSTRUCTORS of ParameterSet and ElementSet at ranks 1-2, ahead of
+        // Parameter.Set -- which is the method the query actually describes.
+        using var cache = NewCache();
+        cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+
+        var results = cache.Search("set parameter", namespaceFilter: null).ToList();
+
+        var method = results.Single(r => r.Member.Name == "Set" && r.Member.DeclaringType.EndsWith(".Parameter", StringComparison.Ordinal));
+        var constructor = results.Single(r => r.Member.Kind == "Constructor" && r.Member.DeclaringType.EndsWith("ParameterSet", StringComparison.Ordinal));
+
+        Assert.True(
+            method.Score > constructor.Score,
+            $"Parameter.Set ({method.Score}) must outrank the ParameterSet constructor ({constructor.Score})");
+    }
+
+    [Fact]
+    public void Search_RepeatedQueryToken_DoesNotChangeTheScore()
+    {
+        // Tokens are deduped, so a repeated word neither counts twice toward the admission threshold nor
+        // gets averaged twice into recall. The old all-AND predicate was immune to this by construction (an
+        // AND of identical clauses is idempotent); counting hits is not.
+        using var cache = NewCache();
+        cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+
+        var once = cache.Search("create sheet", namespaceFilter: null)
+            .Single(r => r.Member.Name == "Create" && r.Member.DeclaringType.EndsWith("ViewSheet", StringComparison.Ordinal));
+        var twice = cache.Search("create sheet create", namespaceFilter: null)
+            .Single(r => r.Member.Name == "Create" && r.Member.DeclaringType.EndsWith("ViewSheet", StringComparison.Ordinal));
+
+        Assert.Equal(once.Score, twice.Score, precision: 9);
+    }
+
+    [Fact]
+    public void Search_TierTwo_IsNotFlatAcrossRowsMatchingTheSameTokens()
+    {
+        // Second defect found while confirming the first: every tier-2 row scored exactly 500 + CoreBoost,
+        // so ordering fell through to DiscoveryService's .ThenBy(Member.Name) tie-break -- i.e.
+        // alphabetical. Whenever tier 2 returned more rows than top_n, page 1 was decided by member name
+        // rather than by relevance.
+        //
+        // "view sheet create" matches both ViewSheet members fully, so it is a clean probe for the tier
+        // carrying ANY relevance signal of its own: before the fix these two rows were exactly equal and
+        // the assertion below could not hold no matter which one is the better answer. Asserting
+        // inequality rather than a specific winner keeps this test about the defect (a flat tier) and
+        // leaves which-one-wins to the test above, so retuning the weights cannot make it vacuous.
+        //
+        // Named for exactly that, after a review round pointed out the previous name
+        // ("...RanksByRelevanceNotAlphabeticallyByMemberName") claimed more than the assertion shows:
+        // "Create" already sorts before "CreatePlaceholder", so this cannot distinguish relevance order
+        // from alphabetical order. It proves the tier is no longer flat, which is the defect it exists for.
+        using var cache = NewCache();
+        cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+
+        var results = cache.Search("view sheet create", namespaceFilter: null).ToList();
+
+        var create = results.Single(r => r.Member.Name == "Create" && r.Member.DeclaringType.EndsWith("ViewSheet", StringComparison.Ordinal));
+        var placeholder = results.Single(r => r.Member.Name == "CreatePlaceholder");
+
+        Assert.InRange(create.Score, 500, 999);
+        Assert.InRange(placeholder.Score, 500, 999);
+        Assert.NotEqual(create.Score, placeholder.Score);
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // search_functions -- synonym expansion (issue #75)
+    // ---------------------------------------------------------------------------------------------
+
+    [Fact]
+    public void Search_CreateQuery_ReachesRevitsNewFactoryConvention()
+    {
+        // Issue #75, reported live from the PRD §13 corpus work: "create family instance" ranked
+        // Document.NewFamilyInstance at #16 -- present, but well below ImportInstance.Create and its
+        // siblings, which match "create" and "instance" head-on with nothing to do with family instances.
+        // Revit's own factory convention is NewXxx, not CreateXxx, and no amount of tuning tier-2's
+        // exact/prefix/substring weights closes a gap that is really "create" and "new" not being
+        // recognized as the same request.
+        using var cache = NewCache();
+        cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+
+        var results = cache.Search("create family instance", namespaceFilter: null)
+            .OrderByDescending(r => r.Score)
+            .ToList();
+
+        var newFamilyInstance = results.Single(r => r.Member.Name == "NewFamilyInstance");
+        var importCreate = results.Single(r => r.Member.Name == "Create" && r.Member.DeclaringType.EndsWith("ImportInstance", StringComparison.Ordinal));
+
+        Assert.InRange(newFamilyInstance.Score, 500, 999);
+        Assert.True(
+            newFamilyInstance.Score > importCreate.Score,
+            $"Document.NewFamilyInstance ({newFamilyInstance.Score}) must outrank ImportInstance.Create ({importCreate.Score})");
+    }
+
+    [Fact]
+    public void Search_SynonymAloneIsEnoughToAdmitAShortQuery_NotOnlyToRankAmongAlreadyAdmittedRows()
+    {
+        // A 2-token query gives the unmatched-token allowance zero slack (UnmatchedTokenAllowance), so
+        // "create level" against Level.NewLevel needs BOTH tokens to hit -- "level" matches the type name
+        // literally, but "create" only matches at all through its synonym "new". Without synonym expansion
+        // at the SQL admission predicate itself (not just in IdentifierRelevance's scoring), this row would
+        // never become a tier-2 candidate in the first place: hits would be 1 of a required 2, and
+        // Score would never run on a row QueryTokenMatch never returned.
+        using var cache = NewCache();
+        cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+
+        var results = cache.Search("create level", namespaceFilter: null).ToList();
+
+        var newLevel = results.Single(r => r.Member.Name == "NewLevel");
+        Assert.InRange(newLevel.Score, 500, 999);
+    }
+
+    [Fact]
+    public void Search_SynonymClassAppearingTwiceInTheQuery_DoesNotBuyAFreeUnmatchedTokenSlot()
+    {
+        // Independent review finding on the first cut of #75, measured live against the real corpus:
+        // "create" and "new" are the same synonym class, but tokenization used to keep them as two
+        // SEPARATE token slots, each expanding to include the other -- so Arc.Create's single "Create"
+        // word-part satisfied both slots and bought a free UnmatchedTokenAllowance seat no query earned.
+        // "create a new wire" collapses to two tokens (create-class, wire) once "a" is dropped as a
+        // stopword and "create"/"new" collapse to one class -- Arc shares only the class word, not "wire",
+        // so with the allowance correctly at zero for a 2-token query, it must not reach tier 2 at all.
+        using var cache = NewCache();
+        cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+
+        var results = cache.Search("create a new wire", namespaceFilter: null).ToList();
+
+        Assert.DoesNotContain(
+            results,
+            r => r.Member.Name == "Create" && r.Member.DeclaringType.EndsWith("Arc", StringComparison.Ordinal) && r.Score >= 500);
+    }
+
+    [Fact]
+    public void Search_LiteralTokenOutranksASynonymOnlyMatch()
+    {
+        // Independent review finding: an undiscounted synonym hit let a purely synonym-derived match
+        // outrank the literally-named method the user actually typed. Level.NewLevel matches "level"
+        // head-on AND "new" via the literal token "new"; Arc.Create matches nothing of "level" and only
+        // reaches this query via "create"-as-a-synonym-of-"new" at all, so it must not merely be admitted
+        // (the previous test) but must not outscore a genuinely well-matched sibling either.
+        using var cache = NewCache();
+        cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+
+        var results = cache.Search("new level", namespaceFilter: null).ToList();
+
+        var newLevel = results.Single(r => r.Member.Name == "NewLevel");
+        var arcCreate = results.SingleOrDefault(r => r.Member.Name == "Create" && r.Member.DeclaringType.EndsWith("Arc", StringComparison.Ordinal));
+
+        Assert.True(newLevel.Score > arcCreate.Score, $"Level.NewLevel ({newLevel.Score}) must outrank Arc.Create ({arcCreate.Score})");
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // search_functions -- tier-2 candidate cap (issue #76)
+    // ---------------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// Establishes the ranking this fixture produces when nothing is capped, so the capped test below is
+    /// asserting against a measured order rather than against my arithmetic on the scorer's weights.
+    /// </summary>
+    [Fact]
+    public void Search_Uncapped_RanksTheTypeNameMatchesAboveTheLongerMemberNameMatches()
+    {
+        using var cache = NewCache();
+        cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+
+        var tierTwo = cache.Search("flange", namespaceFilter: null)
+            .Where(r => r.Score >= 500)
+            .OrderByDescending(r => r.Score)
+            .ToList();
+
+        Assert.Equal(5, tierTwo.Count);
+        Assert.All(tierTwo.Take(2), r => Assert.EndsWith("Flange", r.Member.DeclaringType, StringComparison.Ordinal));
+        Assert.All(tierTwo.Skip(2), r => Assert.EndsWith("Bracket", r.Member.DeclaringType, StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// Issue #76. The cap must fall on the scored ranking, not on an SQL-side stand-in for it.
+    ///
+    /// <para>Depth 2 against 5 candidates, on a fixture built so the two rules disagree completely (see
+    /// <see cref="Fixtures.Flange"/>): every row the OLD <c>ORDER BY member_hits DESC</c> kept is a row the
+    /// scorer ranks last, and vice versa. So this fails loudly rather than marginally if the cap ever moves
+    /// back ahead of scoring -- it does not depend on which of the two Flange members wins, only on the cut
+    /// landing between the groups.</para>
+    ///
+    /// <para>The depth override exists solely for this: the real cap is 500 and no hand-written fixture
+    /// assembly is going to produce enough members to reach it. Verified against the real RhinoCommon     /// corpus separately (see RealRhinoCommonTests).</para>
+    /// </summary>
+    [Fact]
+    public void Search_CandidateCap_KeepsTheHighestScoringRowsNotTheOnesSqlWalkedFirst()
+    {
+        using var cache = new DiscoveryCache(":memory:", 2);
+        cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+
+        var tierTwo = cache.Search("flange", namespaceFilter: null)
+            .Where(r => r.Score >= 500)
+            .ToList();
+
+        Assert.Equal(2, tierTwo.Count);
+        Assert.All(
+            tierTwo,
+            r => Assert.True(
+                r.Member.DeclaringType.EndsWith("Flange", StringComparison.Ordinal),
+                $"the cap kept '{r.Member.DeclaringType}.{r.Member.Name}' ({r.Score:F1}), which the scorer ranks below both Flange members"));
+    }
+
+    /// <summary>
+    /// The companion property, and the one that makes the cap a cap rather than a filter: below the depth,
+    /// nothing is dropped at all. Guards against "fixing" the truncation by tightening admission.
+    ///
+    /// <para>Review finding, recorded rather than hidden: this is a WEAK test on its own. At depth 50 over
+    /// 5 candidates, removing the Take, keeping the lowest scores instead of the highest, or dropping the
+    /// sort all still yield 5. Its sibling above already asserts 5 at the default depth with an ordering
+    /// assertion on top. What it uniquely pins is that the depth parameter is a cap and not a quota -- a
+    /// depth ABOVE the candidate count must not pad, truncate, or throw.</para>
+    /// </summary>
+    [Fact]
+    public void Search_CandidateCap_AboveTheCandidateCount_DropsNothing()
+    {
+        using var cache = new DiscoveryCache(":memory:", 50);
+        cache.Sync(new[] { ("core", typeof(Widget).Assembly) });
+
+        var tierTwo = cache.Search("flange", namespaceFilter: null).Where(r => r.Score >= 500).ToList();
+
+        Assert.Equal(5, tierTwo.Count);
+    }
+
+    /// <summary>
+    /// The depth is a positive count, and a non-positive one fails loudly at construction rather than as a
+    /// SQLite parse error ("IN ()") on the first query that finds candidates -- with tier 3 silently
+    /// UNCAPPED at the same time, since LIMIT -1 means unlimited in SQLite.
+    /// </summary>
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public void Cache_NonPositiveRankedDepth_IsRejectedAtConstruction(int depth)
+    {
+        Assert.Throws<System.ArgumentOutOfRangeException>(() => new DiscoveryCache(":memory:", depth));
+    }
+}

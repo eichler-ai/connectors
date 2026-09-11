@@ -51,6 +51,7 @@ internal sealed class BridgeHost : ISessionEnvironment
     private int _pingInFlight;
     private volatile RegisterSnapshot _snapshot;
     private IDisposable? _changeMonitor;
+    private readonly Rhino.MCPBridge.Core.Discovery.DiscoveryCache? _discoveryCache;
 
     public string Token { get; } = InstanceFile.MintToken();
     public int Port { get; private set; }
@@ -61,8 +62,13 @@ internal sealed class BridgeHost : ISessionEnvironment
     {
         var runner = new RoslynScriptRunner();
         var executor = new UndoRunExecutor(new ScriptRunners(runner, new PythonScriptRunner(pythonHost)), runHost);
+        // API discovery (PRD §09): reflect RhinoCommon + loaded plug-ins into the persistent cache. A
+        // one-time ~1.5s cost on the first launch; later launches sync only deltas. Never fails the bridge.
+        var (discoveryService, discoveryCache) = DiscoveryBootstrap.Create(rhinoVersion, log);
+        _discoveryCache = discoveryCache;
         _dispatcher = new RequestDispatcher(ExecutionManager.CreateDefault(ExecutionRingBuffer.CreateDefault()), executor, launcher, log,
-            capture: new ViewCaptureService(viewCapture), onMainThread: f => mainThread.Invoke(f), windowInventory: windowInventory);
+            capture: new ViewCaptureService(viewCapture), onMainThread: f => mainThread.Invoke(f), windowInventory: windowInventory,
+            discoveryService: discoveryService);
         // The undo tool's gate (PRD §07): every document change outside the connector's own work.
         _changeMonitor = runHost.MonitorChanges(executor.Clock.NoteChange);
         // list_instances' last_run per document (PRD §05): re-send register when the ledger changes.
@@ -106,6 +112,7 @@ internal sealed class BridgeHost : ISessionEnvironment
         _tickTimer?.Dispose();
         try { _listener?.Stop(); } catch { }
         try { _changeMonitor?.Dispose(); } catch { }
+        try { _discoveryCache?.Dispose(); } catch { }
         // Close every live socket now rather than waiting for each session's read to notice the
         // cancellation: a plug-in unload must leave no server holding a half-open connection.
         foreach (var s in _sessions.Snapshot())
