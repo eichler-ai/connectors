@@ -51,4 +51,36 @@ public sealed class RegisterMessageTests
         using var doc = JsonDocument.Parse(json);
         Assert.Equal(0, doc.RootElement.GetProperty("params").GetProperty("documents").GetArrayLength());
     }
+
+    [Fact]
+    public void SerialisesGrasshopperDocuments_InstanceLevel()
+    {
+        var snap = new RegisterSnapshot(Guid.NewGuid(), 1, "8.35", "macos", "dev",
+            Array.Empty<RegisteredDocument>(), "idle", new[]
+            {
+                new GrasshopperDocument("gh-abc123abc123", "Tower.gh", "/Users/x/Tower.gh", isActive: true, isEnabled: true, componentCount: 42),
+                new GrasshopperDocument("gh-def456def456", "Untitled", null, isActive: false, isEnabled: false, componentCount: 0),
+            });
+        var json = RegisterMessage.ToJson(snap);
+        using var doc = JsonDocument.Parse(json);
+        var gh = doc.RootElement.GetProperty("params").GetProperty("grasshopper_documents").EnumerateArray().ToList();
+        Assert.Equal(2, gh.Count);
+        Assert.Equal("gh-abc123abc123", gh[0].GetProperty("gh_document_id").GetString());
+        Assert.Equal("Tower.gh", gh[0].GetProperty("title").GetString());
+        Assert.Equal("/Users/x/Tower.gh", gh[0].GetProperty("path").GetString());
+        Assert.True(gh[0].GetProperty("active").GetBoolean());
+        Assert.True(gh[0].GetProperty("enabled").GetBoolean());
+        Assert.Equal(42, gh[0].GetProperty("component_count").GetInt32());
+        Assert.Equal(JsonValueKind.Null, gh[1].GetProperty("path").ValueKind);
+        Assert.False(gh[1].GetProperty("enabled").GetBoolean());
+    }
+
+    [Fact]
+    public void NoGrasshopperDocuments_OmitsTheField_SoAGrasshopperlessRegisterIsUnchanged()
+    {
+        // A session with Grasshopper never loaded must serialise exactly as before this field existed.
+        var json = RegisterMessage.ToJson(new RegisterSnapshot(Guid.NewGuid(), 1, "8", "windows", "dev", Array.Empty<RegisteredDocument>()));
+        using var doc = JsonDocument.Parse(json);
+        Assert.False(doc.RootElement.GetProperty("params").TryGetProperty("grasshopper_documents", out _));
+    }
 }

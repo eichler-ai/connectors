@@ -170,13 +170,14 @@ type authParams struct {
 }
 
 type registerParams struct {
-	InstanceID     string              `json:"instance_id"`
-	PID            int                 `json:"pid"`
-	RhinoVersion   string              `json:"rhino_version"`
-	Platform       string              `json:"platform"`
-	BridgeVersion  string              `json:"bridge_version"`
-	Documents      []registry.Document `json:"documents"`
-	ExecutionState string              `json:"execution_state"`
+	InstanceID           string                         `json:"instance_id"`
+	PID                  int                            `json:"pid"`
+	RhinoVersion         string                         `json:"rhino_version"`
+	Platform             string                         `json:"platform"`
+	BridgeVersion        string                         `json:"bridge_version"`
+	Documents            []registry.Document            `json:"documents"`
+	GrasshopperDocuments []registry.GrasshopperDocument `json:"grasshopper_documents"`
+	ExecutionState       string                         `json:"execution_state"`
 }
 
 type pingParams struct {
@@ -224,7 +225,7 @@ func (m *Manager) connect(ctx context.Context, f *instancefile.File) {
 			m.mu.Unlock()
 			newEpoch := m.opts.Registry.Register(&registry.Instance{
 				InstanceID: rp.InstanceID, PID: rp.PID, RhinoVersion: rp.RhinoVersion, Platform: rp.Platform,
-				BridgeVersion: rp.BridgeVersion, Documents: rp.Documents, ExecutionState: rp.ExecutionState,
+				BridgeVersion: rp.BridgeVersion, Documents: rp.Documents, GrasshopperDocuments: rp.GrasshopperDocuments, ExecutionState: rp.ExecutionState,
 			}, epoch, m.opts.Now())
 			if newEpoch == 0 {
 				// The registry refused a stale epoch: another connection owns this

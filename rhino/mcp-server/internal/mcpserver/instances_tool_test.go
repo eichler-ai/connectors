@@ -87,6 +87,35 @@ func TestInstancesCarryEveryFieldAndStatus(t *testing.T) {
 	}
 }
 
+func TestGrasshopperDocumentsSurfaceInstanceLevel(t *testing.T) {
+	reg := registry.New()
+	now := time.Now()
+	// i1 has Grasshopper loaded with two definitions; i2 has none (Grasshopper never loaded).
+	reg.Register(&registry.Instance{InstanceID: "i1", PID: 7, RhinoVersion: "8.35", Platform: "macos", BridgeVersion: "dev",
+		GrasshopperDocuments: []registry.GrasshopperDocument{
+			{ID: "gh-abc", Title: "Tower.gh", Path: "/t.gh", Active: true, Enabled: true, ComponentCount: 42},
+			{ID: "gh-def", Title: "Untitled", Active: false, Enabled: false, ComponentCount: 0},
+		}}, 0, now)
+	reg.Register(&registry.Instance{InstanceID: "i2", PID: 8, RhinoVersion: "8.35", Platform: "windows"}, 0, now)
+
+	out := callListInstances(t, reg, now)
+	byID := map[string]InstanceOut{}
+	for _, i := range out.Instances {
+		byID[i.InstanceID] = i
+	}
+	gh := byID["i1"].GrasshopperDocuments
+	if len(gh) != 2 || gh[0].GrasshopperDocumentID != "gh-abc" || !gh[0].Active || !gh[0].Enabled || gh[0].ComponentCount != 42 || gh[0].Path != "/t.gh" {
+		t.Fatalf("i1 grasshopper_documents = %+v", gh)
+	}
+	if gh[1].Enabled || gh[1].Active || gh[1].ComponentCount != 0 {
+		t.Fatalf("gh[1] = %+v", gh[1])
+	}
+	// A Grasshopper-less instance omits the field (nil -> omitempty on the wire).
+	if byID["i2"].GrasshopperDocuments != nil {
+		t.Fatalf("i2 should carry no grasshopper_documents, got %+v", byID["i2"].GrasshopperDocuments)
+	}
+}
+
 func TestSilentInstanceReadsUnresponsive(t *testing.T) {
 	reg := registry.New()
 	now := time.Now()

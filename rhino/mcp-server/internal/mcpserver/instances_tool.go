@@ -26,6 +26,17 @@ type DocumentOut struct {
 	LastRun *execution.LastRun `json:"last_run,omitempty"`
 }
 
+// GrasshopperDocumentOut is one open Grasshopper definition (PRD §10). Instance-level: Grasshopper's
+// document server is process-global, so these are a sibling of Documents, not nested under one.
+type GrasshopperDocumentOut struct {
+	GrasshopperDocumentID string `json:"gh_document_id"`
+	Title                 string `json:"title"`
+	Path                  string `json:"path,omitempty"`
+	Active                bool   `json:"active"`
+	Enabled               bool   `json:"enabled"`
+	ComponentCount        int    `json:"component_count"`
+}
+
 // InstanceOut is one connected Rhino (PRD §05 "Instance discovery").
 type InstanceOut struct {
 	InstanceID     string                 `json:"instance_id"`
@@ -37,6 +48,8 @@ type InstanceOut struct {
 	Status         string                 `json:"status"`
 	Memory         *registry.MemorySample `json:"memory,omitempty"`
 	Documents      []DocumentOut          `json:"documents"`
+	// GrasshopperDocuments are the instance's open definitions (PRD §10); omitted when none/Grasshopper unloaded.
+	GrasshopperDocuments []GrasshopperDocumentOut `json:"grasshopper_documents,omitempty"`
 }
 
 // ListInstancesOut is the tool's result.
@@ -72,9 +85,15 @@ func RegisterInstances(s *mcp.Server, reg *registry.Registry, now func() time.Ti
 			for _, d := range inst.Documents {
 				docs = append(docs, DocumentOut{DocumentID: d.ID, Title: d.Title, Path: d.Path, Active: d.Active, LastRun: d.LastRun})
 			}
+			var ghDocs []GrasshopperDocumentOut
+			for _, g := range inst.GrasshopperDocuments {
+				ghDocs = append(ghDocs, GrasshopperDocumentOut{
+					GrasshopperDocumentID: g.ID, Title: g.Title, Path: g.Path, Active: g.Active, Enabled: g.Enabled, ComponentCount: g.ComponentCount,
+				})
+			}
 			out.Instances = append(out.Instances, InstanceOut{
 				InstanceID: inst.InstanceID, RhinoVersion: inst.RhinoVersion, Platform: inst.Platform, BridgeVersion: inst.BridgeVersion,
-				PID: inst.PID, ConnectedSince: inst.ConnectedSince, Status: status, Memory: inst.Memory, Documents: docs,
+				PID: inst.PID, ConnectedSince: inst.ConnectedSince, Status: status, Memory: inst.Memory, Documents: docs, GrasshopperDocuments: ghDocs,
 			})
 		}
 		if out.Instances == nil {

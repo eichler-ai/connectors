@@ -17,6 +17,10 @@
   -->
   <PropertyGroup>
     <RhinoCommonVersion>8.25.25314.11001</RhinoCommonVersion>
+    <!-- Grasshopper is RhinoCommon's companion NuGet, versioned in lockstep (PRD §10). Referenced the
+         same way as RhinoCommon (ExcludeAssets=runtime): the real Grasshopper.dll/GH_IO.dll are already
+         loaded in-process, and pinning keeps CI compiling against a fixed GH API surface. -->
+    <GrasshopperVersion>8.25.25314.11001</GrasshopperVersion>
     <BridgeTargetFramework>net8.0</BridgeTargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>

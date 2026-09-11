@@ -5,9 +5,17 @@
     <TargetFramework>$(BridgeTargetFramework)</TargetFramework>
     <RootNamespace>Rhino.MCPBridge.RhinoAdapter</RootNamespace>
     <AssemblyName>Rhino.MCPBridge.RhinoAdapter</AssemblyName>
+    <!-- The Grasshopper NuGet declares a FrameworkReference to WindowsDesktop.WindowsForms (its component
+         UI is WinForms), which does not exist on the macOS/Linux SDK and would break the cross-platform
+         build. We reference Grasshopper for COMPILE metadata only (ExcludeAssets=runtime; the real
+         assembly is loaded in-process) and touch only WinForms-free GH APIs (GH_Document, DocumentServer),
+         so we drop the transitive framework reference. Touching a WinForms-typed GH member would then fail
+         to compile (by design), since such a member has no place in the headless bridge. -->
+    <DisableTransitiveFrameworkReferences>true</DisableTransitiveFrameworkReferences>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="RhinoCommon" Version="$(RhinoCommonVersion)" ExcludeAssets="runtime" PrivateAssets="all" />
+    <PackageReference Include="Grasshopper" Version="$(GrasshopperVersion)" ExcludeAssets="runtime" PrivateAssets="all" />
     <ProjectReference Include="../Rhino.MCPBridge.Core/Rhino.MCPBridge.Core.csproj" />
   </ItemGroup>
   <ItemGroup>
