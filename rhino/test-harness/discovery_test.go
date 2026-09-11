@@ -122,6 +122,12 @@ func TestDiscoveryDescribeFunctionResolvesAMember(t *testing.T) {
 	if summary == "" && sig == "" {
 		t.Fatalf("describe returned neither summary nor signature: %+v", out.Result)
 	}
+	// Both call shapes (PR4): describe carries the Python call form beside the C# signature, round-tripped
+	// live through the broker and the python_call column. Radius is an instance property, so its Python
+	// form is bare attribute access.
+	if pc, _ := out.Result["python_call"].(string); pc != "Radius" {
+		t.Fatalf("python_call for Sphere.Radius = %q, want \"Radius\": %+v", pc, out.Result)
+	}
 	if out.RhinoVersion == "" {
 		t.Fatal("expected rhino_version stamped")
 	}
@@ -209,6 +215,10 @@ func TestDiscoveryRhinoScriptFunctionsAreIndexed(t *testing.T) {
 	blob, _ := json.Marshal(d.Result)
 	if !strings.Contains(strings.ToLower(string(blob)), "circle") {
 		t.Fatalf("describe of rhinoscriptsyntax.AddCircle lacks a circle summary: %s", blob)
+	}
+	// The Python call shape for a rhinoscriptsyntax function is its rs.* wrapper (PR4, "both call shapes").
+	if pc, _ := d.Result["python_call"].(string); !strings.HasPrefix(pc, "rs.AddCircle(") {
+		t.Fatalf("python_call for rhinoscriptsyntax.AddCircle = %q, want an rs.AddCircle(...) form: %+v", pc, d.Result)
 	}
 
 	// search surfaces at least one kind=rhinoscript member for a task phrase. Poll until the broker

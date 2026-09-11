@@ -340,6 +340,7 @@ public sealed class DiscoveryService
             DeclaringType = resolvedRow.DeclaringType,
             Name = resolvedRow.Name,
             Signature = resolvedRow.Signature,
+            PythonCall = resolvedRow.PythonCall,
             Summary = resolvedRow.Summary,
             Parameters = parameters,
             Returns = resolvedRow.Returns,

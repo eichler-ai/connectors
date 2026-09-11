@@ -17,6 +17,11 @@ public sealed class ReflectedMember
     /// <summary>Compact, human-readable C#-ish rendering (see <see cref="SignatureFormatter"/>).</summary>
     public required string Signature { get; init; }
 
+    /// <summary>How the member is called from the Rhino CPython 3 host (PRD §09 "both call shapes"); see
+    /// <see cref="SignatureFormatter.BuildPythonCall"/>. Defaulted (not required) so synthetic-source rows
+    /// and test constructions need not set it; the reflector and <see cref="RhinoScriptIndexer"/> always do.</summary>
+    public string PythonCall { get; init; } = "";
+
     public string? Summary { get; init; }
 
     /// <summary>The XML doc-id (<see cref="XmlDocId.GetDocId"/>'s output) -- doubles as describe_function's member_id.</summary>
@@ -317,6 +322,7 @@ public static class DiscoveryReflector
             Kind = kind,
             Name = info is ConstructorInfo ? declaringType.Name : info.Name,
             Signature = SignatureFormatter.BuildSignature(info),
+            PythonCall = SignatureFormatter.BuildPythonCall(info),
             Summary = docEntry?.Summary,
             Returns = docEntry?.Returns,
             Parameters = parameters,

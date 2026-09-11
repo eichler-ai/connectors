@@ -19,6 +19,11 @@ public sealed class DiscoveryMemberRow
     public required string DeclaringType { get; init; }
     public required string Name { get; init; }
     public required string Signature { get; init; }
+
+    /// <summary>The CPython call form (PRD §09 "both call shapes"); see <see cref="SignatureFormatter.BuildPythonCall"/>.
+    /// Empty for rows written before the column existed / by paths that do not set it.</summary>
+    public string PythonCall { get; init; } = "";
+
     public string? Summary { get; init; }
     public string? Returns { get; init; }
     public required IReadOnlyList<ReflectedParameter> Parameters { get; init; }
@@ -175,9 +180,10 @@ public sealed class DiscoveryCache : IDisposable
     /// an existing file -- notably a CHECK constraint, which SQLite cannot ALTER in place. A cache written by
     /// an older version is rebuilt from scratch (see <see cref="CreateSchema"/>); the reflected data is
     /// regenerated on the next <see cref="Sync"/>, so this is a safe, self-correcting drop. Bumped to 2 when
-    /// the assemblies.kind CHECK gained 'rhinoscript'/'grasshopper' for PRD §09.
+    /// the assemblies.kind CHECK gained 'rhinoscript'/'grasshopper' for PRD §09; to 3 when members gained the
+    /// python_call column ("both call shapes"), which an existing cache's rows would otherwise carry empty.
     /// </summary>
-    private const int SchemaVersion = 2;
+    private const int SchemaVersion = 3;
 
     private void CreateSchema()
     {
@@ -269,6 +275,7 @@ public sealed class DiscoveryCache : IDisposable
                 kind TEXT NOT NULL,
                 name TEXT NOT NULL,
                 signature TEXT NOT NULL,
+                python_call TEXT NOT NULL DEFAULT '',
                 summary TEXT,
                 member_id TEXT NOT NULL,
                 returns TEXT,
@@ -548,14 +555,15 @@ public sealed class DiscoveryCache : IDisposable
                 {
                     insertMember.Transaction = transaction;
                     insertMember.CommandText = """
-                        INSERT INTO members (type_id, kind, name, signature, summary, member_id, returns, params_json)
-                        VALUES (@typeId, @kind, @name, @signature, @summary, @memberId, @returns, @paramsJson);
+                        INSERT INTO members (type_id, kind, name, signature, python_call, summary, member_id, returns, params_json)
+                        VALUES (@typeId, @kind, @name, @signature, @pythonCall, @summary, @memberId, @returns, @paramsJson);
                         SELECT last_insert_rowid();
                         """;
                     insertMember.Parameters.AddWithValue("@typeId", typeId);
                     insertMember.Parameters.AddWithValue("@kind", member.Kind);
                     insertMember.Parameters.AddWithValue("@name", member.Name);
                     insertMember.Parameters.AddWithValue("@signature", member.Signature);
+                    insertMember.Parameters.AddWithValue("@pythonCall", member.PythonCall);
                     insertMember.Parameters.AddWithValue("@summary", (object?)member.Summary ?? DBNull.Value);
                     insertMember.Parameters.AddWithValue("@memberId", member.MemberId);
                     insertMember.Parameters.AddWithValue("@returns", (object?)member.Returns ?? DBNull.Value);
@@ -773,7 +781,7 @@ public sealed class DiscoveryCache : IDisposable
             ThrowIfDisposed();
             using var cmd = _connection.CreateCommand();
             cmd.CommandText = """
-                SELECT m.kind, m.name, m.signature, m.summary, m.member_id, m.returns, m.params_json, t.namespace, t.full_name, a.kind
+                SELECT m.kind, m.name, m.signature, m.summary, m.member_id, m.returns, m.params_json, t.namespace, t.full_name, a.kind, m.python_call
                 FROM members m JOIN types t ON m.type_id = t.id JOIN assemblies a ON t.assembly_id = a.id
                 WHERE t.documented = 1
                 ORDER BY m.id
@@ -903,7 +911,7 @@ public sealed class DiscoveryCache : IDisposable
         // not a loud one. Joining assemblies here costs nothing (same pattern ReadMemberRow's other query
         // sites already use) and makes this row genuinely correct regardless of who reads it.
         cmd.CommandText = """
-            SELECT m.kind, m.name, m.signature, m.summary, m.member_id, m.returns, m.params_json, a.kind
+            SELECT m.kind, m.name, m.signature, m.summary, m.member_id, m.returns, m.params_json, a.kind, m.python_call
             FROM members m JOIN types t ON m.type_id = t.id JOIN assemblies a ON t.assembly_id = a.id
             WHERE m.type_id = @typeId
             """;
@@ -925,6 +933,7 @@ public sealed class DiscoveryCache : IDisposable
                 Namespace = namespaceName,
                 DeclaringType = declaringTypeFullName,
                 IsCoreAssembly = reader.GetString(7) == "core",
+                PythonCall = reader.GetString(8),
             });
         }
 
@@ -1146,7 +1155,7 @@ public sealed class DiscoveryCache : IDisposable
         using var cmd = _connection.CreateCommand();
         var typeColumn = matchFullName ? "t.full_name" : "t.name";
         cmd.CommandText = $"""
-            SELECT m.kind, m.name, m.signature, m.summary, m.member_id, m.returns, m.params_json, t.namespace, t.full_name, a.kind
+            SELECT m.kind, m.name, m.signature, m.summary, m.member_id, m.returns, m.params_json, t.namespace, t.full_name, a.kind, m.python_call
             FROM members m JOIN types t ON m.type_id = t.id JOIN assemblies a ON t.assembly_id = a.id
             WHERE t.documented = 1 AND LOWER({typeColumn}) = @typeToken AND LOWER(m.name) = @memberToken
               AND (@ns IS NULL OR t.namespace = @ns)
@@ -1408,9 +1417,9 @@ public sealed class DiscoveryCache : IDisposable
             index++;
         }
 
-        // m.id trails the ten columns ReadMemberRow reads by ordinal, so it can stay unaware of it.
+        // m.id trails the eleven columns ReadMemberRow reads by ordinal, so it can stay unaware of it.
         cmd.CommandText = $"""
-            SELECT m.kind, m.name, m.signature, m.summary, m.member_id, m.returns, m.params_json, t.namespace, t.full_name, a.kind, m.id
+            SELECT m.kind, m.name, m.signature, m.summary, m.member_id, m.returns, m.params_json, t.namespace, t.full_name, a.kind, m.python_call, m.id
             FROM members m JOIN types t ON m.type_id = t.id JOIN assemblies a ON t.assembly_id = a.id
             WHERE m.id IN ({string.Join(", ", placeholders)})
             """;
@@ -1419,7 +1428,7 @@ public sealed class DiscoveryCache : IDisposable
         using var reader = cmd.ExecuteReader();
         while (reader.Read())
         {
-            rows.Add((reader.GetInt64(10), ReadMemberRow(reader)));
+            rows.Add((reader.GetInt64(11), ReadMemberRow(reader)));
         }
 
         return rows;
@@ -1441,7 +1450,7 @@ public sealed class DiscoveryCache : IDisposable
 
         using var cmd = _connection.CreateCommand();
         cmd.CommandText = """
-            SELECT m.kind, m.name, m.signature, m.summary, m.member_id, m.returns, m.params_json, t.namespace, t.full_name, a.kind, bm25(members_fts)
+            SELECT m.kind, m.name, m.signature, m.summary, m.member_id, m.returns, m.params_json, t.namespace, t.full_name, a.kind, m.python_call, bm25(members_fts)
             FROM members_fts
             JOIN members m ON m.id = members_fts.rowid
             JOIN types t ON m.type_id = t.id
@@ -1480,7 +1489,7 @@ public sealed class DiscoveryCache : IDisposable
         using var reader = cmd.ExecuteReader();
         while (reader.Read())
         {
-            results.Add((ReadMemberRow(reader), reader.GetDouble(10)));
+            results.Add((ReadMemberRow(reader), reader.GetDouble(11)));
         }
 
         return results;
@@ -1511,5 +1520,6 @@ public sealed class DiscoveryCache : IDisposable
         Namespace = reader.GetString(7),
         DeclaringType = reader.GetString(8),
         IsCoreAssembly = reader.GetString(9) == "core",
+        PythonCall = reader.GetString(10),
     };
 }

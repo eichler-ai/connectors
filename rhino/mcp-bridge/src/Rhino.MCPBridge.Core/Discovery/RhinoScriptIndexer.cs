@@ -312,6 +312,9 @@ public static class RhinoScriptIndexer
             Kind = "function",
             Name = name,
             Signature = $"{name}({paramsText})",
+            // rhinoscriptsyntax is Python-only, so the Python call shape is the rs.* wrapper an agent
+            // actually writes; there is no C# form (PRD §09 "rs. wrapper where one exists").
+            PythonCall = $"rs.{name}({paramsText})",
             Summary = string.IsNullOrEmpty(summary) ? null : summary,
             MemberId = "rhinoscript:" + name,
             Returns = returns,
