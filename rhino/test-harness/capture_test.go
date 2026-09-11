@@ -194,4 +194,8 @@ func TestCaptureWhileAScriptRuns_IsBusy(t *testing.T) {
 		t.Fatalf("%+v", env.StructuredContent)
 	}
 	poll(t, c, long.ExecutionID, 10000)
+	// The script's result is pollable a moment before the plug-in's main-thread executor releases and
+	// the instance reports idle again; on the slower Windows host that gap let the next shared-instance
+	// cases see this run's leftover busy state. Drain to idle before returning.
+	waitForIdle(t, c, inst.InstanceID)
 }

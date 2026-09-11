@@ -140,6 +140,57 @@ func waitForInstance(t *testing.T, c *mcpclient.Client) instance {
 	}
 }
 
+// rhinocodePath returns the rhinocode CLI for this platform, or "" if it is not where Rhino installs
+// it. Used by cases that stage a "foreign" command from outside the connector; on Windows the CLI is
+// under the Rhino System directory (and reaches Rhino only once the RhinoCode server is engaged --
+// dev-environment.md "Verifying on Windows").
+func rhinocodePath() string {
+	candidates := []string{"/Applications/Rhino 8.app/Contents/Resources/bin/rhinocode"}
+	if runtime.GOOS == "windows" {
+		candidates = []string{`C:\Program Files\Rhino 8\System\rhinocode.exe`}
+	}
+	for _, p := range candidates {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	return ""
+}
+
+// skipPythonExecutionOnWindows skips cases that actually run Python in the live host. On Windows,
+// RhinoCode does not reliably finish initialising the Python environment (issue #287): a normal launch
+// never registers Python 3, and even with the ScriptEditor engaged a fast/cached warm-up can leave
+// scriptcontext (and the rest of Rhino's Python module path) unavailable -- and the runner's preamble
+// imports scriptcontext unconditionally, so any live Python run then hard-fails. The compile- and
+// analysis-only Python cases (syntax error, interactive-getter denial) need no live host and still run.
+// Remove this skip when #287 gives the plug-in a reliable headless Python init.
+func skipPythonExecutionOnWindows(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("Python execution skipped on Windows pending #287 (RhinoCode Python env not reliably initialised); compile/analysis-only Python cases still run")
+	}
+}
+
+// waitForIdle polls until the instance reports idle. The busy/idle state is the plug-in's, shared
+// across servers (PRD §05), so a case that runs a script right after another case whose script is
+// still draining the main thread would otherwise collide with it -- the window is wider on the
+// slower Windows host, where three C# cases after the capture-busy case saw the leftover run's id.
+func waitForIdle(t *testing.T, c *mcpclient.Client, instanceID string) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		for _, i := range listInstances(t, c).Instances {
+			if i.InstanceID == instanceID && i.Status == "idle" {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("instance %s did not return to idle within the deadline", instanceID)
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+}
+
 func TestListInstancesShowsTheRunningRhino(t *testing.T) {
 	c := startServer(t)
 	inst := waitForInstance(t, c)

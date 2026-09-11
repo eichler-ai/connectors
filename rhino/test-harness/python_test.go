@@ -15,6 +15,7 @@ import (
 // cooperative cancellation.
 
 func TestPythonRunsCPython3_WithTheGlobals(t *testing.T) {
+	skipPythonExecutionOnWindows(t)
 	c := startServer(t)
 	inst := waitForInstance(t, c)
 	out := python(t, c, inst, `import sys
@@ -35,6 +36,7 @@ result = {"impl": sys.implementation.name, "major": sys.version_info[0], "doc": 
 }
 
 func TestPythonCreatesObjects_AndReportsMutations(t *testing.T) {
+	skipPythonExecutionOnWindows(t)
 	c := startServer(t)
 	inst := waitForInstance(t, c)
 	out := python(t, c, inst, `import Rhino
@@ -61,6 +63,7 @@ result = [str(a), str(b)]
 }
 
 func TestPythonRaise_IsRolledBack_WithTheTraceback(t *testing.T) {
+	skipPythonExecutionOnWindows(t)
 	c := startServer(t)
 	inst := waitForInstance(t, c)
 	out := python(t, c, inst, `import Rhino
@@ -112,6 +115,7 @@ func TestPythonInteractiveGetter_IsRefused(t *testing.T) {
 }
 
 func TestPythonLifecycleGate_RefusesThenRunsWithTheFlag(t *testing.T) {
+	skipPythonExecutionOnWindows(t)
 	c := startServer(t)
 	inst := waitForInstance(t, c)
 	script := `import Rhino
@@ -134,6 +138,7 @@ result = {"ok": ok, "exists": os.path.exists(path)}
 }
 
 func TestPythonCancel_IsCooperative(t *testing.T) {
+	skipPythonExecutionOnWindows(t)
 	c := startServer(t)
 	inst := waitForInstance(t, c)
 	tag := fmt.Sprintf("py5-%d", time.Now().UnixNano()%100000)

@@ -236,8 +236,8 @@ func TestUndoAfterSomeoneElsesCommand_NeedsConfirm(t *testing.T) {
 	if out.Status != "success" {
 		t.Fatalf("%+v", out)
 	}
-	rc := "/Applications/Rhino 8.app/Contents/Resources/bin/rhinocode"
-	if _, err := os.Stat(rc); err != nil {
+	rc := rhinocodePath()
+	if rc == "" {
 		t.Skip("no rhinocode CLI on this machine to stage a foreign command")
 	}
 	countBefore := len(objectNames(t, c, inst))
@@ -273,6 +273,51 @@ func TestUndoAfterSomeoneElsesCommand_NeedsConfirm(t *testing.T) {
 	if !has(objectNames(t, c, inst), tag) {
 		t.Fatal("the confirmed undo reverted more than the top entry")
 	}
+}
+
+func TestOmittedDocumentIdIsActive(t *testing.T) {
+	// PRD §05: a script with no document_id addresses the active document, on both platforms (on
+	// Windows there is only ever one, which is the active one; on the Mac there may be several).
+	// csharp() deliberately omits document_id, so the run's last_run must land on the document that
+	// list_instances marks active.
+	c := startServer(t)
+	inst := waitForInstance(t, c)
+	waitForIdle(t, c, inst.InstanceID)
+
+	var activeBefore string
+	for _, d := range inst.Documents {
+		if d.Active {
+			activeBefore = d.DocumentID
+		}
+	}
+	if activeBefore == "" {
+		t.Fatalf("no active document reported: %+v", inst.Documents)
+	}
+
+	out := csharp(t, c, inst, `Document.Objects.AddPoint(new Rhino.Geometry.Point3d(3, 3, 3)); return 1;`, map[string]any{"label": "omitted-doc probe"})
+	if out.Status != "success" {
+		t.Fatalf("omitted-document_id run failed: %+v (error %+v)", out, out.Error)
+	}
+
+	var carrier document
+	var found bool
+	for _, i := range listInstances(t, c).Instances {
+		if i.InstanceID != inst.InstanceID {
+			continue
+		}
+		for _, d := range i.Documents {
+			if d.LastRun != nil && d.LastRun.ExecutionID == out.ExecutionID {
+				carrier, found = d, true
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("no document carries the run's last_run %s", out.ExecutionID)
+	}
+	if !carrier.Active || carrier.DocumentID != activeBefore {
+		t.Fatalf("omitted document_id did not target the active document: landed on %q (active=%v), expected active %q", carrier.DocumentID, carrier.Active, activeBefore)
+	}
+	t.Logf("omitted document_id addressed the active document %s (%s)", carrier.DocumentID, carrier.Title)
 }
 
 func TestLastRun_IsReportedPerDocument_AndOnTheNextResult(t *testing.T) {
@@ -364,7 +409,7 @@ func TestCancelResolvesCancelled_AndUndoes(t *testing.T) {
 	tag := fmt.Sprintf("h5-%d", time.Now().UnixNano()%100000)
 	out := csharp(t, c, inst, fmt.Sprintf(`
 Document.Objects.AddPoint(Rhino.Geometry.Point3d.Origin, new Rhino.DocObjects.ObjectAttributes { Name = "%s" });
-while (true) { CancellationToken.ThrowIfCancellationRequested(); System.Threading.Thread.Sleep(50); }`, tag), map[string]any{"timeout_ms": 500})
+while (true) { CancellationToken.ThrowIfCancellationRequested(); System.Threading.Thread.Sleep(50); }`, tag), map[string]any{"timeout_ms": 500, "max_duration_ms": 30000})
 	if out.Status != "running" && out.Status != "pending" {
 		t.Fatalf("expected running, got %+v (error: %+v)", out, out.Error)
 	}

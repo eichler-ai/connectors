@@ -129,27 +129,71 @@ unsaved and the AppleEvent times out after two minutes; the restart helper handl
 ## Verifying on Windows
 
 Nothing here is a development loop; it is the release gate the plan requires (implementation-plan.md
-phase 2 and "Tiers"). No Windows machine is part of this project's dev environment today; the first
-Windows pass is phase 2's deliverable and should extend this section with what it finds.
+phase 2 and "Tiers"). The **first Windows live pass ran 2026-09-11** (phase 2) on a Windows 11 **ARM64**
+VM running Rhino 8.35 **as x64 under emulation**; the results below are what it found, and the loop it
+established. There is no Windows deploy script — the steps are run by hand (or a session driving them),
+because there is no VM topology to automate (PRD §05) and the Mac's `deploy-plugin.sh` is macOS-only.
 
-- **Build**: CI's `Rhino MCP Bridge (C#) tier-1 tests` job runs the tier-1 suite and builds the plug-in
-  on `windows-latest`; `Rhino MCP Server (Go)` cross-compiles `GOOS=windows`. A release artifact for
-  Windows comes from those, not from a Mac.
-- **Runtime**: Rhino 8 for Windows hosts .NET Core by default (with an opt-in .NET Framework mode this
-  connector does not support). The `net8.0` TFM verified on 8.35 for Mac is expected to load; the
-  McNeel forum records `net7.0`/`net8.0` plug-ins failing on one 8.x service release, so the first
-  Windows load is a real check, not a formality.
-- **Install**: `yak install` works the same way; `%AppData%\McNeel\Rhinoceros\packages\8.0\`.
-  `_-PlugInManager _Load <path>` also exists on Windows.
-- **App data**: `%LOCALAPPDATA%\Connectors\Rhino\instances\<pid>.json`; the plug-in writes the file
-  without a special ACL until phase 2 adds the owner-only one.
-- **Documents**: one per process. `TestDocumentEventsRefreshTheRegistry` opens a second document and
-  must be adapted (a second *instance*) or skipped with a reason on Windows; every case that assumes
-  several documents in one instance needs the same review.
-- **Driving Rhino**: `rhinocode.exe` ships with Rhino for Windows too; the System Events pieces of the
-  restart helper have no Windows equivalent yet.
-- **Live pass**: the same harness binary, built with `GOOS=windows`, run on the Windows machine with a
-  Rhino open. Paste its output into the release PR.
+- **Headline result — the `net8.0` plug-in loads on Windows Rhino 8** (the phase-1a §2 open question,
+  now closed on Windows). It yak-installs, loads `AtStartup`, binds loopback, and writes
+  `instances/<pid>.json` with `platform: "windows"` and a `bridge_version` carrying the source rev.
+  Roslyn/C# warms up fine. **Confirm the loaded build is yours** via that `bridge_version`.
+- **Build**: `dotnet build rhino\mcp-bridge\Rhino.MCPBridge.sln -c Release`. dotnet 10 SDK builds the
+  `net8.0` targets fine (it restores the 8.0 targeting pack). **Kill Rhino before building or
+  reinstalling** — a running Rhino holds the plug-in DLLs open, and the build then stalls for minutes
+  retrying the output copy (seen: a 1-minute build take 16) while `yak uninstall` fails with
+  "Access denied. If Rhino is running, close it and try again."
+- **Package + install (the Windows equivalent of `deploy-plugin.sh`)**: copy the Release output's
+  `*.rhp *.dll *.deps.json *.xml` flat into a temp dir (assert no `RhinoCommon.dll`), write the same
+  `manifest.yml`, then `yak build` → `yak uninstall rhino-mcp-bridge` → `yak install .\*.yak`. Installs
+  to `%AppData%\McNeel\Rhinoceros\packages\8.0\rhino-mcp-bridge\<version>\` with yak's `manifest.txt`
+  marker (Rhino scans it at startup only). `yak`'s two warnings ("Content version/name doesn't match
+  manifest") are cosmetic — the `.rhp`'s assembly identity vs. the package name. `_-PlugInManager _Load
+  <path>` also works for a one-off load, but yak matches the release install path.
+- **Launch a document, not the chooser**: `Rhino.exe /nosplash /runscript="_-New _None _Enter"` opens a
+  blank document with no template chooser and without opening a template *file* (which would make saves
+  overwrite the template). A fresh Rhino at the chooser runs nothing and `rhinocode` can't see it.
+- **ARM64/emulation timing**: cold start ≈ 2 min; Roslyn warm-up ≈ 6–45 s; CPython deploy ≈ 30–100 s.
+  Every poll (instance file, warm-up, `rhinocode list`) needs a generous deadline — 180 s+, not seconds.
+- **Verify from files** (independent of GUI): `%LOCALAPPDATA%\Connectors\Rhino\instances\<pid>.json`,
+  `connection.log` ("listening on 127.0.0.1:<port>", "roslyn warm-up done", "python warm-up done"),
+  `startup-errors.log` (absent = clean `OnLoad`). The instance file now carries an **owner-only ACL on
+  Windows** (`InstanceFile.OwnerOnlyDacl`, phase 2): `Get-Acl` shows `AreAccessRulesProtected: True` and
+  a single full-control ACE for the current user — the Windows counterpart of the Unix `0600`.
+
+- **⚠️ Python needs the RhinoCode server engaged, once per session — #287.** On a normal
+  launch the plug-in's Python warm-up **times out at 180 s** ("Python 3 was not registered by RhinoCode
+  within 180 s"): on Windows, RhinoCode does **not** register the Python 3 language, deploy its CPython
+  runtime (`~/.rhinocode/py39-rh8`), or start the remote-pipe server on its own — `WaitStatusComplete`/
+  `QueryLatest` poll forever. **Opening the ScriptEditor once** (`… _ScriptEditor _Enter` in the
+  runscript, or the command) triggers all three: CPython deploys, `python warm-up done` follows
+  (≈28–100 s), and `rhinocode.exe` can then see the instance. A trivial `RhinoCode.RunScript` at warm-up
+  does **not** substitute (it needs the language already registered — ruled out live). And engaging the
+  editor is **not even a reliable workaround**: a fast/cached warm-up (≈10 s) can leave `scriptcontext`
+  off `sys.path`, and the runner imports it unconditionally, so every live Python run then hard-fails
+  (`No module named 'scriptcontext'`). So the Windows harness **skips the live-Python cases**
+  (`skipPythonExecutionOnWindows`, citing #287) and keeps only the compile/analysis-only ones; it still
+  opens the ScriptEditor once because `rhinocode` (used by the foreign-command undo case) needs the
+  RhinoCode server up. C# execution is unaffected and works with no ScriptEditor.
+- **Driving Rhino / `rhinocode`**: `C:\Program Files\Rhino 8\System\rhinocode.exe`. It discovers Rhino
+  only after the RhinoCode server is up (i.e. after ScriptEditor is engaged, per above) — an empty
+  `rhinocode list` means the server isn't engaged, not that Rhino is down. The harness's
+  `rhinocodePath()` returns this path on Windows. The System Events pieces of the Mac restart helper
+  have no Windows equivalent; kill+relaunch manually (`Stop-Process`, then the launch line above).
+- **Documents**: one per process (PRD §05). `TestDocumentEventsRefreshTheRegistry` (opens a second
+  document) skips with a reason on Windows; `TestOmittedDocumentIdIsActive` runs on both.
+- **Live pass — the loop that works**: build → kill Rhino → yak reinstall → launch **with ScriptEditor**
+  → wait for `python warm-up done` + `rhinocode list` showing the instance → `cd rhino\mcp-server && go
+  build -o mcp-server.exe ./cmd/mcp-server` (native Go; winget `GoLang.Go` is windows/arm64; the cold
+  build pulls the shared/ML deps once) → `cd ..\test-harness && go test -tags harness ./... -v
+  -broker-exe ..\mcp-server\mcp-server.exe`. **Result 2026-09-11: 3 consecutive clean runs, 24 pass /
+  7 skip / 0 fail.** The 7 skips are the one-document case, the destructive opt-in, and the 5
+  live-Python-execution cases (skipped on Windows pending #287; the compile/analysis-only Python cases
+  run). C#, capture, undo (incl. the `rhinocode`-driven foreign-command case), single-document
+  addressing and the owner-only ACL are all green. Paste this into the PR and say plainly it is green
+  **with the live-Python cases skipped pending #287** — the plan's exit ("phase-1 suite green on
+  Windows") is fully met only when the #287 fix re-enables and proves those cases; don't let the green
+  hide the defect.
 
 ---
 

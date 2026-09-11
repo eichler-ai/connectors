@@ -1,4 +1,7 @@
 using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using System.Text.Json;
 using Rhino.MCPBridge.Core.Connection;
 using Xunit;
@@ -48,26 +51,48 @@ public sealed class InstanceFileTests : IDisposable
         var path = Sample().Write(_dir);
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
         {
-            // No explicit ACL until phase 2; the file inherits the profile directory's, which is the
-            // current user only. What this leg pins: the file exists, is readable, and nothing else was
-            // left behind -- so the Windows run asserts something rather than returning early
-            // (review of #281).
+            // Phase 2: an explicit, non-inherited DACL granting only the current user (PRD §13), the
+            // Windows counterpart of the 0600 mode below. This exercises InstanceFile.OwnerOnlyDacl
+            // through a real write.
             Assert.True(File.Exists(path));
             Assert.NotNull(InstanceFile.TryRead(path));
             Assert.Single(Directory.GetFiles(_dir));
+            AssertWindowsOwnerOnly(path);
             return;
         }
 
         Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(path));
     }
 
+    [SupportedOSPlatform("windows")]
+    private static void AssertWindowsOwnerOnly(string path)
+    {
+        var security = new FileInfo(path).GetAccessControl();
+        Assert.True(security.AreAccessRulesProtected); // inheritance disabled, so no other identity leaks in
+        var me = WindowsIdentity.GetCurrent().User;
+        var rules = security.GetAccessRules(includeExplicit: true, includeInherited: true, typeof(SecurityIdentifier))
+            .Cast<FileSystemAccessRule>()
+            .ToList();
+        Assert.NotEmpty(rules);
+        Assert.All(rules, r => Assert.Equal(me, r.IdentityReference)); // only the current user appears
+        Assert.Contains(rules, r => r.AccessControlType == AccessControlType.Allow && r.FileSystemRights.HasFlag(FileSystemRights.Read));
+    }
+
     [Fact]
     public void Write_NeverLeavesTheTokenWorldReadable_EvenMidWrite()
     {
-        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) { Assert.True(true); return; }
+        var path = Sample().Write(_dir);
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            // Created WITH the owner-only DACL (FileSystemAclExtensions.Create), so there is no
+            // create-then-secure gap, and the atomic rename leaves no *.tmp with a wider ACL behind.
+            AssertWindowsOwnerOnly(path);
+            Assert.Empty(Directory.GetFiles(_dir, "*.tmp"));
+            return;
+        }
+
         // The temp file is created owner-only; there is no chmod-after-write gap to race.
         // Observed through the final file's mode plus the absence of a *.tmp with a wider mode.
-        var path = Sample().Write(_dir);
         Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(path));
         Assert.Empty(Directory.GetFiles(_dir, "*.tmp"));
     }
