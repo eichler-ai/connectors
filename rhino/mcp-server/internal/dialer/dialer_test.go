@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/eichler-ai/connectors/internal/servercore/transport"
 	"github.com/eichler-ai/connectors/rhino/mcp-server/internal/registry"
 )
 
@@ -32,6 +33,9 @@ type fakeBridge struct {
 	registerAs string
 	// silentAfterAuth: answer auth ok and then send nothing, ever.
 	silentAfterAuth bool
+	// closeAfterRegister: send register, then immediately close the connection (no
+	// ping, no read loop) -- reproduces the fast register->drop of #296 HIGH 1.
+	closeAfterRegister bool
 
 	mu    sync.Mutex
 	conns []net.Conn
@@ -120,6 +124,9 @@ func (b *fakeBridge) serve(c net.Conn) {
 	reg, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "method": "register", "params": map[string]any{
 		"instance_id": claimed, "pid": b.pid, "rhino_version": "8.35", "platform": "macos", "bridge_version": "dev", "documents": b.docs}})
 	c.Write(append(reg, '\n'))
+	if b.closeAfterRegister {
+		return // drop the connection immediately after register (fast register->drop)
+	}
 	c.Write([]byte(`{"jsonrpc":"2.0","method":"ping","params":{"memory":{"private_mb":1,"working_set_mb":2,"managed_mb":3}}}` + "\n"))
 	for {
 		line, err := r.ReadString('\n')
@@ -365,4 +372,94 @@ func TestCloseInstanceWithStaleEpochIsANoOp(t *testing.T) {
 	if n != 1 || len(m.Connected()) != 1 {
 		t.Fatalf("a stale epoch must not close the live connection (dials %d, connected %d)", n, len(m.Connected()))
 	}
+}
+
+// TestAttachHookCompletesBeforeDetachHook pins the #296 fix: for one connection,
+// every attach hook runs to completion before any detach hook, even though the
+// two are delivered on separate goroutines. The bug is a race, so the test
+// FORCES it -- a deliberately slow attach hook plus an immediate disconnect, so
+// the detach goroutine is spawned while the attach hook is still running. Before
+// the fix the detach could be recorded first (the manager would then delete
+// nothing and later insert a stale index for a dead instance); the fix makes the
+// detach goroutine wait on the attach goroutine's completion.
+func TestAttachHookCompletesBeforeDetachHook(t *testing.T) {
+	dir := t.TempDir()
+	b := newFakeBridge(t, dir, 130)
+	reg := registry.New()
+
+	// Build the manager and register the hook BEFORE Run starts dialing, so the
+	// hook is present when the first connection registers (no registration race).
+	m := New(Options{InstancesDir: dir, ServerID: "srv-test", ServerVersion: "test", Registry: reg,
+		Alive: func(int) bool { return true }, ScanInterval: 50 * time.Millisecond, Logf: t.Logf})
+
+	var mu sync.Mutex
+	var events []string
+	attachStarted := make(chan struct{})
+	var once sync.Once
+	m.OnAttach(func(_ string, _ *transport.Conn, attached bool) {
+		if attached {
+			once.Do(func() { close(attachStarted) }) // tell the test the attach hook is running
+			time.Sleep(200 * time.Millisecond)       // stand in for a slow index build
+			mu.Lock()
+			events = append(events, "attach")
+			mu.Unlock()
+			return
+		}
+		mu.Lock()
+		events = append(events, "detach")
+		mu.Unlock()
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go m.Run(ctx)
+
+	// Once the attach hook has STARTED (but is still sleeping), drop the connection
+	// so the detach goroutine races the still-running attach hook. Close the
+	// listener first so the manager cannot redial and produce a second cycle (which
+	// would pollute the single connect->disconnect this test is asserting about).
+	<-attachStarted
+	b.ln.Close()
+	b.closeConns()
+
+	waitFor(t, "both attach and detach hooks", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(events) == 2
+	})
+	mu.Lock()
+	defer mu.Unlock()
+	if events[0] != "attach" || events[1] != "detach" {
+		t.Fatalf("attach must complete before detach runs; got %v", events)
+	}
+}
+
+// TestRegisterThenImmediateDropDoesNotOrphan guards the #296 register-race fix at
+// the level its consequence is observable: a connection that registers and then
+// drops immediately must always run teardown, so m.links[id] is cleared and the
+// instance is redialled -- never left orphaned (which would stop all redials of
+// that instance). The bridge here registers then drops on every connection, so as
+// long as teardown runs each time the auth count keeps climbing.
+//
+// The underlying bug is a select race: the register notification runs inline on
+// the read loop, so a fast register->drop can make BOTH `registered` and
+// `serveErr` ready at once, and the select would then pick the serve-error branch
+// ~half the time even though register succeeded -- skipping teardown. Whether the
+// two are ever simultaneously ready is timing-dependent (on many machines
+// `registered` is observed first and the race never fires), so this test
+// reproduces it opportunistically rather than deterministically; it never
+// false-fails WITH the fix, and can only catch a regression on timings that do
+// race. The fix itself is correct by construction: the serve-error branch
+// re-checks `registered` before declaring "before register".
+func TestRegisterThenImmediateDropDoesNotOrphan(t *testing.T) {
+	dir := t.TempDir()
+	b := newFakeBridgeWith(t, dir, 131, func(b *fakeBridge) { b.closeAfterRegister = true })
+	reg := registry.New()
+	newManager(t, dir, reg)
+
+	waitFor(t, "repeated redials after register-then-drop (no orphaned link)", func() bool {
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		return len(b.auths) >= 6
+	})
 }
