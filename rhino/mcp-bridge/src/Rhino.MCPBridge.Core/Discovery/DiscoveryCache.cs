@@ -162,13 +162,46 @@ public sealed class DiscoveryCache : IDisposable
         }
     }
 
+    /// <summary>
+    /// Bumped whenever the on-disk schema changes in a way <c>CREATE TABLE IF NOT EXISTS</c> cannot reach on
+    /// an existing file -- notably a CHECK constraint, which SQLite cannot ALTER in place. A cache written by
+    /// an older version is rebuilt from scratch (see <see cref="CreateSchema"/>); the reflected data is
+    /// regenerated on the next <see cref="Sync"/>, so this is a safe, self-correcting drop. Bumped to 2 when
+    /// the assemblies.kind CHECK gained 'rhinoscript'/'grasshopper' for PRD §09.
+    /// </summary>
+    private const int SchemaVersion = 2;
+
     private void CreateSchema()
     {
+        long userVersion;
+        using (var read = _connection.CreateCommand())
+        {
+            read.CommandText = "PRAGMA user_version;";
+            userVersion = (long)(read.ExecuteScalar() ?? 0L);
+        }
+
+        // An older cache predates a schema change that CREATE TABLE IF NOT EXISTS cannot apply (e.g. the
+        // kind CHECK gaining 'rhinoscript'/'grasshopper'). SQLite cannot ALTER a CHECK in place, so rebuild
+        // the tables; the reflected data comes back on the next Sync. A brand-new file is also version 0,
+        // where these DROPs are harmless no-ops. A crash mid-migration just leaves the version behind, so it
+        // re-runs on the next open.
+        if (userVersion < SchemaVersion)
+        {
+            using var drop = _connection.CreateCommand();
+            drop.CommandText = """
+                DROP TABLE IF EXISTS members_fts;
+                DROP TABLE IF EXISTS members;
+                DROP TABLE IF EXISTS types;
+                DROP TABLE IF EXISTS assemblies;
+                """;
+            drop.ExecuteNonQuery();
+        }
+
         using var cmd = _connection.CreateCommand();
         cmd.CommandText = """
             CREATE TABLE IF NOT EXISTS assemblies (
                 id INTEGER PRIMARY KEY,
-                kind TEXT NOT NULL CHECK (kind IN ('core','addin')),
+                kind TEXT NOT NULL CHECK (kind IN ('core','addin','rhinoscript','grasshopper')),
                 name TEXT NOT NULL,
                 file_path TEXT NOT NULL UNIQUE,
                 file_hash TEXT NOT NULL,
@@ -209,6 +242,14 @@ public sealed class DiscoveryCache : IDisposable
             );
             """;
         cmd.ExecuteNonQuery();
+
+        if (userVersion < SchemaVersion)
+        {
+            // PRAGMA user_version takes no parameter binding; SchemaVersion is a trusted int constant.
+            using var setVersion = _connection.CreateCommand();
+            setVersion.CommandText = $"PRAGMA user_version = {SchemaVersion};";
+            setVersion.ExecuteNonQuery();
+        }
     }
 
     // -------------------------------------------------------------------------------------------------
@@ -313,6 +354,54 @@ public sealed class DiscoveryCache : IDisposable
         return new DiscoverySyncResult(added, updated, removed, unchanged);
     }
 
+    /// <summary>
+    /// Syncs a SYNTHETIC discovery source that is not a .NET assembly -- e.g. the rhinoscriptsyntax Python
+    /// library (PRD §09 kind=rhinoscript). The <paramref name="sourceId"/> stands in for a file path (it is
+    /// the assemblies.file_path UNIQUE key), and <paramref name="contentHash"/> drives staleness the same
+    /// way a reflected assembly's file hash does: an unchanged hash is a no-op, a changed one purges and
+    /// re-inserts. The caller (RhinoScriptIndexer) has already parsed the source into ReflectedTypes, so
+    /// this shares InsertTypes with the assembly path rather than reflecting.
+    /// </summary>
+    public DiscoverySyncResult SyncSource(string kind, string sourceId, string contentHash, IReadOnlyList<ReflectedType> types)
+    {
+        lock (_lock)
+        {
+            ThrowIfDisposed();
+            var now = DateTimeOffset.UtcNow.ToString("O");
+
+            (long Id, string Hash)? existing = null;
+            using (var select = _connection.CreateCommand())
+            {
+                select.CommandText = "SELECT id, file_hash FROM assemblies WHERE file_path = @path";
+                select.Parameters.AddWithValue("@path", sourceId);
+                using var reader = select.ExecuteReader();
+                if (reader.Read())
+                {
+                    existing = (reader.GetInt64(0), reader.GetString(1));
+                }
+            }
+
+            if (existing is { } row && string.Equals(row.Hash, contentHash, StringComparison.Ordinal))
+            {
+                return new DiscoverySyncResult(0, 0, 0, 1); // unchanged -- source content is identical.
+            }
+
+            using var transaction = _connection.BeginTransaction();
+            var updated = false;
+            if (existing is { } stale)
+            {
+                DeleteAssembly(stale.Id, transaction);
+                updated = true;
+            }
+
+            var assemblyId = InsertAssemblyRow(kind, sourceId, sourceId, contentHash, version: null, now, transaction);
+            InsertTypes(transaction, assemblyId, types);
+            transaction.Commit();
+
+            return updated ? new DiscoverySyncResult(0, 1, 0, 0) : new DiscoverySyncResult(1, 0, 0, 0);
+        }
+    }
+
     private static string ComputeFileHash(string path)
     {
         using var stream = File.OpenRead(path);
@@ -346,23 +435,7 @@ public sealed class DiscoveryCache : IDisposable
 
     private void InsertAssembly(string kind, string name, string path, string hash, string? version, string syncedAt, Assembly assembly, SqliteTransaction transaction)
     {
-        long assemblyId;
-        using (var insert = _connection.CreateCommand())
-        {
-            insert.Transaction = transaction;
-            insert.CommandText = """
-                INSERT INTO assemblies (kind, name, file_path, file_hash, file_version, last_synced_at)
-                VALUES (@kind, @name, @path, @hash, @version, @syncedAt);
-                SELECT last_insert_rowid();
-                """;
-            insert.Parameters.AddWithValue("@kind", kind);
-            insert.Parameters.AddWithValue("@name", name);
-            insert.Parameters.AddWithValue("@path", path);
-            insert.Parameters.AddWithValue("@hash", hash);
-            insert.Parameters.AddWithValue("@version", (object?)version ?? DBNull.Value);
-            insert.Parameters.AddWithValue("@syncedAt", syncedAt);
-            assemblyId = (long)insert.ExecuteScalar()!;
-        }
+        var assemblyId = InsertAssemblyRow(kind, name, path, hash, version, syncedAt, transaction);
 
         IReadOnlyList<ReflectedType> types;
         try
@@ -377,6 +450,33 @@ public sealed class DiscoveryCache : IDisposable
             return;
         }
 
+        InsertTypes(transaction, assemblyId, types);
+    }
+
+    /// <summary>Inserts the assemblies row and returns its id. Shared by <see cref="InsertAssembly"/> (a
+    /// reflected .NET assembly) and <see cref="SyncSource"/> (a synthetic source such as rhinoscriptsyntax).</summary>
+    private long InsertAssemblyRow(string kind, string name, string path, string hash, string? version, string syncedAt, SqliteTransaction transaction)
+    {
+        using var insert = _connection.CreateCommand();
+        insert.Transaction = transaction;
+        insert.CommandText = """
+            INSERT INTO assemblies (kind, name, file_path, file_hash, file_version, last_synced_at)
+            VALUES (@kind, @name, @path, @hash, @version, @syncedAt);
+            SELECT last_insert_rowid();
+            """;
+        insert.Parameters.AddWithValue("@kind", kind);
+        insert.Parameters.AddWithValue("@name", name);
+        insert.Parameters.AddWithValue("@path", path);
+        insert.Parameters.AddWithValue("@hash", hash);
+        insert.Parameters.AddWithValue("@version", (object?)version ?? DBNull.Value);
+        insert.Parameters.AddWithValue("@syncedAt", syncedAt);
+        return (long)insert.ExecuteScalar()!;
+    }
+
+    /// <summary>Inserts the types + members + FTS rows for one assembly/source. The single insert path both
+    /// the reflected-assembly and synthetic-source (rhinoscript) syncs go through.</summary>
+    private void InsertTypes(SqliteTransaction transaction, long assemblyId, IReadOnlyList<ReflectedType> types)
+    {
         foreach (var type in types)
         {
             long typeId;

@@ -69,6 +69,41 @@ internal static class DiscoveryBootstrap
     }
 
     /// <summary>
+    /// Indexes the rhinoscriptsyntax Python library into the cache as kind=rhinoscript (PRD §09), so
+    /// rs.* functions are searchable beside RhinoCommon. Returns false when Rhino's CPython runtime has
+    /// not been deployed yet (the rhinoscript dir does not exist until the first Python run) so the caller
+    /// can retry — the #287 warm-up deploys it shortly after load on a fresh machine.
+    /// </summary>
+    public static bool SyncRhinoScript(DiscoveryCache cache, Action<string> log)
+    {
+        var dir = RhinoScriptIndexer.FindSourceDirectory();
+        if (dir is null)
+        {
+            return false;
+        }
+
+        try
+        {
+            var indexed = RhinoScriptIndexer.Index(dir);
+            if (indexed is not { } result)
+            {
+                log($"discovery: rhinoscript dir found ({dir}) but no functions parsed");
+                return true; // dir exists; nothing to retry for
+            }
+
+            var r = cache.SyncSource("rhinoscript", RhinoScriptIndexer.SourceId, result.ContentHash, result.Types);
+            var count = result.Types.Sum(t => t.Members.Count);
+            log($"discovery: rhinoscript synced from {dir} ({count} functions; added={r.Added} updated={r.Updated} unchanged={r.Unchanged})");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            log($"discovery: rhinoscript index FAILED (RhinoCommon discovery is unaffected): {ex.Message}");
+            return true; // don't spin retrying a genuine parse/db error
+        }
+    }
+
+    /// <summary>
     /// core = RhinoCommon (the one assembly PRD §09 calls "core" for v1; Grasshopper joins as its own kind
     /// in phase 4). addin = this connector's own <c>Eichler.Connectors.Rhino</c> API, plus every other
     /// plug-in loaded into the process that is NOT one of Rhino's own bundled assemblies.
