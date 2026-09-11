@@ -299,7 +299,12 @@ func TestDiscoveryTwoInstances(t *testing.T) {
 		}
 	}
 
-	// Unscoped discovery call -- F2 instance selection.
+	// Unscoped discovery call -- F2 instance selection. The RANKER is intentionally
+	// not asserted here: this is a single cold query, which legitimately uses the
+	// plug-in's keyword fallback until the broker's per-instance semantic index
+	// finishes building (two instances means two indexes building, so that window
+	// is wider). What this case verifies is which INSTANCE an unscoped call selects,
+	// not how it ranks -- the semantic path is covered by TestDiscoverySearchFunctionsFindsCircle.
 	out, isErr := discCall[searchFunctionsOut](t, c, "search_functions", map[string]any{"query": "add a circle to the document"})
 	if sameVersion {
 		// A deterministic pick among same-version instances: the call SUCCEEDS (no
