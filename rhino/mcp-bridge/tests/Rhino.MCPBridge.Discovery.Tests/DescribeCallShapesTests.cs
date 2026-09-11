@@ -94,4 +94,26 @@ public class DescribeCallShapesTests
         var s = Describe(T + ".Seed");
         Assert.Equal("Seed", s.PythonCall);
     }
+
+    [Fact]
+    public void BinaryOperator_RendersAsThePythonOperator_NotAnOpMethodCall()
+    {
+        var s = Describe(T + ".op_Addition");
+        // pythonnet does not expose op_Addition as a callable; the usable form is the operator itself.
+        Assert.Equal("left + right", s.PythonCall);
+    }
+
+    [Fact]
+    public void UnaryOperator_RendersAsThePythonOperator()
+    {
+        var s = Describe(T + ".op_UnaryNegation");
+        Assert.Equal("-value", s.PythonCall);
+    }
+
+    [Fact]
+    public void StaticEvent_IsTypeQualified_WithTheSubscriptionShape()
+    {
+        var s = Describe(T + ".ToleranceChanged");
+        Assert.Equal("Interop.ToleranceChanged += handler", s.PythonCall);
+    }
 }

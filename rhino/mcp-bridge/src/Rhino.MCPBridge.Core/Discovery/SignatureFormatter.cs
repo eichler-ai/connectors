@@ -44,13 +44,35 @@ internal static class SignatureFormatter
         MethodInfo mi => BuildMethodPythonCall(mi),
         PropertyInfo pi => BuildPropertyPythonCall(pi),
         FieldInfo fi => fi.IsStatic ? $"{TypeName(fi.DeclaringType!)}.{fi.Name}" : fi.Name,
-        // An event is `obj.Name += handler` in both languages: nothing Python-specific to show.
-        EventInfo ei => ei.Name,
+        EventInfo ei => BuildEventPythonCall(ei),
         _ => member.Name,
+    };
+
+    // The C# operator-method names (op_*) that have a direct Python operator, so an agent sees `a + b`
+    // rather than a `Vector3d.op_Addition(a, b)` form pythonnet does not expose as a callable. Conversions
+    // (op_Implicit/op_Explicit) are deliberately absent: neither renders to one unambiguous Python form, so
+    // they fall through to the ordinary call rendering (the same shape the C# signature shows).
+    private static readonly Dictionary<string, string> BinaryOperatorSymbols = new(StringComparer.Ordinal)
+    {
+        ["op_Addition"] = "+", ["op_Subtraction"] = "-", ["op_Multiply"] = "*", ["op_Division"] = "/",
+        ["op_Modulus"] = "%", ["op_Equality"] = "==", ["op_Inequality"] = "!=",
+        ["op_LessThan"] = "<", ["op_GreaterThan"] = ">", ["op_LessThanOrEqual"] = "<=", ["op_GreaterThanOrEqual"] = ">=",
+        ["op_BitwiseAnd"] = "&", ["op_BitwiseOr"] = "|", ["op_ExclusiveOr"] = "^",
+        ["op_LeftShift"] = "<<", ["op_RightShift"] = ">>",
+    };
+
+    private static readonly Dictionary<string, string> UnaryOperatorSymbols = new(StringComparer.Ordinal)
+    {
+        ["op_UnaryNegation"] = "-", ["op_UnaryPlus"] = "+", ["op_OnesComplement"] = "~", ["op_LogicalNot"] = "not ",
     };
 
     private static string BuildMethodPythonCall(MethodInfo mi)
     {
+        if (mi.IsSpecialName && mi.Name.StartsWith("op_", StringComparison.Ordinal) && TryOperatorPythonForm(mi, out var operatorForm))
+        {
+            return operatorForm;
+        }
+
         var name = mi.Name;
         if (mi.IsGenericMethodDefinition)
         {
@@ -80,6 +102,38 @@ internal static class SignatureFormatter
         return $"{string.Join(", ", lhs)} = {call}";
     }
 
+    /// <summary>Renders an operator method as its Python operator (<c>a + b</c>, <c>-a</c>) when it maps to
+    /// one, using the parameters' own names. Returns false for a conversion or any unmapped operator, so the
+    /// caller falls back to the ordinary call rendering.</summary>
+    private static bool TryOperatorPythonForm(MethodInfo mi, out string form)
+    {
+        var ps = mi.GetParameters();
+        if (ps.Length == 2 && BinaryOperatorSymbols.TryGetValue(mi.Name, out var binary))
+        {
+            form = $"{ps[0].Name ?? "a"} {binary} {ps[1].Name ?? "b"}";
+            return true;
+        }
+
+        if (ps.Length == 1 && UnaryOperatorSymbols.TryGetValue(mi.Name, out var unary))
+        {
+            form = $"{unary}{ps[0].Name ?? "a"}";
+            return true;
+        }
+
+        form = "";
+        return false;
+    }
+
+    private static string BuildEventPythonCall(EventInfo ei)
+    {
+        // An event is subscribed the same way in both languages; show the `+= handler` shape (dropping it
+        // would leave the bare name looking like a value), type-qualified for a static event as the fields
+        // and properties above are.
+        var isStatic = (ei.AddMethod ?? ei.RemoveMethod)?.IsStatic == true;
+        var receiver = isStatic ? $"{TypeName(ei.DeclaringType!)}." : "";
+        return $"{receiver}{ei.Name} += handler";
+    }
+
     private static string BuildPropertyPythonCall(PropertyInfo pi)
     {
         var isStatic = (pi.GetMethod ?? pi.SetMethod)?.IsStatic == true;
@@ -103,7 +157,11 @@ internal static class SignatureFormatter
     }
 
     /// <summary>An <c>out</c> parameter, or a <c>ref</c> parameter (by-ref but not <c>in</c>), comes back in
-    /// the CPython return tuple; a plain value or <c>in</c> parameter does not.</summary>
+    /// the CPython return tuple; a plain value or <c>in</c> parameter does not. Treating <c>in</c> as
+    /// not-returned is also the SAFE default: modern pythonnet distinguishes it, but even if a host echoed a
+    /// readonly-ref back, rendering it out of the tuple leaves a call that still executes and captures a
+    /// value the caller did not want — whereas rendering it INTO the tuple against a host that omits it would
+    /// give an unpack that fails outright. <c>in</c> is vanishingly rare in RhinoCommon regardless.</summary>
     private static bool ComesBackAsReturn(ParameterInfo p) => p.IsOut || (p.ParameterType.IsByRef && !p.IsIn);
 
     /// <summary>The Python argument list for a call: parameter NAMES only (Python is untyped at the call

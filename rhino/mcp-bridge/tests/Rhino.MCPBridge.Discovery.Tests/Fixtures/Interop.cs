@@ -58,4 +58,13 @@ public class Interop
     /// <param name="other">The other value.</param>
     /// <returns>The absolute difference.</returns>
     public double DistanceTo(double other) => other;
+
+    /// <summary>Combines two helpers by summing their seeds.</summary>
+    public static Interop operator +(Interop left, Interop right) => new(left.Seed + right.Seed);
+
+    /// <summary>Negates a helper's seed.</summary>
+    public static Interop operator -(Interop value) => new(-value.Seed);
+
+    /// <summary>Raised when any helper's shared tolerance changes.</summary>
+    public static event System.EventHandler? ToleranceChanged;
 }
