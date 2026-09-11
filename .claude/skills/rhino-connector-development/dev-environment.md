@@ -186,12 +186,14 @@ because there is no VM topology to automate (PRD §05) and the Mac's `deploy-plu
   issue, not a connector bug). Doc-dependent cases (all script execution) need a document. **Deterministic
   doc-open step:** after launch, run any `rhinocode script` once — executing a script materialises an
   untitled document if none is open (observer effect, used deliberately). Post-#287, `rhinocode` works
-  with no ScriptEditor, so this is a clean step. Tracked as #289.
-- **Live pass — the loop that works**: build → **kill Rhino** (it locks the plug-in DLLs) → yak reinstall
-  → launch (plain, **no ScriptEditor** — the #287 force-load brings RhinoCode up) → wait for `force-load
-  RhinoCodePlugin: True` + `python warm-up done` in connection.log → **materialise a document** (`rhinocode
-  script` once, #289) → `cd rhino\mcp-server && go build -o mcp-server.exe ./cmd/mcp-server` (native Go;
-  winget `GoLang.Go` is windows/arm64; the cold build pulls the shared/ML deps once) → `cd
+  with no ScriptEditor, so this is a clean step. **`deploy-plugin-windows.ps1` does this for you** and
+  confirms an active document; tracked as #289.
+- **Live pass — one command**: `powershell -ExecutionPolicy Bypass -File
+  rhino\dev-tooling\deploy-plugin-windows.ps1` builds, kills Rhino (DLL lock), yak-reinstalls, restarts
+  (plain, **no ScriptEditor** — the #287 force-load brings RhinoCode up), waits for `force-load
+  RhinoCodePlugin: True` + `python warm-up done`, and materialises a document (#289). Then build the
+  server and run the harness: `cd rhino\mcp-server && go build -o mcp-server.exe ./cmd/mcp-server`
+  (native Go; winget `GoLang.Go` is windows/arm64; the cold build pulls the shared/ML deps once) → `cd
   ..\test-harness && go test -tags harness ./... -v -broker-exe ..\mcp-server\mcp-server.exe`. **Result
   2026-09-11 (with #287): 29 pass / 2 skip / 0 fail**, the full Python suite included, no ScriptEditor.
   The 2 skips are the one-document case (`TestDocumentEventsRefreshTheRegistry`, PRD §05) and the
@@ -204,5 +206,6 @@ because there is no VM topology to automate (PRD §05) and the Mac's `deploy-plu
 | Script | Does |
 |---|---|
 | `rhino/dev-tooling/deploy-plugin.sh [--no-restart]` | Build, package, install, restart (Mac). |
+| `rhino/dev-tooling/deploy-plugin-windows.ps1 [-NoRestart]` | Build, package, yak-install, restart, and open a document (Windows). Kills Rhino first (DLL lock), waits for the #287 RhinoCode force-load + python warm-up, then materialises a document via `rhinocode` (#289 — a programmatic launch may open none). |
 | `rhino/docs/spikes/phase-1a/rhino-restart.sh` | Quit-discard-relaunch-new-model (Mac). |
 | `rhino/docs/spikes/phase-1a/*.py` | The CLI probes from the spikes; templates for a new probe. |
