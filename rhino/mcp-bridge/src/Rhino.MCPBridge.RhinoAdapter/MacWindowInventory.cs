@@ -132,10 +132,12 @@ public sealed class MacWindowInventory : IWindowInventory
     [DllImport(CoreFoundation)] private static extern long CFArrayGetCount(IntPtr array);
     [DllImport(CoreFoundation)] private static extern IntPtr CFArrayGetValueAtIndex(IntPtr array, long index);
     [DllImport(CoreFoundation)] private static extern IntPtr CFDictionaryGetValue(IntPtr dict, IntPtr key);
-    [DllImport(CoreFoundation)] private static extern bool CFNumberGetValue(IntPtr number, long type, out long value);
+    // CoreFoundation Boolean is a 1-byte unsigned char; without MarshalAs(I1) the default 4-byte bool
+    // marshalling can misread the flag (the callee need not clear the upper bytes). Independent review.
+    [DllImport(CoreFoundation)] [return: MarshalAs(UnmanagedType.I1)] private static extern bool CFNumberGetValue(IntPtr number, long type, out long value);
     [DllImport(CoreFoundation)] private static extern long CFStringGetLength(IntPtr str);
     [DllImport(CoreFoundation)] private static extern long CFStringGetMaximumSizeForEncoding(long length, uint encoding);
-    [DllImport(CoreFoundation)] private static extern bool CFStringGetCString(IntPtr str, byte[] buffer, long bufferSize, uint encoding);
+    [DllImport(CoreFoundation)] [return: MarshalAs(UnmanagedType.I1)] private static extern bool CFStringGetCString(IntPtr str, byte[] buffer, long bufferSize, uint encoding);
     [DllImport(CoreFoundation, CharSet = CharSet.Ansi)] private static extern IntPtr CFStringCreateWithCString(IntPtr alloc, string s, uint encoding);
     [DllImport(CoreFoundation)] private static extern void CFRelease(IntPtr cf);
 }

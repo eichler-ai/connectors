@@ -35,10 +35,13 @@ public sealed class Win32WindowInventory : IWindowInventory
     public WindowInventorySnapshot EnumerateOwnedTopLevelWindows()
     {
         var currentProcessId = (uint)Environment.ProcessId;
-        // MainWindowHandle enumerates top-level windows internally; safe off the UI thread. Captured once so
-        // every window is compared against the same handle. IntPtr.Zero if Rhino has no main window yet.
+        // MainWindowHandle enumerates top-level windows internally (off the UI thread — no message pump,
+        // so it stays reachable while the UI thread is blocked, unlike RhinoApp.MainWindowHandle which
+        // could P/Invoke the native core). Captured once so every window compares against the same handle.
+        // Zero only if the process has no main window — not expected while a run is executing (a run
+        // implies an open Rhino main frame), so the §08 fire path always has a real handle here.
         IntPtr mainWindow;
-        try { mainWindow = Process.GetCurrentProcess().MainWindowHandle; }
+        try { using var proc = Process.GetCurrentProcess(); mainWindow = proc.MainWindowHandle; }
         catch { mainWindow = IntPtr.Zero; }
 
         var results = new List<WindowInfo>();
