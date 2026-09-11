@@ -248,6 +248,7 @@ func (m *Manager) connect(ctx context.Context, f *instancefile.File) {
 			}
 			hooks := append([]func(string, *transport.Conn, bool){}, m.attachHooks...)
 			attachDone := lk.attachDone
+			attachID := instanceID // snapshot under the lock; the goroutine must not read the mutable closure var
 			m.mu.Unlock()
 			if first {
 				m.opts.Logf("dialer: connected to Rhino %s pid %d (%s, %s) with %d document(s)", rp.RhinoVersion, rp.PID, rp.Platform, rp.BridgeVersion, len(rp.Documents))
@@ -263,7 +264,7 @@ func (m *Manager) connect(ctx context.Context, f *instancefile.File) {
 				go func() {
 					defer close(attachDone)
 					for _, h := range hooks {
-						h(instanceID, conn, true)
+						h(attachID, conn, true)
 					}
 				}()
 			}
@@ -304,11 +305,25 @@ func (m *Manager) connect(ctx context.Context, f *instancefile.File) {
 	// Register must follow promptly (the plug-in sends it right after the auth
 	// answer, from a cache). Wait for it, bounded; a connection that never
 	// registers is closed and backed off, never held open (review of #281).
+	serveEnded := false
 	select {
 	case <-registered:
 	case err = <-serveErr:
-		m.fail(f, fmt.Errorf("connection ended before register: %w", err))
-		return
+		// The connection ended. But the register notification runs INLINE on the
+		// read loop, so a drop RIGHT AFTER a successful register makes both this and
+		// `registered` ready at once, and select picks at random -- landing here
+		// ~half the time even though register succeeded. Re-check registered without
+		// blocking: if it fired, this is a normal post-register end, so fall through
+		// to teardown (below) rather than the "before register" path, which returns
+		// WITHOUT teardown and would orphan m.links[id] forever (never redialled) and
+		// leak the attach hook's index (issue #296, register-race path).
+		select {
+		case <-registered:
+			serveEnded = true // register did happen; err holds the serve error already
+		default:
+			m.fail(f, fmt.Errorf("connection ended before register: %w", err))
+			return
+		}
 	case <-time.After(m.opts.RegisterTimeout):
 		conn.Close()
 		<-serveErr
@@ -320,8 +335,12 @@ func (m *Manager) connect(ctx context.Context, f *instancefile.File) {
 		return
 	}
 
-	// Serve until the connection ends, then tear down under the epoch guard.
-	err = <-serveErr
+	// Serve until the connection ends, then tear down under the epoch guard. When
+	// the register-race branch above already received the serve error, don't wait
+	// on serveErr again (it is a one-shot buffered channel and would block forever).
+	if !serveEnded {
+		err = <-serveErr
+	}
 	m.mu.Lock()
 	epoch := lk.epoch
 	id := instanceID
@@ -341,6 +360,10 @@ func (m *Manager) connect(ctx context.Context, f *instancefile.File) {
 			// connect->disconnect spawns both goroutines, and without this wait the
 			// detach could run first, leaving the hook consumer a stale entry (#296).
 			// id != "" implies the first-register block ran, so attachDone is set.
+			// The wait is unbounded ON PURPOSE -- a timeout would run detach out of
+			// order and defeat the fix -- and relies on the same contract the attach
+			// hooks already carry: they must not block (see the attach comment). It
+			// cannot wedge on a panicking hook, since attachDone is closed via defer.
 			if attachDone != nil {
 				<-attachDone
 			}

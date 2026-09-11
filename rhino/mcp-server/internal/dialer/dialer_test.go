@@ -33,6 +33,9 @@ type fakeBridge struct {
 	registerAs string
 	// silentAfterAuth: answer auth ok and then send nothing, ever.
 	silentAfterAuth bool
+	// closeAfterRegister: send register, then immediately close the connection (no
+	// ping, no read loop) -- reproduces the fast register->drop of #296 HIGH 1.
+	closeAfterRegister bool
 
 	mu    sync.Mutex
 	conns []net.Conn
@@ -121,6 +124,9 @@ func (b *fakeBridge) serve(c net.Conn) {
 	reg, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "method": "register", "params": map[string]any{
 		"instance_id": claimed, "pid": b.pid, "rhino_version": "8.35", "platform": "macos", "bridge_version": "dev", "documents": b.docs}})
 	c.Write(append(reg, '\n'))
+	if b.closeAfterRegister {
+		return // drop the connection immediately after register (fast register->drop)
+	}
 	c.Write([]byte(`{"jsonrpc":"2.0","method":"ping","params":{"memory":{"private_mb":1,"working_set_mb":2,"managed_mb":3}}}` + "\n"))
 	for {
 		line, err := r.ReadString('\n')
@@ -426,4 +432,34 @@ func TestAttachHookCompletesBeforeDetachHook(t *testing.T) {
 	if events[0] != "attach" || events[1] != "detach" {
 		t.Fatalf("attach must complete before detach runs; got %v", events)
 	}
+}
+
+// TestRegisterThenImmediateDropDoesNotOrphan guards the #296 register-race fix at
+// the level its consequence is observable: a connection that registers and then
+// drops immediately must always run teardown, so m.links[id] is cleared and the
+// instance is redialled -- never left orphaned (which would stop all redials of
+// that instance). The bridge here registers then drops on every connection, so as
+// long as teardown runs each time the auth count keeps climbing.
+//
+// The underlying bug is a select race: the register notification runs inline on
+// the read loop, so a fast register->drop can make BOTH `registered` and
+// `serveErr` ready at once, and the select would then pick the serve-error branch
+// ~half the time even though register succeeded -- skipping teardown. Whether the
+// two are ever simultaneously ready is timing-dependent (on many machines
+// `registered` is observed first and the race never fires), so this test
+// reproduces it opportunistically rather than deterministically; it never
+// false-fails WITH the fix, and can only catch a regression on timings that do
+// race. The fix itself is correct by construction: the serve-error branch
+// re-checks `registered` before declaring "before register".
+func TestRegisterThenImmediateDropDoesNotOrphan(t *testing.T) {
+	dir := t.TempDir()
+	b := newFakeBridgeWith(t, dir, 131, func(b *fakeBridge) { b.closeAfterRegister = true })
+	reg := registry.New()
+	newManager(t, dir, reg)
+
+	waitFor(t, "repeated redials after register-then-drop (no orphaned link)", func() bool {
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		return len(b.auths) >= 6
+	})
 }
