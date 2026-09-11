@@ -122,12 +122,18 @@ while (working) { CancellationToken.ThrowIfCancellationRequested(); System.Threa
 | Python | C# | what it is |
 |---|---|---|
 | `doc` | `Document` | the routed `Rhino.RhinoDoc`, full RhinoCommon API |
+| `ghdoc` | `GrasshopperDocument` | the addressed Grasshopper definition (a `Grasshopper.Kernel.GH_Document`), or `None`/`null` |
 | `cancel` | `CancellationToken` | cooperative cancellation (above) |
 | `connector` | `Connector` | **this connector's own functions, not Rhino's** — `BridgeVersion`, `RunLabel` |
 | (import `rs`, `scriptcontext`) | — | `rhinoscriptsyntax` and `scriptcontext` are importable, not injected; `scriptcontext.doc` is pre-pointed at the routed document |
 | the BCL | the BCL | `System.IO`, LINQ, etc. — fully usable |
 
-`ghdoc` (Python) is a Grasshopper document handle, `None` until Grasshopper support ships.
+**Addressing a Grasshopper definition.** `ghdoc`/`GrasshopperDocument` is `None`/`null` unless you pass
+`gh_document_id` (from a `grasshopper_documents[]` entry in `list_instances` — Grasshopper must be open with
+that definition loaded); an id matching no open definition fails with `grasshopper-document-not-found`. In
+Python `ghdoc` is the live `GH_Document`. In C# the global is typed `object` (so a script that ignores
+Grasshopper still compiles when Grasshopper isn't loaded), so cast it:
+`var gh = (Grasshopper.Kernel.GH_Document)GrasshopperDocument;`.
 
 This is **not a sandbox**: full API access, one narrow denylist (below). Reflection can route around
 it, and that is accepted — the denylist guards against the common accident, not a determined bypass.

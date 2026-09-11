@@ -52,6 +52,46 @@ internal sealed class RhinoRunHost : IRunHost
         return null;
     }
 
+    public object? ResolveGrasshopperDocument(string grasshopperDocumentId, out bool notFound)
+    {
+        notFound = false;
+        if (string.IsNullOrEmpty(grasshopperDocumentId))
+        {
+            return null; // no definition requested; the global is null
+        }
+
+        if (!GrasshopperWatcher.GrasshopperLoaded())
+        {
+            notFound = true; // an id was asked for, but Grasshopper is not even loaded, so nothing matches
+            return null;
+        }
+
+        var match = FindGrasshopperDocument(grasshopperDocumentId);
+        notFound = match is null;
+        return match;
+    }
+
+    /// <summary>Grasshopper-typed; only reached once <see cref="GrasshopperWatcher.GrasshopperLoaded"/> is
+    /// true, so the JIT resolves Grasshopper.dll only after the guard.</summary>
+    private object? FindGrasshopperDocument(string grasshopperDocumentId)
+    {
+        var server = global::Grasshopper.Instances.DocumentServer;
+        if (server is null)
+        {
+            return null;
+        }
+
+        foreach (global::Grasshopper.Kernel.GH_Document ghdoc in server)
+        {
+            if (ghdoc is not null && GrasshopperIdentity.IdOf(ghdoc, _processSalt, _caseInsensitivePaths, _log) == grasshopperDocumentId)
+            {
+                return ghdoc;
+            }
+        }
+
+        return null;
+    }
+
     public IReadOnlyList<(string DocumentId, string Title, bool Active)> OpenDocuments()
     {
         var active = RhinoDoc.ActiveDoc;

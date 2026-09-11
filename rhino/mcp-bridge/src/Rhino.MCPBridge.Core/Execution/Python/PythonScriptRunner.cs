@@ -107,7 +107,7 @@ internal sealed class PythonScriptRunner : IScriptRunner
         var inputs = new Dictionary<string, object?>
         {
             ["doc"] = globals.Document,
-            ["ghdoc"] = null,
+            ["ghdoc"] = globals.GrasshopperDocument, // the addressed GH_Document, or null (PRD §10)
             ["connector"] = globals.Connector,
             ["cancel"] = new CancelSignal(cancellationToken),
         };

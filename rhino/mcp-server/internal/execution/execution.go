@@ -116,6 +116,7 @@ func NewRouter(conns Conns, serverID string) *Router {
 type Options struct {
 	Language                string
 	DocumentID              string
+	GrasshopperDocumentID   string
 	TimeoutMs               int
 	MaxDurationMs           int
 	ConfirmLifecycleActions bool
@@ -140,6 +141,7 @@ func (r *Router) ExecuteScript(ctx context.Context, instanceID, script string, o
 		"language":                  opts.Language,
 		"script":                    script,
 		"document_id":               opts.DocumentID,
+		"gh_document_id":            opts.GrasshopperDocumentID,
 		"timeout_ms":                opts.TimeoutMs,
 		"max_duration_ms":           opts.MaxDurationMs,
 		"confirm_lifecycle_actions": opts.ConfirmLifecycleActions,

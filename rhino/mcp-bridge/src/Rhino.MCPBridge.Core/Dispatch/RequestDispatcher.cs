@@ -199,7 +199,7 @@ internal sealed class RequestDispatcher
 
     private async Task<string> HandleExecuteScriptAsync(JsonRpcRequest request)
     {
-        string executionId, script, documentId, language, clientId;
+        string executionId, script, documentId, grasshopperDocumentId, language, clientId;
         long maxDurationMs, timeoutMs;
         bool confirm;
         string? label;
@@ -210,6 +210,7 @@ internal sealed class RequestDispatcher
             language = request.GetRequiredString("language");
             script = request.GetRequiredString("script");
             documentId = request.GetOptionalString("document_id") ?? "";
+            grasshopperDocumentId = request.GetOptionalString("gh_document_id") ?? "";
             maxDurationMs = request.GetOptionalInt64("max_duration_ms", DefaultMaxDurationMs);
             timeoutMs = request.GetOptionalInt64("timeout_ms", DefaultTimeoutMs);
             confirm = request.GetOptionalBool("confirm_lifecycle_actions", false);
@@ -282,6 +283,7 @@ internal sealed class RequestDispatcher
             ScriptText = script,
             Language = language,
             DocumentId = documentId,
+            GrasshopperDocumentId = grasshopperDocumentId,
             CancellationToken = _executionManager.GetCancellationToken(executionId),
             ConfirmLifecycleActions = confirm,
             Label = label,

@@ -111,7 +111,14 @@ internal sealed class RoslynScriptRunner : IScriptRunner
     private readonly ScriptCompilationCache _cache;
     private readonly Func<AssemblyLoadContext> _alcFactory;
     private readonly Action? _compileCounter;
-    private readonly ScriptOptions _options;
+
+    // Rebuilt when the loaded-assembly set grows (see CurrentOptions), so not readonly. The extra
+    // references are held to reapply on a rebuild.
+    private ScriptOptions _options;
+    private int _referencedAssemblyCount;
+    private readonly IEnumerable<string>? _additionalMetadataReferencePaths;
+    private readonly IEnumerable<MetadataReference>? _additionalMetadataReferences;
+    private readonly object _optionsLock = new();
 
     /// <param name="additionalMetadataReferencePaths">
     /// Extra assemblies to make bindable from script scope, referenced by FILE PATH (metadata only)
@@ -143,19 +150,55 @@ internal sealed class RoslynScriptRunner : IScriptRunner
         _cache = new ScriptCompilationCache(cacheCapacity);
         _alcFactory = alcFactory ?? (() => new AssemblyLoadContext($"mcpbridge-script-{Guid.NewGuid()}", isCollectible: true));
         _compileCounter = compileCounter;
-        _options = ScriptOptions.Default
+        _additionalMetadataReferencePaths = additionalMetadataReferencePaths;
+        _additionalMetadataReferences = additionalMetadataReferences;
+        _options = BuildOptions();
+    }
+
+    private ScriptOptions BuildOptions()
+    {
+        _referencedAssemblyCount = AppDomain.CurrentDomain.GetAssemblies().Length;
+        var options = ScriptOptions.Default
             .WithReferences(LoadableReferences())
             .WithImports("System");
 
-        if (additionalMetadataReferencePaths is not null)
+        if (_additionalMetadataReferencePaths is not null)
         {
-            _options = _options.AddReferences(
-                additionalMetadataReferencePaths.Select(path => MetadataReference.CreateFromFile(path)));
+            options = options.AddReferences(
+                _additionalMetadataReferencePaths.Select(path => MetadataReference.CreateFromFile(path)));
         }
 
-        if (additionalMetadataReferences is not null)
+        if (_additionalMetadataReferences is not null)
         {
-            _options = _options.AddReferences(additionalMetadataReferences);
+            options = options.AddReferences(_additionalMetadataReferences);
+        }
+
+        return options;
+    }
+
+    /// <summary>
+    /// The compile options, rebuilt to pick up assemblies loaded AFTER this runner was constructed at
+    /// plug-in startup. This runner snapshots its references once (compilation is not cheap and the set is
+    /// stable for most of a session), but Grasshopper is DEMAND-loaded — it is not in the process at
+    /// startup — so a C# script that addressed a gh_document_id and casts
+    /// <c>(Grasshopper.Kernel.GH_Document)GrasshopperDocument</c> would otherwise fail to compile with the
+    /// assembly absent from the frozen reference set, even though it is live in the process (review of PR
+    /// #305; Roslyn resolves types only from ScriptOptions references, never from the ambient AppDomain).
+    /// The rebuild fires only when the default load context has gained assemblies since the last build — so
+    /// the cost is paid once when an add-in like Grasshopper loads, not on every compile. Script assemblies
+    /// live in their own collectible load contexts, which <see cref="AppDomain.GetAssemblies"/> does not
+    /// report, so ordinary runs do not churn this.
+    /// </summary>
+    private ScriptOptions CurrentOptions()
+    {
+        lock (_optionsLock)
+        {
+            if (AppDomain.CurrentDomain.GetAssemblies().Length != _referencedAssemblyCount)
+            {
+                _options = BuildOptions();
+            }
+
+            return _options;
         }
     }
 
@@ -376,7 +419,7 @@ internal sealed class RoslynScriptRunner : IScriptRunner
             return cached!;
         }
 
-        var script = CSharpScript.Create<object>(scriptText, _options, typeof(ScriptGlobals));
+        var script = CSharpScript.Create<object>(scriptText, CurrentOptions(), typeof(ScriptGlobals));
         RejectTopLevelAwait(script);
 
         // Force a diagnostics pass now so a compile error surfaces on this call

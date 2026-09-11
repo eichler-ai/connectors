@@ -78,9 +78,7 @@ internal sealed class RhinoDocumentSnapshotSource : IDocumentSnapshotSource
             if (ghdoc is null) continue;
             string? path = string.IsNullOrEmpty(ghdoc.FilePath) ? null : ResolvePathForIdentity(ghdoc.FilePath, _log);
             var title = string.IsNullOrEmpty(ghdoc.DisplayName) ? "Untitled" : ghdoc.DisplayName;
-            var id = path is null
-                ? DocumentIdentity.ForGrasshopperUnsaved(_processSalt, title)
-                : DocumentIdentity.ForGrasshopperPath(path, _caseInsensitivePaths);
+            var id = GrasshopperIdentity.IdOf(ghdoc, _processSalt, _caseInsensitivePaths, _log);
             var isActive = activeId is { } a && a == ghdoc.DocumentID;
             list.Add(new GrasshopperDocument(id, title, path, isActive, ghdoc.Enabled, ghdoc.ObjectCount));
         }
