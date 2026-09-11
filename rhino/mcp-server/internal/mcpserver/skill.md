@@ -1,8 +1,9 @@
 # Working with Rhino through this connector
 
-You drive one or more **live Rhino 8 sessions**: you run **Python or C#** with `execute_script`, look
-at any viewport with `capture_view`, and revert your own work with `undo`/`redo`. Read this once at
-the start of a Rhino task; it is orientation, not reference.
+You drive one or more **live Rhino 8 sessions**: you run **Python or C#** with `execute_script`, find
+the API you need with `search_functions`/`list_functions`/`describe_function`, look at any viewport
+with `capture_view`, and revert your own work with `undo`/`redo`. Read this once at the start of a
+Rhino task; it is orientation, not reference.
 
 **Three facts to carry into every script.**
 
@@ -131,6 +132,33 @@ while (working) { CancellationToken.ThrowIfCancellationRequested(); System.Threa
 This is **not a sandbox**: full API access, one narrow denylist (below). Reflection can route around
 it, and that is accepted — the denylist guards against the common accident, not a determined bypass.
 
+## Finding the API — `search_functions` / `list_functions` / `describe_function`
+
+You do not have to know a member's exact name. Three tools index the **live** API of the instance you
+target — **RhinoCommon, `rhinoscriptsyntax`, and any loaded plug-in** — so a member found once is
+usable from either language.
+
+- **`search_functions`** is the one to reach for. Give it a **plain task sentence** naming the
+  operation and the type (`"add a circle to the document"`, `"closest point on a curve"`); ranking
+  fuses a sentence embedding, a keyword pass and a cross-encoder, so you need not guess the spelling.
+  Results carry a one-line summary and a `member_id`; paginate with the cursor, narrow with
+  `namespace`. `rhinoscriptsyntax` functions rank beside RhinoCommon, so a Python task surfaces `rs.*`
+  and a RhinoCommon type together.
+- **`list_functions`** browses when you want the shape of an area rather than a search: no args lists
+  namespaces; `+namespace` its types; `+namespace +type_name` that type's members. One level at a
+  time, paginated.
+- **`describe_function`** gives one member's full detail: pass `member` (a `Type.Member`, e.g.
+  `Rhino.Geometry.Curve.Offset`) or a `member_id`. It returns **both call shapes** — the C#
+  `signature` and the CPython `python_call` — plus parameters, returns and summary. `python_call`
+  spells out where Python interop differs from C#: an `out`/`ref` parameter comes back in a **return
+  tuple** (`result, plane = TryGetPlane()`), a generic method takes explicit `[T]` arguments, a
+  constructor drops `new`, and a `rhinoscriptsyntax` function shows its `rs.` form. An overloaded
+  member with no `member_id` returns its overload list to pick from — re-call with the one you want.
+
+`instance_id` is optional when every connected instance is the same Rhino version; if versions differ
+the call asks you to name one (`ambiguous-instance-version`), since the API surface is
+version-specific. Pass it when instances have different plug-ins loaded, too — each indexes its own.
+
 ## What is refused, and what needs your confirmation
 
 The one test: **would the automatic undo actually revert this?** Anything that escapes that boundary
@@ -212,6 +240,9 @@ inspect the document rather than assuming it's clean.
 | `execute_script` | run Python or C#; `language` is required |
 | `poll_execution` | wait on a `running` execution id for its result |
 | `cancel_execution` | request a cooperative stop |
+| `search_functions` | find a member by a plain task sentence (semantic) |
+| `list_functions` | browse the API tree: namespaces → types → members |
+| `describe_function` | one member's full detail + both call shapes |
 | `capture_view` | see a viewport (image) to debug |
 | `undo` / `redo` | revert or restore the connector's own run |
 | `get_skills` | this guide |

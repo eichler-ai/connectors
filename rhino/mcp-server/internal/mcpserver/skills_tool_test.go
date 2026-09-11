@@ -33,10 +33,10 @@ func TestSkillFileStaysWithinItsBudget(t *testing.T) {
 	// and competes with the caller's own context, so this is a real constraint.
 	const pessimisticBytesPerToken = 3
 	const ceilingTokens = 25000
-	// The Rhino guide is orientation for a phase-1 surface (no discovery or
-	// file-exchange tools yet) and sits near 4.3k tokens. 30% of the host cap
-	// leaves ~3k tokens of room for the features still to land (discovery,
-	// Grasshopper, file exchange) before the number is revisited on its merits.
+	// The Rhino guide now covers phase-1 plus the API-discovery surface
+	// (list/search/describe) and sits near 5.4k tokens. 30% of the host cap
+	// leaves ~2k tokens of room for the features still to land (Grasshopper,
+	// file exchange) before the number is revisited on its merits.
 	const budgetTokens = ceilingTokens * 30 / 100
 	// The soft line sits ABOVE the file's current size so crossing it is
 	// information, not a warning that fires forever. t.Logf alone is dead code
@@ -88,6 +88,9 @@ var registeredToolNames = []string{
 	"execute_script",
 	"poll_execution",
 	"cancel_execution",
+	"search_functions",
+	"list_functions",
+	"describe_function",
 	"capture_view",
 	"undo",
 	"redo",
@@ -117,6 +120,10 @@ func TestSkillFileCoversTheBriefedTopics(t *testing.T) {
 		"error interpretation":        "remedy",
 		"unrecoverable handling":      "unrecoverable",
 		"human status entry":          "MCPBridgeStatus",
+		// The discovery surface (list/search/describe) and, specifically, that describe returns BOTH call
+		// shapes -- the marker is the Python-form field name, which the prose cannot lose without losing the
+		// dual-call-shape story an agent depends on to write either language.
+		"api discovery": "python_call",
 	}
 	for topic, marker := range topics {
 		if !strings.Contains(skillFile, marker) {
