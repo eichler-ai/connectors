@@ -67,7 +67,11 @@ func TestDiscoveryRecallCorpus(t *testing.T) {
 		if isErr {
 			t.Fatalf("%+v", out.Error)
 		}
-		if out.Ranker == "semantic" || out.Ranker == "semantic-no-rerank" {
+		// Require the FULL semantic ranker (cross-encoder rerank on): the floors below were calibrated
+		// against it, so scoring against a degraded "semantic-no-rerank" would compare apples to oranges.
+		// The models skip-gate above already guarantees the whole model set is bundled, so reaching full
+		// semantic is expected; if it stalls at no-rerank the deadline fatal names it.
+		if out.Ranker == "semantic" {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -94,7 +98,12 @@ func TestDiscoveryRecallCorpus(t *testing.T) {
 
 		rank := 0 // 1-based rank of the expected member in the results, 0 = not found
 		for i, r := range out.Results {
-			if strings.HasSuffix(r.DeclaringType+"."+r.Name, rc.Member) {
+			// Anchored to a dotted-segment boundary so a coincidental character suffix cannot count as a
+			// hit: expected "Curve.Offset" must NOT match "NurbsCurve.Offset" (a distinct declared member),
+			// which a bare HasSuffix would silently accept and inflate recall. Exact equality covers the
+			// rhinoscript case ("rhinoscriptsyntax.AddCircle"), which has no leading dot.
+			full := r.DeclaringType + "." + r.Name
+			if full == rc.Member || strings.HasSuffix(full, "."+rc.Member) {
 				rank = i + 1
 				break
 			}
@@ -106,7 +115,7 @@ func TestDiscoveryRecallCorpus(t *testing.T) {
 		default:
 			t.Logf("rank%2d [%s] %-48q -> %s", rank, rc.Language, rc.Query, rc.Member)
 		}
-		if rank >= 1 && rank <= 1 {
+		if rank == 1 {
 			hits1++
 			lt.at1++
 		}
