@@ -161,16 +161,18 @@ type authParams struct {
 }
 
 type registerParams struct {
-	InstanceID    string              `json:"instance_id"`
-	PID           int                 `json:"pid"`
-	RhinoVersion  string              `json:"rhino_version"`
-	Platform      string              `json:"platform"`
-	BridgeVersion string              `json:"bridge_version"`
-	Documents     []registry.Document `json:"documents"`
+	InstanceID     string              `json:"instance_id"`
+	PID            int                 `json:"pid"`
+	RhinoVersion   string              `json:"rhino_version"`
+	Platform       string              `json:"platform"`
+	BridgeVersion  string              `json:"bridge_version"`
+	Documents      []registry.Document `json:"documents"`
+	ExecutionState string              `json:"execution_state"`
 }
 
 type pingParams struct {
-	Memory *registry.MemorySample `json:"memory"`
+	Memory         *registry.MemorySample `json:"memory"`
+	ExecutionState string                 `json:"execution_state"`
 }
 
 func (m *Manager) connect(ctx context.Context, f *instancefile.File) {
@@ -213,7 +215,7 @@ func (m *Manager) connect(ctx context.Context, f *instancefile.File) {
 			m.mu.Unlock()
 			newEpoch := m.opts.Registry.Register(&registry.Instance{
 				InstanceID: rp.InstanceID, PID: rp.PID, RhinoVersion: rp.RhinoVersion, Platform: rp.Platform,
-				BridgeVersion: rp.BridgeVersion, Documents: rp.Documents,
+				BridgeVersion: rp.BridgeVersion, Documents: rp.Documents, ExecutionState: rp.ExecutionState,
 			}, epoch, m.opts.Now())
 			if newEpoch == 0 {
 				// The registry refused a stale epoch: another connection owns this
@@ -265,7 +267,7 @@ func (m *Manager) connect(ctx context.Context, f *instancefile.File) {
 					m.opts.Logf("dialer: malformed ping params from %s (liveness still recorded): %v", id, err)
 				}
 			}
-			m.opts.Registry.RecordPing(id, epoch, m.opts.Now(), pp.Memory)
+			m.opts.Registry.RecordPingState(id, epoch, m.opts.Now(), pp.Memory, pp.ExecutionState)
 		}
 	})
 

@@ -9,12 +9,17 @@ public sealed class RegisteredDocument
     /// <summary>Absolute path of a saved document; null when unsaved.</summary>
     public string? Path { get; }
     public bool IsActive { get; }
+    /// <summary>The connector's last completed run on this document, or null (PRD §05).</summary>
+    public Execution.LastRun? LastRun { get; }
 
-    public RegisteredDocument(string documentId, string title, string? path, bool isActive)
+    public RegisteredDocument(string documentId, string title, string? path, bool isActive, Execution.LastRun? lastRun = null)
     {
         DocumentId = documentId;
         Title = title;
         Path = path;
         IsActive = isActive;
+        LastRun = lastRun;
     }
+
+    public RegisteredDocument WithLastRun(Execution.LastRun? lastRun) => new(DocumentId, Title, Path, IsActive, lastRun);
 }

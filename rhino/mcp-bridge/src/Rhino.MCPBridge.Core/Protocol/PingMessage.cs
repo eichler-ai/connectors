@@ -18,6 +18,11 @@ public static class PingMessage
     {
         [JsonPropertyName("memory")]
         public MemorySnapshot? Memory { get; set; }
+
+        /// <summary>PRD §05: the plug-in owns busy state; "idle" | "busy" | "unrecoverable".</summary>
+        [JsonPropertyName("execution_state")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string? ExecutionState { get; set; }
     }
 
     private sealed class Envelope
@@ -38,6 +43,6 @@ public static class PingMessage
     public static string ToJson() => JsonSerializer.Serialize(new Envelope(), WireJson.Compact);
 
     /// <summary>A heartbeat carrying a memory sample (issue #31).</summary>
-    public static string ToJson(MemorySnapshot memory) =>
-        JsonSerializer.Serialize(new Envelope { Params = new ParamsDto { Memory = memory } }, WireJson.Compact);
+    public static string ToJson(MemorySnapshot memory, string? executionState = null) =>
+        JsonSerializer.Serialize(new Envelope { Params = new ParamsDto { Memory = memory, ExecutionState = executionState } }, WireJson.Compact);
 }

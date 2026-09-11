@@ -184,3 +184,28 @@ System Events (`key code 53`) and re-run.
 Rhino's System.Drawing.Common on the Mac is a shim without `ImageCodecInfo` /
 `EncoderParameters`, and tier 1 cannot catch it (the NuGet reference assembly has the type).
 Use `Bitmap.Save(Stream, ImageFormat)` only; JPEG quality is the encoder's default.
+
+## `Command.LastCommandId == MCPBridgeRun` does not mean the top undo entry is ours
+
+A read-only run of ours (the harness's `objectNames`, any `return doc.Objects.Count`) also runs the
+`MCPBridgeRun` command and leaves it as Rhino's last command, while adding no undo entry. So "last
+command was ours" is fine for the executor's immediate rollback (nothing else can have run in that
+window) but useless for the undo tool minutes later. The tool's gate is the `ChangeClock` instead:
+the adapter reports every document change on every document, the executors mark their own work so
+their changes are not counted as foreign, and the ledger keeps the last run that CHANGED each document
+(a read-only run since does not replace it). A change staged from INSIDE one of our runs, even via a
+nested `RhinoApp.RunScript`, is connector work; to stage a person's change in a test use
+`rhinocode command "_Point 5,5,0"`.
+
+## `list_instances` says `busy` (or `idle`) when the plug-in disagrees
+
+The register snapshot used to capture the execution state when it was built (on a document event,
+often mid-run) and freeze it. The state is now computed when the message is sent, and every ping
+carries `execution_state`; the registry keeps the last non-empty value. After a grace-period expiry
+the server learns `unrecoverable` on the next ping, a few seconds later -- poll, do not assert once.
+
+## A wedged Rhino ignores the restart helper's quit
+
+The helper's polite `quit` AppleEvent needs the main thread. After the destructive harness case (or
+any non-cooperating script) `kill -9 <pid>` first, then run the helper to relaunch; the instance file
+of the dead pid is deleted by the next server scan.

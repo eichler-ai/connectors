@@ -20,6 +20,14 @@ public class PingMessageTests
     }
 
     [Fact]
+    public void ToJson_WithMemoryAndState_CarriesExecutionState()
+    {
+        var json = PingMessage.ToJson(new MemorySnapshot { PrivateMB = 1, WorkingSetMB = 2, ManagedMB = 3 }, "busy");
+        Assert.Contains("\"execution_state\":\"busy\"", json);
+        Assert.DoesNotContain("execution_state", PingMessage.ToJson(new MemorySnapshot { PrivateMB = 1, WorkingSetMB = 2, ManagedMB = 3 }));
+    }
+
+    [Fact]
     public void ToJson_HasNoParams()
     {
         var json = PingMessage.ToJson();

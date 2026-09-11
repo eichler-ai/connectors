@@ -65,6 +65,9 @@ public sealed class ExecutionManager
         get { lock (_lock) { return _instanceUnrecoverable; } }
     }
 
+    /// <summary>The wire word for this instance's state (PRD §05): "unrecoverable", "busy" while a run is non-terminal, else "idle".</summary>
+    public string ExecutionState => IsInstanceUnrecoverable ? "unrecoverable" : ActiveExecutionId is null ? "idle" : "busy";
+
     /// <summary>
     /// Starts a new execution keyed by <paramref name="executionId"/>. Per PRD §01, execution_id
     /// is broker-minted ("the add-in echoes the same ID back rather than generating its own") --

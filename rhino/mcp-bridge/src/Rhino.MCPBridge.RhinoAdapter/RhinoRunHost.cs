@@ -106,6 +106,18 @@ internal sealed class RhinoRunHost : IRunHost
         return r == Result.Success;
     }
 
+    public bool RedoLast(RunDocument run)
+    {
+        var r = RhinoApp.ExecuteCommand((RhinoDoc)run.Raw!, "_Redo");
+        return r == Result.Success;
+    }
+
+    public (Guid Id, string Name) LastCommand()
+    {
+        var id = Command.LastCommandId;
+        return (id, id == Guid.Empty ? "" : Command.LookupCommandName(id, englishName: true) ?? "");
+    }
+
     public bool LastCommandWasOurs()
     {
         // Command.LastCommandId: the id of the command that ran most recently, whatever its style or
@@ -117,20 +129,72 @@ internal sealed class RhinoRunHost : IRunHost
     public IDisposable SubscribeChanges(RunDocument run, Action<DocumentChange> onChange, Action onAnyChange)
     {
         var serial = ((RhinoDoc)run.Raw!).RuntimeSerialNumber;
-        bool Mine(RhinoDoc? d) => d is not null && d.RuntimeSerialNumber == serial;
-        void Added(object? s, RhinoObjectEventArgs e) { if (Mine(e.TheObject?.Document)) { onAnyChange(); onChange(Change(DocumentChange.Kind.Added, e.TheObject!)); } }
-        void Deleted(object? s, RhinoObjectEventArgs e) { if (Mine(e.TheObject?.Document)) { onAnyChange(); onChange(Change(DocumentChange.Kind.Deleted, e.TheObject!)); } }
-        void Undeleted(object? s, RhinoObjectEventArgs e) { if (Mine(e.TheObject?.Document)) { onAnyChange(); onChange(Change(DocumentChange.Kind.Undeleted, e.TheObject!)); } }
-        void Replaced(object? s, RhinoReplaceObjectEventArgs e) { if (Mine(e.Document)) { onAnyChange(); onChange(new DocumentChange(DocumentChange.Kind.Replaced, e.ObjectId, e.NewRhinoObject?.ObjectType.ToString() ?? "", LayerOf(e.NewRhinoObject))); } }
-        // Everything else RhinoCommon reports as a document change: counted as "changed", not netted.
-        void Attributes(object? s, RhinoModifyObjectAttributesEventArgs e) { if (Mine(e.Document)) onAnyChange(); }
-        void Layers(object? s, Rhino.DocObjects.Tables.LayerTableEventArgs e) { if (Mine(e.Document)) onAnyChange(); }
-        void Materials(object? s, Rhino.DocObjects.Tables.MaterialTableEventArgs e) { if (Mine(e.Document)) onAnyChange(); }
-        void Groups(object? s, Rhino.DocObjects.Tables.GroupTableEventArgs e) { if (Mine(e.Document)) onAnyChange(); }
-        void Blocks(object? s, Rhino.DocObjects.Tables.InstanceDefinitionTableEventArgs e) { if (Mine(e.Document)) onAnyChange(); }
-        void DimStyles(object? s, Rhino.DocObjects.Tables.DimStyleTableEventArgs e) { if (Mine(e.Document)) onAnyChange(); }
-        void Lights(object? s, Rhino.DocObjects.Tables.LightTableEventArgs e) { if (Mine(e.Document)) onAnyChange(); }
-        void Props(object? s, DocumentEventArgs e) { if (Mine(e.Document)) onAnyChange(); }
+        return Subscribe(d => d is not null && d.RuntimeSerialNumber == serial, onChange, _ => onAnyChange());
+    }
+
+    public IDisposable MonitorChanges(Action<string> onChange)
+    {
+        // For the life of the plug-in, on every object event: the id is memoised per document serial
+        // (IdOf resolves the path on disk and hashes it -- not per object, review of #285) and forgotten
+        // when the document's identity can change (open, save-as, close).
+        var ids = new Dictionary<uint, string>();
+        void Invalidate(object? s, DocumentEventArgs e) { try { ids.Remove(e.DocumentSerialNumber); } catch { } }
+        void InvalidateOpen(object? s, DocumentOpenEventArgs e) { try { ids.Remove(e.DocumentSerialNumber); } catch { } }
+        void InvalidateSave(object? s, DocumentSaveEventArgs e) { try { ids.Remove(e.DocumentSerialNumber); } catch { } }
+        RhinoDoc.EndOpenDocument += InvalidateOpen;
+        RhinoDoc.EndSaveDocument += InvalidateSave;
+        RhinoDoc.CloseDocument += Invalidate;
+        var inner = Subscribe(d => d is not null, null, d =>
+        {
+            try
+            {
+                if (!ids.TryGetValue(d.RuntimeSerialNumber, out var id))
+                {
+                    id = IdOf(d);
+                    ids[d.RuntimeSerialNumber] = id;
+                }
+
+                onChange(id);
+            }
+            catch (Exception ex)
+            {
+                // Nothing may escape into Rhino's event dispatch (a crash class, not a bug report).
+                _log("change monitor: " + ex.Message);
+            }
+        });
+        return new Unsubscriber(() =>
+        {
+            inner.Dispose();
+            RhinoDoc.EndOpenDocument -= InvalidateOpen;
+            RhinoDoc.EndSaveDocument -= InvalidateSave;
+            RhinoDoc.CloseDocument -= Invalidate;
+        });
+    }
+
+    /// <summary>Every document change RhinoCommon reports, filtered by document: object events go to
+    /// <paramref name="onChange"/> (netted by the mutation report); every event, object or not --
+    /// attributes, layers, materials, groups, block definitions, dimension styles, lights, document
+    /// properties -- goes to <paramref name="onAny"/> with its document, because "did the document
+    /// change" must not key off the subset the report can count (review of #282).</summary>
+    private static IDisposable Subscribe(Func<RhinoDoc?, bool> mine, Action<DocumentChange>? onChange, Action<RhinoDoc> onAny)
+    {
+        void Added(object? s, RhinoObjectEventArgs e) { var d = e.TheObject?.Document; if (mine(d)) { onAny(d!); onChange?.Invoke(Change(DocumentChange.Kind.Added, e.TheObject!)); } }
+        void Deleted(object? s, RhinoObjectEventArgs e) { var d = e.TheObject?.Document; if (mine(d)) { onAny(d!); onChange?.Invoke(Change(DocumentChange.Kind.Deleted, e.TheObject!)); } }
+        void Undeleted(object? s, RhinoObjectEventArgs e) { var d = e.TheObject?.Document; if (mine(d)) { onAny(d!); onChange?.Invoke(Change(DocumentChange.Kind.Undeleted, e.TheObject!)); } }
+        void Replaced(object? s, RhinoReplaceObjectEventArgs e) { if (mine(e.Document)) { onAny(e.Document); onChange?.Invoke(new DocumentChange(DocumentChange.Kind.Replaced, e.ObjectId, e.NewRhinoObject?.ObjectType.ToString() ?? "", LayerOf(e.NewRhinoObject))); } }
+        void Attributes(object? s, RhinoModifyObjectAttributesEventArgs e) { if (mine(e.Document)) onAny(e.Document); }
+        // Current-layer changes leave no undo entry; counting them would only force needless confirms.
+        void Layers(object? s, Rhino.DocObjects.Tables.LayerTableEventArgs e) { if (e.EventType != Rhino.DocObjects.Tables.LayerTableEventType.Current && mine(e.Document)) onAny(e.Document); }
+        void Linetypes(object? s, Rhino.DocObjects.Tables.LinetypeTableEventArgs e) { if (mine(e.Document)) onAny(e.Document); }
+        void Hatches(object? s, Rhino.DocObjects.Tables.HatchPatternTableEventArgs e) { if (mine(e.Document)) onAny(e.Document); }
+        void RenderContent(object? s, RhinoDoc.RenderContentTableEventArgs e) { if (mine(e.Document)) onAny(e.Document); }
+        void UserStrings(object? s, RhinoDoc.UserStringChangedArgs e) { if (mine(e.Document)) onAny(e.Document); }
+        void Materials(object? s, Rhino.DocObjects.Tables.MaterialTableEventArgs e) { if (mine(e.Document)) onAny(e.Document); }
+        void Groups(object? s, Rhino.DocObjects.Tables.GroupTableEventArgs e) { if (mine(e.Document)) onAny(e.Document); }
+        void Blocks(object? s, Rhino.DocObjects.Tables.InstanceDefinitionTableEventArgs e) { if (mine(e.Document)) onAny(e.Document); }
+        void DimStyles(object? s, Rhino.DocObjects.Tables.DimStyleTableEventArgs e) { if (mine(e.Document)) onAny(e.Document); }
+        void Lights(object? s, Rhino.DocObjects.Tables.LightTableEventArgs e) { if (mine(e.Document)) onAny(e.Document); }
+        void Props(object? s, DocumentEventArgs e) { if (mine(e.Document)) onAny(e.Document); }
         RhinoDoc.AddRhinoObject += Added;
         RhinoDoc.DeleteRhinoObject += Deleted;
         RhinoDoc.UndeleteRhinoObject += Undeleted;
@@ -143,8 +207,20 @@ internal sealed class RhinoRunHost : IRunHost
         RhinoDoc.DimensionStyleTableEvent += DimStyles;
         RhinoDoc.LightTableEvent += Lights;
         RhinoDoc.DocumentPropertiesChanged += Props;
+        RhinoDoc.LinetypeTableEvent += Linetypes;
+        RhinoDoc.HatchPatternTableEvent += Hatches;
+        RhinoDoc.RenderMaterialsTableEvent += RenderContent;
+        RhinoDoc.RenderEnvironmentTableEvent += RenderContent;
+        RhinoDoc.RenderTextureTableEvent += RenderContent;
+        RhinoDoc.UserStringChanged += UserStrings;
         return new Unsubscriber(() =>
         {
+            RhinoDoc.LinetypeTableEvent -= Linetypes;
+            RhinoDoc.HatchPatternTableEvent -= Hatches;
+            RhinoDoc.RenderMaterialsTableEvent -= RenderContent;
+            RhinoDoc.RenderEnvironmentTableEvent -= RenderContent;
+            RhinoDoc.RenderTextureTableEvent -= RenderContent;
+            RhinoDoc.UserStringChanged -= UserStrings;
             RhinoDoc.AddRhinoObject -= Added;
             RhinoDoc.DeleteRhinoObject -= Deleted;
             RhinoDoc.UndeleteRhinoObject -= Undeleted;

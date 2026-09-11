@@ -43,6 +43,12 @@ public sealed class ExecutionRecord
     /// <summary>#146 Phase 2: the completed run's net mutation report; null when nothing changed or the run did not complete.</summary>
     public MutationReport? Mutations { get; private set; }
 
+    /// <summary>The run that completed on the same document before this one (PRD §05 observability);
+    /// null when none had, or the run never resolved a document. Set once, by the dispatcher.</summary>
+    public LastRun? PreviousRun { get; private set; }
+
+    public void SetPreviousRun(LastRun? previous) => PreviousRun = previous;
+
     private ExecutionRecord(string executionId, string scriptText, long maxDurationMs, DateTimeOffset createdAt)
     {
         ExecutionId = executionId;

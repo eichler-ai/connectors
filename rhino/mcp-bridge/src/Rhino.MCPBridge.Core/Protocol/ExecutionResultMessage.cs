@@ -86,6 +86,12 @@ public static class ExecutionResultMessage
         [JsonPropertyName("error")]
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public DiagnosticRecord? Error { get; set; }
+
+        /// <summary>PRD §05: the run that completed on this document before this one, so a caller can
+        /// see another client's work since its own last call. Absent when there was none.</summary>
+        [JsonPropertyName("last_run")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public LastRun? LastRun { get; set; }
     }
 
     private sealed class Envelope
@@ -134,6 +140,7 @@ public static class ExecutionResultMessage
             Files = record.Files.Count > 0 ? new List<PublishedFileRecord>(record.Files) : null,
             Mutations = record.Mutations,
             Error = record.Error,
+            LastRun = record.PreviousRun,
         };
 
         return Serialize(id, dto);
@@ -173,7 +180,7 @@ public static class ExecutionResultMessage
     // vocabulary (see the class doc comment) but is deliberately not a member of ExecutionStatus, so a
     // single ResultDto.Status : string field (rather than ExecutionStatus) is what lets one type cover
     // both. Keep in sync with ExecutionStatus's [WireEnumName] attributes if either changes.
-    private static string ToWireStatus(ExecutionStatus status) => status switch
+    public static string ToWireStatus(ExecutionStatus status) => status switch
     {
         ExecutionStatus.Pending => "pending",
         ExecutionStatus.Running => "running",

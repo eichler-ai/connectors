@@ -16,6 +16,7 @@ public static class RegisterMessage
         [JsonPropertyName("title")] public string Title { get; set; } = "";
         [JsonPropertyName("path")] public string? Path { get; set; }
         [JsonPropertyName("active")] public bool Active { get; set; }
+        [JsonPropertyName("last_run")][JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public Execution.LastRun? LastRun { get; set; }
     }
 
     private sealed class ParamsDto
@@ -26,6 +27,7 @@ public static class RegisterMessage
         [JsonPropertyName("platform")] public string Platform { get; set; } = "";
         [JsonPropertyName("bridge_version")] public string BridgeVersion { get; set; } = "";
         [JsonPropertyName("documents")] public List<DocumentDto> Documents { get; set; } = new();
+        [JsonPropertyName("execution_state")] public string ExecutionState { get; set; } = "idle";
     }
 
     private sealed class Envelope
@@ -40,7 +42,7 @@ public static class RegisterMessage
         var docs = new List<DocumentDto>(snapshot.Documents.Count);
         foreach (var d in snapshot.Documents)
         {
-            docs.Add(new DocumentDto { DocumentId = d.DocumentId, Title = d.Title, Path = d.Path, Active = d.IsActive });
+            docs.Add(new DocumentDto { DocumentId = d.DocumentId, Title = d.Title, Path = d.Path, Active = d.IsActive, LastRun = d.LastRun });
         }
 
         return JsonSerializer.Serialize(new Envelope
@@ -53,6 +55,7 @@ public static class RegisterMessage
                 Platform = snapshot.Platform,
                 BridgeVersion = snapshot.BridgeVersion,
                 Documents = docs,
+                ExecutionState = snapshot.ExecutionState,
             },
         }, WireJson.Compact);
     }

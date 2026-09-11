@@ -50,6 +50,7 @@ internal sealed class BridgeHost : ISessionEnvironment
     private Timer? _pingTimer;
     private int _pingInFlight;
     private volatile RegisterSnapshot _snapshot;
+    private IDisposable? _changeMonitor;
 
     public string Token { get; } = InstanceFile.MintToken();
     public int Port { get; private set; }
@@ -62,6 +63,10 @@ internal sealed class BridgeHost : ISessionEnvironment
         var executor = new UndoRunExecutor(new ScriptRunners(runner, new PythonScriptRunner(pythonHost)), runHost);
         _dispatcher = new RequestDispatcher(ExecutionManager.CreateDefault(ExecutionRingBuffer.CreateDefault()), executor, launcher, log,
             capture: new ViewCaptureService(viewCapture), onMainThread: f => mainThread.Invoke(f));
+        // The undo tool's gate (PRD §07): every document change outside the connector's own work.
+        _changeMonitor = runHost.MonitorChanges(executor.Clock.NoteChange);
+        // list_instances' last_run per document (PRD §05): re-send register when the ledger changes.
+        _dispatcher.LedgerChanged += PushRegisterRefresh;
         _warmup = new TransactionlessWarmup(runner, pythonHost, log);
         _instanceId = instanceId;
         _rhinoVersion = rhinoVersion;
@@ -100,6 +105,7 @@ internal sealed class BridgeHost : ISessionEnvironment
         _pingTimer?.Dispose();
         _tickTimer?.Dispose();
         try { _listener?.Stop(); } catch { }
+        try { _changeMonitor?.Dispose(); } catch { }
         // Close every live socket now rather than waiting for each session's read to notice the
         // cancellation: a plug-in unload must leave no server holding a half-open connection.
         foreach (var s in _sessions.Snapshot())
@@ -119,7 +125,7 @@ internal sealed class BridgeHost : ISessionEnvironment
     {
         try { RebuildSnapshot(); }
         catch (Exception ex) { _log("register refresh skipped: " + ex.Message); return; }
-        _ = _sessions.BroadcastAsync(RegisterMessage.ToJson(_snapshot), _stop.Token);
+        _ = _sessions.BroadcastAsync(RegisterMessage.ToJson(Snapshot()), _stop.Token);
     }
 
     /// <summary>Main thread only. Reads the documents directly when called on the main thread and
@@ -128,7 +134,16 @@ internal sealed class BridgeHost : ISessionEnvironment
     private void RebuildSnapshot()
     {
         var docs = _mainThread.Invoke(() => _documents.Snapshot());
-        _snapshot = new RegisterSnapshot(_instanceId, Environment.ProcessId, _rhinoVersion, AppDataPaths.PlatformName(), _bridgeVersion, docs);
+        // A document that is gone takes its ledger and clock evidence with it (review of #285).
+        var open = new HashSet<string>(docs.Select(d => d.DocumentId));
+        foreach (var gone in _snapshot.Documents.Select(d => d.DocumentId).Where(id => !open.Contains(id)))
+        {
+            _dispatcher.ForgetDocument(gone);
+        }
+
+        // PRD §05: each document carries the connector's last completed run on it.
+        docs = docs.Select(d => d.WithLastRun(_dispatcher.Ledger.Get(d.DocumentId))).ToList();
+        _snapshot = new RegisterSnapshot(_instanceId, Environment.ProcessId, _rhinoVersion, AppDataPaths.PlatformName(), _bridgeVersion, docs, _dispatcher.ExecutionState);
     }
 
     private void AcceptLoop()
@@ -175,7 +190,7 @@ internal sealed class BridgeHost : ISessionEnvironment
                 WriteInstanceFile();
             }
 
-            await _sessions.BroadcastAsync(PingMessage.ToJson(MemorySnapshot.Capture()), _stop.Token).ConfigureAwait(false);
+            await _sessions.BroadcastAsync(PingMessage.ToJson(MemorySnapshot.Capture(), _dispatcher.ExecutionState), _stop.Token).ConfigureAwait(false);
         }
         catch (OperationCanceledException) { }
         catch (Exception ex) { _log("ping failed: " + ex.Message); }
@@ -203,7 +218,13 @@ internal sealed class BridgeHost : ISessionEnvironment
     // ISessionEnvironment
 
     /// <summary>The cache; never blocks (see the class doc).</summary>
-    public RegisterSnapshot Snapshot() => _snapshot;
+    /// <summary>The cached documents with the execution state as it is NOW -- a snapshot built during
+    /// a run would otherwise freeze "busy" until the next document event (seen live).</summary>
+    public RegisterSnapshot Snapshot()
+    {
+        var s = _snapshot;
+        return new RegisterSnapshot(s.InstanceId, s.Pid, s.RhinoVersion, s.Platform, s.BridgeVersion, s.Documents, _dispatcher.ExecutionState);
+    }
 
     public Task<string> DispatchAsync(JsonRpcRequest request, CancellationToken cancellationToken) =>
         _dispatcher.DispatchAsync(request, cancellationToken);

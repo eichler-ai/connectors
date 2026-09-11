@@ -256,6 +256,94 @@ public sealed class RequestDispatcherTests
     }
 
     [Fact]
+    public async Task UndoRedo_GoesThroughTheBusyGate_AndIsPollable()
+    {
+        var deferred = new DeferredLauncher();
+        var h = new Harness(deferred);
+        h.Host.DuringRun = on => on(new DocumentChange(DocumentChange.Kind.Added, Guid.NewGuid(), "Brep", "Default"));
+        var first = await h.Execute("return 1;", id: "a", extra: new { timeout_ms = 0 });
+        Assert.Equal("pending", Status(first));
+        // An undo arriving mid-script is busy pointing at the script.
+        var busy = await h.Call("undo_redo", new { execution_id = "u-1", direction = "undo" });
+        Assert.Equal("busy", Status(busy));
+        Assert.Equal("a", busy.GetProperty("result").GetProperty("execution_id").GetString());
+        deferred.RunAll();
+
+        var undo = await h.Call("undo_redo", new { execution_id = "u-2", direction = "undo", timeout_ms = 0 });
+        Assert.Equal("pending", Status(undo));
+        deferred.RunAll();
+        var polled = await h.Call("poll_execution", new { execution_id = "u-2" });
+        Assert.Equal("success", Status(polled));
+        Assert.Equal("undo-reverted-connector-work", polled.GetProperty("result").GetProperty("notices")[0].GetProperty("code").GetString());
+        Assert.Equal(1, h.Host.UndoCalls);
+    }
+
+    [Fact]
+    public async Task UndoRedo_CancelledWhileQueued_NeverRuns()
+    {
+        var deferred = new DeferredLauncher();
+        var h = new Harness(deferred);
+        h.Host.DuringRun = on => on(new DocumentChange(DocumentChange.Kind.Added, Guid.NewGuid(), "Brep", "Default"));
+        await h.Execute("return 1;", id: "a", extra: new { timeout_ms = 0 });
+        deferred.RunAll();
+        var undo = await h.Call("undo_redo", new { execution_id = "u-1", direction = "undo", timeout_ms = 0 });
+        Assert.Equal("pending", Status(undo));
+        Assert.Equal("cancelled", Status(await h.Call("cancel_execution", new { execution_id = "u-1" })));
+        deferred.RunAll();
+        Assert.Equal(0, h.Host.UndoCalls);
+        Assert.Equal("cancelled", Status(await h.Call("poll_execution", new { execution_id = "u-1", timeout_ms = 0 })));
+    }
+
+    [Fact]
+    public async Task UndoRedo_UpdatesLastRun_ButNotTheGatesEvidence()
+    {
+        var h = new Harness();
+        h.Host.DuringRun = on => on(new DocumentChange(DocumentChange.Kind.Added, Guid.NewGuid(), "Brep", "Default"));
+        await h.Execute("return 1;", id: "a");
+        var undo = await h.Call("undo_redo", new { execution_id = "u-1", direction = "undo" });
+        Assert.Equal("success", Status(undo));
+        Assert.Equal("undo", h.Dispatcher.Ledger.Get("tmp-known")!.Status);
+        Assert.Equal("a", h.Dispatcher.Ledger.LastChanging("tmp-known")!.ExecutionId);
+        // The run after the undo sees the undo as last_run.
+        var next = await h.Execute("return 2;", id: "b");
+        Assert.Equal("u-1", next.GetProperty("result").GetProperty("last_run").GetProperty("execution_id").GetString());
+    }
+
+    [Fact]
+    public async Task UndoRedo_BadDirection_AndRefusalCode()
+    {
+        var h = new Harness();
+        Assert.Equal("invalid-params", Code(await h.Call("undo_redo", new { execution_id = "u", direction = "sideways" })));
+        // No connector run has changed the document: nothing is provably ours.
+        var refused = await h.Call("undo_redo", new { execution_id = "u-1", direction = "undo" });
+        Assert.Equal("error", Status(refused));
+        Assert.Equal("undo-confirmation-required", Code(refused));
+        Assert.Equal(0, h.Host.UndoCalls);
+    }
+
+    [Fact]
+    public async Task LastRun_IsRecordedPerDocument_AndThePreviousOneRidesTheNextResult()
+    {
+        var h = new Harness();
+        h.Host.DuringRun = on => on(new DocumentChange(DocumentChange.Kind.Added, Guid.NewGuid(), "Brep", "Default"));
+        var first = await h.Call("execute_script", new { execution_id = "a", language = "csharp", script = "return 1;", agent_client_id = "srv-a", label = "first" });
+        Assert.Equal("success", Status(first));
+        Assert.False(first.GetProperty("result").TryGetProperty("last_run", out _));
+        var last = h.Dispatcher.Ledger.Get("tmp-known")!;
+        Assert.Equal("a", last.ExecutionId);
+        Assert.Equal("srv-a", last.AgentClientId);
+        Assert.Equal("first", last.Label);
+        Assert.True(last.ChangedDocument);
+        Assert.Equal("success", last.Status);
+
+        var second = await h.Call("execute_script", new { execution_id = "b", language = "csharp", script = "return 2;", agent_client_id = "srv-b" });
+        var previous = second.GetProperty("result").GetProperty("last_run");
+        Assert.Equal("a", previous.GetProperty("execution_id").GetString());
+        Assert.Equal("srv-a", previous.GetProperty("agent_client_id").GetString());
+        Assert.Equal("b", h.Dispatcher.Ledger.Get("tmp-known")!.ExecutionId);
+    }
+
+    [Fact]
     public async Task UnknownExecutionId_OnPollAndCancel()
     {
         var h = new Harness();

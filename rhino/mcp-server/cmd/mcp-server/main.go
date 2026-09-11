@@ -98,10 +98,11 @@ func run(appDataDir string, logger *log.Logger) error {
 	}()
 
 	s := mcp.NewServer(&mcp.Implementation{Name: serverName, Version: versionLine()}, nil)
-	mcpserver.RegisterInstances(s, reg, nil, nil)
+	mcpserver.RegisterInstances(s, reg, nil)
 	router := execution.NewRouter(dial, serverID)
 	mcpserver.RegisterExecution(s, router)
 	mcpserver.RegisterCapture(s, router)
+	mcpserver.RegisterUndoRedo(s, router)
 
 	err := s.Run(ctx, &mcp.StdioTransport{})
 	if err != nil && ctx.Err() == nil {

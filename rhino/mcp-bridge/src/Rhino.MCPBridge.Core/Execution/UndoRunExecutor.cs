@@ -19,12 +19,17 @@ internal sealed class UndoRunExecutor
 
     private readonly ScriptRunners _runners;
     private readonly IRunHost _host;
+    private readonly ChangeClock _clock;
 
-    public UndoRunExecutor(ScriptRunners runners, IRunHost host)
+    public UndoRunExecutor(ScriptRunners runners, IRunHost host, ChangeClock? clock = null)
     {
         _runners = runners;
         _host = host;
+        _clock = clock ?? new ChangeClock();
     }
+
+    /// <summary>The clock the undo tool's gate reads; the adapter feeds it every document change.</summary>
+    internal ChangeClock Clock => _clock;
 
     internal ScriptRunners Runners => _runners;
     internal IRunHost Host => _host;
@@ -39,6 +44,8 @@ internal sealed class UndoRunExecutor
         public required CancellationToken CancellationToken { get; init; }
         public bool ConfirmLifecycleActions { get; init; }
         public string? Label { get; init; }
+        /// <summary>The server that issued the run, for the ledger (PRD §05); "" when it did not say.</summary>
+        public string AgentClientId { get; init; } = "";
     }
 
     /// <summary>Returns the outcome, or null when the command could not start (another command holds
@@ -46,6 +53,34 @@ internal sealed class UndoRunExecutor
     public ScriptExecutionOutcome? Execute(Request request)
     {
         var document = _host.ResolveDocument(request.DocumentId);
+        ScriptExecutionOutcome? outcome;
+        if (document is null)
+        {
+            outcome = ExecuteResolved(request, document);
+        }
+        else
+        {
+            using (_clock.EnterConnectorWork(document.DocumentId))
+            {
+                outcome = ExecuteResolved(request, document);
+            }
+
+            if (outcome is not null)
+            {
+                outcome.Tick = _clock.Next();
+            }
+        }
+
+        if (outcome is not null && document is not null)
+        {
+            outcome.DocumentId = document.DocumentId;
+        }
+
+        return outcome;
+    }
+
+    private ScriptExecutionOutcome? ExecuteResolved(Request request, RunDocument? document)
+    {
         if (document is null)
         {
             return ScriptExecutionOutcome.Failed(new DocumentNotFoundException(DocumentNotFound(request)), "");
@@ -91,21 +126,32 @@ internal sealed class UndoRunExecutor
         var report = mutations.Build();
         if (outcome.Success)
         {
-            return ScriptExecutionOutcome.Completed(outcome.ReturnValue, outcome.StdOut, outcome.Notices, outcome.Files, report.IsEmpty ? null : report);
+            return new ScriptExecutionOutcome
+            {
+                Success = true, ReturnValue = outcome.ReturnValue, StdOut = outcome.StdOut, Notices = outcome.Notices, Files = outcome.Files,
+                Mutations = report.IsEmpty ? null : report, ChangedDocument = changed || !report.IsEmpty,
+            };
         }
 
         // Failure or cancellation: revert the run's entry, then report what happened to it (PRD §07,
         // observability over silence). Nothing to revert only when NO document event fired -- the
         // report counts objects, but a layer, attribute or material change is a change too.
         var notices = new List<DiagnosticRecord>(outcome.Notices);
+        var entryRemains = false;
         if (changed || !report.IsEmpty)
         {
-            notices.Add(Rollback(document, request.ExecutionId, report));
+            var rollback = Rollback(document, request.ExecutionId, report);
+            notices.Add(rollback);
+            // A skipped rollback leaves the run's entry on the stack: the ledger must know the run changed
+            // the document, so the undo tool the notice points at can act on it.
+            entryRemains = rollback.Code == "script-rollback-skipped";
         }
 
-        return outcome.WasCancelled
+        var failed = outcome.WasCancelled
             ? ScriptExecutionOutcome.Cancelled(outcome.StdOut, notices, outcome.Files)
             : ScriptExecutionOutcome.Failed(outcome.Exception!, outcome.StdOut, notices, outcome.Files);
+        failed.ChangedDocument = entryRemains;
+        return failed;
     }
 
     private DiagnosticRecord Rollback(RunDocument document, string executionId, MutationReport report)

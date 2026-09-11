@@ -32,18 +32,42 @@ internal sealed class RequestDispatcher
     private readonly Func<DateTimeOffset> _now;
     private readonly Func<TimeSpan, Task> _delay;
     private readonly Action<string> _log;
+    private readonly RunLedger _ledger;
+    private readonly UndoRedoExecutor _undoRedo;
 
-    public static readonly string[] SupportedMethods = { "execute_script", "poll_execution", "cancel_execution", "capture_view" };
+    public static readonly string[] SupportedMethods = { "execute_script", "poll_execution", "cancel_execution", "capture_view", "undo_redo" };
+
+    /// <summary>undo_redo's timeout bounds: the command is synchronous on the main thread, the wait is for the main-thread hop.</summary>
+    public const long UndoMaxTimeoutMs = 30_000, UndoDefaultTimeoutMs = 10_000;
+
+    /// <summary>The per-document last-run ledger (PRD §05), read by the plug-in for register snapshots.</summary>
+    public RunLedger Ledger => _ledger;
+
+    /// <summary>"idle" | "busy" | "unrecoverable", for register and ping (PRD §05).</summary>
+    public string ExecutionState => _executionManager.ExecutionState;
+
+    /// <summary>Raised after the ledger changed, so the plug-in can re-send register with the new last_run.</summary>
+    public event Action? LedgerChanged;
+
+    /// <summary>A document closed: drop its ledger entries and its clock evidence, so a reopened saved
+    /// document (same id) starts clean against its new, empty undo stack (review of #285).</summary>
+    public void ForgetDocument(string documentId)
+    {
+        _ledger.Forget(documentId);
+        _executor.Clock.Forget(documentId);
+    }
 
     /// <param name="capture">capture_view's policy; null disables the method (unknown-method).</param>
     /// <param name="onMainThread">Runs a function on the main thread and waits, bounded (the adapter's
     /// IMainThread); capture needs the main thread but no command, since it changes nothing.</param>
     public RequestDispatcher(ExecutionManager executionManager, UndoRunExecutor executor, IRunLauncher launcher, Action<string> log,
         Func<DateTimeOffset>? now = null, Func<TimeSpan, Task>? delay = null,
-        ViewCaptureService? capture = null, Func<Func<object>, object>? onMainThread = null)
+        ViewCaptureService? capture = null, Func<Func<object>, object>? onMainThread = null, RunLedger? ledger = null)
     {
         _executionManager = executionManager;
         _executor = executor;
+        _ledger = ledger ?? new RunLedger();
+        _undoRedo = new UndoRedoExecutor(executor.Host, _ledger, executor.Clock);
         _launcher = launcher;
         _capture = capture;
         _onMainThread = onMainThread;
@@ -58,6 +82,7 @@ internal sealed class RequestDispatcher
         "poll_execution" => HandlePollExecutionAsync(request),
         "cancel_execution" => Task.FromResult(HandleCancelExecution(request)),
         "capture_view" when _capture is not null && _onMainThread is not null => Task.FromResult(HandleCaptureView(request)),
+        "undo_redo" => HandleUndoRedoAsync(request),
         _ => Task.FromResult(UnknownMethod(request)),
     };
 
@@ -144,13 +169,14 @@ internal sealed class RequestDispatcher
 
     private async Task<string> HandleExecuteScriptAsync(JsonRpcRequest request)
     {
-        string executionId, script, documentId, language;
+        string executionId, script, documentId, language, clientId;
         long maxDurationMs, timeoutMs;
         bool confirm;
         string? label;
         try
         {
             executionId = request.GetRequiredString("execution_id");
+            clientId = request.GetOptionalString("agent_client_id") ?? "";
             language = request.GetRequiredString("language");
             script = request.GetRequiredString("script");
             documentId = request.GetOptionalString("document_id") ?? "";
@@ -215,7 +241,7 @@ internal sealed class RequestDispatcher
             if (rejection is not null)
             {
                 _log($"script rejected pre-flight (execution {executionId}): {rejection.Exception?.GetType().Name}: {rejection.Exception?.Message}");
-                CompleteExecution.Apply(_executionManager, executionId, _now(), rejection);
+                Finish(executionId, rejection, clientId, label);
                 return ExecutionResultMessage.FromRecord(request.Id, _executionManager.Poll(executionId)!);
             }
         }
@@ -229,6 +255,7 @@ internal sealed class RequestDispatcher
             CancellationToken = _executionManager.GetCancellationToken(executionId),
             ConfirmLifecycleActions = confirm,
             Label = label,
+            AgentClientId = clientId,
         }, _now().AddMilliseconds(Math.Max(maxDurationMs, 0)));
 
         return await WaitAsync(request.Id, executionId, timeoutMs).ConfigureAwait(false);
@@ -269,8 +296,8 @@ internal sealed class RequestDispatcher
                 _executionManager.MarkPendingAgain(req.ExecutionId);
                 if (_now() >= deadline)
                 {
-                    CompleteExecution.Apply(_executionManager, req.ExecutionId, _now(), ScriptExecutionOutcome.Failed(
-                        new TimeoutException("Rhino was busy with another command for the whole of max_duration_ms; the script never started"), ""));
+                    Finish(req.ExecutionId, ScriptExecutionOutcome.Failed(
+                        new TimeoutException("Rhino was busy with another command for the whole of max_duration_ms; the script never started"), ""), req.AgentClientId, req.Label);
                     return;
                 }
 
@@ -278,7 +305,7 @@ internal sealed class RequestDispatcher
                 return;
             }
 
-            CompleteExecution.Apply(_executionManager, req.ExecutionId, _now(), outcome);
+            Finish(req.ExecutionId, outcome, req.AgentClientId, req.Label);
         });
     }
 
@@ -300,6 +327,138 @@ internal sealed class RequestDispatcher
 
             await _delay(PollInterval).ConfigureAwait(false);
         }
+    }
+
+    /// <summary>Completes the record and, when the run resolved a document, updates the ledger (PRD §05)
+    /// and stamps the run that preceded it on the record.</summary>
+    private void Finish(string executionId, ScriptExecutionOutcome outcome, string clientId, string? label)
+    {
+        var now = _now();
+        CompleteExecution.Apply(_executionManager, executionId, now, outcome);
+        if (outcome.DocumentId.Length == 0)
+        {
+            return;
+        }
+
+        var record = _executionManager.Poll(executionId);
+        var previous = _ledger.Record(outcome.DocumentId, new LastRun
+        {
+            ExecutionId = executionId,
+            AgentClientId = clientId,
+            FinishedAt = now.ToString("o"),
+            Status = record is null ? "" : ExecutionResultMessage.ToWireStatus(record.Status),
+            Label = label,
+            ChangedDocument = outcome.ChangedDocument,
+            Tick = outcome.Tick,
+        });
+        record?.SetPreviousRun(previous);
+        try { LedgerChanged?.Invoke(); } catch (Exception ex) { _log("ledger listener failed: " + ex.Message); }
+    }
+
+    /// <summary>The undo/redo tools' wire method (PRD §07): execution_id (server-minted), direction,
+    /// confirm, document_id, timeout_ms. An undo IS an execution for the busy gate -- it goes through
+    /// ExecutionManager.Start like a script, so a script arriving mid-undo is busy pointing at the undo
+    /// and vice versa -- and its record is pollable. The work runs on the main thread via the launcher.</summary>
+    private async Task<string> HandleUndoRedoAsync(JsonRpcRequest request)
+    {
+        string executionId, directionText, documentId;
+        bool confirm;
+        long timeoutMs;
+        try
+        {
+            executionId = request.GetRequiredString("execution_id");
+            directionText = request.GetRequiredString("direction");
+            confirm = request.GetOptionalBool("confirm", false);
+            documentId = request.GetOptionalString("document_id") ?? "";
+            timeoutMs = request.GetOptionalInt64("timeout_ms", UndoDefaultTimeoutMs);
+        }
+        catch (JsonRpcParamException ex)
+        {
+            return JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InvalidParams, ex.Message, ex.Diagnostic);
+        }
+
+        if (directionText is not ("undo" or "redo"))
+        {
+            var bad = DiagnosticRecord.Create(DiagnosticSeverity.Error, "invalid-params", DiagnosticSource.Execution,
+                $"direction must be \"undo\" or \"redo\", got \"{directionText}\".", null, new[] { "Pass direction: \"undo\" or \"redo\"." });
+            return JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InvalidParams, bad.Message, bad);
+        }
+
+        var direction = directionText == "undo" ? UndoRedoExecutor.Direction.Undo : UndoRedoExecutor.Direction.Redo;
+        timeoutMs = Math.Clamp(timeoutMs, 0, UndoMaxTimeoutMs);
+
+        ExecuteOutcome started;
+        try
+        {
+            // maxDuration comfortably past the wait: CheckMaxDuration must never cancel a live undo.
+            started = _executionManager.Start(executionId, $"<{directionText}>", timeoutMs + 30_000, _now());
+        }
+        catch (ArgumentException ex)
+        {
+            return JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InvalidParams, ex.Message, UnknownExecution(executionId));
+        }
+
+        switch (started.Kind)
+        {
+            case ExecuteOutcomeKind.Busy:
+                return ExecutionResultMessage.Busy(request.Id, started.Record!.ExecutionId);
+            case ExecuteOutcomeKind.InstanceUnrecoverable:
+                return ExecutionResultMessage.FromInstanceUnrecoverable(request.Id, started.Diagnostic!);
+        }
+
+        var token = _executionManager.GetCancellationToken(executionId);
+        _launcher.Post(() =>
+        {
+            // Cancelled while queued: never touch the model (as the script path).
+            if (token.IsCancellationRequested)
+            {
+                _executionManager.CompleteCancelled(executionId, _now(), stdOut: null);
+                return;
+            }
+
+            if (_executionManager.MarkRunning(executionId, _now()) is { } notStarted)
+            {
+                _log($"undo_redo {executionId} not started: {notStarted.Message}");
+                return; // already terminal (cancelled in the gap)
+            }
+
+            UndoRedoExecutor.Outcome outcome;
+            try
+            {
+                outcome = _undoRedo.Execute(direction, documentId, confirm, executionId, _now());
+            }
+            catch (Exception ex)
+            {
+                outcome = new UndoRedoExecutor.Outcome
+                {
+                    Error = DiagnosticRecord.Create(DiagnosticSeverity.Error, "undo-failed", DiagnosticSource.Execution,
+                        $"{directionText} threw {ex.GetType().Name}: {ex.Message}", new Dictionary<string, object?> { ["exception_type"] = ex.GetType().FullName }, null),
+                };
+            }
+
+            var now = _now();
+            var dropped = outcome.Error is not null
+                ? _executionManager.CompleteError(executionId, now, outcome.Error, null, outcome.Notices)
+                : _executionManager.CompleteSuccess(executionId, now, null, null, outcome.Notices, null, outcome.Mutations);
+            if (dropped is not null)
+            {
+                _log($"undo_redo {executionId} completed after its record went terminal: {dropped.Message}");
+            }
+
+            if (outcome.Error is null && outcome.DocumentId.Length > 0)
+            {
+                // Observability (PRD §05): another client must see that work here was reverted or restored.
+                // The last CHANGING run is left alone -- the gate's evidence is the tool's own tick.
+                _ledger.RecordTool(outcome.DocumentId, new LastRun
+                {
+                    ExecutionId = executionId, AgentClientId = "", FinishedAt = now.ToString("o"), Status = directionText,
+                    Label = outcome.OnOurWork ? "the connector's own work" : "another actor's work (confirmed)", ChangedDocument = true,
+                });
+                try { LedgerChanged?.Invoke(); } catch (Exception ex) { _log("ledger listener failed: " + ex.Message); }
+            }
+        });
+
+        return await WaitAsync(request.Id, executionId, timeoutMs).ConfigureAwait(false);
     }
 
     private async Task<string> HandlePollExecutionAsync(JsonRpcRequest request)
