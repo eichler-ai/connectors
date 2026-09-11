@@ -47,7 +47,7 @@ internal sealed class RhinoDocumentSnapshotSource : IDocumentSnapshotSource
     /// the JIT resolves Grasshopper.dll only when that guard has already passed.</summary>
     private IReadOnlyList<GrasshopperDocument> SnapshotGrasshopper()
     {
-        if (!AppDomain.CurrentDomain.GetAssemblies().Any(a => string.Equals(a.GetName().Name, "Grasshopper", StringComparison.Ordinal)))
+        if (!GrasshopperWatcher.GrasshopperLoaded())
         {
             return Array.Empty<GrasshopperDocument>();
         }

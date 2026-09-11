@@ -63,6 +63,12 @@ result = "loaded={} count={} name={}".format(loaded, len(list(server)), doc.Disp
 				if !strings.HasPrefix(g.GrasshopperDocumentID, "gh-") {
 					t.Errorf("gh_document_id %q should start with gh-", g.GrasshopperDocumentID)
 				}
+				if g.Title == "" {
+					t.Errorf("grasshopper document has an empty title: %+v", g)
+				}
+				if g.ComponentCount < 0 {
+					t.Errorf("component_count is negative: %d", g.ComponentCount)
+				}
 				return
 			}
 		}

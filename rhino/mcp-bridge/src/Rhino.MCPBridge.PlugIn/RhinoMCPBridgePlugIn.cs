@@ -68,6 +68,11 @@ public sealed class RhinoMCPBridgePlugIn : Rhino.PlugIns.PlugIn
             RhinoDoc.NewDocument += OnDocumentsChanged;
             RhinoDoc.ActiveDocumentChanged += OnDocumentsChanged;
             RhinoDoc.EndSaveDocument += OnDocumentsChanged; // a first save changes the id (tmp- -> doc-, PRD §12)
+
+            // Grasshopper is process-global and demand-loaded, so its definitions do not ride RhinoDoc
+            // events; watch its DocumentServer (once it loads) so an opened/closed .gh refreshes the
+            // snapshot immediately (PRD §10, review of PR #304).
+            GrasshopperWatcher.Start(() => CurrentHost?.PushRegisterRefresh(), LogConnection);
             return LoadReturnCode.Success;
         }
         catch (Exception ex)
