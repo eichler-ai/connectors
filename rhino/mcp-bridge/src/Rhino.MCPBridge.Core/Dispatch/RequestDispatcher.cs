@@ -62,7 +62,8 @@ internal sealed class RequestDispatcher
     /// IMainThread); capture needs the main thread but no command, since it changes nothing.</param>
     public RequestDispatcher(ExecutionManager executionManager, UndoRunExecutor executor, IRunLauncher launcher, Action<string> log,
         Func<DateTimeOffset>? now = null, Func<TimeSpan, Task>? delay = null,
-        ViewCaptureService? capture = null, Func<Func<object>, object>? onMainThread = null, RunLedger? ledger = null)
+        ViewCaptureService? capture = null, Func<Func<object>, object>? onMainThread = null, RunLedger? ledger = null,
+        IWindowInventory? windowInventory = null)
     {
         _executionManager = executionManager;
         _executor = executor;
@@ -71,10 +72,22 @@ internal sealed class RequestDispatcher
         _launcher = launcher;
         _capture = capture;
         _onMainThread = onMainThread;
+        _windowInventory = windowInventory;
         _log = log;
         _now = now ?? (() => DateTimeOffset.UtcNow);
         _delay = delay ?? Task.Delay;
     }
+
+    // PRD §08 v1 modal-dialog diagnostic: null (the default) means off — the optional-feature convention.
+    // Production wiring (BridgeHost) passes the platform inventory. Enumerated OFF the main thread on the
+    // §08 timeout path: the main thread may be the thing blocked, so it must never be marshalled to.
+    private readonly IWindowInventory? _windowInventory;
+
+    /// <summary>Hard ceiling on how long the §08 timeout response will wait for the window enumeration,
+    /// independent of the inventory's own internal budget. The server's wire round-trip is timeout_ms + 5 s
+    /// (mcp-server execution.go), and this path is reached only once timeout_ms has already elapsed, so
+    /// there is ample buffer; this cap keeps the diagnostic from ever eating into it.</summary>
+    private const int WindowInventoryHardCapMs = 2500;
 
     public Task<string> DispatchAsync(JsonRpcRequest request, CancellationToken cancellationToken) => request.Method switch
     {
@@ -322,10 +335,48 @@ internal sealed class RequestDispatcher
 
             if (record.Status.IsTerminal() || timeoutMs <= 0 || _now() >= deadline)
             {
-                return ExecutionResultMessage.FromRecord(id, record);
+                // PRD §08 v1: a wait that timed out with the run still non-terminal is where a modal or a
+                // command-line prompt may be blocking it. Enumerate this process's windows (off THIS
+                // connection thread, never the possibly-blocked main thread) and attach a fallback notice
+                // IF a candidate window is found — silent otherwise, so a plain long compute is not flagged.
+                var extra = !record.Status.IsTerminal() && timeoutMs > 0
+                    ? await BuildWindowInventoryNoticesAsync().ConfigureAwait(false)
+                    : null;
+                return ExecutionResultMessage.FromRecord(id, record, extra);
             }
 
             await _delay(PollInterval).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>§08 v1: runs the window inventory OFF this connection thread (never the possibly-blocked
+    /// main thread) within a hard cap, and returns the timeout-fallback notices only when a candidate
+    /// blocking window is present. Returns null when the feature is off, no candidate is found, the pass
+    /// exceeded its cap, or it threw — never blocking the response past the cap and never throwing.</summary>
+    private async Task<IReadOnlyList<DiagnosticRecord>?> BuildWindowInventoryNoticesAsync()
+    {
+        if (_windowInventory is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            var pass = Task.Run(() => _windowInventory.EnumerateOwnedTopLevelWindows());
+            var finished = await Task.WhenAny(pass, _delay(TimeSpan.FromMilliseconds(WindowInventoryHardCapMs))).ConfigureAwait(false);
+            if (finished != pass)
+            {
+                _log("window inventory exceeded its budget; §08 diagnostic skipped for this response");
+                return null;
+            }
+
+            var notices = WindowInventoryDiagnostic.BuildTimeoutNotices(pass.Result);
+            return notices.Count > 0 ? notices : null;
+        }
+        catch (Exception ex)
+        {
+            _log("window inventory failed: " + ex.Message);
+            return null;
         }
     }
 
