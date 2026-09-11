@@ -20,7 +20,7 @@ PKG="$(mktemp -d)"
 # DLLs is how the first PR 2 deploy failed to load ("Could not load file or assembly
 # Eichler.Connectors.Rhino").
 cp "$OUT"/*.rhp "$OUT"/*.dll "$OUT"/*.deps.json "$PKG"/
-cp "$OUT"/*.dylib "$PKG"/ 2>/dev/null || true  # flattened native e_sqlite3 for discovery (PRD §09); win e_sqlite3.dll rides the *.dll glob
+cp "$OUT"/*.dylib "$PKG"/ 2>/dev/null || true  # flattened native e_sqlite3.dylib for discovery (PRD §09); the flattened win e_sqlite3.dll rides the *.dll glob above
 cp "$OUT"/*.xml "$PKG"/ 2>/dev/null || true
 if ls "$PKG"/RhinoCommon.dll >/dev/null 2>&1; then echo "RhinoCommon.dll must not ship in the package"; exit 1; fi
 echo "    packaging $(ls "$PKG" | wc -l | tr -d ' ') files"

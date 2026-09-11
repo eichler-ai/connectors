@@ -51,7 +51,8 @@ internal sealed class BridgeHost : ISessionEnvironment
     private int _pingInFlight;
     private volatile RegisterSnapshot _snapshot;
     private IDisposable? _changeMonitor;
-    private readonly Rhino.MCPBridge.Core.Discovery.DiscoveryCache? _discoveryCache;
+    private Rhino.MCPBridge.Core.Discovery.DiscoveryCache? _discoveryCache;
+    private readonly string _rhinoVersionForDiscovery;
 
     public string Token { get; } = InstanceFile.MintToken();
     public int Port { get; private set; }
@@ -64,11 +65,9 @@ internal sealed class BridgeHost : ISessionEnvironment
         var executor = new UndoRunExecutor(new ScriptRunners(runner, new PythonScriptRunner(pythonHost)), runHost);
         // API discovery (PRD §09): reflect RhinoCommon + loaded plug-ins into the persistent cache. A
         // one-time ~1.5s cost on the first launch; later launches sync only deltas. Never fails the bridge.
-        var (discoveryService, discoveryCache) = DiscoveryBootstrap.Create(rhinoVersion, log);
-        _discoveryCache = discoveryCache;
+        _rhinoVersionForDiscovery = rhinoVersion;
         _dispatcher = new RequestDispatcher(ExecutionManager.CreateDefault(ExecutionRingBuffer.CreateDefault()), executor, launcher, log,
-            capture: new ViewCaptureService(viewCapture), onMainThread: f => mainThread.Invoke(f), windowInventory: windowInventory,
-            discoveryService: discoveryService);
+            capture: new ViewCaptureService(viewCapture), onMainThread: f => mainThread.Invoke(f), windowInventory: windowInventory);
         // The undo tool's gate (PRD §07): every document change outside the connector's own work.
         _changeMonitor = runHost.MonitorChanges(executor.Clock.NoteChange);
         // list_instances' last_run per document (PRD §05): re-send register when the ledger changes.
@@ -103,6 +102,18 @@ internal sealed class BridgeHost : ISessionEnvironment
         // Warm the Roslyn pipeline off the main thread so the first script's compile is not on the
         // response path (Revit #67/#136). Scripts arriving before it finishes take the slow path.
         _warmup.Start();
+        // API discovery (PRD §09): the ~1.5s cold cache build is pure reflection with no main-thread
+        // requirement, so build it off the main thread too — the listener is already up (review of #294,
+        // M1). Discovery calls in the meantime answer discovery-unavailable rather than blocking OnLoad.
+        new Thread(() =>
+        {
+            var (service, cache) = DiscoveryBootstrap.Create(_rhinoVersionForDiscovery, _log);
+            _discoveryCache = cache;
+            if (service is not null)
+            {
+                _dispatcher.SetDiscoveryService(service);
+            }
+        }) { IsBackground = true, Name = "MCPBridge discovery build" }.Start();
     }
 
     public void Stop()

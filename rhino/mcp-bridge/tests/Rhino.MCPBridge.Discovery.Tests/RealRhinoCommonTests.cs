@@ -11,7 +11,7 @@ namespace Rhino.MCPBridge.Discovery.Tests;
 /// </summary>
 public class RealRhinoCommonTests
 {
-    private static DiscoveryService Service() => new(RealRhinoCorpus.Build());
+    private static DiscoveryService Service() => new(RealRhinoCorpus.Shared);
 
     [Fact]
     public void TheCorpusIsSubstantial()

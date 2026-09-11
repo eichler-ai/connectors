@@ -31,9 +31,12 @@ internal static class DiscoveryBootstrap
             Directory.CreateDirectory(Path.GetDirectoryName(dbPath)!);
             cache = new DiscoveryCache(dbPath);
         }
-        catch (Exception ex)
+        catch (Microsoft.Data.Sqlite.SqliteException ex)
         {
-            log($"discovery cache open FAILED, attempting one self-heal (delete + recreate): {ex.Message}");
+            // A corrupt/locked DB (a prior hard crash mid-write, a full disk) self-heals once. A NON-Sqlite
+            // failure here (e.g. the native e_sqlite3 not loading) is not corruption — deleting the file
+            // would destroy a good cache and mask the real cause, so those fall through below (review #294 m3).
+            log($"discovery cache open FAILED (SQLite), attempting one self-heal (delete + recreate): {ex.Message}");
             try
             {
                 File.Delete(dbPath);
@@ -44,6 +47,11 @@ internal static class DiscoveryBootstrap
                 log($"discovery cache self-heal FAILED; discovery disabled for this session: {retry.Message}");
                 return (null, null);
             }
+        }
+        catch (Exception ex)
+        {
+            log($"discovery cache could not be opened (not corruption; the prior cache, if any, is preserved); discovery disabled for this session: {ex.Message}");
+            return (null, null);
         }
 
         try
@@ -102,7 +110,7 @@ internal static class DiscoveryBootstrap
                 continue; // already added (core, or the connector's own API)
             }
 
-            if (rhinoRoot is not null && assembly.Location.StartsWith(rhinoRoot, StringComparison.OrdinalIgnoreCase))
+            if (rhinoRoot is not null && assembly.Location.StartsWith(rhinoRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
             {
                 excludedByRoot.Add(name);
                 continue; // Rhino's own bundled assemblies — not a third-party add-in
@@ -141,8 +149,18 @@ internal static class DiscoveryBootstrap
             return rhinoCommonLocation.Substring(0, appIdx + ".app".Length);
         }
 
-        // Windows/Linux: RhinoCommon lives in <root>\System\; the root is that directory's parent.
+        // Windows: RhinoCommon lives under <root>\System\ (sometimes a level deeper, e.g. System\netcore),
+        // so walk up to the ancestor named "System" and take its parent as the root rather than assuming a
+        // fixed depth (review #294 M2). Fall back to the immediate parent if there is no System ancestor.
         var dir = Path.GetDirectoryName(rhinoCommonLocation);
+        for (var d = dir; d is not null; d = Path.GetDirectoryName(d))
+        {
+            if (string.Equals(Path.GetFileName(d), "System", StringComparison.OrdinalIgnoreCase))
+            {
+                return Path.GetDirectoryName(d) ?? d;
+            }
+        }
+
         return dir is null ? null : (Path.GetDirectoryName(dir) ?? dir);
     }
 }

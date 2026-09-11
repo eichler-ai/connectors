@@ -1,3 +1,4 @@
+using System;
 using Rhino.MCPBridge.Core.Discovery;
 
 namespace Rhino.MCPBridge.Discovery.Tests;
@@ -16,4 +17,11 @@ internal static class RealRhinoCorpus
         cache.Sync(new[] { ("core", typeof(global::Rhino.RhinoDoc).Assembly) });
         return cache;
     }
+
+    // Reflecting RhinoCommon + building the in-memory FTS is ~1.5s; the read-only query tests share one
+    // corpus rather than paying that per case (review #294 m6). Never disposed — it lives for the test run.
+    private static readonly Lazy<DiscoveryCache> _shared = new(Build);
+
+    /// <summary>A single shared read-only corpus for tests that only query (never mutate) it.</summary>
+    public static DiscoveryCache Shared => _shared.Value;
 }

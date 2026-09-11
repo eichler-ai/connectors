@@ -33,7 +33,10 @@ internal sealed class RequestDispatcher
     private readonly Func<Func<object>, object>? _onMainThread;
     // API discovery (PRD §09): pure reflection over Rhino's loaded assemblies, no document access, so it
     // answers on the connection thread even mid-run. Null when the plug-in wired no cache (tests).
-    private readonly DiscoveryService? _discoveryService;
+    // Set once, off the main thread, after the (slow, cold) cache build finishes -- volatile so the
+    // connection threads see it without a lock. Null until then: a discovery call in that brief cold-start
+    // window gets discovery-unavailable rather than blocking the listener (review of #294, M1).
+    private volatile DiscoveryService? _discoveryService;
     private readonly Func<DateTimeOffset> _now;
     private readonly Func<TimeSpan, Task> _delay;
     private readonly Action<string> _log;
@@ -68,8 +71,8 @@ internal sealed class RequestDispatcher
     public RequestDispatcher(ExecutionManager executionManager, UndoRunExecutor executor, IRunLauncher launcher, Action<string> log,
         Func<DateTimeOffset>? now = null, Func<TimeSpan, Task>? delay = null,
         ViewCaptureService? capture = null, Func<Func<object>, object>? onMainThread = null, RunLedger? ledger = null,
-        IWindowInventory? windowInventory = null,
-        DiscoveryService? discoveryService = null)
+        IWindowInventory? windowInventory = null
+        )
     {
         _executionManager = executionManager;
         _executor = executor;
@@ -79,7 +82,6 @@ internal sealed class RequestDispatcher
         _capture = capture;
         _onMainThread = onMainThread;
         _windowInventory = windowInventory;
-        _discoveryService = discoveryService;
         _log = log;
         _now = now ?? (() => DateTimeOffset.UtcNow);
         _delay = delay ?? Task.Delay;
@@ -95,6 +97,10 @@ internal sealed class RequestDispatcher
     /// (mcp-server execution.go), and this path is reached only once timeout_ms has already elapsed, so
     /// there is ample buffer; this cap keeps the diagnostic from ever eating into it.</summary>
     private const int WindowInventoryHardCapMs = 2500;
+
+    /// <summary>Wires the discovery service once its (cold, off-thread) build completes; before this,
+    /// discovery methods answer discovery-unavailable. Idempotent-safe to call once.</summary>
+    public void SetDiscoveryService(DiscoveryService discoveryService) => _discoveryService = discoveryService;
 
     public Task<string> DispatchAsync(JsonRpcRequest request, CancellationToken cancellationToken) => request.Method switch
     {
