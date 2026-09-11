@@ -161,7 +161,7 @@ because there is no VM topology to automate (PRD §05) and the Mac's `deploy-plu
   Windows** (`InstanceFile.OwnerOnlyDacl`, phase 2): `Get-Acl` shows `AreAccessRulesProtected: True` and
   a single full-control ACE for the current user — the Windows counterpart of the Unix `0600`.
 
-- **⚠️ Python needs the RhinoCode server engaged, once per session — [[issue #287]].** On a normal
+- **⚠️ Python needs the RhinoCode server engaged, once per session — #287.** On a normal
   launch the plug-in's Python warm-up **times out at 180 s** ("Python 3 was not registered by RhinoCode
   within 180 s"): on Windows, RhinoCode does **not** register the Python 3 language, deploy its CPython
   runtime (`~/.rhinocode/py39-rh8`), or start the remote-pipe server on its own — `WaitStatusComplete`/

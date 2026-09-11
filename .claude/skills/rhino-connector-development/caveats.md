@@ -50,7 +50,7 @@ polls `QueryLatest(Python3)` until it is non-null, then `Status.WaitReady()`; th
 ## Symptom: on Windows, `python warm-up failed … Python 3 was not registered by RhinoCode within 180 s`
 
 **Windows RhinoCode does not register Python 3 on its own** (verified 2026-09-11, Rhino 8.35 on Windows
-11 ARM64 under x64 emulation; [[issue #287]]). Unlike the Mac — where the language registers ≈2.4 s
+11 ARM64 under x64 emulation; #287). Unlike the Mac — where the language registers ≈2.4 s
 after load — on Windows a normal launch never registers Python 3, never deploys the CPython runtime
 (`~/.rhinocode/py39-rh8` stays absent), and never starts the RhinoCode remote-pipe server, so
 `WaitStatusComplete`/`QueryLatest` poll until the 3-minute timeout. **Engaging the ScriptEditor once**

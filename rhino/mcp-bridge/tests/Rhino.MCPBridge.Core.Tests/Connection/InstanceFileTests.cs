@@ -81,10 +81,18 @@ public sealed class InstanceFileTests : IDisposable
     [Fact]
     public void Write_NeverLeavesTheTokenWorldReadable_EvenMidWrite()
     {
-        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) { Assert.True(true); return; }
+        var path = Sample().Write(_dir);
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            // Created WITH the owner-only DACL (FileSystemAclExtensions.Create), so there is no
+            // create-then-secure gap, and the atomic rename leaves no *.tmp with a wider ACL behind.
+            AssertWindowsOwnerOnly(path);
+            Assert.Empty(Directory.GetFiles(_dir, "*.tmp"));
+            return;
+        }
+
         // The temp file is created owner-only; there is no chmod-after-write gap to race.
         // Observed through the final file's mode plus the absence of a *.tmp with a wider mode.
-        var path = Sample().Write(_dir);
         Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(path));
         Assert.Empty(Directory.GetFiles(_dir, "*.tmp"));
     }
