@@ -38,14 +38,24 @@ type document struct {
 	LastRun    *lastRun `json:"last_run"`
 }
 
+type grasshopperDocument struct {
+	GrasshopperDocumentID string `json:"gh_document_id"`
+	Title                 string `json:"title"`
+	Path                  string `json:"path"`
+	Active                bool   `json:"active"`
+	Enabled               bool   `json:"enabled"`
+	ComponentCount        int    `json:"component_count"`
+}
+
 type instance struct {
-	InstanceID    string     `json:"instance_id"`
-	RhinoVersion  string     `json:"rhino_version"`
-	Platform      string     `json:"platform"`
-	BridgeVersion string     `json:"bridge_version"`
-	PID           int        `json:"pid"`
-	Status        string     `json:"status"`
-	Documents     []document `json:"documents"`
+	InstanceID           string                `json:"instance_id"`
+	RhinoVersion         string                `json:"rhino_version"`
+	Platform             string                `json:"platform"`
+	BridgeVersion        string                `json:"bridge_version"`
+	PID                  int                   `json:"pid"`
+	Status               string                `json:"status"`
+	Documents            []document            `json:"documents"`
+	GrasshopperDocuments []grasshopperDocument `json:"grasshopper_documents"`
 }
 
 type listInstancesOut struct {

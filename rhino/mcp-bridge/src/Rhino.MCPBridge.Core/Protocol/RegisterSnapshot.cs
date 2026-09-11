@@ -16,10 +16,13 @@ public sealed class RegisterSnapshot
     public string Platform { get; }
     public string BridgeVersion { get; }
     public IReadOnlyList<RegisteredDocument> Documents { get; }
+    /// <summary>Open Grasshopper definitions, instance-level (PRD §10) — process-global, not per RhinoDoc.
+    /// Empty when Grasshopper is not loaded.</summary>
+    public IReadOnlyList<GrasshopperDocument> GrasshopperDocuments { get; }
     /// <summary>"idle" | "busy" | "unrecoverable" at the time the snapshot was built (PRD §05).</summary>
     public string ExecutionState { get; }
 
-    public RegisterSnapshot(Guid instanceId, int pid, string rhinoVersion, string platform, string bridgeVersion, IReadOnlyList<RegisteredDocument> documents, string executionState = "idle")
+    public RegisterSnapshot(Guid instanceId, int pid, string rhinoVersion, string platform, string bridgeVersion, IReadOnlyList<RegisteredDocument> documents, string executionState = "idle", IReadOnlyList<GrasshopperDocument>? grasshopperDocuments = null)
     {
         ExecutionState = executionState;
         InstanceId = instanceId;
@@ -28,5 +31,6 @@ public sealed class RegisterSnapshot
         Platform = platform;
         BridgeVersion = bridgeVersion;
         Documents = documents;
+        GrasshopperDocuments = grasshopperDocuments ?? System.Array.Empty<GrasshopperDocument>();
     }
 }

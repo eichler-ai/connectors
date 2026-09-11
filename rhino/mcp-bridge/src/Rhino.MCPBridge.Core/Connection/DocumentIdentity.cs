@@ -36,6 +36,11 @@ public static class DocumentIdentity
     public static string ForGrasshopperPath(string resolvedAbsolutePath, bool caseInsensitive) =>
         GrasshopperPrefix + ForSavedPath(resolvedAbsolutePath, caseInsensitive).Substring(SavedPrefix.Length);
 
+    /// <summary>An unsaved Grasshopper definition: <c>gh-</c> over the same per-process-salt + title rule as
+    /// <see cref="ForUnsaved"/>, so it is session-stable and distinct across concurrent Rhinos.</summary>
+    public static string ForGrasshopperUnsaved(Guid processSalt, string title) =>
+        GrasshopperPrefix + ForUnsaved(processSalt, title).Substring(UnsavedPrefix.Length);
+
     private static string ShortHash(string input)
     {
         var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(input));

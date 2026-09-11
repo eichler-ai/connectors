@@ -1,11 +1,13 @@
+using System.Linq;
 using Rhino.MCPBridge.Core.Connection;
 using Rhino.MCPBridge.Core.Protocol;
 
 namespace Rhino.MCPBridge.RhinoAdapter;
 
 /// <summary>
-/// The real snapshot: every open RhinoDoc (many on the Mac, one on Windows — PRD §05), with PRD §12
-/// identity. Must be called on the main thread; the host wraps it in <see cref="IMainThread"/>.
+/// The real snapshot: every open RhinoDoc (many on the Mac, one on Windows — PRD §05) plus every open
+/// Grasshopper definition (instance-level, PRD §10), with PRD §12 identity. Must be called on the main
+/// thread; the host wraps it in <see cref="IMainThread"/>.
 /// </summary>
 internal sealed class RhinoDocumentSnapshotSource : IDocumentSnapshotSource
 {
@@ -20,7 +22,7 @@ internal sealed class RhinoDocumentSnapshotSource : IDocumentSnapshotSource
         _log = log;
     }
 
-    public IReadOnlyList<RegisteredDocument> Snapshot()
+    public DocumentSnapshot Snapshot()
     {
         var active = RhinoDoc.ActiveDoc;
         var list = new List<RegisteredDocument>();
@@ -36,7 +38,79 @@ internal sealed class RhinoDocumentSnapshotSource : IDocumentSnapshotSource
             list.Add(new RegisteredDocument(id, title, path, isActive));
         }
 
+        return new DocumentSnapshot(list, SnapshotGrasshopper());
+    }
+
+    /// <summary>Open Grasshopper definitions, or empty. NEVER force-loads Grasshopper: a register happens
+    /// often and loading Grasshopper has real cost and UI side effects, so this returns empty unless the
+    /// Grasshopper assembly is already in the process. The GH-typed enumeration lives in its own method so
+    /// the JIT resolves Grasshopper.dll only when that guard has already passed.</summary>
+    private IReadOnlyList<GrasshopperDocument> SnapshotGrasshopper()
+    {
+        if (!GrasshopperWatcher.GrasshopperLoaded())
+        {
+            return Array.Empty<GrasshopperDocument>();
+        }
+
+        try
+        {
+            return EnumerateGrasshopper();
+        }
+        catch (Exception ex)
+        {
+            _log($"grasshopper snapshot failed (definitions omitted from this register): {ex.Message}");
+            return Array.Empty<GrasshopperDocument>();
+        }
+    }
+
+    private IReadOnlyList<GrasshopperDocument> EnumerateGrasshopper()
+    {
+        var server = global::Grasshopper.Instances.DocumentServer;
+        if (server is null)
+        {
+            return Array.Empty<GrasshopperDocument>();
+        }
+
+        var activeId = ActiveGrasshopperDocumentId();
+        var list = new List<GrasshopperDocument>();
+        foreach (global::Grasshopper.Kernel.GH_Document ghdoc in server)
+        {
+            if (ghdoc is null) continue;
+            string? path = string.IsNullOrEmpty(ghdoc.FilePath) ? null : ResolvePathForIdentity(ghdoc.FilePath, _log);
+            var title = string.IsNullOrEmpty(ghdoc.DisplayName) ? "Untitled" : ghdoc.DisplayName;
+            var id = path is null
+                ? DocumentIdentity.ForGrasshopperUnsaved(_processSalt, title)
+                : DocumentIdentity.ForGrasshopperPath(path, _caseInsensitivePaths);
+            var isActive = activeId is { } a && a == ghdoc.DocumentID;
+            list.Add(new GrasshopperDocument(id, title, path, isActive, ghdoc.Enabled, ghdoc.ObjectCount));
+        }
+
         return list;
+    }
+
+    /// <summary>The active definition's <c>DocumentID</c>, read via reflection. Grasshopper's notion of the
+    /// active document lives on <c>Grasshopper.Instances.ActiveCanvas</c> (a <c>GH_Canvas</c>, a WinForms
+    /// <c>Control</c>) — a type this assembly cannot name without pulling the WinForms framework reference
+    /// the headless build deliberately drops. Reflection reaches its <c>Document.DocumentID</c> without a
+    /// compile-time dependency; any failure just leaves no definition marked active.</summary>
+    private static Guid? ActiveGrasshopperDocumentId()
+    {
+        try
+        {
+            var instances = Type.GetType("Grasshopper.Instances, Grasshopper");
+            var canvas = instances?.GetProperty("ActiveCanvas")?.GetValue(null);
+            var ghdoc = canvas?.GetType().GetProperty("Document")?.GetValue(canvas);
+            if (ghdoc?.GetType().GetProperty("DocumentID")?.GetValue(ghdoc) is Guid id)
+            {
+                return id;
+            }
+        }
+        catch
+        {
+            // No active document detectable; none is marked active.
+        }
+
+        return null;
     }
 
     /// <summary>Absolute, with symlinks resolved where the OS lets us (PRD §12: /Volumes and symlinked

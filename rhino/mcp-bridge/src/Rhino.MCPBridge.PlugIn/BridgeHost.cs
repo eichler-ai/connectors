@@ -167,7 +167,8 @@ internal sealed class BridgeHost : ISessionEnvironment
     /// a timeout rather than a corrupting off-thread RhinoCommon call.</summary>
     private void RebuildSnapshot()
     {
-        var docs = _mainThread.Invoke(() => _documents.Snapshot());
+        var snap = _mainThread.Invoke(() => _documents.Snapshot());
+        var docs = snap.Documents;
         // A document that is gone takes its ledger and clock evidence with it (review of #285).
         var open = new HashSet<string>(docs.Select(d => d.DocumentId));
         foreach (var gone in _snapshot.Documents.Select(d => d.DocumentId).Where(id => !open.Contains(id)))
@@ -177,7 +178,7 @@ internal sealed class BridgeHost : ISessionEnvironment
 
         // PRD §05: each document carries the connector's last completed run on it.
         docs = docs.Select(d => d.WithLastRun(_dispatcher.Ledger.Get(d.DocumentId))).ToList();
-        _snapshot = new RegisterSnapshot(_instanceId, Environment.ProcessId, _rhinoVersion, AppDataPaths.PlatformName(), _bridgeVersion, docs, _dispatcher.ExecutionState);
+        _snapshot = new RegisterSnapshot(_instanceId, Environment.ProcessId, _rhinoVersion, AppDataPaths.PlatformName(), _bridgeVersion, docs, _dispatcher.ExecutionState, snap.GrasshopperDocuments);
     }
 
     private void AcceptLoop()
@@ -257,7 +258,7 @@ internal sealed class BridgeHost : ISessionEnvironment
     public RegisterSnapshot Snapshot()
     {
         var s = _snapshot;
-        return new RegisterSnapshot(s.InstanceId, s.Pid, s.RhinoVersion, s.Platform, s.BridgeVersion, s.Documents, _dispatcher.ExecutionState);
+        return new RegisterSnapshot(s.InstanceId, s.Pid, s.RhinoVersion, s.Platform, s.BridgeVersion, s.Documents, _dispatcher.ExecutionState, s.GrasshopperDocuments);
     }
 
     public Task<string> DispatchAsync(JsonRpcRequest request, CancellationToken cancellationToken) =>

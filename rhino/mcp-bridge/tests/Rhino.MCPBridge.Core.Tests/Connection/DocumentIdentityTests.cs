@@ -49,4 +49,18 @@ public sealed class DocumentIdentityTests
         Assert.StartsWith("gh-", gh);
         Assert.Equal(DocumentIdentity.ForSavedPath("/x/def.gh", true).Substring(4), gh.Substring(3));
     }
+
+    [Fact]
+    public void GrasshopperUnsaved_IsGhPrefixed_SessionStable_AndDistinctAcrossRhinos()
+    {
+        var salt1 = Guid.NewGuid();
+        var salt2 = Guid.NewGuid();
+        var a = DocumentIdentity.ForGrasshopperUnsaved(salt1, "Untitled");
+        Assert.StartsWith("gh-", a);
+        Assert.Equal(a, DocumentIdentity.ForGrasshopperUnsaved(salt1, "Untitled"));      // stable within a process
+        Assert.NotEqual(a, DocumentIdentity.ForGrasshopperUnsaved(salt2, "Untitled"));   // distinct across Rhinos
+        Assert.NotEqual(a, DocumentIdentity.ForGrasshopperUnsaved(salt1, "Untitled 2")); // distinct per title
+        // Shares the unsaved hash body with the tmp- form, differing only in the prefix.
+        Assert.Equal(DocumentIdentity.ForUnsaved(salt1, "Untitled").Substring(4), a.Substring(3));
+    }
 }

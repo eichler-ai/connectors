@@ -36,6 +36,17 @@ type Document struct {
 	LastRun *execution.LastRun `json:"last_run,omitempty"`
 }
 
+// GrasshopperDocument is one open Grasshopper definition (PRD §10). Instance-level, not per Document:
+// Grasshopper's document server is process-global.
+type GrasshopperDocument struct {
+	ID             string `json:"gh_document_id"`
+	Title          string `json:"title"`
+	Path           string `json:"path"`
+	Active         bool   `json:"active"`
+	Enabled        bool   `json:"enabled"`
+	ComponentCount int    `json:"component_count"`
+}
+
 // MemorySample rides on the ping (same shape as the Revit connector's).
 type MemorySample struct {
 	PrivateMB    int64 `json:"private_mb"`
@@ -45,14 +56,17 @@ type MemorySample struct {
 
 // Instance is one connected Rhino.
 type Instance struct {
-	InstanceID     string        `json:"instance_id"`
-	PID            int           `json:"pid"`
-	RhinoVersion   string        `json:"rhino_version"`
-	Platform       string        `json:"platform"`
-	BridgeVersion  string        `json:"bridge_version"`
-	Documents      []Document    `json:"documents"`
-	ConnectedSince time.Time     `json:"connected_since"`
-	Memory         *MemorySample `json:"memory,omitempty"`
+	InstanceID    string     `json:"instance_id"`
+	PID           int        `json:"pid"`
+	RhinoVersion  string     `json:"rhino_version"`
+	Platform      string     `json:"platform"`
+	BridgeVersion string     `json:"bridge_version"`
+	Documents     []Document `json:"documents"`
+	// GrasshopperDocuments are the instance's open Grasshopper definitions (PRD §10); nil/empty when
+	// Grasshopper is not loaded.
+	GrasshopperDocuments []GrasshopperDocument `json:"grasshopper_documents,omitempty"`
+	ConnectedSince       time.Time             `json:"connected_since"`
+	Memory               *MemorySample         `json:"memory,omitempty"`
 	// ExecutionState is what the plug-in last reported (register and every ping): idle, busy or
 	// unrecoverable (PRD §05: busy state lives in the plug-in). "" from an older bridge reads idle.
 	ExecutionState string `json:"execution_state,omitempty"`
@@ -78,6 +92,7 @@ func New() *Registry {
 func clone(inst *Instance) *Instance {
 	cp := *inst
 	cp.Documents = append([]Document(nil), inst.Documents...)
+	cp.GrasshopperDocuments = append([]GrasshopperDocument(nil), inst.GrasshopperDocuments...)
 	if inst.Memory != nil {
 		m := *inst.Memory
 		cp.Memory = &m
