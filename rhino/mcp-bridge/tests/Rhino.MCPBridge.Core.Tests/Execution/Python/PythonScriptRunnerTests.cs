@@ -63,7 +63,7 @@ public sealed class PythonScriptRunnerTests
         {
             Error = new InvalidOperationException("boom from python"),
             StdOut = "before\n",
-            StdErr = "Traceback (most recent call last):\n  File \"<string>\", line 5, in <module>\n  File \"/lib/rhinoscriptsyntax.py\", line 120, in AddCircle\nRuntimeError: boom from python\n",
+            StdErr = "Traceback (most recent call last):\n  File \"<string>\", line 6, in <module>\n  File \"/lib/rhinoscriptsyntax.py\", line 120, in AddCircle\nRuntimeError: boom from python\n",
         };
         var outcome = await runner.RunAsync("x = 1\ny = 2\nraise RuntimeError('boom from python')", TestGlobals.Create(), default, false);
         Assert.False(outcome.Success);
@@ -83,8 +83,8 @@ public sealed class PythonScriptRunnerTests
         // The live shape (RhinoCode 8.35): message "Compile Error", stderr with the staged file and [line:col].
         var live = new PythonScriptException(new Exception("Compile Error"), PythonScriptRunner.ShiftTraceback("Compile Error\ninvalid syntax  (Error CPYC01) file:///Users/me/.rhinocode/stage/3fw0rzwd.uxl:[4:1]\n"));
         Assert.True(live.IsSyntaxError);
-        Assert.Contains("<script>:[2:1]", live.Traceback);
-        Assert.Equal("Compile Error: invalid syntax  (Error CPYC01) <script>:[2:1]", live.Message);
+        Assert.Contains("<script>:[1:1]", live.Traceback);
+        Assert.Equal("Compile Error: invalid syntax  (Error CPYC01) <script>:[1:1]", live.Message);
         var raised = new PythonScriptException(new Exception("invalid syntax"), "  File \"<string>\", line 3\n    x = = 1\nSyntaxError: invalid syntax\n");
         Assert.True(raised.IsSyntaxError);
         Assert.False(new PythonScriptException(new Exception("boom"), "ValueError: boom").IsSyntaxError);
@@ -159,12 +159,13 @@ public sealed class PythonScriptRunnerTests
     [InlineData("", "")]
     [InlineData("File \"<string>\", line 1, in <module>", "File \"<string>\", line 1, in <module>")]
     [InlineData("File \"<string>\", line 2, in <module>", "File \"<string>\", line 2, in <module>")]
-    [InlineData("File \"<string>\", line 3, in <module>", "File \"<script>\", line 1, in <module>")]
-    [InlineData("File \"file:///Users/me/.rhinocode/stage/5i05zwmq.4ha\", line 6, in <module>", "File \"<script>\", line 4, in <module>")]
+    [InlineData("File \"<string>\", line 3, in <module>", "File \"<string>\", line 3, in <module>")]
+    [InlineData("File \"<string>\", line 4, in <module>", "File \"<script>\", line 1, in <module>")]
+    [InlineData("File \"file:///Users/me/.rhinocode/stage/5i05zwmq.4ha\", line 6, in <module>", "File \"<script>\", line 3, in <module>")]
     [InlineData("File \"file:///Users/me/.rhinocode/stage/5i05zwmq.4ha\", line 2, in <module>", "File \"file:///Users/me/.rhinocode/stage/5i05zwmq.4ha\", line 2, in <module>")]
-    [InlineData("invalid syntax  (Error CPYC01) file:///Users/me/.rhinocode/stage/x.y:[5:3]", "invalid syntax  (Error CPYC01) <script>:[3:3]")]
+    [InlineData("invalid syntax  (Error CPYC01) file:///Users/me/.rhinocode/stage/x.y:[5:3]", "invalid syntax  (Error CPYC01) <script>:[2:3]")]
     [InlineData("invalid syntax  (Error CPYC01) file:///Users/me/.rhinocode/stage/x.y:[1:1]", "invalid syntax  (Error CPYC01) file:///Users/me/.rhinocode/stage/x.y:[1:1]")]
-    [InlineData("File \"C:\\Users\\me\\.rhinocode\\stage\\ab.cd\", line 5, in f", "File \"<script>\", line 3, in f")]
+    [InlineData("File \"C:\\Users\\me\\.rhinocode\\stage\\ab.cd\", line 5, in f", "File \"<script>\", line 2, in f")]
     [InlineData("File \"/site-rhinopython/rhinoscript/curve.py\", line 176, in AddCircle", "File \"/site-rhinopython/rhinoscript/curve.py\", line 176, in AddCircle")]
     public void ShiftTraceback_LeavesPrefixFramesAlone(string input, string expected)
     {

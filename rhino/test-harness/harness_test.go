@@ -157,20 +157,6 @@ func rhinocodePath() string {
 	return ""
 }
 
-// skipPythonExecutionOnWindows skips cases that actually run Python in the live host. On Windows,
-// RhinoCode does not reliably finish initialising the Python environment (issue #287): a normal launch
-// never registers Python 3, and even with the ScriptEditor engaged a fast/cached warm-up can leave
-// scriptcontext (and the rest of Rhino's Python module path) unavailable -- and the runner's preamble
-// imports scriptcontext unconditionally, so any live Python run then hard-fails. The compile- and
-// analysis-only Python cases (syntax error, interactive-getter denial) need no live host and still run.
-// Remove this skip when #287 gives the plug-in a reliable headless Python init.
-func skipPythonExecutionOnWindows(t *testing.T) {
-	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("Python execution skipped on Windows pending #287 (RhinoCode Python env not reliably initialised); compile/analysis-only Python cases still run")
-	}
-}
-
 // waitForIdle polls until the instance reports idle. The busy/idle state is the plug-in's, shared
 // across servers (PRD §05), so a case that runs a script right after another case whose script is
 // still draining the main thread would otherwise collide with it -- the window is wider on the
