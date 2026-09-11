@@ -58,7 +58,7 @@ Every script call targets `{instance_id, document_id}`, both from `list_instance
 ```json
 {"instances": [{
   "instance_id": "eb81f92b-...", "rhino_version": "8.35...", "platform": "macos",
-  "pid": 10652, "status": "idle", "memory": {"working_set_mb": 1800},
+  "pid": 10652, "status": "idle", "memory": {"private_mb": 4096, "working_set_mb": 1800, "managed_mb": 520},
   "documents": [{"document_id": "doc-b2c2...", "title": "Tower", "active": true,
     "last_run": {"execution_id": "exec-...", "agent_client_id": "...", "finished_at": "...",
                  "status": "success", "changed_document": true}}]
@@ -72,11 +72,14 @@ Every script call targets `{instance_id, document_id}`, both from `list_instance
 - **Platforms differ.** On **macOS** one Rhino holds **many documents**, one window each — address the
   one you mean with `document_id`. On **Windows** one Rhino holds **one document**; a second file is a
   second instance, and `document_id` may be omitted. `platform` tells you which you are on.
-- `status` is `idle` / `pending` / `busy` / `unresponsive` / `unrecoverable`. Only `idle` starts work
-  at once. `unrecoverable` means that instance needs Rhino restarted — nothing you send will run.
+- `status` is `idle` / `busy` / `unresponsive` / `unrecoverable` (an instance's state; `pending` and
+  `running` are *execution* statuses, not instance ones). Only `idle` starts work at once.
+  `unrecoverable` means that instance needs Rhino restarted — nothing you send will run.
 - `last_run` per document is the connector's last completed run there, from any of your sessions
   (`agent_client_id` names which). It is how you notice another client acted since your last call.
-  `working_set_mb` on macOS is the headline memory figure.
+- `memory` (MB, from the heartbeat) is Rhino's own use: `private_mb` (committed) is the figure to
+  watch — Rhino holds document memory until exit, so it only climbs; restart Rhino once it reaches
+  several GB. `working_set_mb` is OS-trimmed and noisier; `managed_mb` is the .NET heap.
 
 ## Running a script
 
@@ -120,7 +123,7 @@ while (working) { CancellationToken.ThrowIfCancellationRequested(); System.Threa
 | `doc` | `Document` | the routed `Rhino.RhinoDoc`, full RhinoCommon API |
 | `cancel` | `CancellationToken` | cooperative cancellation (above) |
 | `connector` | `Connector` | **this connector's own functions, not Rhino's** — `BridgeVersion`, `RunLabel` |
-| `rs`, `scriptcontext` | — | `rhinoscriptsyntax` and `scriptcontext.doc` (the routed document) |
+| (import `rs`, `scriptcontext`) | — | `rhinoscriptsyntax` and `scriptcontext` are importable, not injected; `scriptcontext.doc` is pre-pointed at the routed document |
 | the BCL | the BCL | `System.IO`, LINQ, etc. — fully usable |
 
 `ghdoc` (Python) is a Grasshopper document handle, `None` until Grasshopper support ships.
@@ -135,8 +138,8 @@ is gated.
 
 - **Refused outright (`script-api-denied`), no opt-in:** the undo/redo members and `_Undo`/`_Redo`
   commands (fact 2 above); the interactive getters and dialogs (fact 3); `RhinoApp.Exit`; and, in
-  Python, `exec`/`eval`/`__import__` and a computed `getattr` (the guard is a text walk and cannot see
-  through them). Change the script; no argument lifts this.
+  Python, the dynamic-code builtins (`exec`, `eval`, `compile`, `__import__`, `importlib`, a computed
+  `getattr`) the text-walk guard cannot see through. Change the script; no argument lifts this.
 - **Confirmation-gated (`script-lifecycle-confirmation-required`):** members that act **outside this
   document's content** and no undo reverts — `RhinoDoc.Save`/`SaveAs`/`Export`/`Write3dmFile`,
   `Open`/`Create`/`Import`, and the `_Save`/`_Export`/`_Open`/`_New`/`_Close`/`_Print`-class commands
@@ -144,8 +147,9 @@ is gated.
   intended, **resend the identical call with `confirm_lifecycle_actions: true`**; otherwise remove the
   call.
 
-A note on `RunScript`/`rs.Command`: a **computed** command string (`rs.Command(cmd_variable)`) is not
-gated — those functions call Rhino directly, past the connector — so use a literal when you can.
+A note on `RunScript`/`rs.Command`: the gate reads command tokens out of **literal** string
+arguments, so a **computed** command string (`rs.Command(cmd_variable)`) slips past it — the guard
+cannot see the token inside a variable. Use a literal so the gate can protect you.
 
 ## Looking at a viewport — `capture_view`
 

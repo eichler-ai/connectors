@@ -42,8 +42,10 @@ type SkillBuild struct {
 	Revision     string `json:"revision"`
 	RevisionTime string `json:"revision_time,omitempty"`
 	Modified     bool   `json:"modified,omitempty"`
-	SkillHash    string `json:"skill_sha256"`
-	Note         string `json:"note"`
+	// SkillHash is the first 12 hex chars of skill.md's SHA-256 -- an identifier a reader can
+	// regenerate, not the full digest (see the note for the exact shasum invocation).
+	SkillHash string `json:"skill_sha256_prefix"`
+	Note      string `json:"note"`
 }
 
 // GetSkillsOut carries the document plus its format and the provenance of the
@@ -87,8 +89,9 @@ func skillNote(version string, info buildinfo.Info, hash string) string {
 	}
 	return note + " Everything it serves -- this document, the tool schemas, its behaviour -- is " +
 		"compiled in, so the definitive check is the document itself: " +
-		"`shasum -a 256 rhino/mcp-server/internal/mcpserver/skill.md` must print " + hash +
-		". If it prints anything else, this broker is not your checkout -- rebuild and restart it " +
+		"`shasum -a 256 rhino/mcp-server/internal/mcpserver/skill.md | cut -c1-12` must print " + hash +
+		" (this is the first 12 hex chars of the digest -- shasum prints the full 64 plus the filename). " +
+		"If it prints anything else, this broker is not your checkout -- rebuild and restart it " +
 		"(`go build ./cmd/mcp-server`)."
 }
 

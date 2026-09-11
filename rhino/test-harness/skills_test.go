@@ -37,7 +37,7 @@ func TestGetSkillsReturnsTheGuideWithProvenance(t *testing.T) {
 		Build  struct {
 			Version   string `json:"version"`
 			Revision  string `json:"revision"`
-			SkillHash string `json:"skill_sha256"`
+			SkillHash string `json:"skill_sha256_prefix"`
 			Note      string `json:"note"`
 		} `json:"build"`
 	}
@@ -65,7 +65,7 @@ func TestGetSkillsReturnsTheGuideWithProvenance(t *testing.T) {
 	sum := sha256.Sum256(onDisk)
 	want := hex.EncodeToString(sum[:])[:12]
 	if out.Build.SkillHash != want {
-		t.Fatalf("get_skills reports skill_sha256 %q but the repo's skill.md hashes to %q -- the running broker is not this source (rebuild it)", out.Build.SkillHash, want)
+		t.Fatalf("get_skills reports skill_sha256_prefix %q but the repo's skill.md hashes to %q -- the running broker is not this source (rebuild it)", out.Build.SkillHash, want)
 	}
 	if string(onDisk) != out.Skill {
 		t.Fatal("the served guide differs from the repo's skill.md byte-for-byte despite matching hashes (impossible unless the hash is faked)")
