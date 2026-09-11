@@ -41,6 +41,9 @@ internal sealed class UndoRunExecutor
         /// <summary>"csharp" or "python"; the dispatcher has already checked the runner exists.</summary>
         public required string Language { get; init; }
         public required string DocumentId { get; init; }
+        /// <summary>The Grasshopper definition to bind as the script's ghdoc/GrasshopperDocument (PRD §10);
+        /// "" when the caller passed none, in which case the global is null.</summary>
+        public string GrasshopperDocumentId { get; init; } = "";
         public required CancellationToken CancellationToken { get; init; }
         public bool ConfirmLifecycleActions { get; init; }
         public string? Label { get; init; }
@@ -86,6 +89,14 @@ internal sealed class UndoRunExecutor
             return ScriptExecutionOutcome.Failed(new DocumentNotFoundException(DocumentNotFound(request)), "");
         }
 
+        // Resolve the addressed Grasshopper definition, if any, BEFORE entering the run command: a
+        // gh_document_id that matches no open definition fails loudly rather than silently binding null.
+        var grasshopperDocument = _host.ResolveGrasshopperDocument(request.GrasshopperDocumentId, out var grasshopperNotFound);
+        if (grasshopperNotFound)
+        {
+            return ScriptExecutionOutcome.Failed(new GrasshopperDocumentNotFoundException(GrasshopperDocumentNotFound(request)), "");
+        }
+
         var undoLabel = UndoLabel.For(request.Label);
         var mutations = new MutationTracker();
         var changed = false;
@@ -99,7 +110,7 @@ internal sealed class UndoRunExecutor
             try
             {
                 subscription = _host.SubscribeChanges(document, mutations.Record, () => changed = true);
-                var globals = new ScriptGlobals((RhinoDoc)document.Raw!, request.CancellationToken, _host.BridgeVersion, request.Label);
+                var globals = new ScriptGlobals((RhinoDoc)document.Raw!, request.CancellationToken, _host.BridgeVersion, request.Label, grasshopperDocument);
                 var runner = _runners.Get(request.Language) ?? throw new InvalidOperationException($"no runner for language '{request.Language}'");
                 outcome = runner.RunAsync(request.ScriptText, globals, request.CancellationToken, request.ConfirmLifecycleActions).GetAwaiter().GetResult();
             }
@@ -197,6 +208,18 @@ internal sealed class UndoRunExecutor
             },
             new[] { "Pick a document_id from open_documents in this error's detail (or call list_instances), then retry." });
     }
+
+    private DiagnosticRecord GrasshopperDocumentNotFound(Request request)
+    {
+        return DiagnosticRecord.Create(DiagnosticSeverity.Error, "grasshopper-document-not-found", DiagnosticSource.Execution,
+            $"execution {request.ExecutionId} could not run: no open Grasshopper definition in this instance has gh_document_id '{request.GrasshopperDocumentId}'.",
+            new Dictionary<string, object?>
+            {
+                ["execution_id"] = request.ExecutionId,
+                ["requested_gh_document_id"] = request.GrasshopperDocumentId,
+            },
+            new[] { "Pick a gh_document_id from grasshopper_documents in list_instances (Grasshopper must be open and the definition loaded), then retry; or omit it to run without a bound definition." });
+    }
 }
 
 /// <summary>Carries a ready-made §01 record for the document-not-found refusal.</summary>
@@ -204,4 +227,11 @@ public sealed class DocumentNotFoundException : Exception
 {
     public DiagnosticRecord Record { get; }
     public DocumentNotFoundException(DiagnosticRecord record) : base(record.Message) { Record = record; }
+}
+
+/// <summary>Carries a ready-made §01 record for the grasshopper-document-not-found refusal (PRD §10).</summary>
+public sealed class GrasshopperDocumentNotFoundException : Exception
+{
+    public DiagnosticRecord Record { get; }
+    public GrasshopperDocumentNotFoundException(DiagnosticRecord record) : base(record.Message) { Record = record; }
 }

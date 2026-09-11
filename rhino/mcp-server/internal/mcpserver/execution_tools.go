@@ -19,6 +19,7 @@ const (
 type ExecuteScriptIn struct {
 	InstanceID              string `json:"instance_id" jsonschema:"instance_id of the target Rhino, from list_instances"`
 	DocumentID              string `json:"document_id,omitempty" jsonschema:"document_id of the target document within that instance (from list_instances). Routes for real: the script runs against that document and an id matching no open document fails with document-not-found plus an open_documents list. Omit for the active document. On Windows every instance has exactly one document"`
+	GrasshopperDocumentID   string `json:"gh_document_id,omitempty" jsonschema:"optional gh_document_id (from list_instances' grasshopper_documents) of the Grasshopper definition to bind: the script's ghdoc (Python) / GrasshopperDocument (C#) global becomes that GH_Document. Omit to leave it null. In C# it is typed object -- cast it: (Grasshopper.Kernel.GH_Document)GrasshopperDocument. An id matching no open definition fails with grasshopper-document-not-found (Grasshopper must be open with that definition loaded)"`
 	Language                string `json:"language" jsonschema:"\"csharp\" or \"python\". Required, no default: the two hosts differ and a script for one does not run in the other. Python is real CPython 3 (Rhino 8's own): globals doc, ghdoc, connector, cancel; assign result to return a value; rhinoscriptsyntax and scriptcontext work and scriptcontext.doc is the routed document. A bridge whose Python host is still loading answers language-not-available with the reason; retry in a few seconds"`
 	Script                  string `json:"script" jsonschema:"the script body. C#: a Roslyn script whose scope holds exactly three globals, Document (Rhino.RhinoDoc), CancellationToken and Connector; only System is imported, so qualify Rhino types; return a value with a return statement. Python: CPython 3 with globals doc (Rhino.RhinoDoc), ghdoc, connector and cancel (cancel.Check() raises when cancelled); import Rhino, rhinoscriptsyntax, scriptcontext as usual; assign a variable named result to return a value; print goes to output"`
 	TimeoutMs               int    `json:"timeout_ms,omitempty" jsonschema:"milliseconds to wait for completion before returning a pending/running status; default 30000"`
@@ -114,7 +115,7 @@ func RegisterExecution(s *mcp.Server, router *execution.Router) {
 			maxDurationMs = defaultMaxDurationMs
 		}
 		res, drec := router.ExecuteScript(ctx, in.InstanceID, in.Script, execution.Options{
-			Language: in.Language, DocumentID: in.DocumentID, TimeoutMs: timeoutMs, MaxDurationMs: maxDurationMs,
+			Language: in.Language, DocumentID: in.DocumentID, GrasshopperDocumentID: in.GrasshopperDocumentID, TimeoutMs: timeoutMs, MaxDurationMs: maxDurationMs,
 			ConfirmLifecycleActions: in.ConfirmLifecycleActions, Label: in.Label,
 		})
 		return toolResult(res, drec)

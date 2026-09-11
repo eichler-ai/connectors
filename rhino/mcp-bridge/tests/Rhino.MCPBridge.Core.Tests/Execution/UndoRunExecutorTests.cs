@@ -10,9 +10,9 @@ public sealed class UndoRunExecutorTests
 {
     private static readonly RoslynScriptRunner Runner = new();
 
-    private static UndoRunExecutor.Request Req(string script, string docId = "", string? label = null, CancellationToken ct = default) => new()
+    private static UndoRunExecutor.Request Req(string script, string docId = "", string? label = null, CancellationToken ct = default, string ghDocId = "") => new()
     {
-        ExecutionId = "exec-1", ScriptText = script, Language = "csharp", DocumentId = docId, CancellationToken = ct, Label = label,
+        ExecutionId = "exec-1", ScriptText = script, Language = "csharp", DocumentId = docId, GrasshopperDocumentId = ghDocId, CancellationToken = ct, Label = label,
     };
 
     private static void OneAdd(Action<DocumentChange> on) => on(new DocumentChange(DocumentChange.Kind.Added, Guid.NewGuid(), "Brep", "Default"));
@@ -143,5 +143,42 @@ public sealed class UndoRunExecutorTests
     {
         var l = UndoLabel.For(new string('x', 200));
         Assert.True(l.Length <= "MCP: ".Length + UndoLabel.MaxLength);
+    }
+
+    // ----- gh_document_id -> GrasshopperDocument global (PRD §10, phase 4 PR2) -----
+
+    [Fact]
+    public void OmittedGrasshopperDocumentId_LeavesTheGlobalNull()
+    {
+        var outcome = new UndoRunExecutor(new ScriptRunners(Runner), new FakeRunHost())
+            .Execute(Req("return GrasshopperDocument == null ? \"null\" : \"set\";"))!;
+        Assert.Equal("null", outcome.ReturnValue);
+    }
+
+    [Fact]
+    public void ResolvedGrasshopperDocumentId_ReachesTheScriptGlobal()
+    {
+        var host = new FakeRunHost();
+        host.KnownGrasshopperDocumentIds.Add("gh-known");
+        var outcome = new UndoRunExecutor(new ScriptRunners(Runner), host)
+            .Execute(Req("return GrasshopperDocument == null ? \"null\" : \"set\";", ghDocId: "gh-known"))!;
+        Assert.Equal("set", outcome.ReturnValue);
+    }
+
+    [Fact]
+    public void UnknownGrasshopperDocumentId_FailsWithGrasshopperDocumentNotFound_BeforeRunning()
+    {
+        var host = new FakeRunHost();
+        var outcome = new UndoRunExecutor(new ScriptRunners(Runner), host)
+            .Execute(Req("return 1;", ghDocId: "gh-nope"))!;
+        var gnf = Assert.IsType<GrasshopperDocumentNotFoundException>(outcome.Exception);
+        Assert.Equal("grasshopper-document-not-found", gnf.Record.Code);
+        Assert.Equal(0, host.CommandsRun); // refused before the run command started
+    }
+
+    [Fact]
+    public void GlobalNames_IncludesGrasshopperDocument()
+    {
+        Assert.Contains("GrasshopperDocument", ScriptGlobals.GlobalNames);
     }
 }

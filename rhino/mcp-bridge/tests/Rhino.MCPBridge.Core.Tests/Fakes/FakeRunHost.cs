@@ -21,8 +21,24 @@ internal sealed class FakeRunHost : IRunHost
     public int CommandsRun { get; private set; }
     public HashSet<string> KnownDocumentIds { get; } = new() { "", "tmp-known" };
 
+    /// <summary>gh_document_ids this fake resolves; a non-empty id not in here reports not-found.</summary>
+    public HashSet<string> KnownGrasshopperDocumentIds { get; } = new();
+
+    /// <summary>The opaque GH_Document stand-in a resolved gh_document_id yields (an object in tier 1;
+    /// a real GH_Document only lives inside Rhino).</summary>
+    public object GrasshopperDocumentStub { get; } = new();
+
     // Raw is null: a RhinoDoc must never be materialised in tier 1 (see RunDocument's doc).
     public RunDocument? ResolveDocument(string documentId) => KnownDocumentIds.Contains(documentId) ? new RunDocument(documentId.Length == 0 ? "tmp-known" : documentId, raw: null) : null;
+
+    public object? ResolveGrasshopperDocument(string grasshopperDocumentId, out bool notFound)
+    {
+        notFound = false;
+        if (string.IsNullOrEmpty(grasshopperDocumentId)) return null; // none requested
+        if (KnownGrasshopperDocumentIds.Contains(grasshopperDocumentId)) return GrasshopperDocumentStub;
+        notFound = true;
+        return null;
+    }
 
     public IReadOnlyList<(string DocumentId, string Title, bool Active)> OpenDocuments() => new[] { ("tmp-known", "Untitled", true) };
 

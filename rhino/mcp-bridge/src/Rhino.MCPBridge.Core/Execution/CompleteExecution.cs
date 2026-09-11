@@ -27,9 +27,10 @@ internal static class CompleteExecution
         DiagnosticRecord record = ex0 switch
         {
             DocumentNotFoundException dnf => dnf.Record,
+            GrasshopperDocumentNotFoundException gnf => gnf.Record,
             Microsoft.CodeAnalysis.Scripting.CompilationErrorException cex => DiagnosticRecord.Create(DiagnosticSeverity.Error, "script-compilation-failed", DiagnosticSource.Execution,
                 cex.Message, new Dictionary<string, object?> { ["execution_id"] = executionId },
-                new[] { "Fix the script. The scope has exactly three globals: Document (Rhino.RhinoDoc), CancellationToken, and Connector; only System is imported, so qualify Rhino types (Rhino.Geometry.Sphere) or add a using at the top." }),
+                new[] { "Fix the script. The scope has exactly four globals: Document (Rhino.RhinoDoc), CancellationToken, Connector, and GrasshopperDocument (an object -- cast it to Grasshopper.Kernel.GH_Document when you passed a gh_document_id); only System is imported, so qualify Rhino types (Rhino.Geometry.Sphere) or add a using at the top." }),
             Python.PythonScriptException py when py.IsSyntaxError => DiagnosticRecord.Create(DiagnosticSeverity.Error, "script-compilation-failed", DiagnosticSource.Execution,
                 py.Message, new Dictionary<string, object?> { ["execution_id"] = executionId, ["traceback"] = py.Traceback },
                 new[] { "Fix the script. Line numbers in the traceback refer to the script as sent. The scope has four globals: doc (Rhino.RhinoDoc), ghdoc, connector, cancel; assign `result` to return a value." }),

@@ -13,6 +13,13 @@ internal interface IRunHost
     /// An empty id means the active document (null when there is none).</summary>
     RunDocument? ResolveDocument(string documentId);
 
+    /// <summary>Resolves a gh_document_id to the open Grasshopper definition (a <c>GH_Document</c>, returned
+    /// opaque as <see cref="object"/> — Core must not name Grasshopper types), for the script's
+    /// ghdoc/GrasshopperDocument global (PRD §10). Null when the id is empty (none requested) or Grasshopper
+    /// is not loaded. <paramref name="notFound"/> is true ONLY when a non-empty id matched no open
+    /// definition, so the executor fails loudly instead of silently binding null.</summary>
+    object? ResolveGrasshopperDocument(string grasshopperDocumentId, out bool notFound);
+
     /// <summary>The ids and titles of every open document, for a document-not-found error's candidates.</summary>
     IReadOnlyList<(string DocumentId, string Title, bool Active)> OpenDocuments();
 
