@@ -4,6 +4,7 @@ package harness_test
 
 import (
 	"encoding/json"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -133,7 +134,15 @@ func TestDiscoverySearchFunctionsFindsCircle_AndIndexBuilds(t *testing.T) {
 	// search_functions works immediately via the plug-in's keyword ranker, and becomes the broker's
 	// semantic index once it finishes building (paging dump_members over ~17.8k members). Poll until a
 	// broker ranker answers, proving the end-to-end index path; accept the fallback until then.
-	brokerRankers := map[string]bool{"semantic": true, "semantic-no-rerank": true, "lexical": true}
+	//
+	// When the server bundles the ranking models (the dev/release build does), require the index to reach
+	// a SEMANTIC ranker -- accepting "lexical" would silently pass a build whose embedder failed to load
+	// (review of #295 F5c). Only a genuinely model-less build may settle for lexical.
+	modelsBundled := strings.Contains(searchModelsLine(t), "bundled and verified")
+	brokerRankers := map[string]bool{"semantic": true, "semantic-no-rerank": true}
+	if !modelsBundled {
+		brokerRankers["lexical"] = true
+	}
 	var out searchFunctionsOut
 	var sawBrokerIndex bool
 	deadline := time.Now().Add(120 * time.Second)
@@ -169,4 +178,18 @@ func TestDiscoverySearchFunctionsFindsCircle_AndIndexBuilds(t *testing.T) {
 		t.Fatalf("the broker semantic index never became ready within the timeout (last ranker=%s) -- dump_members paging or the index build may be broken", out.Ranker)
 	}
 	t.Logf("search ranker=%s, %d matched", out.Ranker, out.TotalMatched)
+}
+
+// searchModelsLine runs the broker exe with -search-models and returns its one-line report, so a test
+// can tell a models-bundled build (must reach a semantic ranker) from a model-less one (lexical is fine).
+func searchModelsLine(t *testing.T) string {
+	t.Helper()
+	if *serverExe == "" {
+		return ""
+	}
+	out, err := exec.Command(*serverExe, "-search-models").CombinedOutput()
+	if err != nil {
+		t.Logf("-search-models exited non-zero (%v); treating as model-less: %s", err, out)
+	}
+	return string(out)
 }

@@ -197,3 +197,22 @@ func TestBridgeErrorIsForwarded(t *testing.T) {
 		t.Fatalf("drec = %+v", drec)
 	}
 }
+
+// dropConns reports one instance in Connected() but returns no conn from Conn(),
+// simulating the instance dropping in the window between the two calls
+// (discovery.go's resolveConn documents handling this; F5a of #295 review — it had no coverage).
+type dropConns struct{ id string }
+
+func (d *dropConns) Conn(string) (*transport.Conn, bool) { return nil, false }
+func (d *dropConns) Connected() []string                 { return []string{d.id} }
+
+func TestResolveHandlesInstanceDroppedBetweenConnectedAndConn(t *testing.T) {
+	r := NewRouter(&dropConns{id: "inst-gone"}, registry.New())
+	_, _, drec := r.ResolveInstance("") // omitted -> Connected() lists it, Conn() then misses
+	if drec == nil {
+		t.Fatal("expected an error when the only connected instance drops mid-resolve, got nil")
+	}
+	if drec.Code != "no-instance-connected" {
+		t.Fatalf("code = %q, want no-instance-connected", drec.Code)
+	}
+}

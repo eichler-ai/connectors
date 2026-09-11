@@ -20,7 +20,7 @@ const discoverySource = "mcp-server.internal.mcpserver"
 
 // ListFunctionsIn is the input schema for the list_functions tool.
 type ListFunctionsIn struct {
-	InstanceID string `json:"instance_id,omitempty" jsonschema:"instance_id of the target Rhino instance; if omitted, any connected instance is used as long as all connected instances share one Rhino version -- otherwise this errors and lists the candidates, since results would silently be version-specific"`
+	InstanceID string `json:"instance_id,omitempty" jsonschema:"instance_id of the target Rhino instance; if omitted, any connected instance is used as long as all connected instances share one Rhino version -- otherwise this errors and lists the candidates, since results would silently be version-specific. Among same-version instances the pick is arbitrary, so pass instance_id when their loaded plug-ins differ (each instance indexes its own add-ins)"`
 	Namespace  string `json:"namespace,omitempty" jsonschema:"omit for the namespace list; provide alone for the type list in that namespace; provide with type_name for that type's member list, e.g. Rhino.Geometry"`
 	TypeName   string `json:"type_name,omitempty" jsonschema:"scope to one type within namespace (namespace is required alongside this) -- bare name (Sphere) or fully-qualified (Rhino.Geometry.Sphere), both work"`
 	Cursor     string `json:"cursor,omitempty" jsonschema:"opaque pagination cursor echoed back from a prior response's next_cursor"`
@@ -29,7 +29,7 @@ type ListFunctionsIn struct {
 
 // SearchFunctionsIn is the input schema for the search_functions tool.
 type SearchFunctionsIn struct {
-	InstanceID string `json:"instance_id,omitempty" jsonschema:"instance_id of the target Rhino instance; if omitted, any connected instance is used as long as all connected instances share one Rhino version -- otherwise this errors and lists the candidates, since results would silently be version-specific"`
+	InstanceID string `json:"instance_id,omitempty" jsonschema:"instance_id of the target Rhino instance; if omitted, any connected instance is used as long as all connected instances share one Rhino version -- otherwise this errors and lists the candidates, since results would silently be version-specific. Among same-version instances the pick is arbitrary, so pass instance_id when their loaded plug-ins differ (each instance indexes its own add-ins)"`
 	Query      string `json:"query" jsonschema:"REQUIRED. One plain sentence describing the task, naming the Rhino type and the operation, e.g. \"add a sphere to the document\" or \"get every curve on a layer\". Matched by sentence embedding plus keyword fusion and reranked by a cross-encoder, so intent and synonyms match without the exact API name; a suspected type or member name dropped into the sentence also scores through the keyword pass. Avoid bare single keywords."`
 	Namespace  string `json:"namespace,omitempty" jsonschema:"scope the search to one namespace, e.g. Rhino.Geometry"`
 	Cursor     string `json:"cursor,omitempty" jsonschema:"opaque pagination cursor echoed back from a prior response's next_cursor"`
@@ -38,15 +38,15 @@ type SearchFunctionsIn struct {
 
 // DescribeFunctionIn is the input schema for the describe_function tool.
 type DescribeFunctionIn struct {
-	InstanceID string `json:"instance_id,omitempty" jsonschema:"instance_id of the target Rhino instance; if omitted, any connected instance is used as long as all connected instances share one Rhino version -- otherwise this errors and lists the candidates, since results would silently be version-specific"`
+	InstanceID string `json:"instance_id,omitempty" jsonschema:"instance_id of the target Rhino instance; if omitted, any connected instance is used as long as all connected instances share one Rhino version -- otherwise this errors and lists the candidates, since results would silently be version-specific. Among same-version instances the pick is arbitrary, so pass instance_id when their loaded plug-ins differ (each instance indexes its own add-ins)"`
 	Member     string `json:"member,omitempty" jsonschema:"a fully-qualified MEMBER (Type.Member), e.g. Rhino.Geometry.Sphere.Radius or Rhino.Geometry.Mesh.CreateFromBox -- NOT a bare type: describe_function is member-oriented, so a type alone (Rhino.Geometry.Sphere) is not found. Use list_functions to browse a type's members. Optional when member_id is given."`
 	MemberID   string `json:"member_id,omitempty" jsonschema:"an exact XML-doc-id, e.g. M:Rhino.Geometry.Mesh.CreateFromBox(Rhino.Geometry.BoundingBox,System.Int32,System.Int32,System.Int32), to pick one specific overload -- the reliable disambiguator; returned by search_functions results and by this tool's own overloads[] list when member is ambiguous"`
 }
 
-// Member is one reflected API member, the shape shared by list_functions'
-// members[] and search_functions' results[] (PRD §09). Kind is the taxonomy
-// (core/addin now; grasshopper/rhinoscript in later phases), passed through
-// from the plug-in verbatim.
+// Member is one reflected API member in search_functions' results[] (PRD §09).
+// Kind is the member CATEGORY -- Method/Property/Event/Constructor/Field --
+// passed through from the plug-in verbatim, NOT the core/addin corpus taxonomy
+// (that rides a separate is_core flag on dump_members and is not surfaced here).
 type Member struct {
 	MemberID      string  `json:"member_id"`
 	Kind          string  `json:"kind"`
@@ -193,8 +193,18 @@ func RegisterDiscovery(s *mcp.Server, r *discovery.Router, search *manager.Manag
 		Name:        "search_functions",
 		Description: "Semantic search over the Rhino API (RhinoCommon and loaded plug-ins). Write query as one plain sentence describing the task and naming the type and operation; ranking fuses a sentence-embedding pass with a keyword pass and reranks with a cross-encoder, so you do not need the exact type/method name. Paginated.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in SearchFunctionsIn) (*mcp.CallToolResult, SearchFunctionsOut, error) {
+		// Resolve the instance ONCE (review of #295 F3): the index path, the wire fallback and the
+		// fallback notice must all describe the SAME instance even if the dialer's connection set
+		// changes mid-call. The resolved id is concrete, so every downstream resolve is deterministic.
+		// (F2: an unscoped pick among same-version instances is arbitrary when their loaded add-ins
+		// differ -- the schema says so, and the registry has no per-corpus fingerprint to disambiguate.)
+		resolvedID, rhinoVersion, rdrec := r.ResolveInstance(in.InstanceID)
+		if rdrec != nil {
+			out := SearchFunctionsOut{Error: rdrec}
+			return errorCallToolResultFor(out), out, nil
+		}
 		if search != nil {
-			if out, served := searchViaIndex(ctx, r, search, in); served {
+			if out, served := searchViaIndex(ctx, r, search, in, resolvedID, rhinoVersion); served {
 				if out.Error != nil {
 					return errorCallToolResultFor(out), out, nil
 				}
@@ -211,7 +221,7 @@ func RegisterDiscovery(s *mcp.Server, r *discovery.Router, search *manager.Manag
 		if in.TopN > 0 {
 			params["top_n"] = in.TopN
 		}
-		raw, rhinoVersion, drec := r.SearchFunctions(ctx, in.InstanceID, params)
+		raw, _, drec := r.SearchFunctions(ctx, resolvedID, params)
 		if drec != nil {
 			out := SearchFunctionsOut{Error: drec}
 			return errorCallToolResultFor(out), out, nil
@@ -225,11 +235,9 @@ func RegisterDiscovery(s *mcp.Server, r *discovery.Router, search *manager.Manag
 		out.Guidance = searchGuidance(len(out.Results), out.TotalMatched)
 		if search != nil {
 			out.Ranker = rankerKeywordFallback
-			if resolved, _, rdrec := r.ResolveInstance(in.InstanceID); rdrec == nil {
-				st := search.Status(resolved)
-				out.Guidance = fallbackGuidance(st) + out.Guidance
-				out.Notices = append(out.Notices, fallbackNotice(resolved, st))
-			}
+			st := search.Status(resolvedID)
+			out.Guidance = fallbackGuidance(st) + out.Guidance
+			out.Notices = append(out.Notices, fallbackNotice(resolvedID, st))
 		}
 		return nil, out, nil
 	})
@@ -287,11 +295,7 @@ func errorCallToolResultFor(out any) *mcp.CallToolResult {
 // served is false when the index cannot answer (still building/failed), so the
 // caller falls back to the plug-in's ranker; an unresolvable instance is served
 // as an error.
-func searchViaIndex(ctx context.Context, r *discovery.Router, search *manager.Manager, in SearchFunctionsIn) (SearchFunctionsOut, bool) {
-	resolved, rhinoVersion, drec := r.ResolveInstance(in.InstanceID)
-	if drec != nil {
-		return SearchFunctionsOut{Error: drec}, true
-	}
+func searchViaIndex(ctx context.Context, r *discovery.Router, search *manager.Manager, in SearchFunctionsIn, resolved, rhinoVersion string) (SearchFunctionsOut, bool) {
 	res, err := search.Search(ctx, resolved, in.Query, in.Namespace)
 	if errors.Is(err, manager.ErrNotReady) {
 		return SearchFunctionsOut{}, false
