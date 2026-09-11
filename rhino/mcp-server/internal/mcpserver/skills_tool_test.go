@@ -88,6 +88,9 @@ var registeredToolNames = []string{
 	"execute_script",
 	"poll_execution",
 	"cancel_execution",
+	"search_functions",
+	"list_functions",
+	"describe_function",
 	"capture_view",
 	"undo",
 	"redo",
@@ -117,6 +120,10 @@ func TestSkillFileCoversTheBriefedTopics(t *testing.T) {
 		"error interpretation":        "remedy",
 		"unrecoverable handling":      "unrecoverable",
 		"human status entry":          "MCPBridgeStatus",
+		// The discovery surface (list/search/describe) and, specifically, that describe returns BOTH call
+		// shapes -- the marker is the Python-form field name, which the prose cannot lose without losing the
+		// dual-call-shape story an agent depends on to write either language.
+		"api discovery":               "python_call",
 	}
 	for topic, marker := range topics {
 		if !strings.Contains(skillFile, marker) {
