@@ -123,7 +123,7 @@ func TestSkillFileCoversTheBriefedTopics(t *testing.T) {
 		// The discovery surface (list/search/describe) and, specifically, that describe returns BOTH call
 		// shapes -- the marker is the Python-form field name, which the prose cannot lose without losing the
 		// dual-call-shape story an agent depends on to write either language.
-		"api discovery":               "python_call",
+		"api discovery": "python_call",
 	}
 	for topic, marker := range topics {
 		if !strings.Contains(skillFile, marker) {
