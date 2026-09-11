@@ -15,4 +15,19 @@
     <ProjectReference Include="../Rhino.MCPBridge.Core/Rhino.MCPBridge.Core.csproj" />
     <ProjectReference Include="../Rhino.MCPBridge.RhinoAdapter/Rhino.MCPBridge.RhinoAdapter.csproj" />
   </ItemGroup>
+
+  <!-- API discovery (PRD §09): SQLitePCLRaw's native e_sqlite3 resolver checks the loading assembly's own
+       directory, but under Rhino's LoadFrom-style plug-in load it does NOT walk runtimes/<rid>/native/
+       (the same finding the Revit connector hit). Flatten the platform-correct native beside the managed
+       DLLs so the resolver finds it. On Windows always win-x64 (Rhino 8 is x64, incl. under ARM64
+       emulation); on macOS the SDK's own RID (arm64 or x64 build host == the Rhino it deploys to). -->
+  <Target Name="FlattenSqliteNative" AfterTargets="Build" Condition="'$(TargetFramework)'!=''">
+    <!-- Flatten regardless of build OS, Exists-guarded: a macOS build then also carries win-x64
+         e_sqlite3.dll so the eventual single cross-platform yak package (PRD §15/phase 7) works on
+         Windows too (review #294 M3). Rhino 8 is x64 on Windows, incl. under ARM64 emulation, so win-x64. -->
+    <Copy SourceFiles="$(TargetDir)runtimes/win-x64/native/e_sqlite3.dll" DestinationFolder="$(TargetDir)"
+          Condition="Exists('$(TargetDir)runtimes/win-x64/native/e_sqlite3.dll')" />
+    <Copy SourceFiles="$(TargetDir)runtimes/$(NETCoreSdkRuntimeIdentifier)/native/libe_sqlite3.dylib" DestinationFolder="$(TargetDir)"
+          Condition="Exists('$(TargetDir)runtimes/$(NETCoreSdkRuntimeIdentifier)/native/libe_sqlite3.dylib')" />
+  </Target>
 </Project>

@@ -16,11 +16,16 @@
          (see its doc): the script-facing globals ARE the real RhinoDoc. Compile-time only. -->
     <PackageReference Include="RhinoCommon" Version="$(RhinoCommonVersion)" ExcludeAssets="runtime" PrivateAssets="all" />
     <PackageReference Include="Microsoft.CodeAnalysis.CSharp.Scripting" Version="4.11.0" />
+    <!-- API discovery (PRD §09): the persistent SQLite/FTS5 member cache. Pin past SQLitePCLRaw 2.1.10
+         that Microsoft.Data.Sqlite 9.0.0 would otherwise transitively pull. -->
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.0" />
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.5" />
     <ProjectReference Include="../Eichler.Connectors.Rhino/Eichler.Connectors.Rhino.csproj" />
   </ItemGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="Rhino.MCPBridge.RhinoAdapter" />
     <InternalsVisibleTo Include="Rhino.MCPBridge.PlugIn" />
     <InternalsVisibleTo Include="Rhino.MCPBridge.Core.Tests" />
+    <InternalsVisibleTo Include="Rhino.MCPBridge.Discovery.Tests" />
   </ItemGroup>
 </Project>

@@ -352,10 +352,30 @@ public sealed class RequestDispatcherTests
     }
 
     [Fact]
+    public async Task EveryMethodInSupportedMethodsIsActuallyRouted()
+    {
+        // Guards SupportedMethods <-> switch drift: a name advertised as supported but no longer routed
+        // would fall to unknown-method (review of #294 m5). Build a production-shaped dispatcher (capture +
+        // onMainThread wired, as BridgeHost does) so the capture_view case is reachable; no DiscoveryService
+        // (the discovery cases still route, answering discovery-unavailable, which is NOT unknown-method).
+        var runner = new RoslynScriptRunner(); runner.WarmupCompile();
+        var d = new RequestDispatcher(ExecutionManager.CreateDefault(ExecutionRingBuffer.CreateDefault()),
+            new UndoRunExecutor(new ScriptRunners(runner), new FakeRunHost()), new DeferredLauncher(), _ => { },
+            capture: new Core.Capture.ViewCaptureService(new NoViewports()), onMainThread: f => f());
+        foreach (var method in RequestDispatcher.SupportedMethods)
+        {
+            var json = await d.DispatchAsync(JsonRpcRequest.Parse(
+                JsonSerializer.Serialize(new { jsonrpc = "2.0", id = 1, method, @params = new { } })), CancellationToken.None);
+            Assert.DoesNotContain("unknown-method", json);
+        }
+    }
+
+    [Fact]
     public async Task UnknownMethod_ListsTheSupportedOnes()
     {
+        // list_functions/etc. are now routed (discovery), so use a name that is genuinely not a method.
         var h = new Harness();
-        var r = await h.Call("list_functions", new { });
+        var r = await h.Call("no_such_method", new { });
         Assert.Equal("unknown-method", Code(r));
         Assert.Contains("execute_script", r.GetProperty("error").GetProperty("data").GetProperty("remedy")[0].GetString());
     }

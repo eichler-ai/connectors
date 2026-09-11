@@ -1,0 +1,54 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>$(BridgeTargetFramework)</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <RootNamespace>Rhino.MCPBridge.Discovery.Tests</RootNamespace>
+    <!--
+      Emits a real XML-doc sidecar (Rhino.MCPBridge.Discovery.Tests.xml) next to this test assembly's own
+      DLL, compiled from the Fixtures/*.cs triple-slash comments; DiscoveryService/DiscoveryCache tests sync
+      a DiscoveryCache against typeof(Fixtures.Widget).Assembly (this assembly), and DiscoveryReflector
+      locates this file via the same Path.ChangeExtension(assembly.Location, ".xml") convention it uses for
+      RhinoCommon.xml in production. Portable, self-contained fixture.
+    -->
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <!-- The synthetic API-shape fixtures declare members purely to be reflected over, so unused-member
+         warnings (event/field never used) are expected and not defects. CS1591 = missing XML doc. -->
+    <NoWarn>$(NoWarn);CS1591;CS0067;CS0169;CS0649</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+    <!-- The real-corpus tests reflect the real RhinoCommon assembly directly (pure-managed NuGet, so no
+         MetadataLoadContext workaround is needed, unlike Revit's mixed-mode RevitAPI.dll). -->
+    <PackageReference Include="RhinoCommon" Version="$(RhinoCommonVersion)" GeneratePathProperty="true" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Rhino.MCPBridge.Core\Rhino.MCPBridge.Core.csproj" />
+    <!-- Named-indexed-property fixture (issue #186); VB because C# cannot declare the shape. -->
+    <ProjectReference Include="..\Rhino.MCPBridge.Discovery.Fixtures.VB\Rhino.MCPBridge.Discovery.Fixtures.VB.vbproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Hand-authored doc-id XML asset for direct XmlDocIndex parsing tests. -->
+    <None Include="Fixtures\SampleDocs.xml">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+
+  <!-- The RhinoCommon NuGet ships RhinoCommon.xml (lib/net7.0) but MSBuild doesn't copy a package's XML doc
+       to output. DiscoveryReflector finds the sidecar via Path.ChangeExtension(assembly.Location, ".xml"),
+       so copy it beside the output DLL — this is what lets RealRhinoCommonTests prove summaries resolve
+       (the live plug-in gets the same file from Rhino's app bundle beside RhinoCommon.dll). -->
+  <Target Name="CopyRhinoCommonXmlSidecar" AfterTargets="Build" Condition="'$(TargetFramework)'!=''">
+    <Copy SourceFiles="$(PkgRhinoCommon)/lib/net7.0/RhinoCommon.xml" DestinationFolder="$(TargetDir)"
+          Condition="Exists('$(PkgRhinoCommon)/lib/net7.0/RhinoCommon.xml')" />
+  </Target>
+</Project>

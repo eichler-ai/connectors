@@ -51,6 +51,8 @@ internal sealed class BridgeHost : ISessionEnvironment
     private int _pingInFlight;
     private volatile RegisterSnapshot _snapshot;
     private IDisposable? _changeMonitor;
+    private Rhino.MCPBridge.Core.Discovery.DiscoveryCache? _discoveryCache;
+    private readonly string _rhinoVersionForDiscovery;
 
     public string Token { get; } = InstanceFile.MintToken();
     public int Port { get; private set; }
@@ -61,6 +63,9 @@ internal sealed class BridgeHost : ISessionEnvironment
     {
         var runner = new RoslynScriptRunner();
         var executor = new UndoRunExecutor(new ScriptRunners(runner, new PythonScriptRunner(pythonHost)), runHost);
+        // API discovery (PRD §09): reflect RhinoCommon + loaded plug-ins into the persistent cache. A
+        // one-time ~1.5s cost on the first launch; later launches sync only deltas. Never fails the bridge.
+        _rhinoVersionForDiscovery = rhinoVersion;
         _dispatcher = new RequestDispatcher(ExecutionManager.CreateDefault(ExecutionRingBuffer.CreateDefault()), executor, launcher, log,
             capture: new ViewCaptureService(viewCapture), onMainThread: f => mainThread.Invoke(f), windowInventory: windowInventory);
         // The undo tool's gate (PRD §07): every document change outside the connector's own work.
@@ -97,6 +102,18 @@ internal sealed class BridgeHost : ISessionEnvironment
         // Warm the Roslyn pipeline off the main thread so the first script's compile is not on the
         // response path (Revit #67/#136). Scripts arriving before it finishes take the slow path.
         _warmup.Start();
+        // API discovery (PRD §09): the ~1.5s cold cache build is pure reflection with no main-thread
+        // requirement, so build it off the main thread too — the listener is already up (review of #294,
+        // M1). Discovery calls in the meantime answer discovery-unavailable rather than blocking OnLoad.
+        new Thread(() =>
+        {
+            var (service, cache) = DiscoveryBootstrap.Create(_rhinoVersionForDiscovery, _log);
+            _discoveryCache = cache;
+            if (service is not null)
+            {
+                _dispatcher.SetDiscoveryService(service);
+            }
+        }) { IsBackground = true, Name = "MCPBridge discovery build" }.Start();
     }
 
     public void Stop()
@@ -106,6 +123,7 @@ internal sealed class BridgeHost : ISessionEnvironment
         _tickTimer?.Dispose();
         try { _listener?.Stop(); } catch { }
         try { _changeMonitor?.Dispose(); } catch { }
+        try { _discoveryCache?.Dispose(); } catch { }
         // Close every live socket now rather than waiting for each session's read to notice the
         // cancellation: a plug-in unload must leave no server holding a half-open connection.
         foreach (var s in _sessions.Snapshot())

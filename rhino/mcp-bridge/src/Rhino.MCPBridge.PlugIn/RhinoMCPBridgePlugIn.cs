@@ -2,6 +2,7 @@ using System.Runtime.InteropServices;
 using Rhino.MCPBridge.Core.Connection;
 using Rhino.MCPBridge.Core.Diagnostics;
 using Rhino.MCPBridge.Core.Execution;
+using Rhino.MCPBridge.Core.Discovery;
 using Rhino.MCPBridge.RhinoAdapter;
 using Rhino.PlugIns;
 
@@ -40,6 +41,8 @@ public sealed class RhinoMCPBridgePlugIn : Rhino.PlugIns.PlugIn
             var runHost = new RhinoRunHost(InstanceId, caseInsensitive, BridgeVersion, Core.Execution.UndoRunExecutor.RunCommandName, () => MCPBridgeRunCommand.Instance?.Id ?? Guid.Empty, LogConnection);
             var launcher = new RhinoRunLauncher(LogConnection);
             RoslynAssemblyIsolation.EnsureInitialized();
+            // Discovery's SQLite deps resolve the same way under Rhino's LoadFrom-style plug-in load (PRD §09).
+            SqliteAssemblyIsolation.EnsureInitialized();
             var pythonHost = new RhinoCodePythonHost();
             // §08 v1 modal-dialog diagnostic: the platform window inventory (null on any other OS turns the
             // feature off). Win32 EnumWindows on Windows, Core Graphics CGWindowList on Mac — both enumerate

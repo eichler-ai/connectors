@@ -269,6 +269,28 @@ jobs:
           if ($failed -gt 0) { throw "$failed failing test(s)" }
           # --list-tests prints one line per test CASE (theory rows expanded), like the trx counts them.
           if ($discovered -gt 0 -and $total -lt $discovered) { throw "executed $total of $discovered discovered tests -- the test host most likely crashed mid-run (check for DllNotFoundException rhcommon_c)" }
+      - name: discovery tier-1 tests, asserting on the executed count
+        run: |
+          $results = Join-Path $PWD 'TestResults-Discovery'
+          Remove-Item -Recurse -Force $results -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path $results | Out-Null
+          $proj = 'tests/Rhino.MCPBridge.Discovery.Tests/Rhino.MCPBridge.Discovery.Tests.csproj'
+          # Same discipline as the Core.Tests step: the discovery suite reflects the real RhinoCommon
+          # assembly, so a host that trips a native initializer mid-run would still print "Passed!" for
+          # what ran before it. Assert the trx executed count equals the discovered count.
+          $listed = @(dotnet test $proj --list-tests --nologo 2>$null | Where-Object { $_ -match '^\s+Rhino\.MCPBridge\.Discovery\.Tests\.' })
+          $discovered = $listed.Count
+          dotnet test $proj --logger "trx;LogFileName=discovery.trx" --results-directory $results
+          if ($LASTEXITCODE -ne 0) { throw "dotnet test failed" }
+          $trx = @(Get-ChildItem $results -Filter *.trx)
+          if ($trx.Count -ne 1) { throw "expected 1 trx file, found $($trx.Count)" }
+          [xml]$doc = Get-Content $trx[0].FullName
+          $c = $doc.TestRun.ResultSummary.Counters
+          $total = [int]$c.total; $failed = [int]$c.failed
+          Write-Host ("discovery.trx: discovered={0} total={1} failed={2}" -f $discovered, $total, $failed)
+          if ($total -le 0) { throw "executed 0 discovery tests -- a green job that tests nothing" }
+          if ($failed -gt 0) { throw "$failed failing test(s)" }
+          if ($discovered -gt 0 -and $total -lt $discovered) { throw "executed $total of $discovered discovered tests -- the test host most likely crashed mid-run" }
       - name: build the plug-in (Release, the artifact the deploy script packages)
         run: dotnet build src/Rhino.MCPBridge.PlugIn/Rhino.MCPBridge.PlugIn.csproj -c Release -nologo -v q
 
