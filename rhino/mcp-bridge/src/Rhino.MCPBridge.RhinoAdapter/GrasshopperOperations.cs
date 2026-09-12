@@ -125,9 +125,13 @@ internal sealed class GrasshopperOperations : IGrasshopperOperations
             branches.Add(new GrasshopperBranch(path.ToString(), count, items.ToArray()));
         }
 
-        var note = truncated
-            ? $"showing {branches.Count} of {branchCount} branch(es), up to {MaxItemsPerBranch} item(s) each; read narrower via ghdoc for the rest."
-            : null;
+        string? note = null;
+        if (truncated)
+        {
+            note = branches.Count < branchCount
+                ? $"showing {branches.Count} of {branchCount} branches (branch cap {MaxBranches}); read narrower via ghdoc for the rest."
+                : $"all {branchCount} branches shown, but at least one was capped at {MaxItemsPerBranch} items; read narrower via ghdoc for the rest.";
+        }
         return new GrasshopperData(Nick(obj), obj.Name ?? obj.GetType().Name, branchCount, itemCount, branches.ToArray(), truncated, note);
     }
 
@@ -160,10 +164,24 @@ internal sealed class GrasshopperOperations : IGrasshopperOperations
                 return new GrasshopperItem("text", s.Value, "Text", null, null);
             case IGH_GeometricGoo geo:
                 var handle = geo.ReferenceID == Guid.Empty ? null : geo.ReferenceID.ToString();
-                return new GrasshopperItem("geometry", null, goo.TypeName, BoxOf(geo), handle);
+                return new GrasshopperItem("geometry", null, SafeTypeName(goo), BoxOf(geo), handle);
             default:
-                return new GrasshopperItem("other", goo.ToString(), goo.TypeName, null, null);
+                return new GrasshopperItem("other", SafeToString(goo), SafeTypeName(goo), null, null);
         }
+    }
+
+    // A misbehaving custom goo can throw from ToString()/TypeName; degrade that one item rather than abort
+    // the whole Get/Data read.
+    private static string SafeTypeName(IGH_Goo goo)
+    {
+        try { return goo.TypeName ?? goo.GetType().Name; }
+        catch { return goo.GetType().Name; }
+    }
+
+    private static string? SafeToString(IGH_Goo goo)
+    {
+        try { return goo.ToString(); }
+        catch { return null; }
     }
 
     private static double[]? BoxOf(IGH_GeometricGoo geo)

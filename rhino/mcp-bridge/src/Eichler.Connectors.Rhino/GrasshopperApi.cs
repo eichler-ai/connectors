@@ -37,11 +37,13 @@ public sealed class GrasshopperApi
     /// expiring it.</summary>
     public void ClearReference(string nickname) => _runtime.GrasshopperReference(nickname, null);
 
-    /// <summary>Reads an object's current output (PRD §10) — every output item across the data tree's
+    /// <summary>Reads a parameter's current output (PRD §10) — every output item across the data tree's
     /// branches, flattened into one list and capped to the response budget — as a <see cref="GrasshopperValue"/>.
     /// Numbers/text/booleans ride verbatim; geometry is summarised as type + bounding box + a document handle,
     /// never inline. The read half of <see cref="Set"/>: call <see cref="Solve"/> first so the value is current.
-    /// Raises if the object is not found or holds no readable output. For the full tree with branch paths use
+    /// Returns an empty value (<c>Count</c> 0) when the parameter computed nothing — usually because the
+    /// definition is disabled or has not solved. Raises if the object is not found or is not a parameter with a
+    /// data tree (address a component's output parameter by nickname). For the full tree with branch paths use
     /// <see cref="Data"/>.</summary>
     public GrasshopperValue Get(string nickname) => _runtime.GrasshopperGet(nickname);
 
