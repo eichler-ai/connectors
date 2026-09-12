@@ -15,9 +15,10 @@ internal sealed class GrasshopperSolveScope : IGrasshopperSolveScope
 {
     private readonly GH_Document _doc;
     private readonly List<GrasshopperSolution> _solutions = new();
-    private DateTime _startUtc;
-    private int _startDepth;
-    private bool _solving;
+    // A stack, not a single slot: a solve can recurse (a component that calls NewSolution during a solve,
+    // SolutionDepth > 0). Each Start pushes its own start time + depth; the matching End pops and records,
+    // so a nested solve keeps its own timing rather than the outer one's being lost (review #306, #2).
+    private readonly Stack<(DateTime Start, int Depth)> _pending = new();
 
     public GrasshopperSolveScope(GH_Document doc)
     {
@@ -26,28 +27,36 @@ internal sealed class GrasshopperSolveScope : IGrasshopperSolveScope
         _doc.SolutionEnd += OnSolutionEnd;
     }
 
+    // Both handlers run synchronously inside Grasshopper's solver on the main thread: NOTHING may escape,
+    // or an exception becomes a crash class in the host's event dispatch, not a failed run (the same
+    // invariant RhinoRunHost's change monitor and UndoRunExecutor's body enforce -- review #306, #1).
     private void OnSolutionStart(object sender, GH_SolutionEventArgs e)
     {
-        _startUtc = DateTime.UtcNow;
-        _startDepth = _doc.SolutionDepth;
-        _solving = true;
+        try { _pending.Push((DateTime.UtcNow, _doc.SolutionDepth)); }
+        catch { }
     }
 
     private void OnSolutionEnd(object sender, GH_SolutionEventArgs e)
     {
-        if (!_solving)
+        try
         {
-            return;
-        }
+            if (_pending.Count == 0)
+            {
+                return; // a solve was already in flight when this scope subscribed; ignore its end
+            }
 
-        _solving = false;
-        _solutions.Add(new GrasshopperSolution
+            var (start, depth) = _pending.Pop();
+            _solutions.Add(new GrasshopperSolution
+            {
+                StartedAt = start.ToString("o"),
+                DurationMs = (DateTime.UtcNow - start).TotalMilliseconds,
+                State = _doc.SolutionState.ToString(),
+                Depth = depth,
+            });
+        }
+        catch
         {
-            StartedAt = _startUtc.ToString("o"),
-            DurationMs = (DateTime.UtcNow - _startUtc).TotalMilliseconds,
-            State = _doc.SolutionState.ToString(),
-            Depth = _startDepth,
-        });
+        }
     }
 
     public GrasshopperReport? BuildReport()

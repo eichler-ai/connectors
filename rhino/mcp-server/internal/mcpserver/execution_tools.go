@@ -99,7 +99,7 @@ func RegisterExecution(s *mcp.Server, router *execution.Router) {
 			"a script that throws is undone. Returns the completed result if it finishes within timeout_ms, otherwise a pending/running/busy status " +
 			"with an execution_id for poll_execution. C# scope: Document (Rhino.RhinoDoc), CancellationToken, Connector (this connector's own API, " +
 			"under the Eichler.Connectors.Rhino namespace). Interactive getters (RhinoGet, GetObject, GetPoint...) are refused: nobody is at the keyboard. " +
-			"A run that triggers a Grasshopper solve carries a grasshopper report (solutions[] plus every component that errored/warned or ended non-Computed); errors are reported, not auto-resolved. " +
+			"A run that triggers a synchronous Grasshopper solve (e.g. NewSolution(True)) carries a grasshopper report (solutions[] plus every component that errored/warned or ended non-Computed); errors are reported, not auto-resolved. A solve deferred to after the run (NewSolution(False)/ScheduleSolution) is not captured. " +
 			"Call get_skills for the rules.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in ExecuteScriptIn) (*mcp.CallToolResult, ExecutionOut, error) {
 		if in.Language != "csharp" && in.Language != "python" {
