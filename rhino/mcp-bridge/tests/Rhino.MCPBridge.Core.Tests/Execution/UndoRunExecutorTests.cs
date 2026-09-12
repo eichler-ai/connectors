@@ -273,6 +273,37 @@ public sealed class UndoRunExecutorTests
     }
 
     [Fact]
+    public void ConnectorGrasshopperGet_ForwardsAndReturnsTheValue()
+    {
+        var host = HostWithBoundDefinition();
+        var item = new Eichler.Connectors.Rhino.GrasshopperItem("number", 7.0, "Number", null, null);
+        host.GrasshopperOps.GetResult = new Eichler.Connectors.Rhino.GrasshopperValue("slider", "Number Slider", 1, new[] { item }, false);
+        var outcome = new UndoRunExecutor(new ScriptRunners(Runner), host)
+            .Execute(Req("var v = Connector.Grasshopper.Get(\"slider\"); return v.Type + \":\" + v.Items[0].Value;", ghDocId: "gh-known"))!;
+        Assert.True(outcome.Success, outcome.Exception?.ToString());
+        Assert.Equal("Number Slider:7", outcome.ReturnValue);
+        var get = Assert.Single(host.GrasshopperOps.Gets);
+        Assert.Same(host.GrasshopperDocumentStub, get.Doc);
+        Assert.Equal("slider", get.Nickname);
+    }
+
+    [Fact]
+    public void ConnectorGrasshopperData_ForwardsAndReturnsTheTree()
+    {
+        var host = HostWithBoundDefinition();
+        var branch = new Eichler.Connectors.Rhino.GrasshopperBranch("{0;0}", 1,
+            new[] { new Eichler.Connectors.Rhino.GrasshopperItem("geometry", null, "Curve", new[] { 0.0, 0, 0, 10, 0, 0 }, "the-id") });
+        host.GrasshopperOps.DataResult = new Eichler.Connectors.Rhino.GrasshopperData("crv", "Curve", 1, 1, new[] { branch }, false, null);
+        var outcome = new UndoRunExecutor(new ScriptRunners(Runner), host)
+            .Execute(Req("var d = Connector.Grasshopper.Data(\"crv\"); return d.BranchCount + \":\" + d.Branches[0].Items[0].Handle;", ghDocId: "gh-known"))!;
+        Assert.True(outcome.Success, outcome.Exception?.ToString());
+        Assert.Equal("1:the-id", outcome.ReturnValue);
+        var d = Assert.Single(host.GrasshopperOps.Datas);
+        Assert.Same(host.GrasshopperDocumentStub, d.Doc);
+        Assert.Equal("crv", d.Nickname);
+    }
+
+    [Fact]
     public void ConnectorGrasshopper_WithoutABoundDefinition_FailsClearly_WithoutRunningTheOp()
     {
         var host = new FakeRunHost();

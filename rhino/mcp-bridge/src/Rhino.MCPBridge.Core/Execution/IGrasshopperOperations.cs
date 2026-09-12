@@ -18,4 +18,8 @@ internal interface IGrasshopperOperations
     /// form, or a collection of either.</summary>
     void Reference(object grasshopperDocument, string nickname, object? objectIds);
     void Solve(object grasshopperDocument, bool expireAll);
+    /// <summary>Reads an object's current output, flattened and budget-capped (the read half of Set).</summary>
+    GrasshopperValue Get(object grasshopperDocument, string nickname);
+    /// <summary>Serialises a parameter's full volatile data tree, budget-capped.</summary>
+    GrasshopperData Data(object grasshopperDocument, string nickname);
 }

@@ -37,6 +37,24 @@ public sealed class GrasshopperApi
     /// expiring it.</summary>
     public void ClearReference(string nickname) => _runtime.GrasshopperReference(nickname, null);
 
+    /// <summary>Reads a parameter's current output (PRD §10) — every output item across the data tree's
+    /// branches, flattened into one list and capped to the response budget — as a <see cref="GrasshopperValue"/>.
+    /// Numbers/text/booleans ride verbatim; geometry is summarised as type + bounding box + a document handle,
+    /// never inline. The read half of <see cref="Set"/>: call <see cref="Solve"/> first so the value is current.
+    /// Returns an empty value (<c>Count</c> 0) when the parameter computed nothing — usually because the
+    /// definition is disabled or has not solved. Raises if the object is not found or is not a parameter with a
+    /// data tree (address a component's output parameter by nickname). For the full tree with branch paths use
+    /// <see cref="Data"/>.</summary>
+    public GrasshopperValue Get(string nickname) => _runtime.GrasshopperGet(nickname);
+
+    /// <summary>Serialises a parameter's full volatile data tree (PRD §10) as a <see cref="GrasshopperData"/>:
+    /// the branches with their paths, item counts, and per-item summaries (numbers/text verbatim, geometry as
+    /// type + bounding box + a document handle — never full geometry inline), bounded so a large tree stays
+    /// within the response budget (<see cref="GrasshopperData.Truncated"/>/<see cref="GrasshopperData.Note"/>
+    /// say when a cap was hit). Call <see cref="Solve"/> first so the data is current. Raises if the object is
+    /// not found or is not a parameter with a data tree.</summary>
+    public GrasshopperData Data(string nickname) => _runtime.GrasshopperData(nickname);
+
     /// <summary>Runs a solution on the definition (PRD §10). <paramref name="expireAll"/> forces every
     /// object to recompute; otherwise only what has been expired since the last solve does. The solve is
     /// synchronous on the main thread, so a slow one makes the run <c>running</c>; the resulting solve
