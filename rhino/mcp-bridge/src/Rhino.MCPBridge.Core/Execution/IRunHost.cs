@@ -45,6 +45,13 @@ internal interface IRunHost
     /// non-empty id with no such definition, or an empty id with no active canvas). Main thread.</summary>
     GrasshopperDefinitionInfo? InspectGrasshopperDefinition(string grasshopperDocumentId, string? nameFilter, int offset, int limit, out bool notFound);
 
+    /// <summary>Renders the active Grasshopper canvas to an image for capture_view's "canvas" target
+    /// (PRD §11). Returns null when Grasshopper is not loaded or no editor canvas is open (the caller maps
+    /// that to a legible "open Grasshopper" error). The bytes are encoded as <paramref name="mimeType"/>,
+    /// bounded to capture_view's size limits and, when given, resized to
+    /// <paramref name="requestedWidth"/>/<paramref name="requestedHeight"/>. Main thread.</summary>
+    GrasshopperCanvasImage? CaptureGrasshopperCanvas(string mimeType, bool transparent, int requestedWidth, int requestedHeight);
+
     /// <summary>Runs <paramref name="body"/> inside one Rhino command on <paramref name="document"/>
     /// (RhinoApp.ExecuteCommand of the bridge's own command), naming the command's undo entry
     /// <paramref name="undoLabel"/> where Rhino allows. Returns false when the command could not be

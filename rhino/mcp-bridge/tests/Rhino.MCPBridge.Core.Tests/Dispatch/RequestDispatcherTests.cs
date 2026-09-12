@@ -282,6 +282,57 @@ public sealed class RequestDispatcherTests
             onMainThread: f => f());
     }
 
+    // capture_view needs both a capture service (any) and a main-thread hop wired for its route to be live.
+    private static RequestDispatcher WithCapture(Harness h)
+    {
+        var runner = new RoslynScriptRunner(); runner.WarmupCompile();
+        return new RequestDispatcher(h.Manager, new UndoRunExecutor(new ScriptRunners(runner), h.Host), h.Launcher, h.Logs.Add, () => h.Now, _ => Task.CompletedTask,
+            capture: new Core.Capture.ViewCaptureService(new NoViewports()), onMainThread: f => f());
+    }
+
+    [Fact]
+    public async Task CaptureView_CanvasTarget_ReturnsTheRenderedCanvasImage()
+    {
+        var h = new Harness();
+        h.Host.CanvasImage = new GrasshopperCanvasImage(new byte[] { 1, 2, 3, 4 }, 640, 320);
+        var d = WithCapture(h);
+        var resp = await d.DispatchAsync(JsonRpcRequest.Parse("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"capture_view\",\"params\":{\"target\":\"canvas\",\"format\":\"png\"}}"), CancellationToken.None);
+        var images = JsonDocument.Parse(resp).RootElement.GetProperty("result").GetProperty("images");
+        Assert.Equal(1, images.GetArrayLength());
+        Assert.Equal("canvas", images[0].GetProperty("viewport").GetString());
+        Assert.Equal(640, images[0].GetProperty("width").GetInt32());
+        Assert.Equal("image/png", images[0].GetProperty("mime_type").GetString());
+        Assert.NotEmpty(images[0].GetProperty("data_base64").GetString()!);
+        // The request's format/size reached the host.
+        var (mime, _, _, _) = Assert.Single(h.Host.CanvasCaptures);
+        Assert.Equal("image/png", mime);
+    }
+
+    [Fact]
+    public async Task CaptureView_CanvasTarget_WithNoOpenCanvas_IsAnError()
+    {
+        var h = new Harness();
+        h.Host.CanvasImage = null; // the Grasshopper editor is not open
+        var d = WithCapture(h);
+        var resp = await d.DispatchAsync(JsonRpcRequest.Parse("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"capture_view\",\"params\":{\"target\":\"canvas\"}}"), CancellationToken.None);
+        Assert.Equal("grasshopper-canvas-unavailable", Code(JsonDocument.Parse(resp).RootElement));
+    }
+
+    [Fact]
+    public async Task CaptureView_CanvasTarget_ValidatesRequestLikeTheViewportPath()
+    {
+        var h = new Harness();
+        h.Host.CanvasImage = new GrasshopperCanvasImage(new byte[] { 1 }, 10, 10);
+        var d = WithCapture(h);
+        // A bad format and a negative size are rejected before rendering, the same as a viewport capture.
+        var badFormat = await d.DispatchAsync(JsonRpcRequest.Parse("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"capture_view\",\"params\":{\"target\":\"canvas\",\"format\":\"gif\"}}"), CancellationToken.None);
+        Assert.Equal("invalid-param", Code(JsonDocument.Parse(badFormat).RootElement));
+        var badSize = await d.DispatchAsync(JsonRpcRequest.Parse("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"capture_view\",\"params\":{\"target\":\"canvas\",\"width\":-5}}"), CancellationToken.None);
+        Assert.Equal("invalid-param", Code(JsonDocument.Parse(badSize).RootElement));
+        // Neither reached the host renderer.
+        Assert.Empty(h.Host.CanvasCaptures);
+    }
+
     [Fact]
     public async Task InspectDefinition_ReturnsObjectsPositionsAndWiring()
     {
