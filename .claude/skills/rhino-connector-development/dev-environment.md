@@ -29,7 +29,9 @@ the agent runs. The Revit skill's `prlctl`, launcher-agent and shared-folder mat
   on this network; that is a one-time cost.
 - **Rhino 8** (currently 8.35). The CLIs under
   `/Applications/Rhino 8.app/Contents/Resources/bin/`: `rhinocode` (run scripts/commands in the
-  running Rhino), `yak` (package manager), `rhinoscriptcompiler`.
+  running Rhino), `yak` (package manager), `rhinoscriptcompiler`. The server's plug-in tools
+  (`search_plugins`/`install_plugin`/…) shell out to this `yak` — located at the platform default or
+  `RHINO_YAK_PATH` — and it operates on the per-user package folder independent of a running Rhino.
 - **RhinoCommon reference assemblies**: NuGet `RhinoCommon` (pinned in
   `rhino/mcp-bridge/Directory.Build.props`), `lib/net7.0`, consumed by `net8.0` with
   `ExcludeAssets="runtime"` so nothing is copied beside the plug-in. Rhino's own copy loads at runtime.
@@ -122,7 +124,10 @@ chooser is still up fails with an error result instead of `running`.
 
 `osascript -e 'tell application "Rhino 8" to quit'` blocks on the keep/delete sheet when a document is
 unsaved and the AppleEvent times out after two minutes; the restart helper handles the sheet. Set
-`doc.Modified = False` from a script first and the sheet still appears for a new untitled document.
+`doc.Modified = False` from a script first and the sheet still appears for a new untitled document. A
+**second** blocker the helper does NOT handle: Grasshopper's "multi-save" dialog, up whenever the
+process holds unsaved GH definitions (every `gh_addressing` harness run leaves some) — its buttons are
+unnamed Eto controls, so `pkill -9` + relaunch + click New Model is the recovery (caveats.md).
 
 ---
 

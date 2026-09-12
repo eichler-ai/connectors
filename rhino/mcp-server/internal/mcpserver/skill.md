@@ -124,7 +124,7 @@ while (working) { CancellationToken.ThrowIfCancellationRequested(); System.Threa
 | `doc` | `Document` | the routed `Rhino.RhinoDoc`, full RhinoCommon API |
 | `ghdoc` | `GrasshopperDocument` | the addressed Grasshopper definition (a `Grasshopper.Kernel.GH_Document`), or `None`/`null` |
 | `cancel` | `CancellationToken` | cooperative cancellation (above) |
-| `connector` | `Connector` | **this connector's own functions, not Rhino's** — `BridgeVersion`, `RunLabel` |
+| `connector` | `Connector` | **this connector's own functions, not Rhino's** — `BridgeVersion`, `RunLabel`, and `Grasshopper` (drive/read a bound definition, below) |
 | (import `rs`, `scriptcontext`) | — | `rhinoscriptsyntax` and `scriptcontext` are importable, not injected; `scriptcontext.doc` is pre-pointed at the routed document |
 | the BCL | the BCL | `System.IO`, LINQ, etc. — fully usable |
 
@@ -137,6 +137,31 @@ Grasshopper still compiles when Grasshopper isn't loaded), so cast it:
 
 This is **not a sandbox**: full API access, one narrow denylist (below). Reflection can route around
 it, and that is accepted — the denylist guards against the common accident, not a determined bypass.
+
+## Grasshopper — driving and reading a definition
+
+With a definition bound (`gh_document_id`), a script reaches it two ways. **Directly**: `ghdoc` is the live
+`GH_Document`, the full `Grasshopper.Kernel` API. **Through `connector.Grasshopper`** (C#
+`Connector.Grasshopper`), a helper for what a script would otherwise hand-write:
+
+- `Find(nickname | guid)` → a descriptor (`Guid`, `Nickname`, `Type`), or `None`/`null`.
+- `Set(nickname, value)` — set an input control: a Number Slider (a number, clamped to its range), Boolean
+  Toggle (a bool), Panel (text), or Value List (an item's name/value). Expires the object; a Value List
+  raises if the value is not one of its items.
+- `Reference(nickname, object_ids)` / `ClearReference(nickname)` — wire a Curve/Brep/Surface/Mesh/Point or a
+  generic Geometry input to Rhino document objects **by reference** (one id or a list), so the definition
+  consumes live document geometry that tracks the object. `ClearReference` unwires it.
+- `Solve(expire_all=False)` — run a solution; the **solve report** rides the run result (below).
+- `Get(nickname)` → the object's current output items, flattened; `Data(nickname)` → the full data tree with
+  branch paths and counts. Both summarise each item — numbers/text/booleans **verbatim**, geometry as
+  **type + bounding box + a document handle**, never geometry inline (large trees stay within the response
+  budget; `Truncated`/`Note` say when a cap was hit). `Solve` first so the data is current, and note a
+  definition computes volatile data only when it is **enabled**.
+
+**The solve report.** A run during which a Grasshopper solution ended (`ghdoc.NewSolution(True)` or
+`connector.Grasshopper.Solve()`) carries a `grasshopper` field on its result: `solutions[]` and every
+component that errored, warned, or ended in a non-`Computed` phase. Errors are reported, not auto-resolved —
+a red component is often the intended state.
 
 ## Finding the API — `search_functions` / `list_functions` / `describe_function`
 
@@ -195,6 +220,25 @@ runs. Options: `display_mode` (`Shaded`, `Wireframe`, `Rendered`, …, restored 
 (`jpeg` default, `png`), `transparent_background`. Use it after a geometry run to confirm the result,
 or when a script's output is surprising.
 
+## Installing plug-ins — `search_plugins` / `install_plugin` / `restart_rhino`
+
+Real Grasshopper work leans on third-party plug-ins. These tools manage them through Rhino's own package
+manager (Yak) — they act on the per-user package folder, so they need no `instance_id`:
+
+- `search_plugins(query, prerelease?)` and `list_plugins()` — search the public package server, list what's
+  installed. Read-only. (These manage both Rhino and Grasshopper plug-ins — a Yak package can carry either.)
+- `install_plugin(name, version?, confirm_lifecycle_actions)` / `uninstall_plugin(...)` — **gated**: without
+  `confirm_lifecycle_actions` you get a preview and nothing changes (installing runs third-party code in the
+  person's Rhino on its next start). Yak has no update — install a newer version.
+
+**An installed plug-in is not loaded until Rhino restarts.** `restart_rhino(instance_id,
+confirm_lifecycle_actions, discard_unsaved?)` does that: without confirm it previews what would be quit and
+reopened; it **refuses** (`blocked`) when any document or definition has unsaved changes unless
+`discard_unsaved` is set; on confirm it quits Rhino and relaunches it, reopening the **saved** Rhino
+documents (Grasshopper definitions and unsaved/untitled documents are not reopened). macOS only for now. The
+new instance reconnects within a few seconds — `list_instances` to see it, then re-address by its new
+`instance_id`.
+
 ## Undoing your own work — `undo` / `redo`
 
 `undo` and `redo` run Rhino's undo on a document and report what they reverted. **You do not need
@@ -251,4 +295,7 @@ inspect the document rather than assuming it's clean.
 | `describe_function` | one member's full detail + both call shapes |
 | `capture_view` | see a viewport (image) to debug |
 | `undo` / `redo` | revert or restore the connector's own run |
+| `search_plugins` / `list_plugins` | find or list Rhino/Grasshopper plug-ins (Yak) |
+| `install_plugin` / `uninstall_plugin` | install/remove a plug-in (gated) — restart to load |
+| `restart_rhino` | quit + relaunch Rhino to load an installed plug-in (gated) |
 | `get_skills` | this guide |

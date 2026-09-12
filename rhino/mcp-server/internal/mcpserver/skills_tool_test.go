@@ -43,7 +43,9 @@ func TestSkillFileStaysWithinItsBudget(t *testing.T) {
 	// under `go test` (a passing package's output is discarded); the ci.yml
 	// "skill.md budget headroom" step re-runs this one test with -v to surface
 	// it. If that step is removed, delete this branch rather than leave it.
-	const softBudgetTokens = ceilingTokens * 26 / 100
+	// Raised 26%->29% when Phase 4 landed (Grasshopper drive/read + plug-in
+	// management + restart_rhino sections), to sit back above the file's size.
+	const softBudgetTokens = ceilingTokens * 29 / 100
 
 	// The footer get_skills appends at runtime is charged to the same reader's
 	// context, so measure what a caller receives, not what is on disk. Use the
