@@ -18,7 +18,8 @@ internal sealed class GrasshopperDefinitionInfo
     public int ObjectCount { get; }
     /// <summary>Whether the definition is enabled; a disabled definition computes no volatile data.</summary>
     public bool Enabled { get; }
-    /// <summary>Objects matching the name filter (equals <see cref="ObjectCount"/> when no filter was given).</summary>
+    /// <summary>The objects the inspection enumerated that matched the name filter; with no filter, every
+    /// object it could enumerate (normally equal to <see cref="ObjectCount"/>).</summary>
     public int MatchCount { get; }
     /// <summary>The offset into the match list this page starts at.</summary>
     public int Offset { get; }

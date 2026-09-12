@@ -372,16 +372,22 @@ type inspectDefinition struct {
 // assertInspectDefinition checks inspect_definition reads the bound definition's structure: it echoes the
 // id, reports every object with canvas positions, resolves the build-time wiring to neighbour guids
 // (slider->nsink), and honours name_filter.
-func assertInspectDefinition(t *testing.T, c *mcpclient.Client, instanceID, ghDocID string) {
+func callInspect(t *testing.T, c *mcpclient.Client, args map[string]any) inspectDefinition {
 	t.Helper()
-	raw, err := c.CallTool("inspect_definition", map[string]any{"instance_id": instanceID, "gh_document_id": ghDocID}, 30*time.Second)
+	raw, err := c.CallTool("inspect_definition", args, 30*time.Second)
 	if err != nil {
-		t.Fatalf("inspect_definition: %v", err)
+		t.Fatalf("inspect_definition %v: %v", args, err)
 	}
 	var env inspectDefinition
 	if err := json.Unmarshal(raw, &env); err != nil {
 		t.Fatalf("decode inspect_definition: %v\n%s", err, raw)
 	}
+	return env
+}
+
+func assertInspectDefinition(t *testing.T, c *mcpclient.Client, instanceID, ghDocID string) {
+	t.Helper()
+	env := callInspect(t, c, map[string]any{"instance_id": instanceID, "gh_document_id": ghDocID})
 	def := env.StructuredContent.Definition
 	if def == nil {
 		t.Fatalf("inspect_definition returned no definition: %+v", env.StructuredContent.Error)
@@ -422,17 +428,9 @@ func assertInspectDefinition(t *testing.T, c *mcpclient.Client, instanceID, ghDo
 	}
 
 	// name_filter narrows to the three sink params (nsink/csink/gsink) and nothing else.
-	fraw, err := c.CallTool("inspect_definition", map[string]any{"instance_id": instanceID, "gh_document_id": ghDocID, "name_filter": "sink"}, 30*time.Second)
-	if err != nil {
-		t.Fatalf("inspect_definition (filter): %v", err)
-	}
-	var fenv inspectDefinition
-	if err := json.Unmarshal(fraw, &fenv); err != nil {
-		t.Fatalf("decode filtered inspect: %v", err)
-	}
-	fdef := fenv.StructuredContent.Definition
+	fdef := callInspect(t, c, map[string]any{"instance_id": instanceID, "gh_document_id": ghDocID, "name_filter": "sink"}).StructuredContent.Definition
 	if fdef == nil {
-		t.Fatalf("filtered inspect returned no definition: %+v", fenv.StructuredContent.Error)
+		t.Fatalf("filtered inspect returned no definition")
 	}
 	if fdef.MatchCount != 3 {
 		t.Errorf(`name_filter "sink" should match the 3 sink params, matched %d`, fdef.MatchCount)
@@ -441,6 +439,28 @@ func assertInspectDefinition(t *testing.T, c *mcpclient.Client, instanceID, ghDo
 		if !strings.Contains(strings.ToLower(o.Nickname), "sink") && !strings.Contains(strings.ToLower(o.Name), "sink") {
 			t.Errorf("filtered object %q does not match the filter", o.Nickname)
 		}
+	}
+
+	// Pagination: a small limit truncates and reports the full match_count; offset pages through; an offset
+	// past the end returns nothing and is not truncated. (The built definition has 7 objects.)
+	total := def.ObjectCount
+	page1 := callInspect(t, c, map[string]any{"instance_id": instanceID, "gh_document_id": ghDocID, "limit": 3}).StructuredContent.Definition
+	if page1 == nil {
+		t.Fatalf("paged inspect returned no definition")
+	}
+	if page1.MatchCount != total {
+		t.Errorf("match_count should be the full total %d regardless of the page, got %d", total, page1.MatchCount)
+	}
+	if len(page1.Objects) != 3 || !page1.Truncated {
+		t.Errorf("limit 3 of %d should return 3 objects and truncated=true, got objects=%d truncated=%v", total, len(page1.Objects), page1.Truncated)
+	}
+	last := callInspect(t, c, map[string]any{"instance_id": instanceID, "gh_document_id": ghDocID, "offset": total - 1, "limit": 3}).StructuredContent.Definition
+	if last == nil || len(last.Objects) != 1 || last.Truncated {
+		t.Errorf("the last page (offset=%d) should return 1 object and truncated=false, got %+v", total-1, last)
+	}
+	past := callInspect(t, c, map[string]any{"instance_id": instanceID, "gh_document_id": ghDocID, "offset": total + 50, "limit": 3}).StructuredContent.Definition
+	if past == nil || len(past.Objects) != 0 || past.Truncated {
+		t.Errorf("an offset past the end should return 0 objects and truncated=false, got %+v", past)
 	}
 }
 
