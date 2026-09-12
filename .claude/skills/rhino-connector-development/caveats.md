@@ -9,9 +9,12 @@ Rhino loaded the previous build. Likely causes, in order:
 
 1. **Rhino was not restarted.** yak installs into the package folder; Rhino scans it at startup only.
    `deploy-plugin.sh` restarts unless `--no-restart` was passed.
-2. **The restart never happened** because the quit hung on the keep/delete sheet and the surrounding
-   command chain broke, then ran the tests against the old build. Run the deploy script on its own;
-   read its output; do not put it inside an `&&` chain with the tests.
+2. **The restart never happened** because the quit hung on a save prompt and the surrounding command
+   chain broke, then ran the tests against the old build. Run the deploy script on its own; read its
+   output; do not put it inside an `&&` chain with the tests. The prompt is either Rhino's keep/delete
+   sheet (the helper clicks Delete) OR — after any harness run that created Grasshopper definitions —
+   the **Grasshopper "multi-save" dialog**, whose buttons the helper does NOT handle (see its own entry
+   below).
 3. **The `.rhp` was copied by hand** into a package folder without yak's `manifest.txt`; Rhino ignores
    it. Use `yak install`.
 
@@ -33,8 +36,13 @@ grep MCPBridge` shows which file is mapped.
 ## Symptom: a live step produced nothing, no error, and the old output is still there
 
 **The screen is locked.** Rhino receives script requests and does not run them; System Events does
-nothing; nothing errors. `ioreg -n Root -d1 -a | grep -A1 CGSSessionScreenIsLocked`. Everything
-observed during a lock is invalid; rerun after unlocking. The harness preflight fails on this.
+nothing; nothing errors. `ioreg -n Root -d1 -a | grep -A1 CGSSessionScreenIsLocked` (a `<true/>` line
+means locked; the key absent means not). Everything observed during a lock is invalid; rerun after
+unlocking. The harness preflight fails on this. Two things learned the hard way: the lock is often
+**transient** — the display auto-locks during long deploy/relaunch gaps, so **re-check the key before
+claiming locked** (it clears on its own, and only the user can unlock a real one); and run
+`caffeinate -d -t 3600 &` at the start of a long live session to stop the display sleeping and
+re-locking mid-run.
 
 ## Symptom: `CodeLanguageNotFoundException: Can not determine language for <guid>`
 
@@ -234,6 +242,49 @@ The register snapshot used to capture the execution state when it was built (on 
 often mid-run) and freeze it. The state is now computed when the message is sent, and every ping
 carries `execution_state`; the registry keeps the last non-empty value. After a grace-period expiry
 the server learns `unrecoverable` on the next ping, a few seconds later -- poll, do not assert once.
+
+## The deploy restart fails with "rhino did not quit" after a Grasshopper harness run
+
+Grasshopper puts up a **"Grasshopper multi-save"** dialog ("You have unsaved documents. This is your
+last chance to save changes.") whenever the process holds unsaved GH definitions — which every
+`gh_addressing` harness run leaves behind. Its action buttons are unnamed Eto controls that System
+Events cannot click by name (only the traffic-light buttons enumerate), so the deploy helper's quit
+hangs and `deploy-plugin.sh` reports `RESTART FAILED … the OLD plug-in is still loaded`. Reliable
+recovery, in order: `pkill -9 -i rhino`; `open -a "Rhino 8"`; wait for the process; click **New Model**
+via `osascript` looping `click (first button of w whose name is "New Model")` over every window (the
+template chooser is not in the normal window list at first); then remove any `instances/<dead-pid>.json`
+whose pid is gone so the dialer does not dial a corpse. A fresh restart afterwards (no GH docs open yet)
+quits cleanly.
+
+## Symptom: `Connector.Grasshopper.Get`/`Data` (or `VolatileData`) come back empty after a solve
+
+Two independent causes, both about the definition, not the code:
+
+1. **The GH_Document is disabled.** A `GH_Document` created in a script defaults to `Enabled = false`
+   (it enumerates as `enabled: false`), so its solver is locked and `NewSolution` populates **no**
+   volatile data. Set `doc.Enabled = True`. A loaded `.gh` is already enabled.
+2. **The parameter is an orphan.** A param with no downstream recipient never has its volatile data
+   computed on a solve, even when the document is enabled. Wire a sink (`sink.AddSource(param)`) — or
+   read a param that is actually in the computing graph. `PersistentData` (what `Reference` sets) is
+   populated regardless; `VolatileData` (what `Get`/`Data` read) needs the object to compute.
+
+## Symptom: a .NET DTO returned to a Python script throws `SystemError: error return without exception set`
+
+**pythonnet cannot `len()` or index `IReadOnlyList<T>`** (`... has no len()`, and indexing throws the
+opaque `SystemError`). Any type a script receives and iterates must expose **arrays** (`T[]`), which
+support `len()`/`[]` natively — a string-only DTO is fine, a generic collection is the trap. This is
+why `GrasshopperValue`/`GrasshopperData` return `GrasshopperItem[]`, not `IReadOnlyList`. To pin which
+member fails, wrap the script in `try/except` reporting the exception type and the last step that
+succeeded — the interop error is catchable as a `SystemError` even though its message is useless.
+
+## Symptom: `RhinoDoc.SaveAs(path)` returns True but the document's Path stays None
+
+On the Mac the `SaveAs` **API method** writes the file but does not associate it with the document —
+`doc.Path` stays `None` and the doc is still "untitled" in memory. Only a document that was **opened**
+from a file (or saved through the `_-SaveAs` command) has `Path` set. This matters for anything keying
+off `doc.Path` (e.g. `restart_rhino`'s reopen list): a real user document opened from disk has a path
+and reopens; a `SaveAs`-in-script artifact does not. To get a path-associated doc in a test, write the
+file then `RhinoApp.RunScript('_-Open "…"', False)`.
 
 ## A wedged Rhino ignores the restart helper's quit
 

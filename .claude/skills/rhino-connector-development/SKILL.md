@@ -97,6 +97,28 @@ that section. What Rhino adds:
 - **`Process.PrivateMemorySize64` is 0 on macOS.** Assert the working set, not the private bytes,
   in anything platform-neutral.
 
+### Grasshopper
+
+- **Grasshopper is demand-loaded, so isolate GH-typed code behind a guard.** The Grasshopper assemblies
+  load AFTER Rhino startup (and only once the user opens Grasshopper). Any method naming a `Grasshopper.*`
+  type must be reached only after `GrasshopperWatcher.GrasshopperLoaded()` is true, in a SEPARATE method so
+  the JIT resolves `Grasshopper.dll` only past that guard — a GH type in a method that can also run before
+  load throws at JIT time. Register snapshots and `RestartSaveStates` follow this; the GH branch is its own
+  method, guarded, and **fails safe** (on error it reports uncertainty, e.g. an unsaved sentinel, never
+  silently omits).
+- **The `GrasshopperDocument`/`ghdoc` global is typed `object`, never `GH_Document`.** A real GH type in
+  `ScriptGlobals` would make Core hard-depend on Grasshopper, so Roslyn could not resolve it when GH is
+  unloaded and EVERY C# script would fail to compile. Core passes the GH doc opaque; the adapter
+  (`IGrasshopperOperations`) casts; C# scripts cast too.
+- **The Roslyn runner snapshots references at startup; GH loaded later is absent.** After Grasshopper
+  demand-loads, rebuild the script options when `AppDomain.GetAssemblies().Length` grew, or the C# cast
+  fails to compile. "GH loaded in-process" ≠ "GH in Roslyn's reference set".
+- **Cross-platform GH NuGet build:** reference Grasshopper with `ExcludeAssets="runtime" PrivateAssets="all"`
+  + `DisableTransitiveFrameworkReferences=true` (drops the WindowsForms framework ref that breaks the
+  macOS/Linux SDK build); compile-metadata only, the real assemblies load in-process.
+- **A DTO a script iterates must expose arrays (`T[]`), not `IReadOnlyList<T>`** — pythonnet cannot
+  `len()`/index the interface (caveats.md).
+
 ### Working in agent sessions
 
 - **Use absolute paths and `cd <dir> && <cmd>` in one invocation** — the cwd resets between calls
@@ -150,6 +172,14 @@ Seeing what a case produced: `captureForDiagnostics(t, c, inst, label)` in `capt
 `capture_view` and, with `MCP_HARNESS_CAPTURES=<dir>` set, writes the PNGs there; `sips -Z 640` shrinks
 one for reading. Object assertions still go by name; the picture is for the human.
 
+Phase 4 added: `gh_addressing_test.go` (the whole `Connector.Grasshopper` surface — it builds a
+definition in-script, must `doc.Enabled = True` and wire sink params so volatile data computes, then
+drives Find/Set/Reference/Get/Data/Solve and asserts on kinds/types/handles); `packages_test.go` (the
+Yak plug-in tools — read-only + preview only, so it never mutates the user's package folder, and needs
+no instance); `restart_test.go` (`restart_rhino` preview only). A tool that shells out (Yak) or restarts
+Rhino must keep its every-run harness case non-destructive — verify the mutating path once, by hand, not
+on every run.
+
 ## Per-stage workflow
 
 As the Revit skill's, with the environment differences:
@@ -172,9 +202,11 @@ rhino/dev-tooling/deploy-plugin.sh --no-restart
 ```
 
 The restart discards any unsaved document (it clicks the keep/delete sheet's Delete) and opens a new
-model from the template chooser. After it returns, `MCPBridgeStatus` in Rhino's command line shows the
-port, connection count and bridge version; `~/Library/Application Support/Connectors/Rhino/` holds
-`instances/<pid>.json`, `connection.log` and `startup-errors.log`.
+model from the template chooser. It does **not** handle Grasshopper's "multi-save" dialog, which appears
+after any harness run that created GH definitions and hangs the quit — recover with the manual
+kill+relaunch+New Model sequence (caveats.md). After it returns, `MCPBridgeStatus` in Rhino's command
+line shows the port, connection count and bridge version; `~/Library/Application Support/Connectors/Rhino/`
+holds `instances/<pid>.json`, `connection.log` and `startup-errors.log`.
 
 ## PR review checklist
 
