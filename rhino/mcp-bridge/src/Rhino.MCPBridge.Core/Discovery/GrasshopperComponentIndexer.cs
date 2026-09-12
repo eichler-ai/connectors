@@ -89,7 +89,8 @@ public static class GrasshopperComponentIndexer
         var hashInput = new StringBuilder();
         foreach (var entry in components.OrderBy(c => c.Guid, StringComparer.Ordinal))
         {
-            hashInput.Append(entry.Guid).Append('|').Append(entry.Name).Append('|').Append(entry.Category).Append('\n');
+            hashInput.Append(entry.Guid).Append('|').Append(entry.Name).Append('|').Append(entry.Category)
+                .Append('|').Append(entry.SubCategory).Append('|').Append(entry.Description ?? "").Append('\n');
 
             var category = string.IsNullOrWhiteSpace(entry.Category) ? "Uncategorized" : entry.Category.Trim();
             if (!byCategory.TryGetValue(category, out var members))

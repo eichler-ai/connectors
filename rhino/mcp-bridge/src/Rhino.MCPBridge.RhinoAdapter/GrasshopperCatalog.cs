@@ -38,24 +38,31 @@ public static class GrasshopperCatalog
     }
 
     /// <summary>Marshals the Grasshopper-typed read to the UI thread and blocks (with a timeout) for it. Only
-    /// reached past the GrasshopperLoaded guard.</summary>
+    /// reached past the GrasshopperLoaded guard, always from the background discovery thread (never the UI
+    /// thread), so the marshal never self-deadlocks.</summary>
     private static IReadOnlyList<GrasshopperCatalogEntry> ReadOnUiThread()
     {
         IReadOnlyList<GrasshopperCatalogEntry> result = Array.Empty<GrasshopperCatalogEntry>();
-        using var done = new ManualResetEventSlim(false);
+        // NOT disposed with `using`: if Wait times out (the main thread was busy the whole time) this method
+        // returns while the marshalled callback is still queued; when it later runs it calls Set(), which must
+        // not hit a disposed handle (that would throw ObjectDisposedException on the UI thread — an unhandled
+        // UI-thread exception is exactly what aborts Rhino). Leaving it for GC is safe and cheap here. Set() is
+        // additionally guarded so nothing can escape the callback onto the UI thread.
+        var done = new ManualResetEventSlim(false);
         global::Rhino.RhinoApp.InvokeOnUiThread(new Action(() =>
         {
             try { result = ReadCoreIfInUse(); }
             catch { /* leave empty; the catalog just is not indexed this round */ }
-            finally { done.Set(); }
+            finally { try { done.Set(); } catch { /* handle raced with GC; ignore */ } }
         }));
 
         done.Wait(UiReadTimeout);
         return result;
     }
 
-    /// <summary>On the UI thread. Reads the catalog only when a Grasshopper document is open, so the
-    /// ComponentServer is already initialised (touching it otherwise triggers the loading-UI init).</summary>
+    /// <summary>On the UI thread. Reads the catalog only when a Grasshopper document is open (so Grasshopper is
+    /// genuinely in use). Any lazy ComponentServer initialisation triggered by our access then happens safely
+    /// on the UI thread, rather than forcing it — and crashing — from a background thread.</summary>
     private static IReadOnlyList<GrasshopperCatalogEntry> ReadCoreIfInUse()
     {
         var docServer = global::Grasshopper.Instances.DocumentServer;

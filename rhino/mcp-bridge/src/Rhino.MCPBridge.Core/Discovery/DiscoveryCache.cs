@@ -940,6 +940,45 @@ public sealed class DiscoveryCache : IDisposable
         return results;
     }
 
+    /// <summary>Looks up a single member row by its exact member_id, independent of the dotted
+    /// Namespace.Type.Member structure. describe_function uses this as a fallback so a member_id whose name
+    /// segment the dotted parser cannot invert (a synthetic Grasshopper component named "Mesh (Custom)" or
+    /// "A.B") still resolves. Returns null when no member has that id.</summary>
+    public DiscoveryMemberRow? TryGetMemberByMemberId(string memberId)
+    {
+        lock (_lock)
+        {
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = """
+                SELECT m.kind, m.name, m.signature, m.summary, m.member_id, m.returns, m.params_json, a.kind, m.python_call, t.namespace, t.full_name
+                FROM members m JOIN types t ON m.type_id = t.id JOIN assemblies a ON t.assembly_id = a.id
+                WHERE m.member_id = @memberId
+                LIMIT 1
+                """;
+            cmd.Parameters.AddWithValue("@memberId", memberId);
+            using var reader = cmd.ExecuteReader();
+            if (!reader.Read())
+            {
+                return null;
+            }
+
+            return new DiscoveryMemberRow
+            {
+                Kind = reader.GetString(0),
+                Name = reader.GetString(1),
+                Signature = reader.GetString(2),
+                Summary = reader.IsDBNull(3) ? null : reader.GetString(3),
+                MemberId = reader.GetString(4),
+                Returns = reader.IsDBNull(5) ? null : reader.GetString(5),
+                Parameters = JsonSerializer.Deserialize<List<ReflectedParameter>>(reader.GetString(6)) ?? new List<ReflectedParameter>(),
+                IsCoreAssembly = reader.GetString(7) == "core",
+                PythonCall = reader.GetString(8),
+                Namespace = reader.GetString(9),
+                DeclaringType = reader.GetString(10),
+            };
+        }
+    }
+
     // -------------------------------------------------------------------------------------------------
     // search_functions
     // -------------------------------------------------------------------------------------------------

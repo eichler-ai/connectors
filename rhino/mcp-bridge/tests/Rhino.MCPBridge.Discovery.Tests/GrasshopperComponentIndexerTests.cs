@@ -101,6 +101,31 @@ public class GrasshopperComponentIndexerTests
     }
 
     [Fact]
+    public void DescribeFunction_ResolvesMemberIdsWhoseNamesTheDottedParserMangles()
+    {
+        // The search -> describe-by-member_id flow must work even for component names the dotted member_id
+        // parser cannot invert: '(' (stripped from the first paren) and '.' (split on). Real for plug-ins.
+        var tricky = new[]
+        {
+            Entry("cccc1111-1111-1111-1111-111111111111", "Mesh (Custom)", "Mesh", "Util", "a custom mesh", System.Array.Empty<(string, string)>(), System.Array.Empty<(string, string)>()),
+            Entry("dddd2222-2222-2222-2222-222222222222", "A.B Split", "Sets", "List", "a dotted name", System.Array.Empty<(string, string)>(), System.Array.Empty<(string, string)>()),
+        };
+        var indexed = GrasshopperComponentIndexer.Build(tricky)!.Value;
+        using var cache = new DiscoveryCache(":memory:");
+        cache.SyncSource("grasshopper", GrasshopperComponentIndexer.SourceId, indexed.ContentHash, indexed.Types);
+        var svc = new DiscoveryService(cache);
+
+        // '(' in the name: member_id path (the schema's "reliable disambiguator") must resolve.
+        var paren = svc.DescribeFunction(null, "Grasshopper.Mesh.Mesh (Custom)");
+        Assert.NotNull(paren.Single);
+        Assert.Equal("Mesh (Custom)", paren.Single!.Name);
+
+        // '.' in the name: both member and member_id must resolve via the direct fallback.
+        Assert.Equal("A.B Split", svc.DescribeFunction(null, "Grasshopper.Sets.A.B Split").Single!.Name);
+        Assert.Equal("A.B Split", svc.DescribeFunction("Grasshopper.Sets.A.B Split", null).Single!.Name);
+    }
+
+    [Fact]
     public void DescribeFunction_ResolvesByMember_AndByMemberId()
     {
         var svc = new DiscoveryService(SyncedCache());
