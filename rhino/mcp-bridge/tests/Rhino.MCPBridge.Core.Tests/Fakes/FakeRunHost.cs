@@ -87,6 +87,19 @@ internal sealed class FakeRunHost : IRunHost
     public List<DocumentSaveState> SaveStates { get; } = new();
     public IReadOnlyList<DocumentSaveState> RestartSaveStates() => SaveStates;
 
+    /// <summary>inspect_definition's result and error control. Non-null <see cref="InspectResult"/> is a
+    /// success; null with <see cref="InspectNotFound"/> true is definition-not-found; null with it false is
+    /// grasshopper-not-loaded — the two null paths the dispatcher distinguishes.</summary>
+    public GrasshopperDefinitionInfo? InspectResult { get; set; }
+    public bool InspectNotFound { get; set; }
+    public readonly List<(string Id, string? Filter, int Offset, int Limit)> Inspects = new();
+    public GrasshopperDefinitionInfo? InspectGrasshopperDefinition(string grasshopperDocumentId, string? nameFilter, int offset, int limit, out bool notFound)
+    {
+        Inspects.Add((grasshopperDocumentId, nameFilter, offset, limit));
+        notFound = InspectNotFound;
+        return InspectResult;
+    }
+
     public bool RunInCommand(RunDocument document, string undoLabel, Action body)
     {
         if (RefuseCommands) return false;

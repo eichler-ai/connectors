@@ -250,6 +250,80 @@ func (r *Router) RestartSnapshot(ctx context.Context, instanceID string) ([]DocS
 	return res.Documents, nil
 }
 
+// InspectObject is one object in an InspectResult: its identity, canvas geometry (Pivot [x,y] and Bounds
+// [x,y,width,height]) and component-level wiring (neighbour guids). Keep in step with the plug-in's
+// InspectDefinitionMessage.
+type InspectObject struct {
+	GUID       string    `json:"guid"`
+	Nickname   string    `json:"nickname"`
+	Name       string    `json:"name"`
+	Kind       string    `json:"kind"`
+	Pivot      []float64 `json:"pivot"`
+	Bounds     []float64 `json:"bounds"`
+	Upstream   []string  `json:"upstream"`
+	Downstream []string  `json:"downstream"`
+}
+
+// InspectResult is inspect_definition's result (PRD §10): a read-only snapshot of an open Grasshopper
+// definition's structure.
+type InspectResult struct {
+	GrasshopperDocumentID string          `json:"gh_document_id"`
+	Title                 string          `json:"title"`
+	Path                  string          `json:"path,omitempty"`
+	ObjectCount           int             `json:"object_count"`
+	Enabled               bool            `json:"enabled"`
+	MatchCount            int             `json:"match_count"`
+	Offset                int             `json:"offset"`
+	Truncated             bool            `json:"truncated"`
+	Objects               []InspectObject `json:"objects"`
+}
+
+// InspectDefinition asks the plug-in for an open Grasshopper definition's structure (its objects, their
+// canvas positions and their wiring), for the inspect_definition tool. Read-only. An empty ghDocumentID
+// means the active canvas definition.
+func (r *Router) InspectDefinition(ctx context.Context, instanceID, ghDocumentID, nameFilter string, offset, limit int) (*InspectResult, *diag.Record) {
+	conn, ok := r.conns.Conn(instanceID)
+	if !ok {
+		return nil, diag.New(diag.SeverityError, "instance-not-found", source,
+			fmt.Sprintf("no connected Rhino instance has instance_id %q", instanceID)).
+			WithRemedy("call list_instances and pick a current instance_id")
+	}
+	wctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	params := map[string]any{}
+	if ghDocumentID != "" {
+		params["gh_document_id"] = ghDocumentID
+	}
+	if nameFilter != "" {
+		params["name_filter"] = nameFilter
+	}
+	if offset > 0 {
+		params["offset"] = offset
+	}
+	if limit > 0 {
+		params["limit"] = limit
+	}
+	raw, rpcErr, err := conn.Call(wctx, "inspect_definition", params)
+	if err != nil {
+		return nil, diag.New(diag.SeverityError, "wire-call-failed", source,
+			fmt.Sprintf("inspect_definition did not complete: %v", err)).
+			WithRemedy("check the Rhino is responsive (list_instances) and retry")
+	}
+	if rpcErr != nil {
+		if rpcErr.Data != nil {
+			return nil, rpcErr.Data
+		}
+		return nil, diag.New(diag.SeverityError, "bridge-error", source,
+			fmt.Sprintf("inspect_definition was refused by the plug-in: %s", rpcErr.Message))
+	}
+	var res InspectResult
+	if err := json.Unmarshal(raw, &res); err != nil {
+		return nil, diag.New(diag.SeverityError, "wire-decode-failed", source,
+			fmt.Sprintf("inspect_definition returned a result this server could not decode: %v", err))
+	}
+	return &res, nil
+}
+
 // PollExecution forwards to the owning instance; a wait up to timeoutMs happens plug-in side.
 func (r *Router) PollExecution(ctx context.Context, executionID string, timeoutMs int) (*Result, *diag.Record) {
 	conn, drec := r.lookup(ctx, executionID)

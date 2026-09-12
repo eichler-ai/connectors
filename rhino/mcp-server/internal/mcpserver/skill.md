@@ -159,6 +159,12 @@ With a definition bound (`gh_document_id`), a script reaches it two ways. **Dire
   current, and note a
   definition computes volatile data only when it is **enabled**.
 
+**Seeing what's on the canvas — `inspect_definition`.** A tool (not a script call) that reads an open
+definition's structure: every object with its guid, nickname, type, canvas position (`pivot`/`bounds`), and
+component-level wiring (`upstream`/`downstream` neighbour guids). Omit `gh_document_id` for the active canvas
+definition — its id comes back for later calls. Narrow with `name_filter`, page with `offset`/`limit`. Use it
+to learn the nicknames to `Set`/`Get`, to understand how a definition is wired, and to pick objects to frame.
+
 **The solve report.** A run during which a Grasshopper solution ended (`ghdoc.NewSolution(True)` or
 `connector.Grasshopper.Solve()`) carries a `grasshopper` field on its result: `solutions[]` and every
 component that carried a runtime message (error, warning or remark) or ended in a non-`Computed` phase.
@@ -295,6 +301,7 @@ inspect the document rather than assuming it's clean.
 | `list_functions` | browse the API tree: namespaces → types → members |
 | `describe_function` | one member's full detail + both call shapes |
 | `capture_view` | see a viewport (image) to debug |
+| `inspect_definition` | read an open Grasshopper definition's objects, positions and wiring |
 | `undo` / `redo` | revert or restore the connector's own run |
 | `search_plugins` / `list_plugins` | find or list Rhino/Grasshopper plug-ins (Yak) |
 | `install_plugin` / `uninstall_plugin` | install/remove a plug-in (gated) — restart to load |
