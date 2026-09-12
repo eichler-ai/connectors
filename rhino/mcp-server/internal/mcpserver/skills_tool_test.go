@@ -102,6 +102,7 @@ var registeredToolNames = []string{
 	"uninstall_plugin",
 	"restart_rhino",
 	"inspect_gh_definition",
+	"frame_canvas",
 	"get_skills",
 }
 

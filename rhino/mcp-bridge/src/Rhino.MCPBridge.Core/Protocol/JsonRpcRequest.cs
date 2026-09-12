@@ -205,6 +205,59 @@ public sealed class JsonRpcRequest
     /// <summary>Reads an optional 32-bit numeric param (PRD §08's page_size/top_n), returning <paramref name="defaultValue"/> if absent/null. Throws if present with a non-numeric shape.</summary>
     public int GetOptionalInt32(string name, int defaultValue) => (int)GetOptionalInt64(name, defaultValue);
 
+    /// <summary>Reads an optional floating-point param (PRD §11's padding), returning <paramref name="defaultValue"/> if absent/null. Throws if present with a non-numeric shape.</summary>
+    public double GetOptionalDouble(string name, double defaultValue)
+    {
+        if (_params.ValueKind != JsonValueKind.Object || !_params.TryGetProperty(name, out var value))
+        {
+            return defaultValue;
+        }
+
+        return value.ValueKind switch
+        {
+            JsonValueKind.Number => value.GetDouble(),
+            JsonValueKind.Null or JsonValueKind.Undefined => defaultValue,
+            _ => throw WrongType(name, "number", hasDefault: true),
+        };
+    }
+
+    /// <summary>Reads an optional string-array param (PRD §11's components), returning null if absent/null.
+    /// Empty/null entries are dropped. Throws if present as a non-array, or with a non-string element.</summary>
+    public string[]? GetOptionalStringArray(string name)
+    {
+        if (_params.ValueKind != JsonValueKind.Object || !_params.TryGetProperty(name, out var value))
+        {
+            return null;
+        }
+
+        if (value.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+        {
+            return null;
+        }
+
+        if (value.ValueKind != JsonValueKind.Array)
+        {
+            throw WrongType(name, "array of strings", hasDefault: true);
+        }
+
+        var list = new List<string>();
+        foreach (var item in value.EnumerateArray())
+        {
+            if (item.ValueKind != JsonValueKind.String)
+            {
+                throw WrongType(name, "array of strings", hasDefault: true);
+            }
+
+            var s = item.GetString();
+            if (!string.IsNullOrEmpty(s))
+            {
+                list.Add(s);
+            }
+        }
+
+        return list.ToArray();
+    }
+
     /// <summary>Reads an optional boolean param (PRD §09's overwrite_output_files), returning <paramref name="defaultValue"/> if absent/null. Throws if present with a non-boolean shape.</summary>
     public bool GetOptionalBool(string name, bool defaultValue)
     {

@@ -109,6 +109,18 @@ internal sealed class FakeRunHost : IRunHost
         return CanvasImage;
     }
 
+    /// <summary>frame_canvas's result and error control, mirroring InspectResult/InspectNotFound: non-null
+    /// FrameResult is a success; null + FrameNotFound true is definition-not-found; null + false is no canvas.</summary>
+    public FrameCanvasResult? FrameResult { get; set; }
+    public bool FrameNotFound { get; set; }
+    public readonly List<(string Id, string[] Components, int Up, int Down, double Padding)> Frames = new();
+    public FrameCanvasResult? FrameCanvas(string grasshopperDocumentId, string[] components, int upstreamDepth, int downstreamDepth, double padding, out bool notFound)
+    {
+        Frames.Add((grasshopperDocumentId, components, upstreamDepth, downstreamDepth, padding));
+        notFound = FrameNotFound;
+        return FrameResult;
+    }
+
     public bool RunInCommand(RunDocument document, string undoLabel, Action body)
     {
         if (RefuseCommands) return false;

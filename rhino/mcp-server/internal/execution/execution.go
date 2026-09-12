@@ -324,6 +324,65 @@ func (r *Router) InspectDefinition(ctx context.Context, instanceID, ghDocumentID
 	return &res, nil
 }
 
+// FrameResult is frame_canvas's result (PRD §11): which canvas region the viewport was set to frame.
+type FrameResult struct {
+	GrasshopperDocumentID string    `json:"gh_document_id"`
+	Title                 string    `json:"title"`
+	Rect                  []float64 `json:"rect"`
+	FramedObjectCount     int       `json:"framed_object_count"`
+	MatchedComponents     []string  `json:"matched_components"`
+	MissingComponents     []string  `json:"missing_components"`
+	FramedWholeDefinition bool      `json:"framed_whole_definition"`
+}
+
+// FrameCanvas asks the plug-in to frame the live Grasshopper canvas on a neighbourhood of components. It
+// mutates the canvas view (not the document). An empty ghDocumentID means the active canvas definition.
+func (r *Router) FrameCanvas(ctx context.Context, instanceID, ghDocumentID string, components []string, upstreamDepth, downstreamDepth int, padding float64) (*FrameResult, *diag.Record) {
+	conn, ok := r.conns.Conn(instanceID)
+	if !ok {
+		return nil, diag.New(diag.SeverityError, "instance-not-found", source,
+			fmt.Sprintf("no connected Rhino instance has instance_id %q", instanceID)).
+			WithRemedy("call list_instances and pick a current instance_id")
+	}
+	wctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	params := map[string]any{}
+	if ghDocumentID != "" {
+		params["gh_document_id"] = ghDocumentID
+	}
+	if len(components) > 0 {
+		params["components"] = components
+	}
+	if upstreamDepth > 0 {
+		params["upstream_depth"] = upstreamDepth
+	}
+	if downstreamDepth > 0 {
+		params["downstream_depth"] = downstreamDepth
+	}
+	if padding >= 0 {
+		params["padding"] = padding
+	}
+	raw, rpcErr, err := conn.Call(wctx, "frame_canvas", params)
+	if err != nil {
+		return nil, diag.New(diag.SeverityError, "wire-call-failed", source,
+			fmt.Sprintf("frame_canvas did not complete: %v", err)).
+			WithRemedy("check the Rhino is responsive (list_instances) and retry")
+	}
+	if rpcErr != nil {
+		if rpcErr.Data != nil {
+			return nil, rpcErr.Data
+		}
+		return nil, diag.New(diag.SeverityError, "bridge-error", source,
+			fmt.Sprintf("frame_canvas was refused by the plug-in: %s", rpcErr.Message))
+	}
+	var res FrameResult
+	if err := json.Unmarshal(raw, &res); err != nil {
+		return nil, diag.New(diag.SeverityError, "wire-decode-failed", source,
+			fmt.Sprintf("frame_canvas returned a result this server could not decode: %v", err))
+	}
+	return &res, nil
+}
+
 // PollExecution forwards to the owning instance; a wait up to timeoutMs happens plug-in side.
 func (r *Router) PollExecution(ctx context.Context, executionID string, timeoutMs int) (*Result, *diag.Record) {
 	conn, drec := r.lookup(ctx, executionID)

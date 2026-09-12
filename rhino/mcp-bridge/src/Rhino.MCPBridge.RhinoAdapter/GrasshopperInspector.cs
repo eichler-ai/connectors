@@ -164,4 +164,103 @@ internal static class GrasshopperInspector
             }
         }
     }
+
+    // ---- canvas framing support (PRD §11, frame_canvas) ----
+
+    /// <summary>Resolves each requested nickname/guid to an object on the canvas (first match wins, as
+    /// Find/Set do), reporting which requests matched nothing so the caller can surface them.</summary>
+    internal static (List<IGH_DocumentObject> Matched, List<string> Missing) FindObjects(GH_Document doc, IReadOnlyList<string> nicknamesOrGuids)
+    {
+        var matched = new List<IGH_DocumentObject>();
+        var missing = new List<string>();
+        foreach (var q in nicknamesOrGuids)
+        {
+            var obj = FindOne(doc, q);
+            if (obj is null)
+            {
+                missing.Add(q);
+            }
+            else
+            {
+                matched.Add(obj);
+            }
+        }
+
+        return (matched, missing);
+    }
+
+    private static IGH_DocumentObject? FindOne(GH_Document doc, string nicknameOrGuid)
+    {
+        var byGuid = Guid.TryParse(nicknameOrGuid, out var g);
+        foreach (var obj in doc.Objects)
+        {
+            if (obj is null) continue;
+            var nick = string.IsNullOrEmpty(obj.NickName) ? (obj.Name ?? "") : obj.NickName;
+            if (byGuid ? obj.InstanceGuid == g : string.Equals(nick, nicknameOrGuid, StringComparison.OrdinalIgnoreCase))
+            {
+                return obj;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>Every object reachable from <paramref name="seeds"/> within <paramref name="upstreamDepth"/>
+    /// levels of sources and <paramref name="downstreamDepth"/> levels of recipients, seeds included. Uses the
+    /// same component-level <see cref="Wiring"/> as inspect_gh_definition.</summary>
+    internal static HashSet<IGH_DocumentObject> Neighborhood(GH_Document doc, IReadOnlyList<IGH_DocumentObject> seeds, int upstreamDepth, int downstreamDepth)
+    {
+        var byGuid = new Dictionary<Guid, IGH_DocumentObject>();
+        var docGuids = new HashSet<string>();
+        foreach (var o in doc.Objects)
+        {
+            if (o is null) continue;
+            byGuid[o.InstanceGuid] = o;
+            docGuids.Add(o.InstanceGuid.ToString());
+        }
+
+        var acc = new HashSet<IGH_DocumentObject>(seeds);
+        Expand(acc, seeds, byGuid, docGuids, upstreamDepth, upstream: true);
+        Expand(acc, seeds, byGuid, docGuids, downstreamDepth, upstream: false);
+        return acc;
+    }
+
+    private static void Expand(HashSet<IGH_DocumentObject> acc, IReadOnlyList<IGH_DocumentObject> seeds,
+        Dictionary<Guid, IGH_DocumentObject> byGuid, HashSet<string> docGuids, int depth, bool upstream)
+    {
+        var frontier = new List<IGH_DocumentObject>(seeds);
+        for (var level = 0; level < depth && frontier.Count > 0; level++)
+        {
+            var next = new List<IGH_DocumentObject>();
+            foreach (var obj in frontier)
+            {
+                var (up, down) = Wiring(obj, docGuids);
+                foreach (var guid in upstream ? up : down)
+                {
+                    if (Guid.TryParse(guid, out var g) && byGuid.TryGetValue(g, out var neighbour) && acc.Add(neighbour))
+                    {
+                        next.Add(neighbour);
+                    }
+                }
+            }
+
+            frontier = next;
+        }
+    }
+
+    /// <summary>The union of the canvas bounds of a set of objects, or an empty rectangle when none have
+    /// bounds. Canvas coordinates.</summary>
+    internal static System.Drawing.RectangleF UnionBounds(IEnumerable<IGH_DocumentObject> objects)
+    {
+        System.Drawing.RectangleF? acc = null;
+        foreach (var o in objects)
+        {
+            var attr = o?.Attributes;
+            if (attr is null) continue;
+            var b = attr.Bounds;
+            acc = acc is null ? b : System.Drawing.RectangleF.Union(acc.Value, b);
+        }
+
+        return acc ?? System.Drawing.RectangleF.Empty;
+    }
 }

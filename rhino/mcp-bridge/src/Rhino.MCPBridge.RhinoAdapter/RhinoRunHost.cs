@@ -228,6 +228,80 @@ internal sealed class RhinoRunHost : IRunHost
         return GrasshopperCanvas.Render(mimeType, transparent, requestedWidth, requestedHeight);
     }
 
+    public FrameCanvasResult? FrameCanvas(string grasshopperDocumentId, string[] components, int upstreamDepth, int downstreamDepth, double padding, out bool notFound)
+    {
+        notFound = false;
+        if (!GrasshopperWatcher.GrasshopperLoaded())
+        {
+            return null; // Grasshopper not loaded → no canvas
+        }
+
+        return FrameCanvasCore(grasshopperDocumentId, components, upstreamDepth, downstreamDepth, padding, out notFound);
+    }
+
+    /// <summary>Grasshopper-typed; reached only once <see cref="GrasshopperWatcher.GrasshopperLoaded"/> is true.</summary>
+    private FrameCanvasResult? FrameCanvasCore(string grasshopperDocumentId, string[] components, int upstreamDepth, int downstreamDepth, double padding, out bool notFound)
+    {
+        notFound = false;
+        var canvas = GrasshopperCanvas.ActiveCanvas();
+        if (canvas is null)
+        {
+            return null; // editor not open → the dispatcher maps this to grasshopper-canvas-unavailable
+        }
+
+        var doc = string.IsNullOrEmpty(grasshopperDocumentId)
+            ? ActiveGrasshopperDocument()
+            : FindGrasshopperDocument(grasshopperDocumentId) as global::Grasshopper.Kernel.GH_Document;
+        if (doc is null)
+        {
+            notFound = true;
+            return null;
+        }
+
+        // Make the definition the active canvas document, so the framing (and a subsequent canvas capture) act
+        // on it even if the editor was showing something else.
+        GrasshopperCanvas.SetActiveDocument(canvas, doc);
+
+        var id = GrasshopperIdentity.IdOf(doc, _processSalt, _caseInsensitivePaths, _log);
+        var title = string.IsNullOrEmpty(doc.DisplayName) ? "Untitled" : doc.DisplayName;
+
+        List<global::Grasshopper.Kernel.IGH_DocumentObject> region;
+        string[] matched, missing;
+        bool wholeDefinition;
+        if (components is null || components.Length == 0)
+        {
+            region = new List<global::Grasshopper.Kernel.IGH_DocumentObject>();
+            foreach (var o in doc.Objects)
+            {
+                if (o is not null) region.Add(o);
+            }
+
+            matched = System.Array.Empty<string>();
+            missing = System.Array.Empty<string>();
+            wholeDefinition = true;
+        }
+        else
+        {
+            var (m, miss) = GrasshopperInspector.FindObjects(doc, components);
+            missing = miss.ToArray();
+            matched = components.Where(c => !miss.Contains(c)).ToArray();
+            region = GrasshopperInspector.Neighborhood(doc, m, System.Math.Max(0, upstreamDepth), System.Math.Max(0, downstreamDepth)).ToList();
+            wholeDefinition = false;
+        }
+
+        var rect = System.Drawing.RectangleF.Empty;
+        if (region.Count > 0)
+        {
+            rect = GrasshopperInspector.UnionBounds(region);
+            var pad = (float)System.Math.Max(0, padding);
+            rect.Inflate(pad, pad);
+            GrasshopperCanvas.FrameViewport(canvas, rect);
+        }
+
+        return new FrameCanvasResult(id, title, new double[] { rect.X, rect.Y, rect.Width, rect.Height },
+            region.Count, matched, missing, wholeDefinition);
+    }
+
     /// <summary>Same rule as RhinoDocumentSnapshotSource; kept in one place so routing and register agree.</summary>
     private string IdOf(RhinoDoc doc)
     {

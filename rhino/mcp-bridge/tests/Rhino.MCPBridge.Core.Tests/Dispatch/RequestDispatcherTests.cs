@@ -407,6 +407,63 @@ public sealed class RequestDispatcherTests
         Assert.Equal("unknown-method", Code(await h.Call("inspect_gh_definition", new { })));
     }
 
+    [Fact]
+    public async Task FrameCanvas_ReturnsTheFramedRegion_AndPassesBoundedParams()
+    {
+        var h = new Harness();
+        h.Host.FrameResult = new FrameCanvasResult("gh-1", "Def", new double[] { 10, 20, 300, 120 }, 4,
+            new[] { "circle" }, System.Array.Empty<string>(), framedWholeDefinition: false);
+        var d = WithMainThread(h);
+        var resp = await d.DispatchAsync(JsonRpcRequest.Parse("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"frame_canvas\",\"params\":{\"components\":[\"circle\",\"\"],\"upstream_depth\":99,\"downstream_depth\":-3,\"padding\":15}}"), CancellationToken.None);
+        var result = JsonDocument.Parse(resp).RootElement.GetProperty("result");
+        Assert.Equal("gh-1", result.GetProperty("gh_document_id").GetString());
+        Assert.Equal(300, result.GetProperty("rect")[2].GetDouble());
+        Assert.Equal(4, result.GetProperty("framed_object_count").GetInt32());
+        Assert.Equal("circle", result.GetProperty("matched_components")[0].GetString());
+        // Depths are clamped to [0,20], the empty component is dropped, padding is passed through.
+        var (_, components, up, down, padding) = Assert.Single(h.Host.Frames);
+        Assert.Equal(new[] { "circle" }, components);
+        Assert.Equal(20, up);
+        Assert.Equal(0, down);
+        Assert.Equal(15, padding);
+    }
+
+    [Fact]
+    public async Task FrameCanvas_DefaultsPaddingAndFramesWholeDefinition_WhenNoComponents()
+    {
+        var h = new Harness();
+        h.Host.FrameResult = new FrameCanvasResult("gh-1", "Def", new double[] { 0, 0, 500, 400 }, 12,
+            System.Array.Empty<string>(), System.Array.Empty<string>(), framedWholeDefinition: true);
+        var d = WithMainThread(h);
+        var resp = await d.DispatchAsync(JsonRpcRequest.Parse("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"frame_canvas\",\"params\":{}}"), CancellationToken.None);
+        Assert.True(JsonDocument.Parse(resp).RootElement.GetProperty("result").GetProperty("framed_whole_definition").GetBoolean());
+        var (_, components, _, _, padding) = Assert.Single(h.Host.Frames);
+        Assert.Empty(components);
+        Assert.Equal(20, padding); // the default padding
+    }
+
+    [Fact]
+    public async Task FrameCanvas_DefinitionNotFound_And_NoCanvas_AreDistinctErrors()
+    {
+        var h = new Harness();
+        h.Host.FrameResult = null;
+        h.Host.FrameNotFound = true;
+        var d = WithMainThread(h);
+        var nf = await d.DispatchAsync(JsonRpcRequest.Parse("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"frame_canvas\",\"params\":{\"gh_document_id\":\"nope\"}}"), CancellationToken.None);
+        Assert.Equal("grasshopper-definition-not-found", Code(JsonDocument.Parse(nf).RootElement));
+
+        h.Host.FrameNotFound = false; // null + not-notFound => the editor is not open
+        var noCanvas = await d.DispatchAsync(JsonRpcRequest.Parse("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"frame_canvas\",\"params\":{}}"), CancellationToken.None);
+        Assert.Equal("grasshopper-canvas-unavailable", Code(JsonDocument.Parse(noCanvas).RootElement));
+    }
+
+    [Fact]
+    public async Task FrameCanvas_IsUnknown_WithoutAMainThreadHop()
+    {
+        var h = new Harness();
+        Assert.Equal("unknown-method", Code(await h.Call("frame_canvas", new { })));
+    }
+
     private sealed class NoViewports : Core.Capture.IViewCapture
     {
         public IReadOnlyList<string> ViewportNames(object document) => Array.Empty<string>();
