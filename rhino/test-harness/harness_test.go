@@ -55,7 +55,7 @@ type instance struct {
 	PID                  int                   `json:"pid"`
 	Status               string                `json:"status"`
 	Documents            []document            `json:"documents"`
-	GrasshopperDocuments []grasshopperDocument `json:"grasshopper_documents"`
+	GrasshopperDocuments []grasshopperDocument `json:"gh_documents"`
 }
 
 type listInstancesOut struct {

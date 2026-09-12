@@ -264,7 +264,7 @@ type InspectObject struct {
 	Downstream []string  `json:"downstream"`
 }
 
-// InspectResult is inspect_definition's result (PRD §10): a read-only snapshot of an open Grasshopper
+// InspectResult is inspect_gh_definition's result (PRD §10): a read-only snapshot of an open Grasshopper
 // definition's structure.
 type InspectResult struct {
 	GrasshopperDocumentID string          `json:"gh_document_id"`
@@ -279,7 +279,7 @@ type InspectResult struct {
 }
 
 // InspectDefinition asks the plug-in for an open Grasshopper definition's structure (its objects, their
-// canvas positions and their wiring), for the inspect_definition tool. Read-only. An empty ghDocumentID
+// canvas positions and their wiring), for the inspect_gh_definition tool. Read-only. An empty ghDocumentID
 // means the active canvas definition.
 func (r *Router) InspectDefinition(ctx context.Context, instanceID, ghDocumentID, nameFilter string, offset, limit int) (*InspectResult, *diag.Record) {
 	conn, ok := r.conns.Conn(instanceID)
@@ -303,10 +303,10 @@ func (r *Router) InspectDefinition(ctx context.Context, instanceID, ghDocumentID
 	if limit > 0 {
 		params["limit"] = limit
 	}
-	raw, rpcErr, err := conn.Call(wctx, "inspect_definition", params)
+	raw, rpcErr, err := conn.Call(wctx, "inspect_gh_definition", params)
 	if err != nil {
 		return nil, diag.New(diag.SeverityError, "wire-call-failed", source,
-			fmt.Sprintf("inspect_definition did not complete: %v", err)).
+			fmt.Sprintf("inspect_gh_definition did not complete: %v", err)).
 			WithRemedy("check the Rhino is responsive (list_instances) and retry")
 	}
 	if rpcErr != nil {
@@ -314,12 +314,12 @@ func (r *Router) InspectDefinition(ctx context.Context, instanceID, ghDocumentID
 			return nil, rpcErr.Data
 		}
 		return nil, diag.New(diag.SeverityError, "bridge-error", source,
-			fmt.Sprintf("inspect_definition was refused by the plug-in: %s", rpcErr.Message))
+			fmt.Sprintf("inspect_gh_definition was refused by the plug-in: %s", rpcErr.Message))
 	}
 	var res InspectResult
 	if err := json.Unmarshal(raw, &res); err != nil {
 		return nil, diag.New(diag.SeverityError, "wire-decode-failed", source,
-			fmt.Sprintf("inspect_definition returned a result this server could not decode: %v", err))
+			fmt.Sprintf("inspect_gh_definition returned a result this server could not decode: %v", err))
 	}
 	return &res, nil
 }

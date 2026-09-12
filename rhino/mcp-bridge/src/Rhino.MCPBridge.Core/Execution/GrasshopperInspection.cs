@@ -1,7 +1,7 @@
 namespace Rhino.MCPBridge.Core.Execution;
 
 /// <summary>
-/// A read-only snapshot of an open Grasshopper definition's structure for inspect_definition (PRD §10):
+/// A read-only snapshot of an open Grasshopper definition's structure for inspect_gh_definition (PRD §10):
 /// the objects on the canvas, their canvas positions, and their component-level wiring. Server-facing (it
 /// rides the wire to the MCP server), NOT script-facing — a script reads data with Connector.Grasshopper.
 /// The adapter builds it (it alone names Grasshopper types); Core only forwards it.

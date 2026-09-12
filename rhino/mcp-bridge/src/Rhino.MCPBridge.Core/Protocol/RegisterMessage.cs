@@ -39,7 +39,7 @@ public static class RegisterMessage
         [JsonPropertyName("documents")] public List<DocumentDto> Documents { get; set; } = new();
         // Instance-level (PRD §10); omitted from the wire when empty so a Grasshopper-less session's
         // register looks exactly as it did before this field existed.
-        [JsonPropertyName("grasshopper_documents")][JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] public List<GrasshopperDocumentDto>? GrasshopperDocuments { get; set; }
+        [JsonPropertyName("gh_documents")][JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] public List<GrasshopperDocumentDto>? GrasshopperDocuments { get; set; }
         [JsonPropertyName("execution_state")] public string ExecutionState { get; set; } = "idle";
     }
 

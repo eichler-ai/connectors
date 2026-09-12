@@ -4,7 +4,7 @@ using Rhino.MCPBridge.Core.Execution;
 
 namespace Rhino.MCPBridge.Core.Protocol;
 
-/// <summary>inspect_definition's wire result (PRD §10): a read-only snapshot of an open Grasshopper
+/// <summary>inspect_gh_definition's wire result (PRD §10): a read-only snapshot of an open Grasshopper
 /// definition's objects, their canvas positions, and their component-level wiring, so an agent can see
 /// what is on the canvas and frame a capture. Keep in step with the Go side (execution.InspectResult).</summary>
 internal static class InspectDefinitionMessage

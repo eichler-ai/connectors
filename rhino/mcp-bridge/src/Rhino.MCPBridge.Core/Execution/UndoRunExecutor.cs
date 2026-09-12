@@ -225,7 +225,7 @@ internal sealed class UndoRunExecutor
                 ["execution_id"] = request.ExecutionId,
                 ["requested_gh_document_id"] = request.GrasshopperDocumentId,
             },
-            new[] { "Pick a gh_document_id from grasshopper_documents in list_instances (Grasshopper must be open and the definition loaded), then retry; or omit it to run without a bound definition." });
+            new[] { "Pick a gh_document_id from gh_documents in list_instances (Grasshopper must be open and the definition loaded), then retry; or omit it to run without a bound definition." });
     }
 }
 

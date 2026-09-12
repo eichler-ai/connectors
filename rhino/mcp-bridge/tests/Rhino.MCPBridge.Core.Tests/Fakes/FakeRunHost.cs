@@ -87,7 +87,7 @@ internal sealed class FakeRunHost : IRunHost
     public List<DocumentSaveState> SaveStates { get; } = new();
     public IReadOnlyList<DocumentSaveState> RestartSaveStates() => SaveStates;
 
-    /// <summary>inspect_definition's result and error control. Non-null <see cref="InspectResult"/> is a
+    /// <summary>inspect_gh_definition's result and error control. Non-null <see cref="InspectResult"/> is a
     /// success; null with <see cref="InspectNotFound"/> true is definition-not-found; null with it false is
     /// grasshopper-not-loaded — the two null paths the dispatcher distinguishes.</summary>
     public GrasshopperDefinitionInfo? InspectResult { get; set; }

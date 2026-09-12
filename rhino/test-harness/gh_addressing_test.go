@@ -12,7 +12,7 @@ import (
 )
 
 // TestGrasshopperDocumentsEnumerateLive verifies PRD §10 addressing end to end: with Grasshopper loaded
-// and a definition present, list_instances reports it in grasshopper_documents with a gh- id, title,
+// and a definition present, list_instances reports it in gh_documents with a gh- id, title,
 // enabled flag and component count. It loads Grasshopper itself (demand-loaded) and adds a document via
 // execute_script, so it needs no pre-opened .gh.
 func TestGrasshopperDocumentsEnumerateLive(t *testing.T) {
@@ -35,7 +35,7 @@ loaded = Rhino.PlugIns.PlugIn.LoadPlugIn(gh_id)
 import Grasshopper
 server = Grasshopper.Instances.DocumentServer
 # The DocumentServer is process-global and accumulates a GH_Document per prior harness run; remove any
-# so the enumerated grasshopper_documents[0] is deterministically the one this run creates.
+# so the enumerated gh_documents[0] is deterministically the one this run creates.
 for existing in list(server):
     server.RemoveDocument(existing)
 doc = Grasshopper.Kernel.GH_Document()
@@ -104,7 +104,7 @@ result = "loaded={} count={} name={}".format(loaded, len(list(server)), doc.Disp
 			}
 			if len(i.GrasshopperDocuments) > 0 {
 				g := i.GrasshopperDocuments[0]
-				t.Logf("grasshopper_documents[0]: id=%s title=%q enabled=%v components=%d path=%q",
+				t.Logf("gh_documents[0]: id=%s title=%q enabled=%v components=%d path=%q",
 					g.GrasshopperDocumentID, g.Title, g.Enabled, g.ComponentCount, g.Path)
 				if !strings.HasPrefix(g.GrasshopperDocumentID, "gh-") {
 					t.Errorf("gh_document_id %q should start with gh-", g.GrasshopperDocumentID)
@@ -121,7 +121,7 @@ result = "loaded={} count={} name={}".format(loaded, len(list(server)), doc.Disp
 			}
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("no grasshopper_documents appeared for instance %s within the timeout", inst.InstanceID)
+			t.Fatalf("no gh_documents appeared for instance %s within the timeout", inst.InstanceID)
 		}
 		time.Sleep(1 * time.Second)
 	}
@@ -159,7 +159,7 @@ func assertGhdocBinds(t *testing.T, c *mcpclient.Client, instanceID, documentID,
 		t.Errorf("C# cast to GH_Document should compile and run once Grasshopper is loaded, got status=%s return=%q", cs.Status, cs.ReturnValue)
 	}
 
-	// inspect_definition: a read-only look at the definition's structure. Do it before the mutating steps
+	// inspect_gh_definition: a read-only look at the definition's structure. Do it before the mutating steps
 	// below so the view is the definition as built (slider->nsink, crv->csink, geo->gsink).
 	assertInspectDefinition(t, c, instanceID, ghDocID)
 
@@ -344,7 +344,7 @@ result = 'ext:kind=%s type=%s handle=%s' % (it.Kind, it.Type, it.Handle == str(o
 	}
 }
 
-// inspectDefinition is the structuredContent shape of inspect_definition's result.
+// inspectDefinition is the structuredContent shape of inspect_gh_definition's result.
 type inspectDefinition struct {
 	StructuredContent struct {
 		Definition *struct {
@@ -369,18 +369,18 @@ type inspectDefinition struct {
 	} `json:"structuredContent"`
 }
 
-// assertInspectDefinition checks inspect_definition reads the bound definition's structure: it echoes the
+// assertInspectDefinition checks inspect_gh_definition reads the bound definition's structure: it echoes the
 // id, reports every object with canvas positions, resolves the build-time wiring to neighbour guids
 // (slider->nsink), and honours name_filter.
 func callInspect(t *testing.T, c *mcpclient.Client, args map[string]any) inspectDefinition {
 	t.Helper()
-	raw, err := c.CallTool("inspect_definition", args, 30*time.Second)
+	raw, err := c.CallTool("inspect_gh_definition", args, 30*time.Second)
 	if err != nil {
-		t.Fatalf("inspect_definition %v: %v", args, err)
+		t.Fatalf("inspect_gh_definition %v: %v", args, err)
 	}
 	var env inspectDefinition
 	if err := json.Unmarshal(raw, &env); err != nil {
-		t.Fatalf("decode inspect_definition: %v\n%s", err, raw)
+		t.Fatalf("decode inspect_gh_definition: %v\n%s", err, raw)
 	}
 	return env
 }
@@ -390,7 +390,7 @@ func assertInspectDefinition(t *testing.T, c *mcpclient.Client, instanceID, ghDo
 	env := callInspect(t, c, map[string]any{"instance_id": instanceID, "gh_document_id": ghDocID})
 	def := env.StructuredContent.Definition
 	if def == nil {
-		t.Fatalf("inspect_definition returned no definition: %+v", env.StructuredContent.Error)
+		t.Fatalf("inspect_gh_definition returned no definition: %+v", env.StructuredContent.Error)
 	}
 	t.Logf("inspect: id=%s title=%q objects=%d enabled=%v", def.GrasshopperDocumentID, def.Title, def.ObjectCount, def.Enabled)
 	if def.GrasshopperDocumentID != ghDocID {

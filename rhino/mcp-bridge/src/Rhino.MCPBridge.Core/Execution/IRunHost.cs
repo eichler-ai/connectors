@@ -37,7 +37,7 @@ internal interface IRunHost
     /// restart_rhino's unsaved-work guard and its reopen list (PRD §10/§15). Main thread.</summary>
     IReadOnlyList<DocumentSaveState> RestartSaveStates();
 
-    /// <summary>Enumerates the objects of an open Grasshopper definition for inspect_definition (PRD §10):
+    /// <summary>Enumerates the objects of an open Grasshopper definition for inspect_gh_definition (PRD §10):
     /// the definition with <paramref name="grasshopperDocumentId"/>, or the active canvas definition when the
     /// id is empty, optionally narrowed to objects whose nickname or type name contains
     /// <paramref name="nameFilter"/> and paged by <paramref name="offset"/>/<paramref name="limit"/>. Returns

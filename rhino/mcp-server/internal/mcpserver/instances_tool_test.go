@@ -105,14 +105,14 @@ func TestGrasshopperDocumentsSurfaceInstanceLevel(t *testing.T) {
 	}
 	gh := byID["i1"].GrasshopperDocuments
 	if len(gh) != 2 || gh[0].GrasshopperDocumentID != "gh-abc" || !gh[0].Active || !gh[0].Enabled || gh[0].ComponentCount != 42 || gh[0].Path != "/t.gh" {
-		t.Fatalf("i1 grasshopper_documents = %+v", gh)
+		t.Fatalf("i1 gh_documents = %+v", gh)
 	}
 	if gh[1].Enabled || gh[1].Active || gh[1].ComponentCount != 0 {
 		t.Fatalf("gh[1] = %+v", gh[1])
 	}
 	// A Grasshopper-less instance omits the field (nil -> omitempty on the wire).
 	if byID["i2"].GrasshopperDocuments != nil {
-		t.Fatalf("i2 should carry no grasshopper_documents, got %+v", byID["i2"].GrasshopperDocuments)
+		t.Fatalf("i2 should carry no gh_documents, got %+v", byID["i2"].GrasshopperDocuments)
 	}
 }
 

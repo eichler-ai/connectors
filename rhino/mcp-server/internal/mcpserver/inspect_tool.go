@@ -12,7 +12,7 @@ import (
 
 const inspectSource = "mcp-server.internal.mcpserver"
 
-// InspectDefinitionIn is inspect_definition's input (PRD §10).
+// InspectDefinitionIn is inspect_gh_definition's input (PRD §10).
 type InspectDefinitionIn struct {
 	InstanceID            string `json:"instance_id" jsonschema:"instance_id of the target Rhino, from list_instances"`
 	GrasshopperDocumentID string `json:"gh_document_id,omitempty" jsonschema:"which open Grasshopper definition to inspect; omit for the active canvas definition (its gh_document_id is echoed back for later calls)"`
@@ -21,7 +21,7 @@ type InspectDefinitionIn struct {
 	Limit                 int    `json:"limit,omitempty" jsonschema:"objects per page; default 200, capped at 500"`
 }
 
-// InspectDefinitionOut is inspect_definition's result: the definition's structure, or an error.
+// InspectDefinitionOut is inspect_gh_definition's result: the definition's structure, or an error.
 type InspectDefinitionOut struct {
 	Definition *execution.InspectResult `json:"definition,omitempty"`
 	Error      *diag.Record             `json:"error,omitempty"`
@@ -41,12 +41,12 @@ func doInspect(in InspectDefinitionIn, inspect func(ghDocumentID, nameFilter str
 	return InspectDefinitionOut{Definition: res}, false
 }
 
-// RegisterInspect adds inspect_definition (PRD §10): a read-only look at an open Grasshopper definition's
+// RegisterInspect adds inspect_gh_definition (PRD §10): a read-only look at an open Grasshopper definition's
 // structure — its objects, their canvas positions, and how they are wired — so an agent can learn the
 // nicknames to drive/read and can frame a canvas capture.
 func RegisterInspect(s *mcp.Server, router *execution.Router) {
 	mcp.AddTool(s, &mcp.Tool{
-		Name: "inspect_definition",
+		Name: "inspect_gh_definition",
 		Description: "Read the structure of an open Grasshopper definition: every object on the canvas with its instance guid, " +
 			"nickname, type, canvas position (pivot and bounds), and component-level wiring (upstream/downstream neighbour guids). " +
 			"Omit gh_document_id for the active canvas definition; its id is echoed back for execute_script/capture. Narrow with " +

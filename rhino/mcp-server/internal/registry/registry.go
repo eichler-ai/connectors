@@ -64,7 +64,7 @@ type Instance struct {
 	Documents     []Document `json:"documents"`
 	// GrasshopperDocuments are the instance's open Grasshopper definitions (PRD §10); nil/empty when
 	// Grasshopper is not loaded.
-	GrasshopperDocuments []GrasshopperDocument `json:"grasshopper_documents,omitempty"`
+	GrasshopperDocuments []GrasshopperDocument `json:"gh_documents,omitempty"`
 	ConnectedSince       time.Time             `json:"connected_since"`
 	Memory               *MemorySample         `json:"memory,omitempty"`
 	// ExecutionState is what the plug-in last reported (register and every ping): idle, busy or

@@ -43,7 +43,7 @@ internal sealed class RequestDispatcher
     private readonly RunLedger _ledger;
     private readonly UndoRedoExecutor _undoRedo;
 
-    public static readonly string[] SupportedMethods = { "execute_script", "poll_execution", "cancel_execution", "capture_view", "undo_redo", "list_functions", "search_functions", "describe_function", "dump_members", "restart_snapshot", "inspect_definition" };
+    public static readonly string[] SupportedMethods = { "execute_script", "poll_execution", "cancel_execution", "capture_view", "undo_redo", "list_functions", "search_functions", "describe_function", "dump_members", "restart_snapshot", "inspect_gh_definition" };
 
     /// <summary>undo_redo's timeout bounds: the command is synchronous on the main thread, the wait is for the main-thread hop.</summary>
     public const long UndoMaxTimeoutMs = 30_000, UndoDefaultTimeoutMs = 10_000;
@@ -114,16 +114,16 @@ internal sealed class RequestDispatcher
         "describe_function" => Task.FromResult(HandleDescribeFunction(request)),
         "dump_members" => Task.FromResult(HandleDumpMembers(request)),
         "restart_snapshot" when _onMainThread is not null => Task.FromResult(HandleRestartSnapshot(request)),
-        "inspect_definition" when _onMainThread is not null => Task.FromResult(HandleInspectDefinition(request)),
+        "inspect_gh_definition" when _onMainThread is not null => Task.FromResult(HandleInspectDefinition(request)),
         _ => Task.FromResult(UnknownMethod(request)),
     };
 
-    // inspect_definition's page bounds: a definition can hold hundreds of objects, so the read is paged and
+    // inspect_gh_definition's page bounds: a definition can hold hundreds of objects, so the read is paged and
     // capped to keep the response inside the MCP output ceiling (like the Get/Data budgets).
     private const int DefaultInspectLimit = 200;
     private const int MaxInspectLimit = 500;
 
-    /// <summary>inspect_definition (PRD §10): a read-only snapshot of an open Grasshopper definition's objects,
+    /// <summary>inspect_gh_definition (PRD §10): a read-only snapshot of an open Grasshopper definition's objects,
     /// their canvas positions and their wiring, on the main thread. Changes nothing; needs no command and no
     /// undo entry. The active canvas definition is used when gh_document_id is omitted.</summary>
     private string HandleInspectDefinition(JsonRpcRequest request)
@@ -172,7 +172,7 @@ internal sealed class RequestDispatcher
         catch (Exception ex)
         {
             var rec = DiagnosticRecord.Create(DiagnosticSeverity.Error, "inspect-definition-failed", DiagnosticSource.Execution,
-                $"inspect_definition failed: {ex.GetType().Name}: {ex.Message}", null,
+                $"inspect_gh_definition failed: {ex.GetType().Name}: {ex.Message}", null,
                 new[] { "if Rhino's main thread is inside a modal or a long command, wait and retry" });
             return JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InternalError, rec.Message, rec);
         }

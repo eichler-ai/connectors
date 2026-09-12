@@ -295,7 +295,7 @@ public sealed class RequestDispatcherTests
                     new double[] { 200, 18, 90, 60 }, new[] { "g-slider" }, System.Array.Empty<string>()),
             });
         var d = WithMainThread(h);
-        var resp = await d.DispatchAsync(JsonRpcRequest.Parse("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"inspect_definition\",\"params\":{}}"), CancellationToken.None);
+        var resp = await d.DispatchAsync(JsonRpcRequest.Parse("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"inspect_gh_definition\",\"params\":{}}"), CancellationToken.None);
         var result = JsonDocument.Parse(resp).RootElement.GetProperty("result");
         Assert.Equal("gh-1", result.GetProperty("gh_document_id").GetString());
         Assert.Equal("/tmp/def.gh", result.GetProperty("path").GetString());
@@ -318,7 +318,7 @@ public sealed class RequestDispatcherTests
         var h = new Harness();
         h.Host.InspectResult = new GrasshopperDefinitionInfo("gh-1", "Def", null, 0, true, 0, 0, false, System.Array.Empty<GrasshopperObjectInfo>());
         var d = WithMainThread(h);
-        await d.DispatchAsync(JsonRpcRequest.Parse("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"inspect_definition\",\"params\":{\"gh_document_id\":\"gh-9\",\"name_filter\":\"slider\",\"offset\":-5,\"limit\":9999}}"), CancellationToken.None);
+        await d.DispatchAsync(JsonRpcRequest.Parse("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"inspect_gh_definition\",\"params\":{\"gh_document_id\":\"gh-9\",\"name_filter\":\"slider\",\"offset\":-5,\"limit\":9999}}"), CancellationToken.None);
         var (id, filter, offset, limit) = Assert.Single(h.Host.Inspects);
         Assert.Equal("gh-9", id);
         Assert.Equal("slider", filter);
@@ -333,7 +333,7 @@ public sealed class RequestDispatcherTests
         h.Host.InspectResult = null;
         h.Host.InspectNotFound = true; // a bad id / no active canvas
         var d = WithMainThread(h);
-        var resp = await d.DispatchAsync(JsonRpcRequest.Parse("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"inspect_definition\",\"params\":{\"gh_document_id\":\"nope\"}}"), CancellationToken.None);
+        var resp = await d.DispatchAsync(JsonRpcRequest.Parse("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"inspect_gh_definition\",\"params\":{\"gh_document_id\":\"nope\"}}"), CancellationToken.None);
         Assert.Equal("grasshopper-definition-not-found", Code(JsonDocument.Parse(resp).RootElement));
     }
 
@@ -344,7 +344,7 @@ public sealed class RequestDispatcherTests
         h.Host.InspectResult = null;
         h.Host.InspectNotFound = false; // null + not-notFound means Grasshopper is not loaded
         var d = WithMainThread(h);
-        var resp = await d.DispatchAsync(JsonRpcRequest.Parse("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"inspect_definition\",\"params\":{}}"), CancellationToken.None);
+        var resp = await d.DispatchAsync(JsonRpcRequest.Parse("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"inspect_gh_definition\",\"params\":{}}"), CancellationToken.None);
         Assert.Equal("grasshopper-not-loaded", Code(JsonDocument.Parse(resp).RootElement));
     }
 
@@ -353,7 +353,7 @@ public sealed class RequestDispatcherTests
     {
         // Inspection reads Grasshopper objects on the main thread, so a build with no hop answers legibly.
         var h = new Harness();
-        Assert.Equal("unknown-method", Code(await h.Call("inspect_definition", new { })));
+        Assert.Equal("unknown-method", Code(await h.Call("inspect_gh_definition", new { })));
     }
 
     private sealed class NoViewports : Core.Capture.IViewCapture

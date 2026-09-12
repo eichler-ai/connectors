@@ -62,5 +62,5 @@ public sealed class ScriptGlobals : IConnectorRuntime
         ?? throw new InvalidOperationException("Grasshopper is not available in this run (the plug-in exposed no Grasshopper operations).");
 
     private object RequireGrasshopperDocument() => GrasshopperDocument
-        ?? throw new InvalidOperationException("no Grasshopper definition is bound to this run; pass gh_document_id to execute_script (from list_instances' grasshopper_documents) to use Connector.Grasshopper.");
+        ?? throw new InvalidOperationException("no Grasshopper definition is bound to this run; pass gh_document_id to execute_script (from list_instances' gh_documents) to use Connector.Grasshopper.");
 }

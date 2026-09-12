@@ -7,7 +7,7 @@ using Rhino.MCPBridge.Core.Execution;
 namespace Rhino.MCPBridge.RhinoAdapter;
 
 /// <summary>
-/// Reads the structure of a Grasshopper definition for inspect_definition (PRD §10): the objects on the
+/// Reads the structure of a Grasshopper definition for inspect_gh_definition (PRD §10): the objects on the
 /// canvas, their canvas positions, and their component-level wiring. Grasshopper-typed, so it is only
 /// reached once Grasshopper is loaded (the caller guards with <see cref="GrasshopperWatcher.GrasshopperLoaded"/>)
 /// and runs on the main thread. The wiring helpers here are shared with the canvas-framing work (PRD §11).
@@ -38,7 +38,7 @@ internal static class GrasshopperInspector
             }
 
             // A misbehaving third-party object can throw from any getter (nickname, attributes, port lists).
-            // inspect_definition is a diagnostic tool, so degrade that one object to a placeholder rather than
+            // inspect_gh_definition is a diagnostic tool, so degrade that one object to a placeholder rather than
             // abort the whole read — mirroring the Safe* guards in GrasshopperOperations' Get/Data.
             bool matched;
             try { matched = Matches(obj, nameFilter); }

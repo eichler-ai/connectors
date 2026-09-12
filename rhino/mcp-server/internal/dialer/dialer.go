@@ -176,7 +176,7 @@ type registerParams struct {
 	Platform             string                         `json:"platform"`
 	BridgeVersion        string                         `json:"bridge_version"`
 	Documents            []registry.Document            `json:"documents"`
-	GrasshopperDocuments []registry.GrasshopperDocument `json:"grasshopper_documents"`
+	GrasshopperDocuments []registry.GrasshopperDocument `json:"gh_documents"`
 	ExecutionState       string                         `json:"execution_state"`
 }
 
