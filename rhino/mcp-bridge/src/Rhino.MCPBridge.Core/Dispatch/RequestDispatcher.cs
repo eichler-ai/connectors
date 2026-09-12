@@ -43,7 +43,7 @@ internal sealed class RequestDispatcher
     private readonly RunLedger _ledger;
     private readonly UndoRedoExecutor _undoRedo;
 
-    public static readonly string[] SupportedMethods = { "execute_script", "poll_execution", "cancel_execution", "capture_view", "undo_redo", "list_functions", "search_functions", "describe_function", "dump_members", "restart_snapshot", "inspect_gh_definition" };
+    public static readonly string[] SupportedMethods = { "execute_script", "poll_execution", "cancel_execution", "capture_view", "undo_redo", "list_functions", "search_functions", "describe_function", "dump_members", "restart_snapshot", "inspect_gh_definition", "frame_canvas" };
 
     /// <summary>undo_redo's timeout bounds: the command is synchronous on the main thread, the wait is for the main-thread hop.</summary>
     public const long UndoMaxTimeoutMs = 30_000, UndoDefaultTimeoutMs = 10_000;
@@ -115,8 +115,71 @@ internal sealed class RequestDispatcher
         "dump_members" => Task.FromResult(HandleDumpMembers(request)),
         "restart_snapshot" when _onMainThread is not null => Task.FromResult(HandleRestartSnapshot(request)),
         "inspect_gh_definition" when _onMainThread is not null => Task.FromResult(HandleInspectDefinition(request)),
+        "frame_canvas" when _onMainThread is not null => Task.FromResult(HandleFrameCanvas(request)),
         _ => Task.FromResult(UnknownMethod(request)),
     };
+
+    // frame_canvas's depth bounds: a walk deeper than this over a large definition would frame most of the
+    // canvas anyway, so cap it to keep the neighbourhood computation bounded.
+    private const int MaxFrameDepth = 20;
+
+    /// <summary>frame_canvas (PRD §11): frames the live Grasshopper canvas on a neighbourhood of components, on
+    /// the main thread. Mutates the canvas VIEW (like moving a viewport), not the document, so it needs no
+    /// command and no undo entry.</summary>
+    private string HandleFrameCanvas(JsonRpcRequest request)
+    {
+        string grasshopperDocumentId;
+        string[] components;
+        int upstreamDepth, downstreamDepth;
+        double padding;
+        try
+        {
+            grasshopperDocumentId = request.GetOptionalString("gh_document_id") ?? "";
+            components = request.GetOptionalStringArray("components") ?? System.Array.Empty<string>();
+            upstreamDepth = Math.Clamp(request.GetOptionalInt32("upstream_depth", 0), 0, MaxFrameDepth);
+            downstreamDepth = Math.Clamp(request.GetOptionalInt32("downstream_depth", 0), 0, MaxFrameDepth);
+            padding = request.GetOptionalDouble("padding", 20);
+            if (padding < 0) padding = 0;
+        }
+        catch (JsonRpcParamException ex)
+        {
+            return JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InvalidParams, ex.Message, ex.Diagnostic);
+        }
+
+        try
+        {
+            var notFound = false;
+            var result = (FrameCanvasResult?)_onMainThread!(() =>
+                _executor.Host.FrameCanvas(grasshopperDocumentId, components, upstreamDepth, downstreamDepth, padding, out notFound)!);
+
+            if (result is null && !notFound)
+            {
+                var rec = DiagnosticRecord.Create(DiagnosticSeverity.Error, "grasshopper-canvas-unavailable", DiagnosticSource.Execution,
+                    "there is no open Grasshopper canvas to frame.", null,
+                    new[] { "open the Grasshopper editor (the Grasshopper command) with a definition on the canvas, then retry" });
+                return JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InvalidParams, rec.Message, rec);
+            }
+            if (result is null)
+            {
+                var rec = DiagnosticRecord.Create(DiagnosticSeverity.Error, "grasshopper-definition-not-found", DiagnosticSource.Execution,
+                    grasshopperDocumentId.Length == 0
+                        ? "there is no active Grasshopper definition on the canvas to frame."
+                        : $"no open Grasshopper definition has gh_document_id '{grasshopperDocumentId}'.",
+                    new Dictionary<string, object?> { ["requested_gh_document_id"] = grasshopperDocumentId },
+                    new[] { "open the definition in Grasshopper; omit gh_document_id to frame the active canvas definition" });
+                return JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InvalidParams, rec.Message, rec);
+            }
+
+            return FrameCanvasMessage.ToJson(request.Id, result);
+        }
+        catch (Exception ex)
+        {
+            var rec = DiagnosticRecord.Create(DiagnosticSeverity.Error, "frame-canvas-failed", DiagnosticSource.Execution,
+                $"frame_canvas failed: {ex.GetType().Name}: {ex.Message}", null,
+                new[] { "if Rhino's main thread is inside a modal or a long command, wait and retry" });
+            return JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InternalError, rec.Message, rec);
+        }
+    }
 
     // inspect_gh_definition's page bounds: a definition can hold hundreds of objects, so the read is paged and
     // capped to keep the response inside the MCP output ceiling (like the Get/Data budgets).

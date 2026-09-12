@@ -34,18 +34,20 @@ func TestSkillFileStaysWithinItsBudget(t *testing.T) {
 	const pessimisticBytesPerToken = 3
 	const ceilingTokens = 25000
 	// The Rhino guide covers phase 1 (execution, discovery, capture, undo) plus
-	// phase 4 (Grasshopper drive/read, plug-in management, restart) and sits near
-	// 6.8k tokens. 30% of the host cap leaves ~700 tokens of room before the number
-	// is revisited on its merits.
-	const budgetTokens = ceilingTokens * 30 / 100
+	// phase 4 (Grasshopper drive/read/inspect/frame/capture, plug-in management,
+	// restart) and sits near 7.5k tokens. 32% of the host cap leaves ~500 tokens
+	// of room before the number is revisited on its merits.
+	const budgetTokens = ceilingTokens * 32 / 100
 	// The soft line sits ABOVE the file's current size so crossing it is
 	// information, not a warning that fires forever. t.Logf alone is dead code
 	// under `go test` (a passing package's output is discarded); the ci.yml
 	// "skill.md budget headroom" step re-runs this one test with -v to surface
 	// it. If that step is removed, delete this branch rather than leave it.
 	// Raised 26%->29% when Phase 4 landed (Grasshopper drive/read + plug-in
-	// management + restart_rhino sections), to sit back above the file's size.
-	const softBudgetTokens = ceilingTokens * 29 / 100
+	// management + restart_rhino), then 29%->31% as the canvas work added the
+	// inspect_gh_definition/frame_canvas/canvas-capture sections; each raise keeps
+	// the soft line just above the file's size, per project_skill_md_token_budget.
+	const softBudgetTokens = ceilingTokens * 31 / 100
 
 	// The footer get_skills appends at runtime is charged to the same reader's
 	// context, so measure what a caller receives, not what is on disk. Use the
@@ -102,6 +104,7 @@ var registeredToolNames = []string{
 	"uninstall_plugin",
 	"restart_rhino",
 	"inspect_gh_definition",
+	"frame_canvas",
 	"get_skills",
 }
 

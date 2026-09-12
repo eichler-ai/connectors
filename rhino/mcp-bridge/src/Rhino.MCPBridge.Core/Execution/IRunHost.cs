@@ -52,6 +52,15 @@ internal interface IRunHost
     /// <paramref name="requestedWidth"/>/<paramref name="requestedHeight"/>. Main thread.</summary>
     GrasshopperCanvasImage? CaptureGrasshopperCanvas(string mimeType, bool transparent, int requestedWidth, int requestedHeight);
 
+    /// <summary>Frames the live Grasshopper canvas on a neighbourhood of components for frame_canvas (PRD §11):
+    /// makes the definition (<paramref name="grasshopperDocumentId"/>, or the active canvas definition when
+    /// empty) the active canvas document and sets the viewport to fit the named <paramref name="components"/>
+    /// plus <paramref name="upstreamDepth"/>/<paramref name="downstreamDepth"/> levels of their wiring, padded
+    /// by <paramref name="padding"/> canvas units. With no components it frames the whole definition. Returns
+    /// null when Grasshopper is not loaded or no editor canvas is open; sets <paramref name="notFound"/> when a
+    /// non-empty id matched no open definition. Main thread; mutates the canvas VIEW (not the document).</summary>
+    FrameCanvasResult? FrameCanvas(string grasshopperDocumentId, string[] components, int upstreamDepth, int downstreamDepth, double padding, out bool notFound);
+
     /// <summary>Runs <paramref name="body"/> inside one Rhino command on <paramref name="document"/>
     /// (RhinoApp.ExecuteCommand of the bridge's own command), naming the command's undo entry
     /// <paramref name="undoLabel"/> where Rhino allows. Returns false when the command could not be

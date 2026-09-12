@@ -230,7 +230,11 @@ or when a script's output is surprising.
 `target: "canvas"` captures the open **Grasshopper canvas** (as currently framed) instead of a model
 viewport — use it to *see* a definition. It needs the Grasshopper editor open (else
 `grasshopper-canvas-unavailable`); `display_mode`/`zoom`/grid/axes do not apply. `width`/`height`/`format`
-do.
+do. To frame a *region* first, use **`frame_canvas`**: name one or more `components` (nicknames/guids from
+`inspect_gh_definition`) plus `upstream_depth`/`downstream_depth` (levels of their sources/recipients,
+default 0) and it pans/zooms the canvas to that neighbourhood (and makes the definition active); then
+capture. Omit `components` to frame the whole definition. It moves the view only — nothing in the document
+changes.
 
 ## Installing plug-ins — `search_plugins` / `install_plugin` / `restart_rhino`
 
@@ -307,6 +311,7 @@ inspect the document rather than assuming it's clean.
 | `describe_function` | one member's full detail + both call shapes |
 | `capture_view` | see a viewport (image) to debug |
 | `inspect_gh_definition` | read an open Grasshopper definition's objects, positions and wiring |
+| `frame_canvas` | pan/zoom the Grasshopper canvas to a neighbourhood of components |
 | `undo` / `redo` | revert or restore the connector's own run |
 | `search_plugins` / `list_plugins` | find or list Rhino/Grasshopper plug-ins (Yak) |
 | `install_plugin` / `uninstall_plugin` | install/remove a plug-in (gated) — restart to load |
