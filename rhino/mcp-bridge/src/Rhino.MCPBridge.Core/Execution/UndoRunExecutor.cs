@@ -113,7 +113,7 @@ internal sealed class UndoRunExecutor
             {
                 subscription = _host.SubscribeChanges(document, mutations.Record, () => changed = true);
                 solves = _host.BeginGrasshopperSolves(grasshopperDocument);
-                var globals = new ScriptGlobals((RhinoDoc)document.Raw!, request.CancellationToken, _host.BridgeVersion, request.Label, grasshopperDocument);
+                var globals = new ScriptGlobals((RhinoDoc)document.Raw!, request.CancellationToken, _host.BridgeVersion, request.Label, grasshopperDocument, _host.GrasshopperOperations);
                 var runner = _runners.Get(request.Language) ?? throw new InvalidOperationException($"no runner for language '{request.Language}'");
                 outcome = runner.RunAsync(request.ScriptText, globals, request.CancellationToken, request.ConfirmLifecycleActions).GetAwaiter().GetResult();
             }

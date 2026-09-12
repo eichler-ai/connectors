@@ -33,7 +33,26 @@ gh_id = System.Guid("b45a29b1-4343-4035-989e-044e8580d9cf")
 loaded = Rhino.PlugIns.PlugIn.LoadPlugIn(gh_id)
 import Grasshopper
 server = Grasshopper.Instances.DocumentServer
+# The DocumentServer is process-global and accumulates a GH_Document per prior harness run; remove any
+# so the enumerated grasshopper_documents[0] is deterministically the one this run creates.
+for existing in list(server):
+    server.RemoveDocument(existing)
 doc = Grasshopper.Kernel.GH_Document()
+slider = Grasshopper.Kernel.Special.GH_NumberSlider()
+slider.NickName = "hslider"
+slider.CreateAttributes()
+doc.AddObject(slider, False)
+crv = Grasshopper.Kernel.Parameters.Param_Curve()
+crv.NickName = "crv"
+crv.CreateAttributes()
+doc.AddObject(crv, False)
+vlist = Grasshopper.Kernel.Special.GH_ValueList()
+vlist.NickName = "vlist"
+vlist.ListItems.Clear()
+vlist.ListItems.Add(Grasshopper.Kernel.Special.GH_ValueListItem("Alpha", "0"))
+vlist.ListItems.Add(Grasshopper.Kernel.Special.GH_ValueListItem("Beta", "1"))
+vlist.CreateAttributes()
+doc.AddObject(vlist, False)
 try:
     server.AddDocument(doc, True)
 except TypeError:
@@ -130,6 +149,75 @@ func assertGhdocBinds(t *testing.T, c *mcpclient.Client, instanceID, documentID,
 	}
 	if solutions == 0 {
 		t.Errorf("a run that triggered a Grasshopper solve should carry a grasshopper report with solutions[], got %+v", solve.Grasshopper)
+	}
+
+	// PR4: Connector.Grasshopper drives the bound definition -- Find the slider, Set its value, Solve.
+	drive := callExecute(t, c, map[string]any{
+		"instance_id": instanceID, "document_id": documentID, "gh_document_id": ghDocID, "language": "python",
+		"script": "c = connector.Grasshopper.Find('hslider')\nconnector.Grasshopper.Set('hslider', 7)\nconnector.Grasshopper.Solve(True)\nresult = ('found:%s' % c.Nickname) if c is not None else 'notfound'",
+	}, 30*time.Second)
+	t.Logf("connector.Grasshopper drive: status=%s return=%q", drive.Status, drive.ReturnValue)
+	if drive.Error != nil {
+		t.Logf("  error: code=%s msg=%s", drive.Error.Code, drive.Error.Message)
+	}
+	if drive.Status != "success" || drive.ReturnValue != "found:hslider" {
+		t.Errorf("Connector.Grasshopper Find/Set/Solve should drive the slider, got status=%s return=%q", drive.Status, drive.ReturnValue)
+	}
+
+	// PR4: Connector.Grasshopper.Reference wires document geometry into an input parameter (the user's
+	// priority). Add a real line to the document, reference it into the 'crv' Param_Curve by GUID, solve,
+	// and confirm the parameter now carries one referenced item; then ClearReference empties it.
+	ref := callExecute(t, c, map[string]any{
+		"instance_id": instanceID, "document_id": documentID, "gh_document_id": ghDocID, "language": "python",
+		"script": `import Rhino, Rhino.Geometry as rg
+line = rg.Line(rg.Point3d(0,0,0), rg.Point3d(10,0,0))
+oid = Rhino.RhinoDoc.ActiveDoc.Objects.AddLine(line)
+connector.Grasshopper.Reference('crv', str(oid))
+p = None
+for o in ghdoc.Objects:
+    if o.NickName == 'crv':
+        p = o
+        break
+persist_ref = p.PersistentData.DataCount
+goo = list(p.PersistentData.AllData(True))[0]
+id_ok = str(goo.ReferenceID) == str(oid)
+goo.LoadGeometry()
+loaded = goo.IsValid
+connector.Grasshopper.ClearReference('crv')
+persist_clear = p.PersistentData.DataCount
+result = 'persist_ref:%d id_ok:%s loaded:%s persist_clear:%d' % (persist_ref, id_ok, loaded, persist_clear)`,
+	}, 30*time.Second)
+	t.Logf("connector.Grasshopper reference: status=%s return=%q", ref.Status, ref.ReturnValue)
+	if ref.Error != nil {
+		t.Logf("  error: code=%s msg=%s", ref.Error.Code, ref.Error.Message)
+	}
+	if ref.Status != "success" || ref.ReturnValue != "persist_ref:1 id_ok:True loaded:True persist_clear:0" {
+		t.Errorf("Connector.Grasshopper Reference/ClearReference should wire document geometry (right id, loads live) and unwire it, got status=%s return=%q", ref.Status, ref.ReturnValue)
+	}
+
+	// PR4 review MEDIUM: Set on a Value List selects a matching item, and refuses (does not silently
+	// deselect everything) when the value is not one of its items.
+	vl := callExecute(t, c, map[string]any{
+		"instance_id": instanceID, "document_id": documentID, "gh_document_id": ghDocID, "language": "python",
+		"script": `connector.Grasshopper.Set('vlist', 'Beta')
+sel = None
+for o in ghdoc.Objects:
+    if o.NickName == 'vlist':
+        sel = [i.Name for i in o.ListItems if i.Selected]
+        break
+try:
+    connector.Grasshopper.Set('vlist', 'Nope')
+    raised = 'noraise'
+except Exception:
+    raised = 'raised'
+result = 'selected:%s badvalue:%s' % (','.join(sel), raised)`,
+	}, 30*time.Second)
+	t.Logf("connector.Grasshopper value-list: status=%s return=%q", vl.Status, vl.ReturnValue)
+	if vl.Error != nil {
+		t.Logf("  error: code=%s msg=%s", vl.Error.Code, vl.Error.Message)
+	}
+	if vl.Status != "success" || vl.ReturnValue != "selected:Beta badvalue:raised" {
+		t.Errorf("Set on a Value List should select the item and refuse an unknown value, got status=%s return=%q", vl.Status, vl.ReturnValue)
 	}
 
 	bogus := callExecute(t, c, map[string]any{

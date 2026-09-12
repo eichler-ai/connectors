@@ -25,6 +25,10 @@ public sealed class Connector
     /// text names the run's entry in Rhino's Undo history.</summary>
     public string? RunLabel => _runtime.RunLabel;
 
+    /// <summary>Drive the bound Grasshopper definition (PRD §10): find objects, set input values, link
+    /// referenced document geometry, and solve. Acts on the definition addressed with <c>gh_document_id</c>.</summary>
+    public GrasshopperApi Grasshopper => new(_runtime);
+
     /// <summary>PRD §08: the place to register how a modal dialog should be answered, for when a
     /// suppressible pre-show hook exists. v1 has none — RhinoCommon exposes no pre-show dialog event
     /// (§08, §17 item 4) — so this is a documented NO-OP: overrides are accepted so the API surface is

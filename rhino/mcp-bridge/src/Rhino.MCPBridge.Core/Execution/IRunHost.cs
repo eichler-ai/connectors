@@ -26,6 +26,10 @@ internal interface IRunHost
     /// (its report null) when Grasshopper is not loaded.</summary>
     IGrasshopperSolveScope BeginGrasshopperSolves(object? grasshopperDocument);
 
+    /// <summary>The Grasshopper driving operations behind <c>Connector.Grasshopper</c> (PRD §10), bound into
+    /// the script's globals. The implementation names Grasshopper types; Core only forwards through it.</summary>
+    IGrasshopperOperations GrasshopperOperations { get; }
+
     /// <summary>The ids and titles of every open document, for a document-not-found error's candidates.</summary>
     IReadOnlyList<(string DocumentId, string Title, bool Active)> OpenDocuments();
 

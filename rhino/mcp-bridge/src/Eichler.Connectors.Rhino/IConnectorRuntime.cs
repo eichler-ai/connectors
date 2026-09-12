@@ -13,4 +13,11 @@ internal interface IConnectorRuntime
 
     /// <summary>The label the caller gave this run (the `label` parameter), or null.</summary>
     string? RunLabel { get; }
+
+    // Grasshopper driving surface (PRD §10), forwarded from GrasshopperApi. Each acts on the definition
+    // the run addressed with gh_document_id; the implementation raises a clear error when none is bound.
+    GrasshopperComponent? GrasshopperFind(string nicknameOrGuid);
+    void GrasshopperSet(string nickname, object value);
+    void GrasshopperReference(string nickname, object? objectIds);
+    void GrasshopperSolve(bool expireAll);
 }

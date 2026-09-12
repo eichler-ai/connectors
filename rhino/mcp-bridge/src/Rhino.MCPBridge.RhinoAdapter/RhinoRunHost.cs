@@ -71,6 +71,10 @@ internal sealed class RhinoRunHost : IRunHost
         return match;
     }
 
+    // Stateless; safe to build at plug-in load (its Grasshopper-typed method bodies JIT only when called,
+    // from inside a run where a definition is bound and Grasshopper is loaded).
+    public IGrasshopperOperations GrasshopperOperations { get; } = new GrasshopperOperations();
+
     public IGrasshopperSolveScope BeginGrasshopperSolves(object? grasshopperDocument)
     {
         if (!GrasshopperWatcher.GrasshopperLoaded())
