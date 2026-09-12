@@ -66,7 +66,7 @@ internal sealed class GrasshopperOperations : IGrasshopperOperations
         // set (with ids) complains when the parameter type cannot hold referenced geometry.
         if (!SetReferences(param, ids) && !clearing)
         {
-            throw new InvalidOperationException($"'{Nick(obj)}' is a {obj.Name} parameter, which does not take referenced document geometry (a Curve/Brep/Surface/Mesh/Point parameter does).");
+            throw new InvalidOperationException($"'{Nick(obj)}' is a {obj.Name} parameter, which does not take referenced document geometry (a Curve/Brep/Surface/Mesh/Point or generic Geometry parameter does).");
         }
 
         param.ExpireSolution(recompute: false);
@@ -295,7 +295,8 @@ internal sealed class GrasshopperOperations : IGrasshopperOperations
         : throw new InvalidOperationException($"'{s}' is not a Rhino object id (a GUID).");
 
     /// <summary>Replaces a persistent geometry parameter's referenced objects with those <paramref name="ids"/>
-    /// (empty clears it), matching the goo type to the parameter. A goo carrying only its ReferenceID makes
+    /// (empty clears it): for a typed parameter the goo matches the parameter, for a generic Geometry
+    /// parameter it matches each referenced object's own type. A goo carrying only its ReferenceID makes
     /// Grasshopper load the geometry from the document on the next solve, and track it live. Returns false
     /// when the parameter does not take referenced geometry.</summary>
     private static bool SetReferences(IGH_Param param, Guid[] ids)
@@ -307,7 +308,34 @@ internal sealed class GrasshopperOperations : IGrasshopperOperations
             case Grasshopper.Kernel.Parameters.Param_Surface p: p.PersistentData.Clear(); foreach (var id in ids) p.PersistentData.Append(new GH_Surface { ReferenceID = id }); return true;
             case Grasshopper.Kernel.Parameters.Param_Mesh p: p.PersistentData.Clear(); foreach (var id in ids) p.PersistentData.Append(new GH_Mesh { ReferenceID = id }); return true;
             case Grasshopper.Kernel.Parameters.Param_Point p: p.PersistentData.Clear(); foreach (var id in ids) p.PersistentData.Append(new GH_Point { ReferenceID = id }); return true;
+            // The generic Geometry input takes any geometry, so the goo type is not fixed by the parameter --
+            // resolve each object in the document and match the goo to what it actually is.
+            case Grasshopper.Kernel.Parameters.Param_Geometry p: p.PersistentData.Clear(); foreach (var id in ids) p.PersistentData.Append(ReferencedGooFor(id)); return true;
             default: return false;
         }
+    }
+
+    /// <summary>Builds the referenced goo for a generic Geometry input: looks the object up and matches the
+    /// goo to its geometry type (so the reference loads and tracks it live). Resolves against the active
+    /// document on purpose — Grasshopper itself resolves a goo's ReferenceID against the active RhinoDoc at
+    /// solve time, so that is where the geometry will actually load from. Throws a clear error when the object
+    /// is missing or its type is not one a Geometry parameter references.</summary>
+    private static IGH_GeometricGoo ReferencedGooFor(Guid id)
+    {
+        var obj = Rhino.RhinoDoc.ActiveDoc?.Objects.FindId(id)
+            ?? throw new InvalidOperationException($"no Rhino object with id {id} is in the document to reference into a Geometry parameter.");
+        return obj.Geometry switch
+        {
+            Rhino.Geometry.Curve => new GH_Curve { ReferenceID = id },
+            Rhino.Geometry.Brep => new GH_Brep { ReferenceID = id },
+            // Extrusion derives from Surface but is a capped solid; Grasshopper references it as a Brep, so
+            // match that here (this arm must precede the Surface arm, which would otherwise catch it).
+            Rhino.Geometry.Extrusion => new GH_Brep { ReferenceID = id },
+            Rhino.Geometry.Surface => new GH_Surface { ReferenceID = id },
+            Rhino.Geometry.Mesh => new GH_Mesh { ReferenceID = id },
+            Rhino.Geometry.Point => new GH_Point { ReferenceID = id },
+            null => throw new InvalidOperationException($"the Rhino object {id} has no geometry to reference into a Geometry parameter."),
+            var g => throw new InvalidOperationException($"the Rhino object {id} is a {g.GetType().Name}, which a Geometry parameter does not reference (Curve, Brep, Surface, Mesh or Point objects)."),
+        };
     }
 }

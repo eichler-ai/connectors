@@ -65,6 +65,15 @@ csink.NickName = "csink"
 csink.CreateAttributes()
 doc.AddObject(csink, False)
 csink.AddSource(crv)
+geo = Grasshopper.Kernel.Parameters.Param_Geometry()
+geo.NickName = "geo"
+geo.CreateAttributes()
+doc.AddObject(geo, False)
+gsink = Grasshopper.Kernel.Parameters.Param_Geometry()
+gsink.NickName = "gsink"
+gsink.CreateAttributes()
+doc.AddObject(gsink, False)
+gsink.AddSource(geo)
 # A programmatically-created GH_Document defaults to disabled (its solver is locked), so NewSolution would
 # populate no volatile data; enable it so the read half has real output to read (a loaded .gh is enabled).
 doc.Enabled = True
@@ -274,6 +283,51 @@ result = 'data:branches=%s items=%s kind=%s type=%s box=%s handle=%s' % (d.Branc
 	}
 	if data.Status != "success" || data.ReturnValue != "data:branches=1 items=1 kind=geometry type=Curve box=True handle=True" {
 		t.Errorf("Data should serialize the curve param's tree (geometry as type+box+handle), got status=%s return=%q", data.Status, data.ReturnValue)
+	}
+
+	// PR (Param_Geometry): Reference wires a document object into a GENERIC Geometry input -- the goo type is
+	// resolved from the object itself (a line -> Curve). Read it back through Data.
+	geo := callExecute(t, c, map[string]any{
+		"instance_id": instanceID, "document_id": documentID, "gh_document_id": ghDocID, "language": "python",
+		"script": `import Rhino, Rhino.Geometry as rg
+line = rg.Line(rg.Point3d(0,0,0), rg.Point3d(6,0,0))
+oid = Rhino.RhinoDoc.ActiveDoc.Objects.AddLine(line)
+connector.Grasshopper.Reference('geo', str(oid))
+connector.Grasshopper.Solve(True)
+d = connector.Grasshopper.Data('geo')
+it = d.Branches[0].Items[0]
+box_ok = it.Box is not None and len(it.Box) == 6
+handle_ok = it.Handle == str(oid)
+result = 'geo:branches=%s items=%s kind=%s type=%s box=%s handle=%s' % (d.BranchCount, d.ItemCount, it.Kind, it.Type, box_ok, handle_ok)`,
+	}, 30*time.Second)
+	t.Logf("connector.Grasshopper geometry-ref: status=%s return=%q", geo.Status, geo.ReturnValue)
+	if geo.Error != nil {
+		t.Logf("  error: code=%s msg=%s", geo.Error.Code, geo.Error.Message)
+	}
+	if geo.Status != "success" || geo.ReturnValue != "geo:branches=1 items=1 kind=geometry type=Curve box=True handle=True" {
+		t.Errorf("Reference into a generic Geometry param should resolve the object's goo type, got status=%s return=%q", geo.Status, geo.ReturnValue)
+	}
+
+	// PR (Param_Geometry): an Extrusion (what Box/Cylinder default to) derives from Surface but is a solid;
+	// Grasshopper references it as a Brep, so a generic Geometry input should resolve it to a Brep, not a Surface.
+	ext := callExecute(t, c, map[string]any{
+		"instance_id": instanceID, "document_id": documentID, "gh_document_id": ghDocID, "language": "python",
+		"script": `import Rhino, Rhino.Geometry as rg
+circle = rg.Circle(rg.Plane.WorldXY, 1.0).ToNurbsCurve()
+ext = rg.Extrusion.Create(circle, 5.0, True)
+oid = Rhino.RhinoDoc.ActiveDoc.Objects.AddExtrusion(ext)
+connector.Grasshopper.Reference('geo', str(oid))
+connector.Grasshopper.Solve(True)
+d = connector.Grasshopper.Data('geo')
+it = d.Branches[0].Items[0]
+result = 'ext:kind=%s type=%s handle=%s' % (it.Kind, it.Type, it.Handle == str(oid))`,
+	}, 30*time.Second)
+	t.Logf("connector.Grasshopper extrusion-ref: status=%s return=%q", ext.Status, ext.ReturnValue)
+	if ext.Error != nil {
+		t.Logf("  error: code=%s msg=%s", ext.Error.Code, ext.Error.Message)
+	}
+	if ext.Status != "success" || ext.ReturnValue != "ext:kind=geometry type=Brep handle=True" {
+		t.Errorf("Reference of an Extrusion into a Geometry param should resolve it as a Brep, got status=%s return=%q", ext.Status, ext.ReturnValue)
 	}
 
 	bogus := callExecute(t, c, map[string]any{
