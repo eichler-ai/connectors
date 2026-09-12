@@ -136,7 +136,7 @@ func run(appDataDir string, logger *log.Logger) error {
 	mcpserver.RegisterUndoRedo(s, router)
 	mcpserver.RegisterSkills(s, version)
 	mcpserver.RegisterDiscovery(s, discoveryRouter, searchIndex)
-	mcpserver.RegisterPackages(s)
+	mcpserver.RegisterPlugins(s)
 
 	err := s.Run(ctx, &mcp.StdioTransport{})
 	if err != nil && ctx.Err() == nil {
