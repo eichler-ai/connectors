@@ -218,6 +218,16 @@ internal sealed class RhinoRunHost : IRunHost
         return GrasshopperInspector.Inspect(doc, id, nameFilter, offset, limit);
     }
 
+    public GrasshopperCanvasImage? CaptureGrasshopperCanvas(string mimeType, bool transparent, int requestedWidth, int requestedHeight)
+    {
+        if (!GrasshopperWatcher.GrasshopperLoaded())
+        {
+            return null; // Grasshopper not loaded, so no canvas; the dispatcher maps this to "open Grasshopper"
+        }
+
+        return GrasshopperCanvas.Render(mimeType, transparent, requestedWidth, requestedHeight);
+    }
+
     /// <summary>Same rule as RhinoDocumentSnapshotSource; kept in one place so routing and register agree.</summary>
     private string IdOf(RhinoDoc doc)
     {

@@ -227,6 +227,11 @@ runs. Options: `display_mode` (`Shaded`, `Wireframe`, `Rendered`, …, restored 
 (`jpeg` default, `png`), `transparent_background`. Use it after a geometry run to confirm the result,
 or when a script's output is surprising.
 
+`target: "canvas"` captures the open **Grasshopper canvas** (as currently framed) instead of a model
+viewport — use it to *see* a definition. It needs the Grasshopper editor open (else
+`grasshopper-canvas-unavailable`); `display_mode`/`zoom`/grid/axes do not apply. `width`/`height`/`format`
+do.
+
 ## Installing plug-ins — `search_plugins` / `install_plugin` / `restart_rhino`
 
 Real Grasshopper work leans on third-party plug-ins. These tools manage them through Rhino's own package

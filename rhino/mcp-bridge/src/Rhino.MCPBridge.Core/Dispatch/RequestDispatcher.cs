@@ -230,6 +230,11 @@ internal sealed class RequestDispatcher
             return ExecutionResultMessage.Busy(request.Id, active);
         }
 
+        if (string.Equals(req.Target, "canvas", StringComparison.OrdinalIgnoreCase))
+        {
+            return HandleCaptureCanvas(request, req);
+        }
+
         try
         {
             var result = (ViewCaptureService.Result)_onMainThread!(() =>
@@ -259,6 +264,36 @@ internal sealed class RequestDispatcher
             var rec = DiagnosticRecord.Create(DiagnosticSeverity.Error, "capture-failed", DiagnosticSource.Execution,
                 $"capture_view failed: {ex.GetType().Name}: {ex.Message}", null,
                 new[] { "if Rhino's main thread is inside a modal or a long command, wait and retry; otherwise the viewport may not be capturable in this display mode" });
+            return JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InternalError, rec.Message, rec);
+        }
+    }
+
+    /// <summary>capture_view with target "canvas" (PRD §11): renders the live Grasshopper canvas instead of a
+    /// model viewport. Same main-thread, serialised-with-scripts contract as a viewport capture; the image
+    /// rides the same base64 wire result, labelled viewport "canvas".</summary>
+    private string HandleCaptureCanvas(JsonRpcRequest request, CaptureRequest req)
+    {
+        try
+        {
+            var img = (GrasshopperCanvasImage?)_onMainThread!(() =>
+                _executor.Host.CaptureGrasshopperCanvas(req.ResolvedMimeType, req.TransparentBackground, req.Width, req.Height)!);
+            if (img is null)
+            {
+                var rec = DiagnosticRecord.Create(DiagnosticSeverity.Error, "grasshopper-canvas-unavailable", DiagnosticSource.Execution,
+                    "there is no open Grasshopper canvas to capture.", null,
+                    new[] { "open the Grasshopper editor (the Grasshopper command) with a definition on the canvas, then retry" });
+                return JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InvalidParams, rec.Message, rec);
+            }
+
+            var result = new ViewCaptureService.Result();
+            result.Images.Add(new CapturedImage { Viewport = "canvas", Width = img.Width, Height = img.Height, MimeType = req.ResolvedMimeType, Bytes = img.Bytes });
+            return CaptureResultMessage.ToJson(request.Id, result);
+        }
+        catch (Exception ex)
+        {
+            var rec = DiagnosticRecord.Create(DiagnosticSeverity.Error, "capture-failed", DiagnosticSource.Execution,
+                $"capturing the Grasshopper canvas failed: {ex.GetType().Name}: {ex.Message}", null,
+                new[] { "if Rhino's main thread is inside a modal or a long command, wait and retry" });
             return JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InternalError, rec.Message, rec);
         }
     }

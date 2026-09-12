@@ -100,6 +100,15 @@ internal sealed class FakeRunHost : IRunHost
         return InspectResult;
     }
 
+    /// <summary>The canvas image capture_view's "canvas" target returns; null simulates no open canvas.</summary>
+    public GrasshopperCanvasImage? CanvasImage { get; set; }
+    public readonly List<(string Mime, bool Transparent, int Width, int Height)> CanvasCaptures = new();
+    public GrasshopperCanvasImage? CaptureGrasshopperCanvas(string mimeType, bool transparent, int requestedWidth, int requestedHeight)
+    {
+        CanvasCaptures.Add((mimeType, transparent, requestedWidth, requestedHeight));
+        return CanvasImage;
+    }
+
     public bool RunInCommand(RunDocument document, string undoLabel, Action body)
     {
         if (RefuseCommands) return false;

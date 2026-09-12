@@ -15,7 +15,7 @@ import (
 type CaptureViewIn struct {
 	InstanceID            string `json:"instance_id" jsonschema:"instance_id of the target Rhino, from list_instances"`
 	DocumentID            string `json:"document_id,omitempty" jsonschema:"document to capture; omit for the active document"`
-	Target                string `json:"target,omitempty" jsonschema:"\"active\" (default), \"all\" (one image per viewport), or a viewport name such as Perspective, Top, Front, Right"`
+	Target                string `json:"target,omitempty" jsonschema:"\"active\" (default), \"all\" (one image per viewport), a viewport name such as Perspective, Top, Front, Right, or \"canvas\" to capture the open Grasshopper canvas as currently framed. display_mode/zoom/grid/axes do not apply to the canvas."`
 	DisplayMode           string `json:"display_mode,omitempty" jsonschema:"display mode for the capture only (Wireframe, Shaded, Rendered, Ghosted, X-Ray, Technical, Artistic, Pen, Arctic, Raytraced); the viewport's own mode is restored after"`
 	Zoom                  string `json:"zoom,omitempty" jsonschema:"\"none\" (default: the viewport as the person sees it), \"extents\" (zoom to everything), or \"selected\"; the previous view is restored after"`
 	Width                 int    `json:"width,omitempty" jsonschema:"pixel width; default keeps the viewport's aspect at 1024 px on the long edge, hard cap 2048"`
