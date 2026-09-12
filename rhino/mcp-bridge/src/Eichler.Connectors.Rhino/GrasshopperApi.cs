@@ -27,8 +27,8 @@ public sealed class GrasshopperApi
     /// feed other inputs with <see cref="Reference"/> (document geometry) or by driving <c>ghdoc</c> directly.</summary>
     public void Set(string nickname, object value) => _runtime.GrasshopperSet(nickname, value);
 
-    /// <summary>Links an input geometry parameter (Curve, Brep, Surface, Mesh or Point) to Rhino document
-    /// objects BY REFERENCE — <paramref name="objectIds"/> is one object id or a collection of them
+    /// <summary>Links an input geometry parameter (Curve, Brep, Surface, Mesh, Point, or the generic Geometry)
+    /// to Rhino document objects BY REFERENCE — <paramref name="objectIds"/> is one object id or a collection of them
     /// (a <c>System.Guid</c> or its string form) — so the definition consumes live document geometry that
     /// updates when the object changes. Replaces any existing reference on the parameter and expires it.</summary>
     public void Reference(string nickname, object objectIds) => _runtime.GrasshopperReference(nickname, objectIds);
