@@ -33,10 +33,10 @@ func TestSkillFileStaysWithinItsBudget(t *testing.T) {
 	// and competes with the caller's own context, so this is a real constraint.
 	const pessimisticBytesPerToken = 3
 	const ceilingTokens = 25000
-	// The Rhino guide now covers phase-1 plus the API-discovery surface
-	// (list/search/describe) and sits near 5.4k tokens. 30% of the host cap
-	// leaves ~2k tokens of room for the features still to land (Grasshopper,
-	// file exchange) before the number is revisited on its merits.
+	// The Rhino guide covers phase 1 (execution, discovery, capture, undo) plus
+	// phase 4 (Grasshopper drive/read, plug-in management, restart) and sits near
+	// 6.8k tokens. 30% of the host cap leaves ~700 tokens of room before the number
+	// is revisited on its merits.
 	const budgetTokens = ceilingTokens * 30 / 100
 	// The soft line sits ABOVE the file's current size so crossing it is
 	// information, not a warning that fires forever. t.Logf alone is dead code
@@ -96,6 +96,11 @@ var registeredToolNames = []string{
 	"capture_view",
 	"undo",
 	"redo",
+	"search_plugins",
+	"list_plugins",
+	"install_plugin",
+	"uninstall_plugin",
+	"restart_rhino",
 	"get_skills",
 }
 

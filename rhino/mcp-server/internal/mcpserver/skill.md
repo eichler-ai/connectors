@@ -155,13 +155,14 @@ With a definition bound (`gh_document_id`), a script reaches it two ways. **Dire
 - `Get(nickname)` → the object's current output items, flattened; `Data(nickname)` → the full data tree with
   branch paths and counts. Both summarise each item — numbers/text/booleans **verbatim**, geometry as
   **type + bounding box + a document handle**, never geometry inline (large trees stay within the response
-  budget; `Truncated`/`Note` say when a cap was hit). `Solve` first so the data is current, and note a
+  budget; `Truncated` — plus `Data`'s `Note` — says when a cap was hit). `Solve` first so the data is
+  current, and note a
   definition computes volatile data only when it is **enabled**.
 
 **The solve report.** A run during which a Grasshopper solution ended (`ghdoc.NewSolution(True)` or
 `connector.Grasshopper.Solve()`) carries a `grasshopper` field on its result: `solutions[]` and every
-component that errored, warned, or ended in a non-`Computed` phase. Errors are reported, not auto-resolved —
-a red component is often the intended state.
+component that carried a runtime message (error, warning or remark) or ended in a non-`Computed` phase.
+Errors are reported, not auto-resolved — a red component is often the intended state.
 
 ## Finding the API — `search_functions` / `list_functions` / `describe_function`
 
