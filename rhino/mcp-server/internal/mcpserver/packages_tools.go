@@ -141,6 +141,60 @@ func actionResult(out PackageActionOut) (*mcp.CallToolResult, PackageActionOut, 
 	return nil, out, nil
 }
 
+// The tool handlers, extracted so the full gate (name/confirm -> client -> mutate) is testable by
+// overriding packagesClient. RegisterPackages just wires these to the MCP tool names.
+
+func searchTool(ctx context.Context, in SearchPackagesIn) (*mcp.CallToolResult, SearchPackagesOut, error) {
+	client, drec := packagesClient()
+	if drec != nil {
+		out := SearchPackagesOut{Packages: []PackageOut{}, Error: drec}
+		return packagesErr(out), out, nil
+	}
+	out := doSearch(ctx, client, in)
+	if out.Error != nil {
+		return packagesErr(out), out, nil
+	}
+	return nil, out, nil
+}
+
+func listTool(ctx context.Context) (*mcp.CallToolResult, ListPackagesOut, error) {
+	client, drec := packagesClient()
+	if drec != nil {
+		out := ListPackagesOut{Packages: []PackageOut{}, Error: drec}
+		return packagesErr(out), out, nil
+	}
+	out := doList(ctx, client)
+	if out.Error != nil {
+		return packagesErr(out), out, nil
+	}
+	return nil, out, nil
+}
+
+func installTool(ctx context.Context, in InstallPackageIn) (*mcp.CallToolResult, PackageActionOut, error) {
+	// The validation and preview paths need no yak client; only a confirmed install shells out.
+	if in.Name == "" || !in.ConfirmLifecycleActions {
+		return actionResult(doInstall(ctx, nil, in))
+	}
+	client, drec := packagesClient()
+	if drec != nil {
+		out := PackageActionOut{Status: "error", Name: in.Name, Error: drec}
+		return packagesErr(out), out, nil
+	}
+	return actionResult(doInstall(ctx, client, in))
+}
+
+func uninstallTool(ctx context.Context, in UninstallPackageIn) (*mcp.CallToolResult, PackageActionOut, error) {
+	if in.Name == "" || !in.ConfirmLifecycleActions {
+		return actionResult(doUninstall(ctx, nil, in))
+	}
+	client, drec := packagesClient()
+	if drec != nil {
+		out := PackageActionOut{Status: "error", Name: in.Name, Error: drec}
+		return packagesErr(out), out, nil
+	}
+	return actionResult(doUninstall(ctx, client, in))
+}
+
 // RegisterPackages adds search_packages, list_packages, install_package and uninstall_package (PRD §10):
 // Grasshopper/Rhino plug-in management through Rhino's bundled Yak CLI. These act on the per-user package
 // folder and need no running Rhino; a change takes effect on Rhino's next start.
@@ -151,16 +205,7 @@ func RegisterPackages(s *mcp.Server) {
 			"Read-only. Returns matching packages with their latest version; use install_package to install one. " +
 			"Matches are fuzzy, so an empty or broad query returns many results.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in SearchPackagesIn) (*mcp.CallToolResult, SearchPackagesOut, error) {
-		client, drec := packagesClient()
-		if drec != nil {
-			out := SearchPackagesOut{Packages: []PackageOut{}, Error: drec}
-			return packagesErr(out), out, nil
-		}
-		out := doSearch(ctx, client, in)
-		if out.Error != nil {
-			return packagesErr(out), out, nil
-		}
-		return nil, out, nil
+		return searchTool(ctx, in)
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
@@ -168,16 +213,7 @@ func RegisterPackages(s *mcp.Server) {
 		Description: "List the Rhino/Grasshopper plug-in packages installed for this user, with the folder Rhino loads them from. " +
 			"Read-only.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ ListPackagesIn) (*mcp.CallToolResult, ListPackagesOut, error) {
-		client, drec := packagesClient()
-		if drec != nil {
-			out := ListPackagesOut{Packages: []PackageOut{}, Error: drec}
-			return packagesErr(out), out, nil
-		}
-		out := doList(ctx, client)
-		if out.Error != nil {
-			return packagesErr(out), out, nil
-		}
-		return nil, out, nil
+		return listTool(ctx)
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
@@ -187,16 +223,7 @@ func RegisterPackages(s *mcp.Server) {
 			"the user's Rhino on its next start). On success the plug-in is on disk but NOT yet loaded -- Rhino must " +
 			"restart to load it. Yak has no update command: to update, install a newer version.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in InstallPackageIn) (*mcp.CallToolResult, PackageActionOut, error) {
-		// The validation and preview paths need no yak client; only a confirmed install shells out.
-		if in.Name == "" || !in.ConfirmLifecycleActions {
-			return actionResult(doInstall(ctx, nil, in))
-		}
-		client, drec := packagesClient()
-		if drec != nil {
-			out := PackageActionOut{Status: "error", Name: in.Name, Error: drec}
-			return packagesErr(out), out, nil
-		}
-		return actionResult(doInstall(ctx, client, in))
+		return installTool(ctx, in)
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
@@ -204,19 +231,13 @@ func RegisterPackages(s *mcp.Server) {
 		Description: "Uninstall a Rhino/Grasshopper plug-in package for this user. Gated: without confirm_lifecycle_actions " +
 			"it returns a preview and removes nothing. The plug-in stays loaded in any running Rhino until it restarts.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in UninstallPackageIn) (*mcp.CallToolResult, PackageActionOut, error) {
-		if in.Name == "" || !in.ConfirmLifecycleActions {
-			return actionResult(doUninstall(ctx, nil, in))
-		}
-		client, drec := packagesClient()
-		if drec != nil {
-			out := PackageActionOut{Status: "error", Name: in.Name, Error: drec}
-			return packagesErr(out), out, nil
-		}
-		return actionResult(doUninstall(ctx, client, in))
+		return uninstallTool(ctx, in)
 	})
 }
 
-func packagesClient() (*yak.Client, *diag.Record) {
+// packagesClient locates the yak CLI and wraps it. A var so a test can substitute a recording
+// packageManager and drive the handlers without a real yak.
+var packagesClient = func() (packageManager, *diag.Record) {
 	exe, err := yak.Locate()
 	if err != nil {
 		return nil, diag.New(diag.SeverityError, "yak-not-found", packagesSource, err.Error()).

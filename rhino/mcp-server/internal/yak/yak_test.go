@@ -38,6 +38,18 @@ func TestParseList(t *testing.T) {
 	}
 }
 
+func TestParseList_DirEndingInParensIsNotAPackage(t *testing.T) {
+	in := "Package directory: /Users/x/My Packages (backup)\n\nrhino-mcp-bridge (0.0.1)\n"
+	dir, pkgs := parseList(in)
+	if dir != "/Users/x/My Packages (backup)" {
+		t.Fatalf("dir = %q", dir)
+	}
+	want := []Package{{"rhino-mcp-bridge", "0.0.1"}}
+	if !reflect.DeepEqual(pkgs, want) {
+		t.Fatalf("pkgs = %#v, want %#v (the header must not be parsed as a package)", pkgs, want)
+	}
+}
+
 // fakeRun records the args a command was invoked with and returns canned output.
 func fakeRun(stdout, stderr string, err error, captured *[]string) func(context.Context, string, ...string) (string, string, error) {
 	return func(_ context.Context, _ string, args ...string) (string, string, error) {

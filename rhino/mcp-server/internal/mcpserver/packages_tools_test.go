@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/eichler-ai/connectors/internal/servercore/diag"
 	"github.com/eichler-ai/connectors/rhino/mcp-server/internal/yak"
 )
 
@@ -116,6 +117,94 @@ func TestSearch_MapsPackages(t *testing.T) {
 	out := doSearch(context.Background(), f, SearchPackagesIn{Query: "box"})
 	if len(out.Packages) != 1 || out.Packages[0].Name != "LunchBox" {
 		t.Fatalf("packages = %+v", out.Packages)
+	}
+}
+
+// withFakeClient swaps packagesClient for one returning f, counting how many times a client was obtained,
+// and restores the original. Not parallel-safe (mutates a package var), so callers must not t.Parallel().
+func withFakeClient(t *testing.T, f packageManager) *int {
+	t.Helper()
+	calls := 0
+	orig := packagesClient
+	packagesClient = func() (packageManager, *diag.Record) {
+		calls++
+		return f, nil
+	}
+	t.Cleanup(func() { packagesClient = orig })
+	return &calls
+}
+
+func TestInstallTool_GateBlocksMutationWithoutConfirm(t *testing.T) {
+	f := &fakePM{}
+	calls := withFakeClient(t, f)
+
+	_, out, _ := installTool(context.Background(), InstallPackageIn{Name: "Foo"})
+	if out.Status != "preview" {
+		t.Fatalf("without confirm, want preview, got %q", out.Status)
+	}
+	if *calls != 0 {
+		t.Fatalf("preview must not even obtain a yak client; obtained %d time(s)", *calls)
+	}
+	if len(f.installed) != 0 {
+		t.Fatalf("preview must not install; got %v", f.installed)
+	}
+}
+
+func TestInstallTool_ConfirmedInstallsWithRightArgs(t *testing.T) {
+	f := &fakePM{}
+	calls := withFakeClient(t, f)
+
+	_, out, _ := installTool(context.Background(), InstallPackageIn{Name: "Foo", Version: "1.0", ConfirmLifecycleActions: true})
+	if out.Status != "installed" {
+		t.Fatalf("want installed, got %q", out.Status)
+	}
+	if *calls != 1 {
+		t.Fatalf("a confirmed install should obtain the client once, got %d", *calls)
+	}
+	if len(f.installed) != 1 || f.installed[0] != [2]string{"Foo", "1.0"} {
+		t.Fatalf("installed = %v", f.installed)
+	}
+}
+
+func TestUninstallTool_GateBlocksMutationWithoutConfirm(t *testing.T) {
+	f := &fakePM{}
+	calls := withFakeClient(t, f)
+
+	_, out, _ := uninstallTool(context.Background(), UninstallPackageIn{Name: "Foo"})
+	if out.Status != "preview" {
+		t.Fatalf("without confirm, want preview, got %q", out.Status)
+	}
+	if *calls != 0 || len(f.uninstalled) != 0 {
+		t.Fatalf("preview must not obtain a client (%d) or uninstall (%v)", *calls, f.uninstalled)
+	}
+}
+
+func TestUninstallTool_ConfirmedUninstalls(t *testing.T) {
+	f := &fakePM{}
+	withFakeClient(t, f)
+
+	_, out, _ := uninstallTool(context.Background(), UninstallPackageIn{Name: "Foo", ConfirmLifecycleActions: true})
+	if out.Status != "uninstalled" {
+		t.Fatalf("want uninstalled, got %q", out.Status)
+	}
+	if len(f.uninstalled) != 1 || f.uninstalled[0] != "Foo" {
+		t.Fatalf("uninstalled = %v", f.uninstalled)
+	}
+}
+
+func TestInstallTool_YakNotFound_Errors(t *testing.T) {
+	orig := packagesClient
+	packagesClient = func() (packageManager, *diag.Record) {
+		return nil, invalidParam("yak not found", "set RHINO_YAK_PATH")
+	}
+	t.Cleanup(func() { packagesClient = orig })
+
+	result, out, _ := installTool(context.Background(), InstallPackageIn{Name: "Foo", ConfirmLifecycleActions: true})
+	if out.Status != "error" || out.Error == nil {
+		t.Fatalf("a missing yak should error, got %+v", out)
+	}
+	if result == nil || !result.IsError {
+		t.Fatal("the tool result should be marked IsError")
 	}
 }
 

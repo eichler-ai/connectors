@@ -51,7 +51,11 @@ func Locate() (string, error) {
 			return c, nil
 		}
 	}
-	return "", fmt.Errorf("could not find Rhino's yak CLI (looked in %s); set RHINO_YAK_PATH to its full path", strings.Join(candidates, ", "))
+	where := strings.Join(candidates, ", ")
+	if where == "" {
+		where = "no default location is known for this OS"
+	}
+	return "", fmt.Errorf("could not find Rhino's yak CLI (%s); set RHINO_YAK_PATH to its full path", where)
 }
 
 func defaultYakPaths() []string {
@@ -123,7 +127,12 @@ func (c *Client) Uninstall(ctx context.Context, name string) (output string, err
 func (c *Client) exec(ctx context.Context, timeout time.Duration, args ...string) (string, string, error) {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	return c.run(cctx, c.exe, args...)
+	stdout, stderr, err := c.run(cctx, c.exe, args...)
+	// A killed-on-timeout process surfaces as an opaque "signal: killed"; name the timeout instead.
+	if err != nil && cctx.Err() == context.DeadlineExceeded {
+		err = fmt.Errorf("timed out after %s", timeout)
+	}
+	return stdout, stderr, err
 }
 
 func runCommand(ctx context.Context, exe string, args ...string) (string, string, error) {
@@ -148,6 +157,8 @@ func cliError(command, stdout, stderr string, err error) error {
 
 // packageLine matches "Name (version)" as yak prints each result. The version can
 // carry build metadata (e.g. "1.2609.10+19753"), so it is anything up to the ")".
+// This is a hard dependency on yak's current text format: a future yak that emits
+// tab/column-separated output would parse to nothing (the live harness pins the format).
 var packageLine = regexp.MustCompile(`^(.+?)\s+\(([^)]+)\)\s*$`)
 
 // parsePackageLines turns yak's "Name (version)" lines into packages, skipping blanks.
@@ -166,14 +177,18 @@ func parsePackageLines(s string) []Package {
 }
 
 // parseList reads `yak list` output: a "Package directory: <dir>" header followed
-// by "Name (version)" lines.
+// by "Name (version)" lines. The header is pulled out first and excluded from the
+// package parse, so a package-directory path that itself ends in "(...)" is not
+// mistaken for a package.
 func parseList(s string) (dir string, pkgs []Package) {
+	var body strings.Builder
 	for _, line := range strings.Split(s, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if rest, ok := strings.CutPrefix(trimmed, "Package directory:"); ok {
+		if rest, ok := strings.CutPrefix(strings.TrimSpace(line), "Package directory:"); ok {
 			dir = strings.TrimSpace(rest)
 			continue
 		}
+		body.WriteString(line)
+		body.WriteByte('\n')
 	}
-	return dir, parsePackageLines(s)
+	return dir, parsePackageLines(body.String())
 }
