@@ -3,6 +3,10 @@
 package harness_test
 
 import (
+	"bytes"
+	"image"
+	_ "image/jpeg"
+	_ "image/png"
 	"strings"
 	"testing"
 	"time"
@@ -80,9 +84,30 @@ result = "canvas=%s doc_set=%s" % (canvas is not None, canvas is not None and ca
 	if meta.Width != 800 {
 		t.Errorf("requested width 800, got %d", meta.Width)
 	}
-	// The bytes must be a real, decodable PNG of the requested width.
+	// The bytes must be a real, decodable PNG whose pixels match the reported size (not a 1px/blank render).
 	imgs := decodeImages(t, env, "gh_canvas")
 	if len(imgs) != 1 {
 		t.Fatalf("expected one decodable image, got %d", len(imgs))
+	}
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(imgs[0]))
+	if err != nil {
+		t.Fatalf("canvas image did not decode: %v", err)
+	}
+	if cfg.Width != meta.Width || cfg.Height != meta.Height {
+		t.Errorf("decoded image %dx%d disagrees with the reported %dx%d", cfg.Width, cfg.Height, meta.Width, meta.Height)
+	}
+	if cfg.Width < 64 || cfg.Height < 64 {
+		t.Errorf("canvas image is degenerate (%dx%d)", cfg.Width, cfg.Height)
+	}
+
+	// The default-size JPEG path (no width/height, default format) also renders a valid canvas image.
+	jpg := capture(t, c, map[string]any{"instance_id": inst.InstanceID, "target": "canvas"})
+	if jpg.StructuredContent.Error != nil || len(jpg.StructuredContent.Images) != 1 {
+		t.Fatalf("default-size canvas capture failed: %+v", jpg.StructuredContent.Error)
+	}
+	jm := jpg.StructuredContent.Images[0]
+	t.Logf("default canvas image: viewport=%q %dx%d", jm.Viewport, jm.Width, jm.Height)
+	if jm.Viewport != "canvas" || jm.Width <= 0 || jm.Height <= 0 {
+		t.Errorf("default canvas capture returned a bad image: %+v", jm)
 	}
 }

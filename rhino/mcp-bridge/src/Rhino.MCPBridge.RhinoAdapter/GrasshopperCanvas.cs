@@ -42,15 +42,26 @@ internal static class GrasshopperCanvas
             return null;
         }
 
-        var method = canvas.GetType().GetMethod("GenerateHiResImageTile", PubInstance, binder: null,
-            types: new[] { viewport.GetType(), typeof(Color) }, modifiers: null)
-            ?? throw new InvalidOperationException("this Grasshopper build has no GH_Canvas.GenerateHiResImageTile(GH_Viewport, Color) to render the canvas.");
+        var method = ResolveRenderMethod(canvas.GetType(), viewport.GetType())
+            ?? throw new InvalidOperationException("this Grasshopper build has no GH_Canvas.GenerateHiResImageTile(viewport, Color) method to render the canvas.");
 
         var background = transparent ? Color.Transparent : Color.White;
-        var raw = method.Invoke(canvas, new[] { viewport, (object)background }) as Bitmap;
+        Bitmap? raw;
+        try
+        {
+            // Unwrap so a genuine render failure surfaces its real cause, not the opaque reflection wrapper.
+            raw = method.Invoke(canvas, new[] { viewport, (object)background }) as Bitmap;
+        }
+        catch (System.Reflection.TargetInvocationException tie)
+        {
+            throw tie.InnerException ?? tie;
+        }
+
         if (raw is null)
         {
-            return null;
+            // The editor IS open (canvas + viewport resolved) but the render produced nothing: a real
+            // failure, not the "canvas unavailable" case, so throw rather than return null.
+            throw new InvalidOperationException("Grasshopper produced no image when rendering the canvas.");
         }
 
         try
@@ -84,6 +95,27 @@ internal static class GrasshopperCanvas
         {
             raw.Dispose();
         }
+    }
+
+    /// <summary>Finds GH_Canvas.GenerateHiResImageTile(viewport, Color) -> Bitmap. Prefers the exact
+    /// viewport-typed overload; falls back to any 2-arg overload whose second parameter is a Color and which
+    /// returns a Bitmap, in case a Grasshopper version declares the viewport parameter as a base type (the
+    /// other GenerateHiResImage overload returns a List, so the Bitmap return type disambiguates).</summary>
+    private static MethodInfo? ResolveRenderMethod(Type canvasType, Type viewportType)
+    {
+        var exact = canvasType.GetMethod("GenerateHiResImageTile", PubInstance, binder: null,
+            types: new[] { viewportType, typeof(Color) }, modifiers: null);
+        if (exact is not null)
+        {
+            return exact;
+        }
+
+        return Array.Find(canvasType.GetMethods(PubInstance), m =>
+            m.Name == "GenerateHiResImageTile"
+            && typeof(Bitmap).IsAssignableFrom(m.ReturnType)
+            && m.GetParameters() is { Length: 2 } p
+            && p[1].ParameterType == typeof(Color)
+            && p[0].ParameterType.IsAssignableFrom(viewportType));
     }
 
     private static Bitmap Resize(Bitmap src, int width, int height, bool transparent)

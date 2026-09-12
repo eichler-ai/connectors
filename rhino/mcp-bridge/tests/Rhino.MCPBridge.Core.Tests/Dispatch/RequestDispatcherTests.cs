@@ -319,6 +319,21 @@ public sealed class RequestDispatcherTests
     }
 
     [Fact]
+    public async Task CaptureView_CanvasTarget_ValidatesRequestLikeTheViewportPath()
+    {
+        var h = new Harness();
+        h.Host.CanvasImage = new GrasshopperCanvasImage(new byte[] { 1 }, 10, 10);
+        var d = WithCapture(h);
+        // A bad format and a negative size are rejected before rendering, the same as a viewport capture.
+        var badFormat = await d.DispatchAsync(JsonRpcRequest.Parse("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"capture_view\",\"params\":{\"target\":\"canvas\",\"format\":\"gif\"}}"), CancellationToken.None);
+        Assert.Equal("invalid-param", Code(JsonDocument.Parse(badFormat).RootElement));
+        var badSize = await d.DispatchAsync(JsonRpcRequest.Parse("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"capture_view\",\"params\":{\"target\":\"canvas\",\"width\":-5}}"), CancellationToken.None);
+        Assert.Equal("invalid-param", Code(JsonDocument.Parse(badSize).RootElement));
+        // Neither reached the host renderer.
+        Assert.Empty(h.Host.CanvasCaptures);
+    }
+
+    [Fact]
     public async Task InspectDefinition_ReturnsObjectsPositionsAndWiring()
     {
         var h = new Harness();

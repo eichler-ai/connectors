@@ -46,10 +46,10 @@ type CapturedImageOut struct {
 func RegisterCapture(s *mcp.Server, router *execution.Router) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "capture_view",
-		Description: "Look at a Rhino viewport: returns an image (JPEG by default) of the active viewport, a named one, or all of them, inline as image content, " +
-			"bounded to 1024 px on the long edge (2048 max). Optionally zoom to extents or selection and switch display mode for the " +
-			"shot; the viewport is restored afterwards and nothing in the document changes. Busy while a script is running. " +
-			"Use it to check what a script actually produced.",
+		Description: "Look at a Rhino viewport or the Grasshopper canvas: returns an image (JPEG by default) of the active viewport, a named one, all of them, " +
+			"or the open Grasshopper canvas (target \"canvas\"), inline as image content, bounded to 1024 px on the long edge (2048 max). For a viewport, " +
+			"optionally zoom to extents or selection and switch display mode for the shot; the viewport is restored afterwards and nothing in the document " +
+			"changes. Busy while a script is running. Use it to check what a script actually produced, or to see a Grasshopper definition.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in CaptureViewIn) (*mcp.CallToolResult, CaptureViewOut, error) {
 		target := in.Target
 		if target == "" {
