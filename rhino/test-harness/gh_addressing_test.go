@@ -308,6 +308,28 @@ result = 'geo:branches=%s items=%s kind=%s type=%s box=%s handle=%s' % (d.Branch
 		t.Errorf("Reference into a generic Geometry param should resolve the object's goo type, got status=%s return=%q", geo.Status, geo.ReturnValue)
 	}
 
+	// PR (Param_Geometry): an Extrusion (what Box/Cylinder default to) derives from Surface but is a solid;
+	// Grasshopper references it as a Brep, so a generic Geometry input should resolve it to a Brep, not a Surface.
+	ext := callExecute(t, c, map[string]any{
+		"instance_id": instanceID, "document_id": documentID, "gh_document_id": ghDocID, "language": "python",
+		"script": `import Rhino, Rhino.Geometry as rg
+circle = rg.Circle(rg.Plane.WorldXY, 1.0).ToNurbsCurve()
+ext = rg.Extrusion.Create(circle, 5.0, True)
+oid = Rhino.RhinoDoc.ActiveDoc.Objects.AddExtrusion(ext)
+connector.Grasshopper.Reference('geo', str(oid))
+connector.Grasshopper.Solve(True)
+d = connector.Grasshopper.Data('geo')
+it = d.Branches[0].Items[0]
+result = 'ext:kind=%s type=%s handle=%s' % (it.Kind, it.Type, it.Handle == str(oid))`,
+	}, 30*time.Second)
+	t.Logf("connector.Grasshopper extrusion-ref: status=%s return=%q", ext.Status, ext.ReturnValue)
+	if ext.Error != nil {
+		t.Logf("  error: code=%s msg=%s", ext.Error.Code, ext.Error.Message)
+	}
+	if ext.Status != "success" || ext.ReturnValue != "ext:kind=geometry type=Brep handle=True" {
+		t.Errorf("Reference of an Extrusion into a Geometry param should resolve it as a Brep, got status=%s return=%q", ext.Status, ext.ReturnValue)
+	}
+
 	bogus := callExecute(t, c, map[string]any{
 		"instance_id": instanceID, "document_id": documentID, "gh_document_id": "gh-nope", "language": "python",
 		"script": "result = 1",
