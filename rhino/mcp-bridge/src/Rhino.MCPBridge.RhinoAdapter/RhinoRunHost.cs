@@ -259,8 +259,13 @@ internal sealed class RhinoRunHost : IRunHost
         }
 
         // Make the definition the active canvas document, so the framing (and a subsequent canvas capture) act
-        // on it even if the editor was showing something else.
-        GrasshopperCanvas.SetActiveDocument(canvas, doc);
+        // on it even if the editor was showing something else. If this fails, the rect below is computed from
+        // `doc` but the canvas would still show another document — so surface it rather than pan to coordinates
+        // unrelated to what is on screen (→ frame-canvas-failed).
+        if (!GrasshopperCanvas.SetActiveDocument(canvas, doc))
+        {
+            throw new InvalidOperationException("could not make the requested definition the active Grasshopper canvas document.");
+        }
 
         var id = GrasshopperIdentity.IdOf(doc, _processSalt, _caseInsensitivePaths, _log);
         var title = string.IsNullOrEmpty(doc.DisplayName) ? "Untitled" : doc.DisplayName;
@@ -284,7 +289,7 @@ internal sealed class RhinoRunHost : IRunHost
         {
             var (m, miss) = GrasshopperInspector.FindObjects(doc, components);
             missing = miss.ToArray();
-            matched = components.Where(c => !miss.Contains(c)).ToArray();
+            matched = components.Where(c => !miss.Contains(c)).Distinct().ToArray();
             region = GrasshopperInspector.Neighborhood(doc, m, System.Math.Max(0, upstreamDepth), System.Math.Max(0, downstreamDepth)).ToList();
             wholeDefinition = false;
         }

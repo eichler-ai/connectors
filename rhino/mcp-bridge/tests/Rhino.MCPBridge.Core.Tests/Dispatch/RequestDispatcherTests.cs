@@ -458,6 +458,32 @@ public sealed class RequestDispatcherTests
     }
 
     [Fact]
+    public async Task FrameCanvas_NegativePadding_IsClampedToZero()
+    {
+        var h = new Harness();
+        h.Host.FrameResult = new FrameCanvasResult("gh-1", "Def", new double[] { 0, 0, 1, 1 }, 1,
+            System.Array.Empty<string>(), System.Array.Empty<string>(), true);
+        var d = WithMainThread(h);
+        await d.DispatchAsync(JsonRpcRequest.Parse("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"frame_canvas\",\"params\":{\"padding\":-5}}"), CancellationToken.None);
+        var (_, _, _, _, padding) = Assert.Single(h.Host.Frames);
+        Assert.Equal(0, padding);
+    }
+
+    [Fact]
+    public async Task FrameCanvas_WrongTypedParams_AreRejected()
+    {
+        var h = new Harness();
+        var d = WithMainThread(h);
+        var badComponents = await d.DispatchAsync(JsonRpcRequest.Parse("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"frame_canvas\",\"params\":{\"components\":\"notanarray\"}}"), CancellationToken.None);
+        Assert.Equal("invalid-param-type", Code(JsonDocument.Parse(badComponents).RootElement));
+        var badPadding = await d.DispatchAsync(JsonRpcRequest.Parse("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"frame_canvas\",\"params\":{\"padding\":\"wide\"}}"), CancellationToken.None);
+        Assert.Equal("invalid-param-type", Code(JsonDocument.Parse(badPadding).RootElement));
+        var badElement = await d.DispatchAsync(JsonRpcRequest.Parse("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"frame_canvas\",\"params\":{\"components\":[1,2]}}"), CancellationToken.None);
+        Assert.Equal("invalid-param-type", Code(JsonDocument.Parse(badElement).RootElement));
+        Assert.Empty(h.Host.Frames); // none reached the host
+    }
+
+    [Fact]
     public async Task FrameCanvas_IsUnknown_WithoutAMainThreadHop()
     {
         var h = new Harness();

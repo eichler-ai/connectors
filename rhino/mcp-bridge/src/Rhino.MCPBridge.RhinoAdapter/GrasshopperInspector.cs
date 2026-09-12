@@ -206,8 +206,9 @@ internal static class GrasshopperInspector
     }
 
     /// <summary>Every object reachable from <paramref name="seeds"/> within <paramref name="upstreamDepth"/>
-    /// levels of sources and <paramref name="downstreamDepth"/> levels of recipients, seeds included. Uses the
-    /// same component-level <see cref="Wiring"/> as inspect_gh_definition.</summary>
+    /// levels of sources and <paramref name="downstreamDepth"/> levels of recipients, seeds included. Builds the
+    /// component-level adjacency (the same <see cref="Wiring"/> as inspect_gh_definition) and delegates the walk
+    /// to the pure, tier-1-tested <see cref="GrasshopperGraph"/>.</summary>
     internal static HashSet<IGH_DocumentObject> Neighborhood(GH_Document doc, IReadOnlyList<IGH_DocumentObject> seeds, int upstreamDepth, int downstreamDepth)
     {
         var byGuid = new Dictionary<Guid, IGH_DocumentObject>();
@@ -219,33 +220,31 @@ internal static class GrasshopperInspector
             docGuids.Add(o.InstanceGuid.ToString());
         }
 
-        var acc = new HashSet<IGH_DocumentObject>(seeds);
-        Expand(acc, seeds, byGuid, docGuids, upstreamDepth, upstream: true);
-        Expand(acc, seeds, byGuid, docGuids, downstreamDepth, upstream: false);
-        return acc;
-    }
-
-    private static void Expand(HashSet<IGH_DocumentObject> acc, IReadOnlyList<IGH_DocumentObject> seeds,
-        Dictionary<Guid, IGH_DocumentObject> byGuid, HashSet<string> docGuids, int depth, bool upstream)
-    {
-        var frontier = new List<IGH_DocumentObject>(seeds);
-        for (var level = 0; level < depth && frontier.Count > 0; level++)
+        var adjacency = new Dictionary<string, GrasshopperGraph.Edges>();
+        foreach (var o in doc.Objects)
         {
-            var next = new List<IGH_DocumentObject>();
-            foreach (var obj in frontier)
-            {
-                var (up, down) = Wiring(obj, docGuids);
-                foreach (var guid in upstream ? up : down)
-                {
-                    if (Guid.TryParse(guid, out var g) && byGuid.TryGetValue(g, out var neighbour) && acc.Add(neighbour))
-                    {
-                        next.Add(neighbour);
-                    }
-                }
-            }
-
-            frontier = next;
+            if (o is null) continue;
+            var (up, down) = Wiring(o, docGuids);
+            adjacency[o.InstanceGuid.ToString()] = new GrasshopperGraph.Edges(up, down);
         }
+
+        var seedGuids = new List<string>(seeds.Count);
+        foreach (var s in seeds)
+        {
+            if (s is not null) seedGuids.Add(s.InstanceGuid.ToString());
+        }
+
+        var hood = GrasshopperGraph.Neighborhood(seedGuids, adjacency, upstreamDepth, downstreamDepth);
+        var result = new HashSet<IGH_DocumentObject>();
+        foreach (var guid in hood)
+        {
+            if (Guid.TryParse(guid, out var g) && byGuid.TryGetValue(g, out var obj))
+            {
+                result.Add(obj);
+            }
+        }
+
+        return result;
     }
 
     /// <summary>The union of the canvas bounds of a set of objects, or an empty rectangle when none have

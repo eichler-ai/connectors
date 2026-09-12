@@ -155,7 +155,9 @@ internal static class GrasshopperCanvas
         }
 
         var zoom = Math.Min(sw / Math.Max(rect.Width, 1f), sh / Math.Max(rect.Height, 1f));
-        zoom = Math.Clamp(zoom, 0.1f, 2.0f); // Grasshopper's own zoom range; avoids a degenerate fit
+        // Cap zoom-in at 2x (a single small component should not fill the whole view); floor low enough that a
+        // large "whole definition" region still fits (Grasshopper clamps to its own min internally too).
+        zoom = Math.Clamp(zoom, 0.02f, 2.0f);
         var center = new PointF(rect.X + (rect.Width / 2f), rect.Y + (rect.Height / 2f));
 
         FindWritableProperty(vt, "Zoom", typeof(float))?.SetValue(viewport, zoom);
