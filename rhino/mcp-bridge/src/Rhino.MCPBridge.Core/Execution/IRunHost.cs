@@ -37,6 +37,14 @@ internal interface IRunHost
     /// restart_rhino's unsaved-work guard and its reopen list (PRD §10/§15). Main thread.</summary>
     IReadOnlyList<DocumentSaveState> RestartSaveStates();
 
+    /// <summary>Enumerates the objects of an open Grasshopper definition for inspect_gh_definition (PRD §10):
+    /// the definition with <paramref name="grasshopperDocumentId"/>, or the active canvas definition when the
+    /// id is empty, optionally narrowed to objects whose nickname or type name contains
+    /// <paramref name="nameFilter"/> and paged by <paramref name="offset"/>/<paramref name="limit"/>. Returns
+    /// null when Grasshopper is not loaded; sets <paramref name="notFound"/> when no definition matched (a
+    /// non-empty id with no such definition, or an empty id with no active canvas). Main thread.</summary>
+    GrasshopperDefinitionInfo? InspectGrasshopperDefinition(string grasshopperDocumentId, string? nameFilter, int offset, int limit, out bool notFound);
+
     /// <summary>Runs <paramref name="body"/> inside one Rhino command on <paramref name="document"/>
     /// (RhinoApp.ExecuteCommand of the bridge's own command), naming the command's undo entry
     /// <paramref name="undoLabel"/> where Rhino allows. Returns false when the command could not be

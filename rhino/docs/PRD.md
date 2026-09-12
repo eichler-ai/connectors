@@ -119,7 +119,7 @@ Rhino runs natively on the Mac, so the second reason is gone, and the first is a
 
 ### Instance discovery — `list_instances`
 
-As Revit §05's table, with `platform` (`macos`/`windows`) and `bridge_version` added per instance, `last_run` added per document, and `documents[]` entries carrying `document_id`, `title`, `path` (or `unsaved`), `active`, and `grasshopper_documents[]` (§10) — the open definitions, each with its own id, so an agent can address a definition without first finding it through the canvas.
+As Revit §05's table, with `platform` (`macos`/`windows`) and `bridge_version` added per instance, `last_run` added per document, and `documents[]` entries carrying `document_id`, `title`, `path` (or `unsaved`), `active`, and `gh_documents[]` (§10) — the open definitions, each with its own id, so an agent can address a definition without first finding it through the canvas.
 
 ## 06. Threading & script execution
 
@@ -190,7 +190,7 @@ Grasshopper is in scope for v1 at the level agreed on 2026-09-09: **scriptable, 
 
 ### Addressing
 
-`list_instances` reports each instance's open definitions as `grasshopper_documents[]` (`gh_document_id`, `title`, `path` or `unsaved`, `active`, `enabled`, `component_count`). `execute_script` takes an optional `gh_document_id`; when given, the script's `ghdoc`/`GrasshopperDocument` global is that `GH_Document` and the solve report below covers it. Identity follows §12's rules applied to the `.gh`/`.ghx` path.
+`list_instances` reports each instance's open definitions as `gh_documents[]` (`gh_document_id`, `title`, `path` or `unsaved`, `active`, `enabled`, `component_count`). `execute_script` takes an optional `gh_document_id`; when given, the script's `ghdoc`/`GrasshopperDocument` global is that `GH_Document` and the solve report below covers it. Identity follows §12's rules applied to the `.gh`/`.ghx` path.
 
 ### What a script does directly
 

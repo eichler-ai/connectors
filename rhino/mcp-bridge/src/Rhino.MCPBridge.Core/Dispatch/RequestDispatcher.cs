@@ -43,7 +43,7 @@ internal sealed class RequestDispatcher
     private readonly RunLedger _ledger;
     private readonly UndoRedoExecutor _undoRedo;
 
-    public static readonly string[] SupportedMethods = { "execute_script", "poll_execution", "cancel_execution", "capture_view", "undo_redo", "list_functions", "search_functions", "describe_function", "dump_members", "restart_snapshot" };
+    public static readonly string[] SupportedMethods = { "execute_script", "poll_execution", "cancel_execution", "capture_view", "undo_redo", "list_functions", "search_functions", "describe_function", "dump_members", "restart_snapshot", "inspect_gh_definition" };
 
     /// <summary>undo_redo's timeout bounds: the command is synchronous on the main thread, the wait is for the main-thread hop.</summary>
     public const long UndoMaxTimeoutMs = 30_000, UndoDefaultTimeoutMs = 10_000;
@@ -114,8 +114,69 @@ internal sealed class RequestDispatcher
         "describe_function" => Task.FromResult(HandleDescribeFunction(request)),
         "dump_members" => Task.FromResult(HandleDumpMembers(request)),
         "restart_snapshot" when _onMainThread is not null => Task.FromResult(HandleRestartSnapshot(request)),
+        "inspect_gh_definition" when _onMainThread is not null => Task.FromResult(HandleInspectDefinition(request)),
         _ => Task.FromResult(UnknownMethod(request)),
     };
+
+    // inspect_gh_definition's page bounds: a definition can hold hundreds of objects, so the read is paged and
+    // capped to keep the response inside the MCP output ceiling (like the Get/Data budgets).
+    private const int DefaultInspectLimit = 200;
+    private const int MaxInspectLimit = 500;
+
+    /// <summary>inspect_gh_definition (PRD §10): a read-only snapshot of an open Grasshopper definition's objects,
+    /// their canvas positions and their wiring, on the main thread. Changes nothing; needs no command and no
+    /// undo entry. The active canvas definition is used when gh_document_id is omitted.</summary>
+    private string HandleInspectDefinition(JsonRpcRequest request)
+    {
+        string grasshopperDocumentId;
+        string? nameFilter;
+        int offset, limit;
+        try
+        {
+            grasshopperDocumentId = request.GetOptionalString("gh_document_id") ?? "";
+            nameFilter = request.GetOptionalString("name_filter");
+            offset = Math.Max(0, request.GetOptionalInt32("offset", 0));
+            limit = Math.Clamp(request.GetOptionalInt32("limit", DefaultInspectLimit), 1, MaxInspectLimit);
+        }
+        catch (JsonRpcParamException ex)
+        {
+            return JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InvalidParams, ex.Message, ex.Diagnostic);
+        }
+
+        try
+        {
+            var notFound = false;
+            var info = (GrasshopperDefinitionInfo?)_onMainThread!(() =>
+                _executor.Host.InspectGrasshopperDefinition(grasshopperDocumentId, nameFilter, offset, limit, out notFound)!);
+
+            if (info is null && !notFound)
+            {
+                var rec = DiagnosticRecord.Create(DiagnosticSeverity.Error, "grasshopper-not-loaded", DiagnosticSource.Execution,
+                    "Grasshopper is not loaded in this Rhino, so there is no definition to inspect.", null,
+                    new[] { "Open Grasshopper (the Grasshopper command) with a definition on the canvas, then retry." });
+                return JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InvalidParams, rec.Message, rec);
+            }
+            if (info is null)
+            {
+                var rec = DiagnosticRecord.Create(DiagnosticSeverity.Error, "grasshopper-definition-not-found", DiagnosticSource.Execution,
+                    grasshopperDocumentId.Length == 0
+                        ? "there is no active Grasshopper definition on the canvas to inspect."
+                        : $"no open Grasshopper definition has gh_document_id '{grasshopperDocumentId}'.",
+                    new Dictionary<string, object?> { ["requested_gh_document_id"] = grasshopperDocumentId },
+                    new[] { "open the definition in Grasshopper; omit gh_document_id to inspect the active canvas definition" });
+                return JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InvalidParams, rec.Message, rec);
+            }
+
+            return InspectDefinitionMessage.ToJson(request.Id, info);
+        }
+        catch (Exception ex)
+        {
+            var rec = DiagnosticRecord.Create(DiagnosticSeverity.Error, "inspect-definition-failed", DiagnosticSource.Execution,
+                $"inspect_gh_definition failed: {ex.GetType().Name}: {ex.Message}", null,
+                new[] { "if Rhino's main thread is inside a modal or a long command, wait and retry" });
+            return JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InternalError, rec.Message, rec);
+        }
+    }
 
     /// <summary>restart_snapshot (PRD §10/§15): reports every open document's save state on the main thread so
     /// the server can guard against discarding unsaved work and know which saved files to reopen. Read-only —

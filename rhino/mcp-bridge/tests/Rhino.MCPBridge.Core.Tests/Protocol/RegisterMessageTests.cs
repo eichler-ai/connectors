@@ -63,7 +63,7 @@ public sealed class RegisterMessageTests
             });
         var json = RegisterMessage.ToJson(snap);
         using var doc = JsonDocument.Parse(json);
-        var gh = doc.RootElement.GetProperty("params").GetProperty("grasshopper_documents").EnumerateArray().ToList();
+        var gh = doc.RootElement.GetProperty("params").GetProperty("gh_documents").EnumerateArray().ToList();
         Assert.Equal(2, gh.Count);
         Assert.Equal("gh-abc123abc123", gh[0].GetProperty("gh_document_id").GetString());
         Assert.Equal("Tower.gh", gh[0].GetProperty("title").GetString());
@@ -81,6 +81,6 @@ public sealed class RegisterMessageTests
         // A session with Grasshopper never loaded must serialise exactly as before this field existed.
         var json = RegisterMessage.ToJson(new RegisterSnapshot(Guid.NewGuid(), 1, "8", "windows", "dev", Array.Empty<RegisteredDocument>()));
         using var doc = JsonDocument.Parse(json);
-        Assert.False(doc.RootElement.GetProperty("params").TryGetProperty("grasshopper_documents", out _));
+        Assert.False(doc.RootElement.GetProperty("params").TryGetProperty("gh_documents", out _));
     }
 }

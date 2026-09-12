@@ -129,7 +129,7 @@ while (working) { CancellationToken.ThrowIfCancellationRequested(); System.Threa
 | the BCL | the BCL | `System.IO`, LINQ, etc. — fully usable |
 
 **Addressing a Grasshopper definition.** `ghdoc`/`GrasshopperDocument` is `None`/`null` unless you pass
-`gh_document_id` (from a `grasshopper_documents[]` entry in `list_instances` — Grasshopper must be open with
+`gh_document_id` (from a `gh_documents[]` entry in `list_instances` — Grasshopper must be open with
 that definition loaded); an id matching no open definition fails with `grasshopper-document-not-found`. In
 Python `ghdoc` is the live `GH_Document`. In C# the global is typed `object` (so a script that ignores
 Grasshopper still compiles when Grasshopper isn't loaded), so cast it:
@@ -158,6 +158,12 @@ With a definition bound (`gh_document_id`), a script reaches it two ways. **Dire
   budget; `Truncated` — plus `Data`'s `Note` — says when a cap was hit). `Solve` first so the data is
   current, and note a
   definition computes volatile data only when it is **enabled**.
+
+**Seeing what's on the canvas — `inspect_gh_definition`.** A tool (not a script call) that reads an open
+definition's structure: every object with its guid, nickname, type, canvas position (`pivot`/`bounds`), and
+component-level wiring (`upstream`/`downstream` neighbour guids). Omit `gh_document_id` for the active canvas
+definition — its id comes back for later calls. Narrow with `name_filter`, page with `offset`/`limit`. Use it
+to learn the nicknames to `Set`/`Get`, to understand how a definition is wired, and to pick objects to frame.
 
 **The solve report.** A run during which a Grasshopper solution ended (`ghdoc.NewSolution(True)` or
 `connector.Grasshopper.Solve()`) carries a `grasshopper` field on its result: `solutions[]` and every
@@ -295,6 +301,7 @@ inspect the document rather than assuming it's clean.
 | `list_functions` | browse the API tree: namespaces → types → members |
 | `describe_function` | one member's full detail + both call shapes |
 | `capture_view` | see a viewport (image) to debug |
+| `inspect_gh_definition` | read an open Grasshopper definition's objects, positions and wiring |
 | `undo` / `redo` | revert or restore the connector's own run |
 | `search_plugins` / `list_plugins` | find or list Rhino/Grasshopper plug-ins (Yak) |
 | `install_plugin` / `uninstall_plugin` | install/remove a plug-in (gated) — restart to load |

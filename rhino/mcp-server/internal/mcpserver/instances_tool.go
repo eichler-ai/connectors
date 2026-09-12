@@ -49,7 +49,7 @@ type InstanceOut struct {
 	Memory         *registry.MemorySample `json:"memory,omitempty"`
 	Documents      []DocumentOut          `json:"documents"`
 	// GrasshopperDocuments are the instance's open definitions (PRD §10); omitted when none/Grasshopper unloaded.
-	GrasshopperDocuments []GrasshopperDocumentOut `json:"grasshopper_documents,omitempty"`
+	GrasshopperDocuments []GrasshopperDocumentOut `json:"gh_documents,omitempty"`
 }
 
 // ListInstancesOut is the tool's result.

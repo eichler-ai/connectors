@@ -3,6 +3,7 @@
 package harness_test
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -11,7 +12,7 @@ import (
 )
 
 // TestGrasshopperDocumentsEnumerateLive verifies PRD §10 addressing end to end: with Grasshopper loaded
-// and a definition present, list_instances reports it in grasshopper_documents with a gh- id, title,
+// and a definition present, list_instances reports it in gh_documents with a gh- id, title,
 // enabled flag and component count. It loads Grasshopper itself (demand-loaded) and adds a document via
 // execute_script, so it needs no pre-opened .gh.
 func TestGrasshopperDocumentsEnumerateLive(t *testing.T) {
@@ -34,7 +35,7 @@ loaded = Rhino.PlugIns.PlugIn.LoadPlugIn(gh_id)
 import Grasshopper
 server = Grasshopper.Instances.DocumentServer
 # The DocumentServer is process-global and accumulates a GH_Document per prior harness run; remove any
-# so the enumerated grasshopper_documents[0] is deterministically the one this run creates.
+# so the enumerated gh_documents[0] is deterministically the one this run creates.
 for existing in list(server):
     server.RemoveDocument(existing)
 doc = Grasshopper.Kernel.GH_Document()
@@ -103,7 +104,7 @@ result = "loaded={} count={} name={}".format(loaded, len(list(server)), doc.Disp
 			}
 			if len(i.GrasshopperDocuments) > 0 {
 				g := i.GrasshopperDocuments[0]
-				t.Logf("grasshopper_documents[0]: id=%s title=%q enabled=%v components=%d path=%q",
+				t.Logf("gh_documents[0]: id=%s title=%q enabled=%v components=%d path=%q",
 					g.GrasshopperDocumentID, g.Title, g.Enabled, g.ComponentCount, g.Path)
 				if !strings.HasPrefix(g.GrasshopperDocumentID, "gh-") {
 					t.Errorf("gh_document_id %q should start with gh-", g.GrasshopperDocumentID)
@@ -120,7 +121,7 @@ result = "loaded={} count={} name={}".format(loaded, len(list(server)), doc.Disp
 			}
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("no grasshopper_documents appeared for instance %s within the timeout", inst.InstanceID)
+			t.Fatalf("no gh_documents appeared for instance %s within the timeout", inst.InstanceID)
 		}
 		time.Sleep(1 * time.Second)
 	}
@@ -157,6 +158,10 @@ func assertGhdocBinds(t *testing.T, c *mcpclient.Client, instanceID, documentID,
 	if cs.Status != "success" || !strings.HasPrefix(cs.ReturnValue, "cs-bound:") {
 		t.Errorf("C# cast to GH_Document should compile and run once Grasshopper is loaded, got status=%s return=%q", cs.Status, cs.ReturnValue)
 	}
+
+	// inspect_gh_definition: a read-only look at the definition's structure. Do it before the mutating steps
+	// below so the view is the definition as built (slider->nsink, crv->csink, geo->gsink).
+	assertInspectDefinition(t, c, instanceID, ghDocID)
 
 	// PR3: a run that triggers a solve carries the grasshopper solve report.
 	solve := callExecute(t, c, map[string]any{
@@ -337,6 +342,155 @@ result = 'ext:kind=%s type=%s handle=%s' % (it.Kind, it.Type, it.Handle == str(o
 	if bogus.Error == nil || bogus.Error.Code != "grasshopper-document-not-found" {
 		t.Errorf("a bogus gh_document_id should fail grasshopper-document-not-found, got status=%s error=%+v", bogus.Status, bogus.Error)
 	}
+}
+
+// inspectDefinition is the structuredContent shape of inspect_gh_definition's result.
+type inspectDefinition struct {
+	StructuredContent struct {
+		Definition *struct {
+			GrasshopperDocumentID string `json:"gh_document_id"`
+			Title                 string `json:"title"`
+			ObjectCount           int    `json:"object_count"`
+			Enabled               bool   `json:"enabled"`
+			MatchCount            int    `json:"match_count"`
+			Truncated             bool   `json:"truncated"`
+			Objects               []struct {
+				GUID       string    `json:"guid"`
+				Nickname   string    `json:"nickname"`
+				Name       string    `json:"name"`
+				Kind       string    `json:"kind"`
+				Pivot      []float64 `json:"pivot"`
+				Bounds     []float64 `json:"bounds"`
+				Upstream   []string  `json:"upstream"`
+				Downstream []string  `json:"downstream"`
+			} `json:"objects"`
+		} `json:"definition"`
+		Error *notice `json:"error"`
+	} `json:"structuredContent"`
+}
+
+// assertInspectDefinition checks inspect_gh_definition reads the bound definition's structure: it echoes the
+// id, reports every object with canvas positions, resolves the build-time wiring to neighbour guids
+// (slider->nsink), and honours name_filter.
+func callInspect(t *testing.T, c *mcpclient.Client, args map[string]any) inspectDefinition {
+	t.Helper()
+	raw, err := c.CallTool("inspect_gh_definition", args, 30*time.Second)
+	if err != nil {
+		t.Fatalf("inspect_gh_definition %v: %v", args, err)
+	}
+	var env inspectDefinition
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("decode inspect_gh_definition: %v\n%s", err, raw)
+	}
+	return env
+}
+
+func assertInspectDefinition(t *testing.T, c *mcpclient.Client, instanceID, ghDocID string) {
+	t.Helper()
+	env := callInspect(t, c, map[string]any{"instance_id": instanceID, "gh_document_id": ghDocID})
+	def := env.StructuredContent.Definition
+	if def == nil {
+		t.Fatalf("inspect_gh_definition returned no definition: %+v", env.StructuredContent.Error)
+	}
+	t.Logf("inspect: id=%s title=%q objects=%d enabled=%v", def.GrasshopperDocumentID, def.Title, def.ObjectCount, def.Enabled)
+	if def.GrasshopperDocumentID != ghDocID {
+		t.Errorf("inspect should echo the gh_document_id, got %q want %q", def.GrasshopperDocumentID, ghDocID)
+	}
+	if def.ObjectCount < 7 {
+		t.Errorf("the built definition has >=7 objects, inspect reports %d", def.ObjectCount)
+	}
+
+	byNick := map[string]int{}
+	guidToNick := map[string]string{}
+	for i, o := range def.Objects {
+		byNick[o.Nickname] = i
+		guidToNick[o.GUID] = o.Nickname
+		if len(o.Pivot) != 2 || len(o.Bounds) != 4 {
+			t.Errorf("object %q has no canvas geometry: pivot=%v bounds=%v", o.Nickname, o.Pivot, o.Bounds)
+		}
+		if o.Kind != "param" && o.Kind != "component" && o.Kind != "other" {
+			t.Errorf("object %q has an unexpected kind %q", o.Nickname, o.Kind)
+		}
+	}
+
+	si, ok := byNick["hslider"]
+	ni, ok2 := byNick["nsink"]
+	if !ok || !ok2 {
+		t.Fatalf("inspect is missing hslider/nsink; nicknames seen: %v", keysOf(byNick))
+	}
+	slider, nsink := def.Objects[si], def.Objects[ni]
+	// The build wired nsink.AddSource(slider): slider feeds nsink, resolved to each other's guids.
+	if !containsStr(slider.Downstream, nsink.GUID) {
+		t.Errorf("the slider should feed nsink downstream; slider.downstream=%v resolve to %v", slider.Downstream, nicksOf(slider.Downstream, guidToNick))
+	}
+	if !containsStr(nsink.Upstream, slider.GUID) {
+		t.Errorf("nsink should list the slider upstream; nsink.upstream=%v resolve to %v", nsink.Upstream, nicksOf(nsink.Upstream, guidToNick))
+	}
+
+	// name_filter narrows to the three sink params (nsink/csink/gsink) and nothing else.
+	fdef := callInspect(t, c, map[string]any{"instance_id": instanceID, "gh_document_id": ghDocID, "name_filter": "sink"}).StructuredContent.Definition
+	if fdef == nil {
+		t.Fatalf("filtered inspect returned no definition")
+	}
+	if fdef.MatchCount != 3 {
+		t.Errorf(`name_filter "sink" should match the 3 sink params, matched %d`, fdef.MatchCount)
+	}
+	for _, o := range fdef.Objects {
+		if !strings.Contains(strings.ToLower(o.Nickname), "sink") && !strings.Contains(strings.ToLower(o.Name), "sink") {
+			t.Errorf("filtered object %q does not match the filter", o.Nickname)
+		}
+	}
+
+	// Pagination: a small limit truncates and reports the full match_count; offset pages through; an offset
+	// past the end returns nothing and is not truncated. (The built definition has 7 objects.)
+	total := def.ObjectCount
+	page1 := callInspect(t, c, map[string]any{"instance_id": instanceID, "gh_document_id": ghDocID, "limit": 3}).StructuredContent.Definition
+	if page1 == nil {
+		t.Fatalf("paged inspect returned no definition")
+	}
+	if page1.MatchCount != total {
+		t.Errorf("match_count should be the full total %d regardless of the page, got %d", total, page1.MatchCount)
+	}
+	if len(page1.Objects) != 3 || !page1.Truncated {
+		t.Errorf("limit 3 of %d should return 3 objects and truncated=true, got objects=%d truncated=%v", total, len(page1.Objects), page1.Truncated)
+	}
+	last := callInspect(t, c, map[string]any{"instance_id": instanceID, "gh_document_id": ghDocID, "offset": total - 1, "limit": 3}).StructuredContent.Definition
+	if last == nil || len(last.Objects) != 1 || last.Truncated {
+		t.Errorf("the last page (offset=%d) should return 1 object and truncated=false, got %+v", total-1, last)
+	}
+	past := callInspect(t, c, map[string]any{"instance_id": instanceID, "gh_document_id": ghDocID, "offset": total + 50, "limit": 3}).StructuredContent.Definition
+	if past == nil || len(past.Objects) != 0 || past.Truncated {
+		t.Errorf("an offset past the end should return 0 objects and truncated=false, got %+v", past)
+	}
+}
+
+func containsStr(xs []string, want string) bool {
+	for _, x := range xs {
+		if x == want {
+			return true
+		}
+	}
+	return false
+}
+
+func keysOf(m map[string]int) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
+func nicksOf(guids []string, guidToNick map[string]string) []string {
+	out := make([]string, 0, len(guids))
+	for _, g := range guids {
+		if n, ok := guidToNick[g]; ok {
+			out = append(out, n)
+		} else {
+			out = append(out, g)
+		}
+	}
+	return out
 }
 
 func docID(inst instance) string {

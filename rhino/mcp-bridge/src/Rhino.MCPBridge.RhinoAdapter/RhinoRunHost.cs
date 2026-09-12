@@ -189,6 +189,35 @@ internal sealed class RhinoRunHost : IRunHost
         }
     }
 
+    public GrasshopperDefinitionInfo? InspectGrasshopperDefinition(string grasshopperDocumentId, string? nameFilter, int offset, int limit, out bool notFound)
+    {
+        notFound = false;
+        if (!GrasshopperWatcher.GrasshopperLoaded())
+        {
+            return null; // Grasshopper not loaded; the dispatcher maps this to grasshopper-not-loaded
+        }
+
+        return InspectGrasshopperDefinitionCore(grasshopperDocumentId, nameFilter, offset, limit, out notFound);
+    }
+
+    /// <summary>Grasshopper-typed; reached only once <see cref="GrasshopperWatcher.GrasshopperLoaded"/> is
+    /// true, so the JIT resolves Grasshopper.dll only after the guard.</summary>
+    private GrasshopperDefinitionInfo? InspectGrasshopperDefinitionCore(string grasshopperDocumentId, string? nameFilter, int offset, int limit, out bool notFound)
+    {
+        notFound = false;
+        var doc = string.IsNullOrEmpty(grasshopperDocumentId)
+            ? ActiveGrasshopperDocument()
+            : FindGrasshopperDocument(grasshopperDocumentId) as global::Grasshopper.Kernel.GH_Document;
+        if (doc is null)
+        {
+            notFound = true; // a bad id, or an empty id with no active canvas definition
+            return null;
+        }
+
+        var id = GrasshopperIdentity.IdOf(doc, _processSalt, _caseInsensitivePaths, _log);
+        return GrasshopperInspector.Inspect(doc, id, nameFilter, offset, limit);
+    }
+
     /// <summary>Same rule as RhinoDocumentSnapshotSource; kept in one place so routing and register agree.</summary>
     private string IdOf(RhinoDoc doc)
     {
