@@ -83,6 +83,10 @@ internal sealed class FakeRunHost : IRunHost
 
     public IReadOnlyList<(string DocumentId, string Title, bool Active)> OpenDocuments() => new[] { ("tmp-known", "Untitled", true) };
 
+    /// <summary>The save states restart_snapshot returns; a test sets these to simulate saved/unsaved docs.</summary>
+    public List<DocumentSaveState> SaveStates { get; } = new();
+    public IReadOnlyList<DocumentSaveState> RestartSaveStates() => SaveStates;
+
     public bool RunInCommand(RunDocument document, string undoLabel, Action body)
     {
         if (RefuseCommands) return false;

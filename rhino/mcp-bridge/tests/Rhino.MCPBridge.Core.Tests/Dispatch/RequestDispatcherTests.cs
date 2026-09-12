@@ -247,6 +247,34 @@ public sealed class RequestDispatcherTests
         Assert.Contains("no-viewports", cap2);
     }
 
+    [Fact]
+    public async Task RestartSnapshot_ReturnsEverySaveState_AndOmitsPathWhenUnsaved()
+    {
+        var h = new Harness();
+        h.Host.SaveStates.Add(new Core.Execution.DocumentSaveState("rhino", "Model", "/tmp/model.3dm", modified: false));
+        h.Host.SaveStates.Add(new Core.Execution.DocumentSaveState("grasshopper", "Def", null, modified: true));
+        var runner = new RoslynScriptRunner(); runner.WarmupCompile();
+        var d = new RequestDispatcher(h.Manager, new UndoRunExecutor(new ScriptRunners(runner), h.Host), h.Launcher, h.Logs.Add, () => h.Now, _ => Task.CompletedTask,
+            onMainThread: f => f());
+        var resp = await d.DispatchAsync(JsonRpcRequest.Parse("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"restart_snapshot\",\"params\":{}}"), CancellationToken.None);
+        var docs = JsonDocument.Parse(resp).RootElement.GetProperty("result").GetProperty("documents");
+        Assert.Equal(2, docs.GetArrayLength());
+        Assert.Equal("rhino", docs[0].GetProperty("kind").GetString());
+        Assert.Equal("/tmp/model.3dm", docs[0].GetProperty("path").GetString());
+        Assert.False(docs[0].GetProperty("modified").GetBoolean());
+        Assert.Equal("grasshopper", docs[1].GetProperty("kind").GetString());
+        Assert.True(docs[1].GetProperty("modified").GetBoolean());
+        Assert.False(docs[1].TryGetProperty("path", out _)); // an unsaved definition has no path to reopen
+    }
+
+    [Fact]
+    public async Task RestartSnapshot_IsUnknown_WithoutAMainThreadHop()
+    {
+        // A bridge build with no main-thread hop cannot read document state, so the method answers legibly.
+        var h = new Harness();
+        Assert.Equal("unknown-method", Code(await h.Call("restart_snapshot", new { })));
+    }
+
     private sealed class NoViewports : Core.Capture.IViewCapture
     {
         public IReadOnlyList<string> ViewportNames(object document) => Array.Empty<string>();

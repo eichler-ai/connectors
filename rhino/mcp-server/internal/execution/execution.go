@@ -208,6 +208,48 @@ func (r *Router) UndoRedo(ctx context.Context, instanceID, direction string, con
 	})
 }
 
+// DocSaveState is one open document's save state from restart_snapshot (PRD §10/§15).
+type DocSaveState struct {
+	Kind     string `json:"kind"` // "rhino" | "grasshopper"
+	Title    string `json:"title"`
+	Path     string `json:"path,omitempty"`
+	Modified bool   `json:"modified"`
+}
+
+// RestartSnapshot asks the plug-in for every open document's save state, for the restart tool's
+// unsaved-work guard and reopen list. Read-only; the plug-in does not exit.
+func (r *Router) RestartSnapshot(ctx context.Context, instanceID string) ([]DocSaveState, *diag.Record) {
+	conn, ok := r.conns.Conn(instanceID)
+	if !ok {
+		return nil, diag.New(diag.SeverityError, "instance-not-found", source,
+			fmt.Sprintf("no connected Rhino instance has instance_id %q", instanceID)).
+			WithRemedy("call list_instances and pick a current instance_id")
+	}
+	wctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	raw, rpcErr, err := conn.Call(wctx, "restart_snapshot", map[string]any{})
+	if err != nil {
+		return nil, diag.New(diag.SeverityError, "wire-call-failed", source,
+			fmt.Sprintf("restart_snapshot did not complete: %v", err)).
+			WithRemedy("check the Rhino is responsive (list_instances) and retry")
+	}
+	if rpcErr != nil {
+		if rpcErr.Data != nil {
+			return nil, rpcErr.Data
+		}
+		return nil, diag.New(diag.SeverityError, "bridge-error", source,
+			fmt.Sprintf("restart_snapshot was refused by the plug-in: %s", rpcErr.Message))
+	}
+	var res struct {
+		Documents []DocSaveState `json:"documents"`
+	}
+	if err := json.Unmarshal(raw, &res); err != nil {
+		return nil, diag.New(diag.SeverityError, "wire-decode-failed", source,
+			fmt.Sprintf("restart_snapshot returned a result this server could not decode: %v", err))
+	}
+	return res.Documents, nil
+}
+
 // PollExecution forwards to the owning instance; a wait up to timeoutMs happens plug-in side.
 func (r *Router) PollExecution(ctx context.Context, executionID string, timeoutMs int) (*Result, *diag.Record) {
 	conn, drec := r.lookup(ctx, executionID)
