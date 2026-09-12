@@ -217,4 +217,69 @@ public sealed class UndoRunExecutorTests
         Assert.False(outcome.Success);
         Assert.NotNull(outcome.Grasshopper);
     }
+
+    // ----- Connector.Grasshopper forwarding (PRD §10, phase 4 PR4) -----
+
+    private static FakeRunHost HostWithBoundDefinition()
+    {
+        var host = new FakeRunHost();
+        host.KnownGrasshopperDocumentIds.Add("gh-known");
+        return host;
+    }
+
+    [Fact]
+    public void ConnectorGrasshopperSet_ForwardsToTheOps_WithTheBoundDefinition()
+    {
+        var host = HostWithBoundDefinition();
+        var outcome = new UndoRunExecutor(new ScriptRunners(Runner), host)
+            .Execute(Req("Connector.Grasshopper.Set(\"slider\", 5); return 1;", ghDocId: "gh-known"))!;
+        Assert.True(outcome.Success, outcome.Exception?.ToString());
+        var set = Assert.Single(host.GrasshopperOps.Sets);
+        Assert.Same(host.GrasshopperDocumentStub, set.Doc);
+        Assert.Equal("slider", set.Nickname);
+        Assert.Equal(5, set.Value);
+    }
+
+    [Fact]
+    public void ConnectorGrasshopperReferenceAndClear_Forward()
+    {
+        var host = HostWithBoundDefinition();
+        var outcome = new UndoRunExecutor(new ScriptRunners(Runner), host)
+            .Execute(Req("Connector.Grasshopper.Reference(\"crv\", \"abc\"); Connector.Grasshopper.ClearReference(\"crv\"); return 1;", ghDocId: "gh-known"))!;
+        Assert.True(outcome.Success, outcome.Exception?.ToString());
+        Assert.Equal(2, host.GrasshopperOps.References.Count);
+        Assert.Equal(("crv", (object?)"abc"), (host.GrasshopperOps.References[0].Nickname, host.GrasshopperOps.References[0].ObjectIds));
+        Assert.Null(host.GrasshopperOps.References[1].ObjectIds); // ClearReference passes null
+    }
+
+    [Fact]
+    public void ConnectorGrasshopperSolve_ForwardsExpireAll()
+    {
+        var host = HostWithBoundDefinition();
+        var outcome = new UndoRunExecutor(new ScriptRunners(Runner), host)
+            .Execute(Req("Connector.Grasshopper.Solve(true); return 1;", ghDocId: "gh-known"))!;
+        Assert.True(outcome.Success, outcome.Exception?.ToString());
+        Assert.True(Assert.Single(host.GrasshopperOps.Solves).ExpireAll);
+    }
+
+    [Fact]
+    public void ConnectorGrasshopperFind_ReturnsTheDescriptor()
+    {
+        var host = HostWithBoundDefinition();
+        host.GrasshopperOps.FindResult = new Eichler.Connectors.Rhino.GrasshopperComponent("g", "slider", "Number Slider");
+        var outcome = new UndoRunExecutor(new ScriptRunners(Runner), host)
+            .Execute(Req("var c = Connector.Grasshopper.Find(\"slider\"); return c == null ? \"none\" : c.Nickname;", ghDocId: "gh-known"))!;
+        Assert.Equal("slider", outcome.ReturnValue);
+    }
+
+    [Fact]
+    public void ConnectorGrasshopper_WithoutABoundDefinition_FailsClearly_WithoutRunningTheOp()
+    {
+        var host = new FakeRunHost();
+        var outcome = new UndoRunExecutor(new ScriptRunners(Runner), host)
+            .Execute(Req("Connector.Grasshopper.Solve(); return 1;"))!; // no gh_document_id
+        Assert.False(outcome.Success);
+        Assert.Contains("no Grasshopper definition is bound", outcome.Exception!.Message);
+        Assert.Empty(host.GrasshopperOps.Solves);
+    }
 }

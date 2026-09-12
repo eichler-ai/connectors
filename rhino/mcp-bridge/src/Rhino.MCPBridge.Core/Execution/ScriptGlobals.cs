@@ -33,18 +33,32 @@ public sealed class ScriptGlobals : IConnectorRuntime
 
     private readonly string _bridgeVersion;
     private readonly string? _runLabel;
+    private readonly IGrasshopperOperations? _grasshopperOps;
 
-    internal ScriptGlobals(RhinoDoc document, CancellationToken cancellationToken, string bridgeVersion, string? runLabel, object? grasshopperDocument = null)
+    internal ScriptGlobals(RhinoDoc document, CancellationToken cancellationToken, string bridgeVersion, string? runLabel, object? grasshopperDocument = null, IGrasshopperOperations? grasshopperOperations = null)
     {
         Document = document;
         CancellationToken = cancellationToken;
         _bridgeVersion = bridgeVersion;
         _runLabel = runLabel;
         GrasshopperDocument = grasshopperDocument;
+        _grasshopperOps = grasshopperOperations;
         Connector = new Connector(this);
     }
 
-    // IConnectorRuntime -- explicit so a script sees only the three globals above.
+    // IConnectorRuntime -- explicit so a script sees only the globals above, reaching this API through
+    // Connector (C#) / connector (Python).
     string IConnectorRuntime.BridgeVersion => _bridgeVersion;
     string? IConnectorRuntime.RunLabel => _runLabel;
+
+    GrasshopperComponent? IConnectorRuntime.GrasshopperFind(string nicknameOrGuid) => Ops().Find(RequireGrasshopperDocument(), nicknameOrGuid);
+    void IConnectorRuntime.GrasshopperSet(string nickname, object value) => Ops().Set(RequireGrasshopperDocument(), nickname, value);
+    void IConnectorRuntime.GrasshopperReference(string nickname, object? objectIds) => Ops().Reference(RequireGrasshopperDocument(), nickname, objectIds);
+    void IConnectorRuntime.GrasshopperSolve(bool expireAll) => Ops().Solve(RequireGrasshopperDocument(), expireAll);
+
+    private IGrasshopperOperations Ops() => _grasshopperOps
+        ?? throw new InvalidOperationException("Grasshopper is not available in this run (the plug-in exposed no Grasshopper operations).");
+
+    private object RequireGrasshopperDocument() => GrasshopperDocument
+        ?? throw new InvalidOperationException("no Grasshopper definition is bound to this run; pass gh_document_id to execute_script (from list_instances' grasshopper_documents) to use Connector.Grasshopper.");
 }

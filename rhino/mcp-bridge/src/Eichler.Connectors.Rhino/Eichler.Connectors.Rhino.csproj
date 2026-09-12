@@ -15,5 +15,6 @@
   <ItemGroup>
     <InternalsVisibleTo Include="Rhino.MCPBridge.Core" />
     <InternalsVisibleTo Include="Rhino.MCPBridge.Core.Tests" />
+    <InternalsVisibleTo Include="Rhino.MCPBridge.RhinoAdapter" />
   </ItemGroup>
 </Project>

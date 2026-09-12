@@ -47,6 +47,26 @@ internal sealed class FakeRunHost : IRunHost
     public IGrasshopperSolveScope BeginGrasshopperSolves(object? grasshopperDocument) =>
         GrasshopperReportToReturn is null ? NullGrasshopperSolveScope.Instance : new StubSolveScope(GrasshopperReportToReturn);
 
+    /// <summary>Records the Connector.Grasshopper operations the executor forwarded, so tier 1 can assert
+    /// they reached the ops layer with the right document and arguments (no real Grasshopper needed).</summary>
+    public FakeGrasshopperOperations GrasshopperOps { get; } = new();
+
+    public IGrasshopperOperations GrasshopperOperations => GrasshopperOps;
+
+    internal sealed class FakeGrasshopperOperations : IGrasshopperOperations
+    {
+        public readonly List<(object Doc, string Query)> Finds = new();
+        public readonly List<(object Doc, string Nickname, object Value)> Sets = new();
+        public readonly List<(object Doc, string Nickname, object? ObjectIds)> References = new();
+        public readonly List<(object Doc, bool ExpireAll)> Solves = new();
+        public Eichler.Connectors.Rhino.GrasshopperComponent? FindResult { get; set; }
+
+        public Eichler.Connectors.Rhino.GrasshopperComponent? Find(object doc, string q) { Finds.Add((doc, q)); return FindResult; }
+        public void Set(object doc, string nickname, object value) => Sets.Add((doc, nickname, value));
+        public void Reference(object doc, string nickname, object? objectIds) => References.Add((doc, nickname, objectIds));
+        public void Solve(object doc, bool expireAll) => Solves.Add((doc, expireAll));
+    }
+
     private sealed class StubSolveScope : IGrasshopperSolveScope
     {
         private readonly GrasshopperReport _report;
