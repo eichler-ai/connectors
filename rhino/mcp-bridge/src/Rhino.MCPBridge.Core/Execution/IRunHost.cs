@@ -20,6 +20,12 @@ internal interface IRunHost
     /// definition, so the executor fails loudly instead of silently binding null.</summary>
     object? ResolveGrasshopperDocument(string grasshopperDocumentId, out bool notFound);
 
+    /// <summary>Begins collecting Grasshopper solution events for the run's duration (PRD §10): the addressed
+    /// definition (<paramref name="grasshopperDocument"/>, the resolved GH_Document as opaque object) if
+    /// given, else the active one. Returns a scope the executor disposes when the run ends; a no-op scope
+    /// (its report null) when Grasshopper is not loaded.</summary>
+    IGrasshopperSolveScope BeginGrasshopperSolves(object? grasshopperDocument);
+
     /// <summary>The ids and titles of every open document, for a document-not-found error's candidates.</summary>
     IReadOnlyList<(string DocumentId, string Title, bool Active)> OpenDocuments();
 

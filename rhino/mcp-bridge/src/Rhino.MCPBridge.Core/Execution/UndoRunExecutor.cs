@@ -100,6 +100,7 @@ internal sealed class UndoRunExecutor
         var undoLabel = UndoLabel.For(request.Label);
         var mutations = new MutationTracker();
         var changed = false;
+        GrasshopperReport? grasshopperReport = null;
         ScriptExecutionOutcome? outcome = null;
         var started = _host.RunInCommand(document, undoLabel, () =>
         {
@@ -107,9 +108,11 @@ internal sealed class UndoRunExecutor
             // exception there is a crash class, not a failed run (review of #282). Everything from the
             // subscription to the runner is inside the try; a failure becomes the run's outcome.
             IDisposable? subscription = null;
+            IGrasshopperSolveScope? solves = null;
             try
             {
                 subscription = _host.SubscribeChanges(document, mutations.Record, () => changed = true);
+                solves = _host.BeginGrasshopperSolves(grasshopperDocument);
                 var globals = new ScriptGlobals((RhinoDoc)document.Raw!, request.CancellationToken, _host.BridgeVersion, request.Label, grasshopperDocument);
                 var runner = _runners.Get(request.Language) ?? throw new InvalidOperationException($"no runner for language '{request.Language}'");
                 outcome = runner.RunAsync(request.ScriptText, globals, request.CancellationToken, request.ConfirmLifecycleActions).GetAwaiter().GetResult();
@@ -120,6 +123,9 @@ internal sealed class UndoRunExecutor
             }
             finally
             {
+                // Build the solve report while still inside the command (all solves have ended), then release.
+                try { grasshopperReport = solves?.BuildReport(); } catch { }
+                try { solves?.Dispose(); } catch { }
                 try { subscription?.Dispose(); } catch { }
             }
         });
@@ -140,7 +146,7 @@ internal sealed class UndoRunExecutor
             return new ScriptExecutionOutcome
             {
                 Success = true, ReturnValue = outcome.ReturnValue, StdOut = outcome.StdOut, Notices = outcome.Notices, Files = outcome.Files,
-                Mutations = report.IsEmpty ? null : report, ChangedDocument = changed || !report.IsEmpty,
+                Mutations = report.IsEmpty ? null : report, ChangedDocument = changed || !report.IsEmpty, Grasshopper = grasshopperReport,
             };
         }
 
@@ -162,6 +168,7 @@ internal sealed class UndoRunExecutor
             ? ScriptExecutionOutcome.Cancelled(outcome.StdOut, notices, outcome.Files)
             : ScriptExecutionOutcome.Failed(outcome.Exception!, outcome.StdOut, notices, outcome.Files);
         failed.ChangedDocument = entryRemains;
+        failed.Grasshopper = grasshopperReport; // diagnostics of what solved, reported even on failure
         return failed;
     }
 

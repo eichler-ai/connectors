@@ -10,7 +10,7 @@ internal static class CompleteExecution
     {
         if (outcome.WasCancelled)
         {
-            manager.CompleteCancelled(executionId, now, outcome.StdOut, outcome.Notices, outcome.Files);
+            manager.CompleteCancelled(executionId, now, outcome.StdOut, outcome.Notices, outcome.Files, outcome.Grasshopper);
             return;
         }
 
@@ -19,7 +19,7 @@ internal static class CompleteExecution
             string? formatted;
             try { formatted = outcome.ReturnValue is null ? null : ReturnValueFormatter.Format(outcome.ReturnValue); }
             catch (Exception ex) { formatted = "<return value could not be formatted: " + ex.Message + ">"; }
-            manager.CompleteSuccess(executionId, now, formatted, outcome.StdOut, outcome.Notices, outcome.Files, outcome.Mutations);
+            manager.CompleteSuccess(executionId, now, formatted, outcome.StdOut, outcome.Notices, outcome.Files, outcome.Mutations, outcome.Grasshopper);
             return;
         }
 
@@ -48,6 +48,6 @@ internal static class CompleteExecution
                 $"{ex0.GetType().FullName}: {ex0.Message}", new Dictionary<string, object?> { ["execution_id"] = executionId, ["exception_type"] = ex0.GetType().FullName, ["stack"] = ex0.StackTrace },
                 new[] { "Read the exception: it is what Rhino's API threw. Check the member's signature with describe_function before retrying." }),
         };
-        manager.CompleteError(executionId, now, record, outcome.StdOut, outcome.Notices, outcome.Files);
+        manager.CompleteError(executionId, now, record, outcome.StdOut, outcome.Notices, outcome.Files, outcome.Grasshopper);
     }
 }
