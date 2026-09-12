@@ -174,7 +174,11 @@ Errors are reported, not auto-resolved — a red component is often the intended
 
 You do not have to know a member's exact name. Three tools index the **live** API of the instance you
 target — **RhinoCommon, `rhinoscriptsyntax`, and any loaded plug-in** — so a member found once is
-usable from either language.
+usable from either language. Once a Grasshopper definition is open, its **component catalog** is indexed too,
+under the `Grasshopper` namespace (one type per category): searching `"circle"` surfaces the Grasshopper
+Circle component beside `Rhino.Geometry.Circle`, and `describe_function` gives its description and a
+`python_call` that places it on a bound definition by guid. Use it to find which component to add when
+authoring a definition.
 
 - **`search_functions`** is the one to reach for. Give it a **plain task sentence** naming the
   operation and the type (`"add a circle to the document"`, `"closest point on a curve"`); ranking

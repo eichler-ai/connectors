@@ -104,6 +104,43 @@ internal static class DiscoveryBootstrap
     }
 
     /// <summary>
+    /// Indexes the installed Grasshopper component catalog into the cache as kind=grasshopper (PRD §09), so
+    /// GH components are searchable beside RhinoCommon. Returns false when Grasshopper is not loaded yet (its
+    /// ComponentServer is empty until GH loads, which happens lazily when the user opens it) so the caller can
+    /// retry; true once synced (or on a genuine index error the caller should not spin on).
+    /// </summary>
+    public static bool SyncGrasshopper(DiscoveryCache cache, Action<string> log)
+    {
+        // GH-typed catalog read is guarded inside ReadComponents; an empty result means Grasshopper is not
+        // loaded yet (it always ships components once loaded), so signal the caller to retry.
+        var components = global::Rhino.MCPBridge.RhinoAdapter.GrasshopperCatalog.ReadComponents();
+        if (components.Count == 0)
+        {
+            return false;
+        }
+
+        try
+        {
+            var indexed = GrasshopperComponentIndexer.Build(components);
+            if (indexed is not { } result)
+            {
+                log("discovery: grasshopper catalog read but nothing to index");
+                return true;
+            }
+
+            var r = cache.SyncSource("grasshopper", GrasshopperComponentIndexer.SourceId, result.ContentHash, result.Types);
+            var count = result.Types.Sum(t => t.Members.Count);
+            log($"discovery: grasshopper catalog synced ({count} components in {result.Types.Count} categories; added={r.Added} updated={r.Updated} unchanged={r.Unchanged})");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            log($"discovery: grasshopper catalog index FAILED (RhinoCommon discovery is unaffected): {ex.Message}");
+            return true;
+        }
+    }
+
+    /// <summary>
     /// core = RhinoCommon (the one assembly PRD §09 calls "core" for v1; Grasshopper joins as its own kind
     /// in phase 4). addin = this connector's own <c>Eichler.Connectors.Rhino</c> API, plus every other
     /// plug-in loaded into the process that is NOT one of Rhino's own bundled assemblies.

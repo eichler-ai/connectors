@@ -266,6 +266,14 @@ public sealed class DiscoveryService
 
         if (!_cache.TypeExistsByFullName(typeName))
         {
+            // The dotted parse can derive a wrong type segment when the name contains '.'; fall back to
+            // resolving the reference directly as an exact id (a Grasshopper member's dotted `member` string
+            // equals its member_id) before giving up.
+            if ((DescribeByExactMemberId(memberId) ?? DescribeByExactMemberId(member)) is { } byId)
+            {
+                return byId;
+            }
+
             throw new DiscoveryMemberNotFoundException($"no type '{typeName}' found (from member reference '{member ?? memberId}').");
         }
 
@@ -298,6 +306,13 @@ public sealed class DiscoveryService
 
         if (candidates.Count == 0)
         {
+            // The dotted parse strips a member_id from the first '(' — mangling a name that contains one (a
+            // Grasshopper component "Mesh (Custom)"); resolve the reference directly as an exact id first.
+            if ((DescribeByExactMemberId(memberId) ?? DescribeByExactMemberId(member)) is { } byId)
+            {
+                return byId;
+            }
+
             throw new DiscoveryMemberNotFoundException($"no public member named '{memberName}' found on type '{typeName}'.");
         }
 
@@ -327,27 +342,38 @@ public sealed class DiscoveryService
             return DescribeFunctionResult.FromOverloads(new DescribeFunctionOverloadList { Member = member!, Overloads = overloads });
         }
 
-        var resolvedRow = resolved!;
-        var parameters = resolvedRow.Parameters
-            .Select(p => new DescribeParameter { Name = p.Name, Type = p.Type, Description = p.Description })
-            .ToList();
+        return DescribeFunctionResult.FromSingle(BuildSingle(resolved!, candidates.Count));
+    }
 
-        var single = new DescribeFunctionSingle
+    private static DescribeFunctionSingle BuildSingle(DiscoveryMemberRow row, int overloadCount) => new()
+    {
+        MemberId = row.MemberId,
+        Kind = row.Kind,
+        Namespace = row.Namespace,
+        DeclaringType = row.DeclaringType,
+        Name = row.Name,
+        Signature = row.Signature,
+        PythonCall = row.PythonCall,
+        Summary = row.Summary,
+        Parameters = row.Parameters.Select(p => new DescribeParameter { Name = p.Name, Type = p.Type, Description = p.Description }).ToList(),
+        Returns = row.Returns,
+        OverloadCount = overloadCount,
+    };
+
+    /// <summary>Resolves a member by its exact member_id directly, bypassing the dotted Namespace.Type.Member
+    /// parse. describe_function falls back to this when the dotted parse fails to find the member, so a
+    /// synthetic member_id whose name segment the parser mangles — a Grasshopper component named
+    /// "Mesh (Custom)" (a '(' the parser strips) or "A.B" (a '.' it splits on) — still resolves from the
+    /// search → describe-by-member_id flow. Null when no member has that id.</summary>
+    private DescribeFunctionResult? DescribeByExactMemberId(string? memberId)
+    {
+        if (string.IsNullOrEmpty(memberId))
         {
-            MemberId = resolvedRow.MemberId,
-            Kind = resolvedRow.Kind,
-            Namespace = resolvedRow.Namespace,
-            DeclaringType = resolvedRow.DeclaringType,
-            Name = resolvedRow.Name,
-            Signature = resolvedRow.Signature,
-            PythonCall = resolvedRow.PythonCall,
-            Summary = resolvedRow.Summary,
-            Parameters = parameters,
-            Returns = resolvedRow.Returns,
-            OverloadCount = candidates.Count,
-        };
+            return null;
+        }
 
-        return DescribeFunctionResult.FromSingle(single);
+        var row = _cache.TryGetMemberByMemberId(memberId);
+        return row is null ? null : DescribeFunctionResult.FromSingle(BuildSingle(row, overloadCount: 1));
     }
 
     /// <summary>"get_SlopeAngle" / "set_SlopeAngle" -> "SlopeAngle"; null for any other shape.</summary>
