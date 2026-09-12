@@ -46,6 +46,13 @@ crv = Grasshopper.Kernel.Parameters.Param_Curve()
 crv.NickName = "crv"
 crv.CreateAttributes()
 doc.AddObject(crv, False)
+vlist = Grasshopper.Kernel.Special.GH_ValueList()
+vlist.NickName = "vlist"
+vlist.ListItems.Clear()
+vlist.ListItems.Add(Grasshopper.Kernel.Special.GH_ValueListItem("Alpha", "0"))
+vlist.ListItems.Add(Grasshopper.Kernel.Special.GH_ValueListItem("Beta", "1"))
+vlist.CreateAttributes()
+doc.AddObject(vlist, False)
 try:
     server.AddDocument(doc, True)
 except TypeError:
@@ -186,6 +193,31 @@ result = 'persist_ref:%d id_ok:%s loaded:%s persist_clear:%d' % (persist_ref, id
 	}
 	if ref.Status != "success" || ref.ReturnValue != "persist_ref:1 id_ok:True loaded:True persist_clear:0" {
 		t.Errorf("Connector.Grasshopper Reference/ClearReference should wire document geometry (right id, loads live) and unwire it, got status=%s return=%q", ref.Status, ref.ReturnValue)
+	}
+
+	// PR4 review MEDIUM: Set on a Value List selects a matching item, and refuses (does not silently
+	// deselect everything) when the value is not one of its items.
+	vl := callExecute(t, c, map[string]any{
+		"instance_id": instanceID, "document_id": documentID, "gh_document_id": ghDocID, "language": "python",
+		"script": `connector.Grasshopper.Set('vlist', 'Beta')
+sel = None
+for o in ghdoc.Objects:
+    if o.NickName == 'vlist':
+        sel = [i.Name for i in o.ListItems if i.Selected]
+        break
+try:
+    connector.Grasshopper.Set('vlist', 'Nope')
+    raised = 'noraise'
+except Exception:
+    raised = 'raised'
+result = 'selected:%s badvalue:%s' % (','.join(sel), raised)`,
+	}, 30*time.Second)
+	t.Logf("connector.Grasshopper value-list: status=%s return=%q", vl.Status, vl.ReturnValue)
+	if vl.Error != nil {
+		t.Logf("  error: code=%s msg=%s", vl.Error.Code, vl.Error.Message)
+	}
+	if vl.Status != "success" || vl.ReturnValue != "selected:Beta badvalue:raised" {
+		t.Errorf("Set on a Value List should select the item and refuse an unknown value, got status=%s return=%q", vl.Status, vl.ReturnValue)
 	}
 
 	bogus := callExecute(t, c, map[string]any{

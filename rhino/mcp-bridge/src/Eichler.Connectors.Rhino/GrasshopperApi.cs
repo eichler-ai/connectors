@@ -20,10 +20,11 @@ public sealed class GrasshopperApi
     /// or null when none matches. When a nickname is shared, the first match in document order wins.</summary>
     public GrasshopperComponent? Find(string nicknameOrGuid) => _runtime.GrasshopperFind(nicknameOrGuid);
 
-    /// <summary>Sets the value of an input object by nickname — a Number Slider (a number), a Boolean Toggle
-    /// (a bool), a Panel (text) or a Value List (an item's name or value) — and expires it so the next solve
-    /// recomputes. Raises if the object is not found or does not take a settable value; feed other inputs
-    /// with <see cref="Reference"/> (document geometry) or by driving <c>ghdoc</c> directly.</summary>
+    /// <summary>Sets the value of an input object by nickname — a Number Slider (a number, clamped to the
+    /// slider's range and rounded to its precision), a Boolean Toggle (a bool), a Panel (text) or a Value
+    /// List (an item's name or value) — and expires it so the next solve recomputes. Raises if the object
+    /// is not found, does not take a settable value, or (for a Value List) the value is not one of its items;
+    /// feed other inputs with <see cref="Reference"/> (document geometry) or by driving <c>ghdoc</c> directly.</summary>
     public void Set(string nickname, object value) => _runtime.GrasshopperSet(nickname, value);
 
     /// <summary>Links an input geometry parameter (Curve, Brep, Surface, Mesh or Point) to Rhino document

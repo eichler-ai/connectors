@@ -59,9 +59,12 @@ internal sealed class GrasshopperOperations : IGrasshopperOperations
             throw new InvalidOperationException($"'{Nick(obj)}' is a {obj.Name}, not an input parameter that can reference document geometry.");
         }
 
-        var ids = objectIds is null ? Array.Empty<Guid>() : ToGuids(objectIds).ToArray();
+        var clearing = objectIds is null;
+        var ids = clearing ? Array.Empty<Guid>() : ToGuids(objectIds!).ToArray();
         param.ClearData();
-        if (!SetReferences(param, ids))
+        // A clear on a parameter that never took referenced geometry is a no-op, not an error; only a real
+        // set (with ids) complains when the parameter type cannot hold referenced geometry.
+        if (!SetReferences(param, ids) && !clearing)
         {
             throw new InvalidOperationException($"'{Nick(obj)}' is a {obj.Name} parameter, which does not take referenced document geometry (a Curve/Brep/Surface/Mesh/Point parameter does).");
         }
@@ -100,6 +103,10 @@ internal sealed class GrasshopperOperations : IGrasshopperOperations
     private static decimal ToDecimal(object value) => value switch
     {
         null => throw new InvalidOperationException("a slider needs a number value, got null."),
+        // string is IConvertible, so parse it explicitly (a bad string would otherwise throw a raw
+        // FormatException from IConvertible.ToDecimal instead of this friendly message).
+        string s => decimal.TryParse(s, NumberStyles.Any, CultureInfo.InvariantCulture, out var d) ? d
+            : throw new InvalidOperationException($"a slider needs a number value, got '{s}'."),
         IConvertible c => c.ToDecimal(CultureInfo.InvariantCulture),
         _ when decimal.TryParse(value.ToString(), NumberStyles.Any, CultureInfo.InvariantCulture, out var d) => d,
         _ => throw new InvalidOperationException($"a slider needs a number value, got '{value}'."),
@@ -108,6 +115,8 @@ internal sealed class GrasshopperOperations : IGrasshopperOperations
     private static bool ToBool(object value) => value switch
     {
         bool b => b,
+        string s => bool.TryParse(s, out var b) ? b
+            : throw new InvalidOperationException($"a toggle needs a true/false value, got '{s}'."),
         IConvertible c => c.ToBoolean(CultureInfo.InvariantCulture),
         _ when bool.TryParse(value?.ToString(), out var b) => b,
         _ => throw new InvalidOperationException($"a toggle needs a true/false value, got '{value}'."),
@@ -116,17 +125,23 @@ internal sealed class GrasshopperOperations : IGrasshopperOperations
     private static void SelectValueListItem(GH_ValueList list, object value)
     {
         var target = value?.ToString() ?? "";
+        // Select the first item whose name or expression matches (first-match-wins, like FindObject);
+        // refuse rather than silently deselect everything when nothing matches, which would leave the
+        // list with no selection and feed the definition null on the next solve.
+        var matched = false;
         foreach (var item in list.ListItems)
         {
-            if (string.Equals(item.Name, target, StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(item.Expression, target, StringComparison.OrdinalIgnoreCase))
-            {
-                item.Selected = true;
-            }
-            else
-            {
-                item.Selected = false;
-            }
+            var hit = !matched &&
+                (string.Equals(item.Name, target, StringComparison.OrdinalIgnoreCase) ||
+                 string.Equals(item.Expression, target, StringComparison.OrdinalIgnoreCase));
+            item.Selected = hit;
+            matched |= hit;
+        }
+
+        if (!matched)
+        {
+            var names = string.Join(", ", list.ListItems.Select(i => "'" + i.Name + "'"));
+            throw new InvalidOperationException($"'{target}' is not an item on value list '{Nick(list)}'; its items are: {names}.");
         }
     }
 
