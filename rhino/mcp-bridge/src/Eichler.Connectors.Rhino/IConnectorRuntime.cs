@@ -20,4 +20,6 @@ internal interface IConnectorRuntime
     void GrasshopperSet(string nickname, object value);
     void GrasshopperReference(string nickname, object? objectIds);
     void GrasshopperSolve(bool expireAll);
+    GrasshopperValue GrasshopperGet(string nickname);
+    GrasshopperData GrasshopperData(string nickname);
 }

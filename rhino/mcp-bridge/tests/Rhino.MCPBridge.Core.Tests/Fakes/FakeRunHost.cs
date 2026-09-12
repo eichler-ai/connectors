@@ -59,12 +59,18 @@ internal sealed class FakeRunHost : IRunHost
         public readonly List<(object Doc, string Nickname, object Value)> Sets = new();
         public readonly List<(object Doc, string Nickname, object? ObjectIds)> References = new();
         public readonly List<(object Doc, bool ExpireAll)> Solves = new();
+        public readonly List<(object Doc, string Nickname)> Gets = new();
+        public readonly List<(object Doc, string Nickname)> Datas = new();
         public Eichler.Connectors.Rhino.GrasshopperComponent? FindResult { get; set; }
+        public Eichler.Connectors.Rhino.GrasshopperValue? GetResult { get; set; }
+        public Eichler.Connectors.Rhino.GrasshopperData? DataResult { get; set; }
 
         public Eichler.Connectors.Rhino.GrasshopperComponent? Find(object doc, string q) { Finds.Add((doc, q)); return FindResult; }
         public void Set(object doc, string nickname, object value) => Sets.Add((doc, nickname, value));
         public void Reference(object doc, string nickname, object? objectIds) => References.Add((doc, nickname, objectIds));
         public void Solve(object doc, bool expireAll) => Solves.Add((doc, expireAll));
+        public Eichler.Connectors.Rhino.GrasshopperValue Get(object doc, string nickname) { Gets.Add((doc, nickname)); return GetResult!; }
+        public Eichler.Connectors.Rhino.GrasshopperData Data(object doc, string nickname) { Datas.Add((doc, nickname)); return DataResult!; }
     }
 
     private sealed class StubSolveScope : IGrasshopperSolveScope

@@ -53,6 +53,21 @@ vlist.ListItems.Add(Grasshopper.Kernel.Special.GH_ValueListItem("Alpha", "0"))
 vlist.ListItems.Add(Grasshopper.Kernel.Special.GH_ValueListItem("Beta", "1"))
 vlist.CreateAttributes()
 doc.AddObject(vlist, False)
+# Sink params give the slider and the curve a downstream recipient, so their VolatileData actually
+# computes on a solve (an orphan param with no recipient stays empty) -- the read half reads VolatileData.
+nsink = Grasshopper.Kernel.Parameters.Param_Number()
+nsink.NickName = "nsink"
+nsink.CreateAttributes()
+doc.AddObject(nsink, False)
+nsink.AddSource(slider)
+csink = Grasshopper.Kernel.Parameters.Param_Curve()
+csink.NickName = "csink"
+csink.CreateAttributes()
+doc.AddObject(csink, False)
+csink.AddSource(crv)
+# A programmatically-created GH_Document defaults to disabled (its solver is locked), so NewSolution would
+# populate no volatile data; enable it so the read half has real output to read (a loaded .gh is enabled).
+doc.Enabled = True
 try:
     server.AddDocument(doc, True)
 except TypeError:
@@ -218,6 +233,47 @@ result = 'selected:%s badvalue:%s' % (','.join(sel), raised)`,
 	}
 	if vl.Status != "success" || vl.ReturnValue != "selected:Beta badvalue:raised" {
 		t.Errorf("Set on a Value List should select the item and refuse an unknown value, got status=%s return=%q", vl.Status, vl.ReturnValue)
+	}
+
+	// PR (read half): Get reads an object's current output. Set the slider, solve, and read it back.
+	get := callExecute(t, c, map[string]any{
+		"instance_id": instanceID, "document_id": documentID, "gh_document_id": ghDocID, "language": "python",
+		"script": `connector.Grasshopper.Set('hslider', 7)
+connector.Grasshopper.Solve(True)
+g = connector.Grasshopper.Get('hslider')
+has_value = g.Count >= 1 and g.Items[0].Value is not None
+result = 'get:count>=1=%s kind=%s hasvalue=%s' % (g.Count >= 1, g.Items[0].Kind, has_value)`,
+	}, 30*time.Second)
+	t.Logf("connector.Grasshopper get: status=%s return=%q", get.Status, get.ReturnValue)
+	if get.Error != nil {
+		t.Logf("  error: code=%s msg=%s", get.Error.Code, get.Error.Message)
+	}
+	if get.Status != "success" || get.ReturnValue != "get:count>=1=True kind=number hasvalue=True" {
+		t.Errorf("Get should read the slider's output as a number, got status=%s return=%q", get.Status, get.ReturnValue)
+	}
+
+	// PR (read half): Data serializes a parameter's volatile data tree -- reference a document line into
+	// the curve param, solve, and read the tree: one branch, one geometry item, with a bounding box and the
+	// document object's id as its handle (geometry summarized, never inline).
+	data := callExecute(t, c, map[string]any{
+		"instance_id": instanceID, "document_id": documentID, "gh_document_id": ghDocID, "language": "python",
+		"script": `import Rhino, Rhino.Geometry as rg
+line = rg.Line(rg.Point3d(0,0,0), rg.Point3d(4,0,0))
+oid = Rhino.RhinoDoc.ActiveDoc.Objects.AddLine(line)
+connector.Grasshopper.Reference('crv', str(oid))
+connector.Grasshopper.Solve(True)
+d = connector.Grasshopper.Data('crv')
+it = d.Branches[0].Items[0]
+box_ok = it.Box is not None and len(it.Box) == 6
+handle_ok = it.Handle == str(oid)
+result = 'data:branches=%s items=%s kind=%s type=%s box=%s handle=%s' % (d.BranchCount, d.ItemCount, it.Kind, it.Type, box_ok, handle_ok)`,
+	}, 30*time.Second)
+	t.Logf("connector.Grasshopper data: status=%s return=%q", data.Status, data.ReturnValue)
+	if data.Error != nil {
+		t.Logf("  error: code=%s msg=%s", data.Error.Code, data.Error.Message)
+	}
+	if data.Status != "success" || data.ReturnValue != "data:branches=1 items=1 kind=geometry type=Curve box=True handle=True" {
+		t.Errorf("Data should serialize the curve param's tree (geometry as type+box+handle), got status=%s return=%q", data.Status, data.ReturnValue)
 	}
 
 	bogus := callExecute(t, c, map[string]any{

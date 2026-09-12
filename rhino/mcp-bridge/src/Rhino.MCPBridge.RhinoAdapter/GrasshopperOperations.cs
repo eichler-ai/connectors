@@ -77,7 +77,107 @@ internal sealed class GrasshopperOperations : IGrasshopperOperations
         ((GH_Document)grasshopperDocument).NewSolution(expireAll);
     }
 
+    // Budget caps for the read half (PRD §10): keep a large data tree within the response budget. The char
+    // ceiling is enforced downstream when a script returns the DTO (ReturnValueFormatter); these bound how
+    // much we materialise in the first place, and each true total is reported so nothing is hidden silently.
+    private const int MaxGetItems = 500;
+    private const int MaxBranches = 50;
+    private const int MaxItemsPerBranch = 200;
+
+    public GrasshopperValue Get(object grasshopperDocument, string nickname)
+    {
+        var param = RequireParam((GH_Document)grasshopperDocument, nickname, out var obj);
+        var data = param.VolatileData;
+        var total = data.DataCount;
+        var items = new List<GrasshopperItem>();
+        foreach (var goo in data.AllData(false))
+        {
+            if (items.Count >= MaxGetItems) break;
+            items.Add(DescribeGoo(goo as IGH_Goo));
+        }
+
+        return new GrasshopperValue(Nick(obj), obj.Name ?? obj.GetType().Name, total, items.ToArray(), items.Count < total);
+    }
+
+    public GrasshopperData Data(object grasshopperDocument, string nickname)
+    {
+        var param = RequireParam((GH_Document)grasshopperDocument, nickname, out var obj);
+        var data = param.VolatileData;
+        var branchCount = data.PathCount;
+        var itemCount = data.DataCount;
+        var truncated = false;
+        var branches = new List<GrasshopperBranch>();
+        foreach (var path in data.Paths)
+        {
+            if (branches.Count >= MaxBranches) { truncated = true; break; }
+            var branch = data.get_Branch(path);
+            var items = new List<GrasshopperItem>();
+            var count = branch?.Count ?? 0;
+            if (branch != null)
+            {
+                foreach (var goo in branch)
+                {
+                    if (items.Count >= MaxItemsPerBranch) { truncated = true; break; }
+                    items.Add(DescribeGoo(goo as IGH_Goo));
+                }
+            }
+
+            branches.Add(new GrasshopperBranch(path.ToString(), count, items.ToArray()));
+        }
+
+        var note = truncated
+            ? $"showing {branches.Count} of {branchCount} branch(es), up to {MaxItemsPerBranch} item(s) each; read narrower via ghdoc for the rest."
+            : null;
+        return new GrasshopperData(Nick(obj), obj.Name ?? obj.GetType().Name, branchCount, itemCount, branches.ToArray(), truncated, note);
+    }
+
     // ---- helpers ----
+
+    private static IGH_Param RequireParam(GH_Document doc, string nickname, out IGH_DocumentObject obj)
+    {
+        obj = FindObject(doc, nickname)
+            ?? throw new InvalidOperationException($"no Grasshopper object with nickname or id '{nickname}' is on the canvas.");
+        return obj as IGH_Param
+            ?? throw new InvalidOperationException($"'{Nick(obj)}' is a {obj.Name}, not a parameter with a data tree; address a parameter (or a component's output parameter) by nickname to read its data.");
+    }
+
+    /// <summary>Summarises one goo for the read half: numbers/text/booleans verbatim, geometry as its type
+    /// plus bounding box and (when it references a document object) that object's id — never the geometry
+    /// itself.</summary>
+    private static GrasshopperItem DescribeGoo(IGH_Goo? goo)
+    {
+        switch (goo)
+        {
+            case null:
+                return new GrasshopperItem("other", null, "null", null, null);
+            case GH_Number n:
+                return new GrasshopperItem("number", n.Value, "Number", null, null);
+            case GH_Integer i:
+                return new GrasshopperItem("number", i.Value, "Integer", null, null);
+            case GH_Boolean b:
+                return new GrasshopperItem("boolean", b.Value, "Boolean", null, null);
+            case GH_String s:
+                return new GrasshopperItem("text", s.Value, "Text", null, null);
+            case IGH_GeometricGoo geo:
+                var handle = geo.ReferenceID == Guid.Empty ? null : geo.ReferenceID.ToString();
+                return new GrasshopperItem("geometry", null, goo.TypeName, BoxOf(geo), handle);
+            default:
+                return new GrasshopperItem("other", goo.ToString(), goo.TypeName, null, null);
+        }
+    }
+
+    private static double[]? BoxOf(IGH_GeometricGoo geo)
+    {
+        try
+        {
+            var b = geo.Boundingbox;
+            return b.IsValid ? new[] { b.Min.X, b.Min.Y, b.Min.Z, b.Max.X, b.Max.Y, b.Max.Z } : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
 
     private static IGH_DocumentObject? FindObject(GH_Document doc, string nicknameOrGuid)
     {
