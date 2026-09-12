@@ -217,6 +217,15 @@ For the run's duration the plug-in subscribes `SolutionStart`/`SolutionEnd` on t
 
 **Threading.** The solver runs on the main thread inside `NewSolution`, so it is serialised with scripts by construction and cannot interleave with one. A solve the *person* triggers while a script is `pending` delays the script exactly as a command would.
 
+### Plug-in management — Yak-backed package tools
+
+Real Grasshopper work leans on installed third-party plug-ins, so the connector lets an agent find and manage them through Rhino's own first-party package manager, **yak** (§15). Four server-side MCP tools shell out to the bundled `yak` CLI (`/Applications/Rhino 8.app/Contents/Resources/bin/yak`; `…\Rhino 8\System\Yak.exe` on Windows — override with `RHINO_YAK_PATH`), which operates on the per-user package folder (`~/Library/Application Support/McNeel/Rhinoceros/packages/8.0/`) independent of any running Rhino, so these tools need no `instance_id`:
+
+- `search_plugins(query, prerelease?)` and `list_plugins()` are **read-only** — search the public package server (`yak.rhino3d.com`, anonymous) and list what is installed with its package directory.
+- `install_plugin(name, version?, confirm_lifecycle_actions)` and `uninstall_plugin(name, confirm_lifecycle_actions)` are **gated** the same way `execute_script`'s lifecycle actions are: without `confirm_lifecycle_actions` they return a `preview` and change nothing; installing runs third-party code in the user's Rhino on its next start. Yak has no update command — updating is installing a newer version.
+
+**A freshly installed plug-in is on disk but not loaded.** Rhino (and Grasshopper) load new packages only at startup, and there is no supported way to hot-load a `.gha` into a running Grasshopper, so every `install_plugin` result says a Rhino restart is required to use it. Putting a plug-in "into use" therefore pairs with a **gated restart** capability (a separate tool) that checks for unsaved documents before restarting and reopens the saved ones. The in-process `Yak.Core` API exists but is undocumented and unsupported, so the supported CLI is used instead; this keeps the bridge thin (the server, not the plug-in, does the work).
+
 ## 11. Viewport capture
 
 An agent driving geometry cannot debug what it cannot see. The Revit connector reaches a PNG through a script plus `Publish`, which works but costs a round trip, a file the agent then has to open with its own tools, and a script the agent has to get right first. For Rhino this is a dedicated tool, `capture_view`, and it is one of the few fixed tools in the connector because it is a *connector mechanism* — getting pixels to the agent — not a Rhino capability an agent could discover.
