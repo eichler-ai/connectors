@@ -43,6 +43,10 @@ public sealed class ExecutionRecord
     /// <summary>#146 Phase 2: the completed run's net mutation report; null when nothing changed or the run did not complete.</summary>
     public MutationReport? Mutations { get; private set; }
 
+    /// <summary>The Grasshopper solve report (PRD §10) when a solution ended during the run; null otherwise.
+    /// Reported on every terminal state (success/error/cancelled), unlike Mutations.</summary>
+    public GrasshopperReport? Grasshopper { get; private set; }
+
     /// <summary>The run that completed on the same document before this one (PRD §05 observability);
     /// null when none had, or the run never resolved a document. Set once, by the dispatcher.</summary>
     public LastRun? PreviousRun { get; private set; }
@@ -79,7 +83,7 @@ public sealed class ExecutionRecord
         StartedAt = now;
     }
 
-    public void MarkCompleted(DateTimeOffset now, string? result, string? stdOut, IReadOnlyList<DiagnosticRecord> notices, IReadOnlyList<PublishedFileRecord>? files = null, MutationReport? mutations = null)
+    public void MarkCompleted(DateTimeOffset now, string? result, string? stdOut, IReadOnlyList<DiagnosticRecord> notices, IReadOnlyList<PublishedFileRecord>? files = null, MutationReport? mutations = null, GrasshopperReport? grasshopper = null)
     {
         RequireNonTerminal();
         Status = ExecutionStatus.Completed;
@@ -89,9 +93,10 @@ public sealed class ExecutionRecord
         Notices = notices;
         Files = files ?? Array.Empty<PublishedFileRecord>();
         Mutations = mutations;
+        Grasshopper = grasshopper;
     }
 
-    public void MarkError(DateTimeOffset now, DiagnosticRecord error, string? stdOut, IReadOnlyList<DiagnosticRecord>? notices = null, IReadOnlyList<PublishedFileRecord>? files = null)
+    public void MarkError(DateTimeOffset now, DiagnosticRecord error, string? stdOut, IReadOnlyList<DiagnosticRecord>? notices = null, IReadOnlyList<PublishedFileRecord>? files = null, GrasshopperReport? grasshopper = null)
     {
         RequireNonTerminal();
         Status = ExecutionStatus.Error;
@@ -100,9 +105,10 @@ public sealed class ExecutionRecord
         StdOut = stdOut;
         Notices = notices ?? Array.Empty<DiagnosticRecord>();
         Files = files ?? Array.Empty<PublishedFileRecord>();
+        Grasshopper = grasshopper;
     }
 
-    public void MarkCancelled(DateTimeOffset now, string? stdOut, IReadOnlyList<DiagnosticRecord>? notices = null, IReadOnlyList<PublishedFileRecord>? files = null)
+    public void MarkCancelled(DateTimeOffset now, string? stdOut, IReadOnlyList<DiagnosticRecord>? notices = null, IReadOnlyList<PublishedFileRecord>? files = null, GrasshopperReport? grasshopper = null)
     {
         RequireNonTerminal();
         Status = ExecutionStatus.Cancelled;
@@ -110,6 +116,7 @@ public sealed class ExecutionRecord
         StdOut = stdOut;
         Notices = notices ?? Array.Empty<DiagnosticRecord>();
         Files = files ?? Array.Empty<PublishedFileRecord>();
+        Grasshopper = grasshopper;
     }
 
     public void MarkUnrecoverable(DateTimeOffset now, DiagnosticRecord diagnostic)

@@ -41,10 +41,44 @@ type Result struct {
 	Notices     []diag.Record   `json:"notices,omitempty"`
 	Files       []FileRecord    `json:"files,omitempty"`
 	Mutations   *MutationReport `json:"mutations,omitempty"`
-	ErrorDetail *diag.Record    `json:"error,omitempty"`
+	// Grasshopper is the solve report (PRD §10), present only when a solution ended during the run.
+	Grasshopper *GrasshopperReport `json:"grasshopper,omitempty"`
+	ErrorDetail *diag.Record       `json:"error,omitempty"`
 	// LastRun is the run that completed on the same document before this one (PRD §05), so a
 	// caller can see another client's work since its own last call.
 	LastRun *LastRun `json:"last_run,omitempty"`
+}
+
+// GrasshopperReport mirrors the plug-in's GrasshopperReport (PRD §10): the solutions that ended during
+// the run and every object that carried a runtime message or ended non-Computed. Typed (not raw) for the
+// same reason as MutationReport -- so the MCP SDK derives a real output schema.
+type GrasshopperReport struct {
+	Solutions  []GrasshopperSolution        `json:"solutions"`
+	Components []GrasshopperComponentReport `json:"components"`
+}
+
+// GrasshopperSolution is one ended solution.
+type GrasshopperSolution struct {
+	StartedAt  string  `json:"started_at"`
+	DurationMs float64 `json:"duration_ms"`
+	State      string  `json:"state"`
+	Depth      int     `json:"depth"`
+}
+
+// GrasshopperComponentReport is one object's outcome in the solve.
+type GrasshopperComponentReport struct {
+	GUID        string               `json:"guid"`
+	Nickname    string               `json:"nickname"`
+	Type        string               `json:"type"`
+	Phase       string               `json:"phase"`
+	ProcessorMs float64              `json:"processor_ms"`
+	Messages    []GrasshopperMessage `json:"messages"`
+}
+
+// GrasshopperMessage is one runtime message on an object.
+type GrasshopperMessage struct {
+	Severity string `json:"severity"`
+	Text     string `json:"text"`
 }
 
 // MutationReport mirrors the plug-in's MutationReport (rhino/docs/PRD.md §07): what a successful

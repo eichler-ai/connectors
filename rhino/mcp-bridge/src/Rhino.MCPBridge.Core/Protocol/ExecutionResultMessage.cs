@@ -83,6 +83,11 @@ public static class ExecutionResultMessage
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public MutationReport? Mutations { get; set; }
 
+        /// <summary>PRD §10: the Grasshopper solve report, present only when a solution ended during the run.</summary>
+        [JsonPropertyName("grasshopper")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public Execution.GrasshopperReport? Grasshopper { get; set; }
+
         [JsonPropertyName("error")]
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public DiagnosticRecord? Error { get; set; }
@@ -139,6 +144,7 @@ public static class ExecutionResultMessage
             Notices = notices,
             Files = record.Files.Count > 0 ? new List<PublishedFileRecord>(record.Files) : null,
             Mutations = record.Mutations,
+            Grasshopper = record.Grasshopper,
             Error = record.Error,
             LastRun = record.PreviousRun,
         };

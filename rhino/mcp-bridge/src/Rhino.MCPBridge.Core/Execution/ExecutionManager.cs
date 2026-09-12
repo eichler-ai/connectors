@@ -173,8 +173,8 @@ public sealed class ExecutionManager
     /// object retained for the ring buffer's window pins collectible script ALCs and Revit wrappers).
     /// The parameter type is string, not object, precisely so that can't regress silently.
     /// </summary>
-    public DiagnosticRecord? CompleteSuccess(string executionId, DateTimeOffset now, string? result, string? stdOut, IReadOnlyList<DiagnosticRecord> notices, IReadOnlyList<PublishedFileRecord>? files = null, MutationReport? mutations = null) =>
-        Transition(executionId, "complete-success", record => { record.MarkCompleted(now, result, stdOut, notices, files, mutations); _lastCompletedAt = now; }, clearActive: true);
+    public DiagnosticRecord? CompleteSuccess(string executionId, DateTimeOffset now, string? result, string? stdOut, IReadOnlyList<DiagnosticRecord> notices, IReadOnlyList<PublishedFileRecord>? files = null, MutationReport? mutations = null, GrasshopperReport? grasshopper = null) =>
+        Transition(executionId, "complete-success", record => { record.MarkCompleted(now, result, stdOut, notices, files, mutations, grasshopper); _lastCompletedAt = now; }, clearActive: true);
 
     private DateTimeOffset? _lastCompletedAt;
 
@@ -196,12 +196,12 @@ public sealed class ExecutionManager
     }
 
     /// <summary>See <see cref="Transition"/> for why this never throws on a terminal race.</summary>
-    public DiagnosticRecord? CompleteError(string executionId, DateTimeOffset now, DiagnosticRecord error, string? stdOut, IReadOnlyList<DiagnosticRecord>? notices = null, IReadOnlyList<PublishedFileRecord>? files = null) =>
-        Transition(executionId, "complete-error", record => record.MarkError(now, error, stdOut, notices, files), clearActive: true);
+    public DiagnosticRecord? CompleteError(string executionId, DateTimeOffset now, DiagnosticRecord error, string? stdOut, IReadOnlyList<DiagnosticRecord>? notices = null, IReadOnlyList<PublishedFileRecord>? files = null, GrasshopperReport? grasshopper = null) =>
+        Transition(executionId, "complete-error", record => record.MarkError(now, error, stdOut, notices, files, grasshopper), clearActive: true);
 
     /// <summary>See <see cref="Transition"/> for why this never throws on a terminal race.</summary>
-    public DiagnosticRecord? CompleteCancelled(string executionId, DateTimeOffset now, string? stdOut, IReadOnlyList<DiagnosticRecord>? notices = null, IReadOnlyList<PublishedFileRecord>? files = null) =>
-        Transition(executionId, "complete-cancelled", record => record.MarkCancelled(now, stdOut, notices, files), clearActive: true);
+    public DiagnosticRecord? CompleteCancelled(string executionId, DateTimeOffset now, string? stdOut, IReadOnlyList<DiagnosticRecord>? notices = null, IReadOnlyList<PublishedFileRecord>? files = null, GrasshopperReport? grasshopper = null) =>
+        Transition(executionId, "complete-cancelled", record => record.MarkCancelled(now, stdOut, notices, files, grasshopper), clearActive: true);
 
     /// <summary>
     /// Shared guard for every finishing-path record mutation (MarkRunning/CompleteSuccess/

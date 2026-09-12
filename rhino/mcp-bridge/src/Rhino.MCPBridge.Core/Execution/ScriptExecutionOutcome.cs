@@ -31,6 +31,12 @@ public sealed class ScriptExecutionOutcome
     /// </summary>
     public MutationReport? Mutations { get; init; }
 
+    /// <summary>The Grasshopper solve report (PRD §10) when at least one solution ended during the run, else
+    /// null. Unlike <see cref="Mutations"/> it is NOT conditional on success: a failed or cancelled run that
+    /// solved still reports what the solve did (errors are diagnostics, not rolled-back writes). Settable
+    /// like <see cref="ChangedDocument"/> so the executor can attach it after building either outcome.</summary>
+    public GrasshopperReport? Grasshopper { get; set; }
+
     /// <summary>The document the run was routed to (set by the executor once resolved); "" when none was.</summary>
     public string DocumentId { get; set; } = "";
 

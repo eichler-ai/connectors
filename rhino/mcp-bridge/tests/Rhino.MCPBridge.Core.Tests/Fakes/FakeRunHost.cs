@@ -40,6 +40,21 @@ internal sealed class FakeRunHost : IRunHost
         return null;
     }
 
+    /// <summary>The solve report this fake yields for the run (null = no solve). Tier 1 has no real
+    /// Grasshopper, so the scope just hands back whatever the test set.</summary>
+    public GrasshopperReport? GrasshopperReportToReturn { get; set; }
+
+    public IGrasshopperSolveScope BeginGrasshopperSolves(object? grasshopperDocument) =>
+        GrasshopperReportToReturn is null ? NullGrasshopperSolveScope.Instance : new StubSolveScope(GrasshopperReportToReturn);
+
+    private sealed class StubSolveScope : IGrasshopperSolveScope
+    {
+        private readonly GrasshopperReport _report;
+        public StubSolveScope(GrasshopperReport report) => _report = report;
+        public GrasshopperReport? BuildReport() => _report;
+        public void Dispose() { }
+    }
+
     public IReadOnlyList<(string DocumentId, string Title, bool Active)> OpenDocuments() => new[] { ("tmp-known", "Untitled", true) };
 
     public bool RunInCommand(RunDocument document, string undoLabel, Action body)

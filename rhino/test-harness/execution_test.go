@@ -21,8 +21,28 @@ type executionOut struct {
 	ReturnValue string          `json:"return_value"`
 	Notices     []notice        `json:"notices"`
 	Mutations   json.RawMessage `json:"mutations"`
+	Grasshopper *ghReport       `json:"grasshopper"`
 	Error       *notice         `json:"error"`
 	LastRun     *lastRun        `json:"last_run"`
+}
+
+type ghReport struct {
+	Solutions []struct {
+		StartedAt  string  `json:"started_at"`
+		DurationMs float64 `json:"duration_ms"`
+		State      string  `json:"state"`
+		Depth      int     `json:"depth"`
+	} `json:"solutions"`
+	Components []struct {
+		GUID     string `json:"guid"`
+		Nickname string `json:"nickname"`
+		Type     string `json:"type"`
+		Phase    string `json:"phase"`
+		Messages []struct {
+			Severity string `json:"severity"`
+			Text     string `json:"text"`
+		} `json:"messages"`
+	} `json:"components"`
 }
 
 type lastRun struct {

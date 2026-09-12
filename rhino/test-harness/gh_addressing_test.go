@@ -115,6 +115,23 @@ func assertGhdocBinds(t *testing.T, c *mcpclient.Client, instanceID, documentID,
 		t.Errorf("C# cast to GH_Document should compile and run once Grasshopper is loaded, got status=%s return=%q", cs.Status, cs.ReturnValue)
 	}
 
+	// PR3: a run that triggers a solve carries the grasshopper solve report.
+	solve := callExecute(t, c, map[string]any{
+		"instance_id": instanceID, "document_id": documentID, "gh_document_id": ghDocID, "language": "python",
+		"script": "ghdoc.NewSolution(True)\nresult = 'solved'",
+	}, 30*time.Second)
+	solutions := 0
+	if solve.Grasshopper != nil {
+		solutions = len(solve.Grasshopper.Solutions)
+	}
+	t.Logf("gh solve: status=%s has_report=%v solutions=%d", solve.Status, solve.Grasshopper != nil, solutions)
+	if solve.Status != "success" {
+		t.Errorf("solve script failed: %+v", solve.Error)
+	}
+	if solutions == 0 {
+		t.Errorf("a run that triggered a Grasshopper solve should carry a grasshopper report with solutions[], got %+v", solve.Grasshopper)
+	}
+
 	bogus := callExecute(t, c, map[string]any{
 		"instance_id": instanceID, "document_id": documentID, "gh_document_id": "gh-nope", "language": "python",
 		"script": "result = 1",

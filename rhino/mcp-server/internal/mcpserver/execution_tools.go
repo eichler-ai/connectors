@@ -41,15 +41,16 @@ type CancelExecutionIn struct {
 
 // ExecutionOut is the shared result shape (PRD §06's two-shape contract).
 type ExecutionOut struct {
-	Status      string                    `json:"status"`
-	ExecutionID string                    `json:"execution_id,omitempty"`
-	Output      string                    `json:"output,omitempty"`
-	ReturnValue string                    `json:"return_value,omitempty"`
-	Notices     []diag.Record             `json:"notices,omitempty"`
-	Files       []execution.FileRecord    `json:"files,omitempty"`
-	Mutations   *execution.MutationReport `json:"mutations,omitempty"`
-	Error       *diag.Record              `json:"error,omitempty"`
-	LastRun     *execution.LastRun        `json:"last_run,omitempty"`
+	Status      string                       `json:"status"`
+	ExecutionID string                       `json:"execution_id,omitempty"`
+	Output      string                       `json:"output,omitempty"`
+	ReturnValue string                       `json:"return_value,omitempty"`
+	Notices     []diag.Record                `json:"notices,omitempty"`
+	Files       []execution.FileRecord       `json:"files,omitempty"`
+	Mutations   *execution.MutationReport    `json:"mutations,omitempty"`
+	Grasshopper *execution.GrasshopperReport `json:"grasshopper,omitempty"`
+	Error       *diag.Record                 `json:"error,omitempty"`
+	LastRun     *execution.LastRun           `json:"last_run,omitempty"`
 }
 
 // UndoRedoIn is the input shared by the undo and redo tools (PRD §07).
@@ -98,6 +99,7 @@ func RegisterExecution(s *mcp.Server, router *execution.Router) {
 			"a script that throws is undone. Returns the completed result if it finishes within timeout_ms, otherwise a pending/running/busy status " +
 			"with an execution_id for poll_execution. C# scope: Document (Rhino.RhinoDoc), CancellationToken, Connector (this connector's own API, " +
 			"under the Eichler.Connectors.Rhino namespace). Interactive getters (RhinoGet, GetObject, GetPoint...) are refused: nobody is at the keyboard. " +
+			"A run that triggers a synchronous Grasshopper solve (e.g. NewSolution(True)) carries a grasshopper report (solutions[] plus every component that errored/warned or ended non-Computed); errors are reported, not auto-resolved. A solve deferred to after the run (NewSolution(False)/ScheduleSolution) is not captured. " +
 			"Call get_skills for the rules.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in ExecuteScriptIn) (*mcp.CallToolResult, ExecutionOut, error) {
 		if in.Language != "csharp" && in.Language != "python" {
@@ -152,7 +154,7 @@ func toolResult(res *execution.Result, drec *diag.Record) (*mcp.CallToolResult, 
 		return toolError(drec)
 	}
 	out := ExecutionOut{Status: res.Status, ExecutionID: res.ExecutionID, Output: res.Output, ReturnValue: res.ReturnValue,
-		Notices: res.Notices, Files: res.Files, Mutations: res.Mutations, Error: res.ErrorDetail, LastRun: res.LastRun}
+		Notices: res.Notices, Files: res.Files, Mutations: res.Mutations, Grasshopper: res.Grasshopper, Error: res.ErrorDetail, LastRun: res.LastRun}
 	if res.Status == "error" || res.Status == "unrecoverable" {
 		return errorCallToolResult(out), out, nil
 	}

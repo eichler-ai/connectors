@@ -181,4 +181,40 @@ public sealed class UndoRunExecutorTests
     {
         Assert.Contains("GrasshopperDocument", ScriptGlobals.GlobalNames);
     }
+
+    // ----- Grasshopper solve report (PRD §10, phase 4 PR3) -----
+
+    private static GrasshopperReport SampleReport() => new()
+    {
+        Solutions = new[] { new GrasshopperSolution { StartedAt = "t", DurationMs = 1.0, State = "Process", Depth = 0 } },
+        Components = new[] { new GrasshopperComponentReport { Guid = Guid.NewGuid(), Nickname = "Slider", Type = "Number Slider", Phase = "Failed", ProcessorMs = 0.5, Messages = new[] { new GrasshopperMessage { Severity = "error", Text = "boom" } } } },
+    };
+
+    [Fact]
+    public void NoSolve_LeavesGrasshopperReportNull()
+    {
+        var outcome = new UndoRunExecutor(new ScriptRunners(Runner), new FakeRunHost()).Execute(Req("return 1;"))!;
+        Assert.Null(outcome.Grasshopper);
+    }
+
+    [Fact]
+    public void GrasshopperSolveReport_ReachesTheOutcome_OnSuccess()
+    {
+        var host = new FakeRunHost { GrasshopperReportToReturn = SampleReport() };
+        var outcome = new UndoRunExecutor(new ScriptRunners(Runner), host).Execute(Req("return 1;"))!;
+        Assert.True(outcome.Success);
+        Assert.NotNull(outcome.Grasshopper);
+        Assert.Single(outcome.Grasshopper!.Solutions);
+        Assert.Equal("Failed", Assert.Single(outcome.Grasshopper.Components).Phase);
+    }
+
+    [Fact]
+    public void GrasshopperSolveReport_ReachesTheOutcome_EvenOnFailure()
+    {
+        // Errors are diagnostics, not rolled-back writes: a failed run that solved still reports it (PRD §10).
+        var host = new FakeRunHost { GrasshopperReportToReturn = SampleReport() };
+        var outcome = new UndoRunExecutor(new ScriptRunners(Runner), host).Execute(Req("throw new System.Exception(\"x\");"))!;
+        Assert.False(outcome.Success);
+        Assert.NotNull(outcome.Grasshopper);
+    }
 }

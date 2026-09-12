@@ -71,6 +71,40 @@ internal sealed class RhinoRunHost : IRunHost
         return match;
     }
 
+    public IGrasshopperSolveScope BeginGrasshopperSolves(object? grasshopperDocument)
+    {
+        if (!GrasshopperWatcher.GrasshopperLoaded())
+        {
+            return NullGrasshopperSolveScope.Instance;
+        }
+
+        return BeginGrasshopperSolvesCore(grasshopperDocument);
+    }
+
+    /// <summary>Grasshopper-typed; only reached once Grasshopper is loaded. Watches the addressed definition,
+    /// or the active one when none was addressed (PRD §10).</summary>
+    private IGrasshopperSolveScope BeginGrasshopperSolvesCore(object? grasshopperDocument)
+    {
+        var doc = grasshopperDocument as global::Grasshopper.Kernel.GH_Document ?? ActiveGrasshopperDocument();
+        return doc is null ? NullGrasshopperSolveScope.Instance : new GrasshopperSolveScope(doc);
+    }
+
+    /// <summary>The active definition via reflection on <c>Grasshopper.Instances.ActiveCanvas.Document</c>
+    /// (the canvas is WinForms-typed, which this assembly cannot name — see the snapshot source), or null.</summary>
+    private static global::Grasshopper.Kernel.GH_Document? ActiveGrasshopperDocument()
+    {
+        try
+        {
+            var instances = Type.GetType("Grasshopper.Instances, Grasshopper");
+            var canvas = instances?.GetProperty("ActiveCanvas")?.GetValue(null);
+            return canvas?.GetType().GetProperty("Document")?.GetValue(canvas) as global::Grasshopper.Kernel.GH_Document;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     /// <summary>Grasshopper-typed; only reached once <see cref="GrasshopperWatcher.GrasshopperLoaded"/> is
     /// true, so the JIT resolves Grasshopper.dll only after the guard.</summary>
     private object? FindGrasshopperDocument(string grasshopperDocumentId)
