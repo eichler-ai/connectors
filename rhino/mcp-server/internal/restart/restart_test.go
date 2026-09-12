@@ -22,6 +22,29 @@ func TestAppBundle(t *testing.T) {
 	}
 }
 
+func TestIsRhino(t *testing.T) {
+	if !IsRhino("/Applications/Rhino 8.app/Contents/MacOS/Rhinoceros") {
+		t.Error("the Rhino executable should be recognised as Rhino")
+	}
+	if IsRhino("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome") {
+		t.Error("a non-Rhino app must not be recognised as Rhino")
+	}
+}
+
+func TestRestart_RefusesNonRhinoPid(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("Restart is macOS-only in v1")
+	}
+	// Simulates pid reuse: the pid now belongs to a different app. Restart must not kill it.
+	r, _, killed := fakeRunner("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", 2)
+	if _, err := Restart(context.Background(), *r, 1234, nil); err == nil {
+		t.Fatal("Restart must refuse to quit a non-Rhino process")
+	}
+	if *killed {
+		t.Fatal("Restart must NOT SIGKILL a non-Rhino process")
+	}
+}
+
 func TestOpenArgs(t *testing.T) {
 	got := OpenArgs("/Applications/Rhino 8.app", []string{"/a.3dm", "/b.3dm"})
 	want := []string{"-a", "/Applications/Rhino 8.app", "/a.3dm", "/b.3dm"}

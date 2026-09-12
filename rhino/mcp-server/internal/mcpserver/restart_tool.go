@@ -87,31 +87,57 @@ func RegisterRestart(s *mcp.Server, reg *registry.Registry, router *execution.Ro
 			return restartErr(out), out, nil
 		}
 
-		status, reopen, unsaved := planRestart(states, in.ConfirmLifecycleActions, in.DiscardUnsaved)
-		switch status {
-		case "preview":
-			return nil, RestartRhinoOut{
-				Status: "preview", ReopenDocuments: reopen, Unsaved: unsaved,
-				Notice: previewNotice(inst.PID, reopen, unsaved),
-			}, nil
-		case "blocked":
-			out := RestartRhinoOut{
-				Status: "blocked", Unsaved: unsaved,
-				Error: diag.New(diag.SeverityError, "restart-blocked-unsaved", restartSource,
-					"refusing to restart Rhino while these are unsaved: "+strings.Join(unsaved, ", ")).
-					WithRemedy("save them first (a script with confirm_lifecycle_actions can Save), or pass discard_unsaved: true to restart and lose the changes"),
-			}
+		out, isErr := applyRestartDecision(inst.PID, states, in.ConfirmLifecycleActions, in.DiscardUnsaved,
+			func() ([]execution.DocSaveState, *diag.Record) { return router.RestartSnapshot(ctx, in.InstanceID) },
+			func(pid int, reopen []string) (string, error) { return restartFn(ctx, pid, reopen) })
+		if isErr {
 			return restartErr(out), out, nil
-		default: // proceed
-			note, err := restartFn(ctx, inst.PID, reopen)
-			if err != nil {
-				out := RestartRhinoOut{Status: "error", Error: diag.New(diag.SeverityError, "restart-failed", restartSource, err.Error()).
-					WithRemedy("restart Rhino manually to load the plug-in")}
-				return restartErr(out), out, nil
-			}
-			return nil, RestartRhinoOut{Status: "restarted", ReopenDocuments: reopen, Notice: note}, nil
 		}
+		return nil, out, nil
 	})
+}
+
+// applyRestartDecision maps the plan to a result, performing the restart only on "proceed". Testable: the
+// I/O (re-snapshot and the actual restart) is injected. To close the snapshot->kill TOCTOU window, on a
+// proceed that is NOT discarding it re-snapshots immediately before the kill and re-blocks if anything went
+// unsaved in the gap. Returns the result and whether it is an error result.
+func applyRestartDecision(pid int, states []execution.DocSaveState, confirm, discard bool,
+	resnapshot func() ([]execution.DocSaveState, *diag.Record),
+	doRestart func(pid int, reopen []string) (string, error)) (RestartRhinoOut, bool) {
+	status, reopen, unsaved := planRestart(states, confirm, discard)
+	switch status {
+	case "preview":
+		return RestartRhinoOut{Status: "preview", ReopenDocuments: reopen, Unsaved: unsaved, Notice: previewNotice(pid, reopen, unsaved)}, false
+	case "blocked":
+		return blockedResult(unsaved), true
+	default: // proceed
+		// Re-check right before the kill (unless the caller already accepted discarding unsaved work), so a
+		// document modified during the snapshot round-trip is not SIGKILL'd without warning.
+		if !discard {
+			states2, drec := resnapshot()
+			if drec != nil {
+				return RestartRhinoOut{Status: "error", Error: drec}, true
+			}
+			if s2, _, unsaved2 := planRestart(states2, true, false); s2 == "blocked" {
+				return blockedResult(unsaved2), true
+			}
+		}
+		note, err := doRestart(pid, reopen)
+		if err != nil {
+			return RestartRhinoOut{Status: "error", Error: diag.New(diag.SeverityError, "restart-failed", restartSource, err.Error()).
+				WithRemedy("restart Rhino manually to load the plug-in")}, true
+		}
+		return RestartRhinoOut{Status: "restarted", ReopenDocuments: reopen, Notice: note}, false
+	}
+}
+
+func blockedResult(unsaved []string) RestartRhinoOut {
+	return RestartRhinoOut{
+		Status: "blocked", Unsaved: unsaved,
+		Error: diag.New(diag.SeverityError, "restart-blocked-unsaved", restartSource,
+			"refusing to restart Rhino while these are unsaved: "+strings.Join(unsaved, ", ")).
+			WithRemedy("save them first (a script with confirm_lifecycle_actions can Save), or pass discard_unsaved: true to restart and lose the changes"),
+	}
 }
 
 func previewNotice(pid int, reopen, unsaved []string) string {

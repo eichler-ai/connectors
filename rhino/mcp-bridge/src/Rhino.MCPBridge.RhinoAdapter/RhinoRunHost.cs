@@ -181,7 +181,11 @@ internal sealed class RhinoRunHost : IRunHost
         }
         catch (Exception ex)
         {
-            _log($"grasshopper save-state snapshot failed (definitions omitted from restart_snapshot): {ex.Message}");
+            // Fail SAFE, not open: if the Grasshopper state cannot be read, a restart must not silently
+            // discard a possibly-unsaved definition. Emit an unsaved sentinel so restart_rhino blocks on the
+            // uncertainty (the user can still pass discard_unsaved to proceed).
+            _log($"grasshopper save-state snapshot failed; reporting unknown GH state as unsaved: {ex.Message}");
+            list.Add(new DocumentSaveState("grasshopper", "(Grasshopper state unavailable)", null, modified: true));
         }
     }
 

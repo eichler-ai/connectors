@@ -30,6 +30,12 @@ func AppBundle(execPath string) string {
 	return ""
 }
 
+// IsRhino reports whether an executable path belongs to Rhino (the executable is "Rhinoceros" inside a
+// "Rhino N.app" bundle). Used as a kill-time identity guard against pid reuse.
+func IsRhino(execPath string) bool {
+	return strings.Contains(strings.ToLower(execPath), "rhino")
+}
+
 // OpenArgs builds the `open` arguments to relaunch the app bundle, reopening the
 // given saved document paths (an empty list just relaunches the app).
 func OpenArgs(bundle string, reopenPaths []string) []string {
@@ -85,6 +91,12 @@ func Restart(ctx context.Context, r Runner, pid int, reopenPaths []string) (stri
 	if err != nil {
 		return "", fmt.Errorf("finding Rhino's executable for pid %d: %w", pid, err)
 	}
+	// Identity check before a SIGKILL: the pid came from the registry and could have been reused by another
+	// process since the snapshot; refuse to kill anything that is not Rhino. AppBundle would happily accept
+	// any .app path, so this guard is what stops a reused pid from taking down an unrelated app.
+	if !IsRhino(execPath) {
+		return "", fmt.Errorf("pid %d is %q, not Rhino — refusing to quit it (the process may have been replaced since the restart was planned)", pid, execPath)
+	}
 	bundle := AppBundle(execPath)
 	if bundle == "" {
 		return "", fmt.Errorf("could not derive the Rhino app bundle from %q", execPath)
@@ -102,7 +114,7 @@ func Restart(ctx context.Context, r Runner, pid int, reopenPaths []string) (stri
 	}
 
 	if err := r.Open(ctx, OpenArgs(bundle, reopenPaths)); err != nil {
-		return "", fmt.Errorf("relaunching %s: %w", bundle, err)
+		return "", fmt.Errorf("Rhino was quit but did not relaunch (%s): %w — reopen Rhino manually; your saved documents are on disk", bundle, err)
 	}
 	return fmt.Sprintf("restarted %s (was pid %d); reopening %d saved document(s). The new instance reconnects within a few seconds — call list_instances to see it.", bundle, pid, len(reopenPaths)), nil
 }
