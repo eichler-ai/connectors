@@ -43,7 +43,7 @@ internal sealed class RequestDispatcher
     private readonly RunLedger _ledger;
     private readonly UndoRedoExecutor _undoRedo;
 
-    public static readonly string[] SupportedMethods = { "execute_script", "poll_execution", "cancel_execution", "capture_view", "undo_redo", "list_functions", "search_functions", "describe_function", "dump_members" };
+    public static readonly string[] SupportedMethods = { "execute_script", "poll_execution", "cancel_execution", "capture_view", "undo_redo", "list_functions", "search_functions", "describe_function", "dump_members", "restart_snapshot" };
 
     /// <summary>undo_redo's timeout bounds: the command is synchronous on the main thread, the wait is for the main-thread hop.</summary>
     public const long UndoMaxTimeoutMs = 30_000, UndoDefaultTimeoutMs = 10_000;
@@ -113,8 +113,28 @@ internal sealed class RequestDispatcher
         "search_functions" => Task.FromResult(HandleSearchFunctions(request)),
         "describe_function" => Task.FromResult(HandleDescribeFunction(request)),
         "dump_members" => Task.FromResult(HandleDumpMembers(request)),
+        "restart_snapshot" when _onMainThread is not null => Task.FromResult(HandleRestartSnapshot(request)),
         _ => Task.FromResult(UnknownMethod(request)),
     };
+
+    /// <summary>restart_snapshot (PRD §10/§15): reports every open document's save state on the main thread so
+    /// the server can guard against discarding unsaved work and know which saved files to reopen. Read-only —
+    /// the bridge does not exit; the server drives the actual restart.</summary>
+    private string HandleRestartSnapshot(JsonRpcRequest request)
+    {
+        try
+        {
+            var states = (IReadOnlyList<DocumentSaveState>)_onMainThread!(() => _executor.Host.RestartSaveStates());
+            return RestartSnapshotMessage.ToJson(request.Id, states);
+        }
+        catch (Exception ex)
+        {
+            var rec = DiagnosticRecord.Create(DiagnosticSeverity.Error, "restart-snapshot-failed", DiagnosticSource.Execution,
+                $"restart_snapshot failed: {ex.GetType().Name}: {ex.Message}", null,
+                new[] { "if Rhino's main thread is inside a modal or a long command, wait and retry" });
+            return JsonRpcErrorMessage.ToJson(request.Id, JsonRpcErrorCode.InternalError, rec.Message, rec);
+        }
+    }
 
     /// <summary>capture_view (PRD §11): serialised with scripts by refusing while one runs (`busy`),
     /// then executed on the main thread with the adapter's bounded wait. Changes nothing in the

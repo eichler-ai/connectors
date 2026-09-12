@@ -143,6 +143,48 @@ internal sealed class RhinoRunHost : IRunHost
         return list;
     }
 
+    public IReadOnlyList<DocumentSaveState> RestartSaveStates()
+    {
+        var list = new List<DocumentSaveState>();
+        foreach (var doc in RhinoDoc.OpenDocuments())
+        {
+            if (doc is null) continue;
+            var title = string.IsNullOrEmpty(doc.Name) ? "Untitled" : doc.Name;
+            var path = string.IsNullOrEmpty(doc.Path) ? null : doc.Path;
+            list.Add(new DocumentSaveState("rhino", title, path, doc.Modified));
+        }
+
+        // GH definitions can be unsaved too (their multi-save prompt is what blocks a quit); include them,
+        // but only once Grasshopper is loaded, and in a separate method so the JIT resolves Grasshopper.dll
+        // only past that guard.
+        if (GrasshopperWatcher.GrasshopperLoaded())
+        {
+            AddGrasshopperSaveStates(list);
+        }
+
+        return list;
+    }
+
+    private void AddGrasshopperSaveStates(List<DocumentSaveState> list)
+    {
+        try
+        {
+            var server = global::Grasshopper.Instances.DocumentServer;
+            if (server is null) return;
+            foreach (global::Grasshopper.Kernel.GH_Document ghdoc in server)
+            {
+                if (ghdoc is null) continue;
+                var title = string.IsNullOrEmpty(ghdoc.DisplayName) ? "Untitled" : ghdoc.DisplayName;
+                var path = string.IsNullOrEmpty(ghdoc.FilePath) ? null : ghdoc.FilePath;
+                list.Add(new DocumentSaveState("grasshopper", title, path, ghdoc.IsModified));
+            }
+        }
+        catch (Exception ex)
+        {
+            _log($"grasshopper save-state snapshot failed (definitions omitted from restart_snapshot): {ex.Message}");
+        }
+    }
+
     /// <summary>Same rule as RhinoDocumentSnapshotSource; kept in one place so routing and register agree.</summary>
     private string IdOf(RhinoDoc doc)
     {

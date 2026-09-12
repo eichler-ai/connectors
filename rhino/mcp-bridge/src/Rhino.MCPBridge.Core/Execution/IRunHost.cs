@@ -33,6 +33,10 @@ internal interface IRunHost
     /// <summary>The ids and titles of every open document, for a document-not-found error's candidates.</summary>
     IReadOnlyList<(string DocumentId, string Title, bool Active)> OpenDocuments();
 
+    /// <summary>Every open document's save state — Rhino documents and Grasshopper definitions — for
+    /// restart_rhino's unsaved-work guard and its reopen list (PRD §10/§15). Main thread.</summary>
+    IReadOnlyList<DocumentSaveState> RestartSaveStates();
+
     /// <summary>Runs <paramref name="body"/> inside one Rhino command on <paramref name="document"/>
     /// (RhinoApp.ExecuteCommand of the bridge's own command), naming the command's undo entry
     /// <paramref name="undoLabel"/> where Rhino allows. Returns false when the command could not be
@@ -66,6 +70,28 @@ internal interface IRunHost
     /// definitions, dimension styles, lights, document properties -- because the rollback decision must
     /// key off "did the run change the document", not off the subset the report can count (review of #282).</summary>
     IDisposable SubscribeChanges(RunDocument document, Action<DocumentChange> onChange, Action onAnyChange);
+}
+
+/// <summary>
+/// One open document's save state for restart_rhino (PRD §10/§15): whether it has unsaved changes and,
+/// when saved, its path (to reopen after the restart). <see cref="Kind"/> is "rhino" or "grasshopper".
+/// </summary>
+internal sealed class DocumentSaveState
+{
+    public string Kind { get; }
+    public string Title { get; }
+    /// <summary>The file path when saved; null for an unsaved/untitled document.</summary>
+    public string? Path { get; }
+    /// <summary>True when the document has changes not written to disk.</summary>
+    public bool Modified { get; }
+
+    public DocumentSaveState(string kind, string title, string? path, bool modified)
+    {
+        Kind = kind;
+        Title = title;
+        Path = path;
+        Modified = modified;
+    }
 }
 
 /// <summary>
