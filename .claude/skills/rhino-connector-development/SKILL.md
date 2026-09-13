@@ -118,6 +118,38 @@ that section. What Rhino adds:
   macOS/Linux SDK build); compile-metadata only, the real assemblies load in-process.
 - **A DTO a script iterates must expose arrays (`T[]`), not `IReadOnlyList<T>`** — pythonnet cannot
   `len()`/index the interface (caveats.md).
+- **Wiring is `IGH_Param.AddSource`, and mutators expire but never solve.** `Connector.Grasshopper`
+  `Connect`/`Disconnect`/`ClearSources` (and `Set`/`Reference`) call `param.ExpireSolution(recompute:false)`
+  and leave the solve to an explicit `Solve` — same convention across the whole write surface; errors
+  (type mismatch, cycle) surface in the run's solve report, not at the mutator. An object is addressed by
+  nickname-or-guid (reuse `FindObject`); a port by name/nickname or 0-based index, or `""` for the sole
+  port. A free-floating parameter (slider/panel/bare `Param_*`) **is its own single port** — the guard is
+  `obj is IGH_Param && obj is not IGH_Component`. Expiring a component's INPUT param does propagate to the
+  owner under `Solve(false)` (verified live), so no owner-expire is needed.
+- **An output-only control accepts `AddSource` and silently ignores it.** A `GH_NumberSlider`/
+  `GH_BooleanToggle`/`GH_ValueList` takes a wired source at the kernel level (SourceCount goes up) but
+  never uses it at solve — a silent no-op. `Connect` refuses one as a target loudly (the "never silently"
+  rule); a `GH_Panel` is NOT in that set (it displays a wired source).
+- **Saving a GH definition needs its FilePath set by hand and gating in BOTH languages.**
+  `GH_DocumentIO.SaveQuiet(path)` writes the file but does NOT set `doc.FilePath` (the GH analog of the
+  RhinoDoc `SaveAs`-leaves-`Path=None` trap — caveats.md), so `Connector.Grasshopper.Save` sets it. Save
+  writes the filesystem, so it is confirmation-gated: added to `ScriptApiDenylist` (C#) AND
+  `PythonScriptGuard`'s `ReceiverPrefixes` (Python normalises `connector.Grasshopper` → `GrasshopperApi`
+  so its `Save` gates by type). The Python guard gates a lifecycle member only via a normalised receiver
+  type, **not** a bare member name — a new gated connector method must be added there too (caveats.md).
+- **Agent GH edits must be user-undoable — on Grasshopper's OWN undo stack, separate from Rhino's.**
+  `Connector.Grasshopper` mutators record their before-state into one run-scoped `GH_UndoRecord`
+  (`GH_GenericObjectAction` for Set/Reference, `GH_WireAction` for wiring), pushed as one entry when the
+  run ends — so a person reverts an agent's whole run with one Ctrl+Z in the GH editor. Capture the action
+  BEFORE mutating; record only on an actual change (an idempotent re-wire records nothing). `ghdoc.Undo()`
+  IS callable from a script (unlike `RhinoDoc.Undo`, which the denylist refuses). Commit the record even on
+  a failed run — a partial GH edit is not auto-reverted, so leaving it undoable is the safe outcome.
+- **Reading a component's ports means instantiating it — cheap, not the feared UI hang.** A proxy exposes
+  ports only after `CreateInstance()` (they are registered at instantiation). Measured live: ~1200 proxies
+  instantiate + yield ports in ~0.5 s (worst single 12 ms). `GrasshopperCatalog` enriches ports in bounded
+  UI-thread batches (snapshot the proxy list, instantiate in chunks with a yield between) so no single hop
+  stalls Rhino; a hop timeout discards the round so the sync retries (never commits a partial catalog).
+  Ports are part of the indexer content-hash, so a GH/plug-in update re-syncs.
 
 ### Working in agent sessions
 
@@ -179,6 +211,35 @@ Yak plug-in tools — read-only + preview only, so it never mutates the user's p
 no instance); `restart_test.go` (`restart_rhino` preview only). A tool that shells out (Yak) or restarts
 Rhino must keep its every-run harness case non-destructive — verify the mutating path once, by hand, not
 on every run.
+
+The Grasshopper authoring + how-to arc (2026-09-12/13) added: `gh_wire_test.go` (Connect/Disconnect/
+ClearSources — wire a slider→panel, prove the value flows and stops on disconnect; component ports by
+name and index; the error paths); `gh_undo_save_test.go` (one run = one GH undo entry reverting both a
+Set and a wire; Save writes the file + sets FilePath; unconfirmed Save refused in both languages);
+`gh_catalog_test.go` (the `kind=grasshopper` discovery catalog — list/search/describe, now asserting the
+port-enriched signature); `gh_semsearch_rebuild_test.go` (open GH mid-session → the broker rebuilds its
+`search_functions` index within a tick, on ONE broker); and the `RhinoHowToSweep` (below).
+
+The how-to corpus (a Rhino analog of Revit's, `rhino/mcp-server/internal/{howto,howtosearch}`,
+read-side-only): embedded seed docs (`corpus/*.json` + `verified.jsonl` stamps) served by
+`search_howtos`/`describe_howto`, ranked by the shared semsearch engine. Verified by
+`TestRhinoHowToSweep` (`-tags harness`, flags `-howto-stamps`/`-howto-only`): it runs each doc's script
+live and asserts the Rhino verify contract — `expect_object_delta` (measured via an active-normal
+`ObjectEnumeratorSettings` enumerator, NOT `RhinoDoc.Objects.Count`, which counts undo-buffered deletes —
+caveats.md) and `expect_return_contains`. A `verify.grasshopper` doc drives `connector.Grasshopper.*`, so
+the sweep runs it against a fresh **bound** definition: it clears all open GH docs and creates exactly one
+(an unsaved/empty GH doc's `gh_document_id` collides with every other empty one — caveats.md — so leaving
+exactly one makes the id unambiguous). Stamps bind to the script's sha256 and a Rhino MAJOR version
+("8"); run the sweep once with `-howto-stamps` on a live Rhino, commit `verified.jsonl`, and the corpus
+ships "verified on Rhino 8". Adding a how-to = author the doc + run the sweep to stamp it; corpus-count
+unit assertions are relational (every doc stamped; a floor), so they don't churn as it grows.
+
+`search_functions` rebuilds mid-session: the shared `manager` (`internal/servercore/semsearch/manager`)
+now has `RefreshAll`/`RefreshIfChanged`, driven by the server's 30s heartbeat ticker — it cheap-polls the
+corpus fingerprint (`dump_members(0,1)`, already carried, no wire change) and rebuilds in the background
+(old index keeps serving) when it changed. Purely additive to the shared manager (Revit doesn't call it).
+Its live test needs a fresh Rhino with GH NOT loaded at connect, or the corpus never changes and nothing
+rebuilds.
 
 ## Per-stage workflow
 
