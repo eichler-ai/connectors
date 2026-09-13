@@ -121,6 +121,12 @@ type Verify struct {
 	// Execute carries extra execute_script arguments the sweep passes verbatim
 	// (e.g. confirm_lifecycle_actions: true for a how-to that saves or closes).
 	Execute map[string]any `json:"execute,omitempty"`
+	// Grasshopper marks a how-to whose script drives a Grasshopper definition
+	// (connector.Grasshopper.*, which needs a bound gh_document_id). The sweep
+	// runs it against a fresh empty bound definition — the script builds what it
+	// needs on it (place via ghdoc, wire with Connect, …). The object delta is
+	// still measured on the Rhino document.
+	Grasshopper bool `json:"grasshopper,omitempty"`
 }
 
 // Contributor is one opt-in credit entry.

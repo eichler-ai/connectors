@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "id": "reference-a-rhino-object-into-a-grasshopper-definition",
+  "rev": 1,
+  "kind": "howto",
+  "title": "Reference a Rhino object into a Grasshopper definition",
+  "task": "Feed a Rhino document object into a Grasshopper definition by reference with connector.Grasshopper.Reference (by object id), so the definition consumes live geometry that tracks the object; Solve and read the parameter back with Get.",
+  "members": [
+    "Rhino.DocObjects.Tables.ObjectTable.AddLine",
+    "Grasshopper.Kernel.Parameters.Param_Curve",
+    "Grasshopper.Kernel.GH_Document.AddObject"
+  ],
+  "script": "# Task: feed a Rhino document object into a Grasshopper definition by reference,\n# so the definition consumes live geometry that tracks the object. Address the run\n# with a gh_document_id (binds the definition as `ghdoc`).\nimport Rhino\nimport scriptcontext as sc\nimport Grasshopper.Kernel.Parameters as ghp\n\n# 1. Make a Rhino object to feed in (a line on the document).\nline = Rhino.Geometry.Line(Rhino.Geometry.Point3d(0, 0, 0), Rhino.Geometry.Point3d(10, 0, 0))\ncrv_id = sc.doc.Objects.AddLine(line)\nsc.doc.Views.Redraw()\n\n# 2. Place a Curve input parameter on the definition and reference the Rhino object\n#    into it BY ID. Reference takes one id or a list; it replaces any existing\n#    reference and expires the parameter (Solve to recompute).\nfeed = ghp.Param_Curve(); feed.NickName = \"Feed\"; feed.CreateAttributes(); ghdoc.AddObject(feed, False)\nconnector.Grasshopper.Reference(\"Feed\", str(crv_id))\nconnector.Grasshopper.Solve(True)\n\n# 3. Read it back \u2014 one referenced curve, summarised as type + bbox + a handle\n#    (the handle is the Rhino object id it tracks).\nout = connector.Grasshopper.Get(\"Feed\")\nresult = \"items=%d handle=%s\" % (out.Count, out.Items[0].Handle if out.Count else \"none\")\n",
+  "script_language": "python",
+  "pitfalls": [
+    {
+      "symptom": "The parameter reads empty (Count 0) after Reference.",
+      "cause": "Reference expires the parameter but does not recompute; and a disabled definition computes no volatile data.",
+      "fix": "Call connector.Grasshopper.Solve() after Reference, and ensure the definition is enabled."
+    },
+    {
+      "symptom": "Reference raises that the object is not a Curve/Brep/Surface/Mesh/Point.",
+      "cause": "A typed parameter (Param_Curve) only references geometry of its type; the Rhino object was a different type.",
+      "fix": "Use a parameter matching the object's type, or the generic Param_Geometry which references any of them."
+    }
+  ],
+  "tags": [
+    "grasshopper",
+    "geometry",
+    "reference"
+  ],
+  "provenance": {
+    "kind": "maintainer",
+    "reviewed_by": "nchim",
+    "reviewed_at": "2026-09-13T00:00:00Z"
+  },
+  "verify": {
+    "expect_object_delta": 1,
+    "expect_return_contains": "items=1",
+    "grasshopper": true
+  },
+  "created_at": "2026-09-13T00:00:00Z",
+  "updated_at": "2026-09-13T00:00:00Z"
+}
