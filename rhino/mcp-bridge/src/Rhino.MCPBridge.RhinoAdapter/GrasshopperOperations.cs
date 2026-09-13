@@ -77,6 +77,14 @@ internal sealed class GrasshopperOperations : IGrasshopperOperations
         var doc = (GH_Document)grasshopperDocument;
         var source = ResolvePort(FindObjectOrThrow(doc, sourceId), sourceOutput, output: true);
         var target = ResolvePort(FindObjectOrThrow(doc, targetId), targetInput, output: false);
+        // An output-only control (slider/toggle/value list) accepts AddSource at the kernel level but ignores
+        // it at solve — a silent no-op. Refuse it loudly (the connector's "never silently" rule), naming the
+        // fix, rather than let a script think it wired something.
+        if (IsSourceRejectingControl(target))
+        {
+            throw new InvalidOperationException($"'{Nick((IGH_DocumentObject)target)}' is an output-only control (a Number Slider, Boolean Toggle or Value List): it produces a value and cannot take a wired source. Use it as the wire's source instead.");
+        }
+
         // Idempotent: wiring the same pair twice is a no-op, not a duplicate source.
         if (!target.Sources.Contains(source))
         {
@@ -249,7 +257,7 @@ internal sealed class GrasshopperOperations : IGrasshopperOperations
                 !string.Equals(param.Name, port, StringComparison.OrdinalIgnoreCase) &&
                 !string.Equals(param.NickName, port, StringComparison.OrdinalIgnoreCase))
             {
-                throw new InvalidOperationException($"'{Nick(obj)}' is a parameter, not a component, so it has no named {side} ports; pass \"\" as the {side} port.");
+                throw new InvalidOperationException($"'{Nick(obj)}' is a parameter, not a component, so it has no {side} ports to address by name or index; pass \"\" as the {side} port.");
             }
 
             return param;
@@ -297,6 +305,12 @@ internal sealed class GrasshopperOperations : IGrasshopperOperations
 
         throw new InvalidOperationException($"'{Nick(obj)}' ({obj.Name}) is neither a component nor a parameter, so it has no ports to wire.");
     }
+
+    // Slider/toggle/value list are input controls a user edits, but wiring-wise they are output-only: their
+    // value comes from their own state, and a source added to them is ignored at solve. (A Panel, by contrast,
+    // does display a wired source, so it is not in this set.)
+    private static bool IsSourceRejectingControl(IGH_Param param) =>
+        param is GH_NumberSlider or GH_BooleanToggle or GH_ValueList;
 
     private static string PortNames(IEnumerable<IGH_Param> ports) =>
         string.Join(", ", ports.Select(p => "'" + (string.IsNullOrEmpty(p.NickName) ? p.Name : p.NickName) + "'"));

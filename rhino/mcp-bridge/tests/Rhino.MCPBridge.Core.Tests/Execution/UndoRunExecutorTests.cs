@@ -272,6 +272,7 @@ public sealed class UndoRunExecutorTests
             .Execute(Req("Connector.Grasshopper.Disconnect(\"slider\", \"\", \"circle\", \"Radius\"); Connector.Grasshopper.ClearSources(\"circle\", \"Plane\"); return 1;", ghDocId: "gh-known"))!;
         Assert.True(outcome.Success, outcome.Exception?.ToString());
         var un = Assert.Single(host.GrasshopperOps.Disconnects);
+        Assert.Same(host.GrasshopperDocumentStub, un.Doc);
         Assert.Equal(("slider", "", "circle", "Radius"), (un.SourceId, un.SourceOutput, un.TargetId, un.TargetInput));
         var cleared = Assert.Single(host.GrasshopperOps.ClearedSources);
         Assert.Same(host.GrasshopperDocumentStub, cleared.Doc);

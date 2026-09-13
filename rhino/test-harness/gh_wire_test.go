@@ -121,38 +121,51 @@ result = "before=[%s] slider=[%s] after=[%s] disc=[%s]" % (before, sval, after, 
 		t.Errorf("Disconnect should stop the slider's value reaching the panel, got %q", wire.ReturnValue)
 	}
 
-	// Component-input-by-name resolution + the error paths.
+	// Component-input resolution (by name AND by index), idempotency, and the error paths.
+	if !strings.Contains(setup.ReturnValue, "addition=yes") {
+		t.Skip("Addition component not available in this Grasshopper; skipping the component-port checks")
+	}
 	comp := callExecute(t, c, map[string]any{
 		"instance_id": inst.InstanceID, "document_id": doc, "gh_document_id": ghID, "language": "python",
-		"script": `# Wire slider into the Addition component's "A" input BY NAME, then read back via the raw API
-# that the input now has one source (the slider).
-connector.Grasshopper.Connect("S", "", "ADD", "A")
-add = None
+		"script": `add = None
 for o in ghdoc.Objects:
     if o.NickName == "ADD": add = o
+# Wire the slider into input "A" BY NAME, and into input "B" BY 0-based INDEX (1).
+connector.Grasshopper.Connect("S", "", "ADD", "A")
+connector.Grasshopper.Connect("S", "", "ADD", "1")
 srcA = add.Params.Input[0].SourceCount
+srcB = add.Params.Input[1].SourceCount
+# Idempotent: wiring "A" again adds no duplicate source.
+connector.Grasshopper.Connect("S", "", "ADD", "A")
+srcA_again = add.Params.Input[0].SourceCount
 # An empty port on a multi-input component is ambiguous -> a clear error, not a silent pick.
 try:
     connector.Grasshopper.Connect("S", "", "ADD", "")
     amb = "no-error"
 except Exception:
     amb = "err"
-# A missing target object errors too.
+# A missing target object errors.
 try:
     connector.Grasshopper.Connect("S", "", "NOPE", "")
     bad = "no-error"
 except Exception:
     bad = "err"
-# ClearSources removes the wire we just made.
+# Wiring INTO an output-only control (the slider) is refused, not a silent no-op.
+try:
+    connector.Grasshopper.Connect("P", "", "S", "")
+    intoctl = "no-error"
+except Exception:
+    intoctl = "err"
+# ClearSources removes every wire on input "A".
 connector.Grasshopper.ClearSources("ADD", "A")
-srcAfter = add.Params.Input[0].SourceCount
-result = "srcA=%d ambiguous=%s badtarget=%s cleared=%d" % (srcA, amb, bad, srcAfter)`,
+cleared = add.Params.Input[0].SourceCount
+result = "srcA=%d srcB=%d idem=%d ambiguous=%s badtarget=%s intocontrol=%s cleared=%d" % (srcA, srcB, srcA_again, amb, bad, intoctl, cleared)`,
 	}, 30*time.Second)
 	t.Logf("component ports: status=%s return=%q err=%+v", comp.Status, comp.ReturnValue, comp.Error)
 	if comp.Status != "success" {
 		t.Fatalf("component-port run failed: %+v", comp.Error)
 	}
-	for _, want := range []string{"srcA=1", "ambiguous=err", "badtarget=err", "cleared=0"} {
+	for _, want := range []string{"srcA=1", "srcB=1", "idem=1", "ambiguous=err", "badtarget=err", "intocontrol=err", "cleared=0"} {
 		if !strings.Contains(comp.ReturnValue, want) {
 			t.Errorf("expected %q in the component-port result, got %q", want, comp.ReturnValue)
 		}
