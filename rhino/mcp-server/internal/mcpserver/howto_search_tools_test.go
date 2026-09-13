@@ -32,6 +32,24 @@ func TestResolveHowToVersion(t *testing.T) {
 	}
 }
 
+func TestVersionLessIsNumericNotLexical(t *testing.T) {
+	// The bug the Revit copy carried: "10" < "8" lexically. Rhino majors are
+	// 1-2 digits, so the comparison must be numeric.
+	if !versionLess("8", "10") {
+		t.Error(`8 should be less than 10 (numeric), lexical comparison gets this wrong`)
+	}
+	if versionLess("10", "8") {
+		t.Error("10 is not less than 8")
+	}
+	if versionLess("8", "8") {
+		t.Error("8 is not less than 8")
+	}
+	// An unparseable value never fabricates a boundary (returns false both ways).
+	if versionLess("x", "8") || versionLess("8", "x") {
+		t.Error("an unparseable version must not fabricate an ordering")
+	}
+}
+
 func TestSearchHowTosOverEmbeddedCorpus(t *testing.T) {
 	deps := HowToDeps{Search: howtosearch.New(nil, nil, nil)}
 	out := searchHowTos(context.Background(), deps, SearchHowTosIn{Query: "create a layer and draw a circle on it", RhinoVersion: "8"})

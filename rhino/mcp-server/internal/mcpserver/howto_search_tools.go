@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -173,6 +174,19 @@ func majorVersion(v string) string {
 		return v[:i]
 	}
 	return v
+}
+
+// versionLess reports a < b as Rhino MAJOR version numbers. Both are bare
+// digit strings here (a resolved major, or an api_since/api_until field the
+// schema constrains to ^[1-9][0-9]?$); an unparseable value yields false, so a
+// malformed field never fabricates a boundary warning.
+func versionLess(a, b string) bool {
+	ai, aerr := strconv.Atoi(a)
+	bi, berr := strconv.Atoi(b)
+	if aerr != nil || berr != nil {
+		return false
+	}
+	return ai < bi
 }
 
 // resolveHowToVersion applies the exactly-one rule and returns the major
@@ -347,10 +361,13 @@ func describeHowTo(ctx context.Context, deps HowToDeps, in DescribeHowToIn) Desc
 	if stamp, has := e.Verified.ByVersion[ver]; has {
 		out.Verification = &HowToVerification{RhinoVersion: ver, Status: stamp.Status, By: stamp.By, At: stamp.At, ConnectorVersion: stamp.ConnectorVersion, Diagnostic: stamp.Diagnostic}
 	}
-	if d.APISince != "" && d.APISince > ver {
+	// Compare NUMERICALLY, not lexically: Rhino majors are 1-2 digits, where
+	// "8" < "10" numerically but not as strings (unlike Revit's 4-digit years,
+	// whose string order matches — this is the one place the Revit copy breaks).
+	if d.APISince != "" && versionLess(ver, d.APISince) {
 		out.APIWarnings = append(out.APIWarnings, fmt.Sprintf("api_since %s: the members this how-to uses are declared to appear in Rhino %s, after your %s", d.APISince, d.APISince, ver))
 	}
-	if d.APIUntil != "" && d.APIUntil < ver {
+	if d.APIUntil != "" && versionLess(d.APIUntil, ver) {
 		out.APIWarnings = append(out.APIWarnings, fmt.Sprintf("api_until %s: the members this how-to uses are declared to disappear after Rhino %s, before your %s", d.APIUntil, d.APIUntil, ver))
 	}
 	if from != "" {

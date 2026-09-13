@@ -249,7 +249,13 @@ func (s *Service) current(ctx context.Context) (*state, error) {
 	}
 	st, err := s.build(ctx)
 	if err != nil {
-		s.buildErr = err
+		// Memoize a deterministic failure (the bundled static embedder ignores
+		// ctx, so a failed build is hopeless to retry). But do NOT poison the
+		// corpus for the broker's lifetime on a context cancellation — that is
+		// transient, and would matter if a future embedder honored ctx.
+		if ctx.Err() == nil {
+			s.buildErr = err
+		}
 		return nil, &LoadError{Err: err}
 	}
 	s.st = st
