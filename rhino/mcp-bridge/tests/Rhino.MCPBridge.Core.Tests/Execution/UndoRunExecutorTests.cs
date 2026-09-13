@@ -10,9 +10,9 @@ public sealed class UndoRunExecutorTests
 {
     private static readonly RoslynScriptRunner Runner = new();
 
-    private static UndoRunExecutor.Request Req(string script, string docId = "", string? label = null, CancellationToken ct = default, string ghDocId = "") => new()
+    private static UndoRunExecutor.Request Req(string script, string docId = "", string? label = null, CancellationToken ct = default, string ghDocId = "", bool confirm = false) => new()
     {
-        ExecutionId = "exec-1", ScriptText = script, Language = "csharp", DocumentId = docId, GrasshopperDocumentId = ghDocId, CancellationToken = ct, Label = label,
+        ExecutionId = "exec-1", ScriptText = script, Language = "csharp", DocumentId = docId, GrasshopperDocumentId = ghDocId, CancellationToken = ct, Label = label, ConfirmLifecycleActions = confirm,
     };
 
     private static void OneAdd(Action<DocumentChange> on) => on(new DocumentChange(DocumentChange.Kind.Added, Guid.NewGuid(), "Brep", "Default"));
@@ -277,6 +277,49 @@ public sealed class UndoRunExecutorTests
         var cleared = Assert.Single(host.GrasshopperOps.ClearedSources);
         Assert.Same(host.GrasshopperDocumentStub, cleared.Doc);
         Assert.Equal(("circle", "Plane"), (cleared.TargetId, cleared.TargetInput));
+    }
+
+    [Fact]
+    public void ConnectorGrasshopperSave_ForwardsToTheOps_WithConfirmation()
+    {
+        var host = HostWithBoundDefinition();
+        var outcome = new UndoRunExecutor(new ScriptRunners(Runner), host)
+            .Execute(Req("Connector.Grasshopper.Save(\"/tmp/x.gh\"); return 1;", ghDocId: "gh-known", confirm: true))!;
+        Assert.True(outcome.Success, outcome.Exception?.ToString());
+        var save = Assert.Single(host.GrasshopperOps.Saves);
+        Assert.Same(host.GrasshopperDocumentStub, save.Doc);
+        Assert.Equal("/tmp/x.gh", save.Path);
+    }
+
+    [Fact]
+    public void ConnectorGrasshopperSave_WithoutConfirmation_IsRefused_WithoutSaving()
+    {
+        var host = HostWithBoundDefinition();
+        var outcome = new UndoRunExecutor(new ScriptRunners(Runner), host)
+            .Execute(Req("Connector.Grasshopper.Save(\"/tmp/x.gh\"); return 1;", ghDocId: "gh-known"))!; // no confirm
+        Assert.False(outcome.Success);
+        Assert.Empty(host.GrasshopperOps.Saves);
+    }
+
+    [Fact]
+    public void ARunWithABoundDefinition_RecordsOneGroupedGrasshopperUndoEntry()
+    {
+        var host = HostWithBoundDefinition();
+        var outcome = new UndoRunExecutor(new ScriptRunners(Runner), host)
+            .Execute(Req("Connector.Grasshopper.Set(\"s\", 1); return 1;", ghDocId: "gh-known", label: "tweak"))!;
+        Assert.True(outcome.Success, outcome.Exception?.ToString());
+        // One run = one grouped GH undo entry, begun with the bound definition and the run's label.
+        var rec = Assert.Single(host.GrasshopperOps.UndoRecordings);
+        Assert.Same(host.GrasshopperDocumentStub, rec.Doc);
+        Assert.Equal("MCP: tweak", rec.Label);
+    }
+
+    [Fact]
+    public void ARunWithoutABoundDefinition_RecordsNoGrasshopperUndo()
+    {
+        var host = new FakeRunHost();
+        new UndoRunExecutor(new ScriptRunners(Runner), host).Execute(Req("return 1;"));
+        Assert.Empty(host.GrasshopperOps.UndoRecordings);
     }
 
     [Fact]

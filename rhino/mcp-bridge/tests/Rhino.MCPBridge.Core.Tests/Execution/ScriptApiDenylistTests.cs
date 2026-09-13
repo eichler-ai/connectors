@@ -93,6 +93,8 @@ public sealed class ScriptApiDenylistTests
     [InlineData("Rhino.RhinoApp.RunScript(\"_-Export /tmp/x.obj _Enter\", false);", "export")]
     [InlineData("Rhino.RhinoApp.ExecuteCommand(Document, \"_Save\");", "save")]
     [InlineData("const string c = \"_Export\"; Rhino.RhinoApp.RunScript(c, false);", "export")] // a const still folds
+    [InlineData("Connector.Grasshopper.Save(\"/tmp/x.gh\");", "GrasshopperApi.Save")] // GH save writes a file too
+    [InlineData("Connector.Grasshopper.Save(\"\");", "GrasshopperApi.Save")] // save-to-current is gated the same
     public void LifecycleMembers_AreGated_AndTheFlagLiftsThem(string script, string member) => AssertGated(script, member);
 
     [Fact]

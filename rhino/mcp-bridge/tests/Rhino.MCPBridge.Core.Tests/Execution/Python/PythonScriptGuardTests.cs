@@ -113,6 +113,8 @@ public sealed class PythonScriptGuardTests
     [InlineData("import rhinoscriptsyntax as rs\nrs.Command('-_Export \"/tmp/x.obj\" _Enter')", "rhinoscriptsyntax.Command(\"export\")")]
     [InlineData("import Rhino\nRhino.RhinoApp.RunScript('_Close', False)", "Rhino.RhinoApp.RunScript(\"close\")")]
     [InlineData("import Rhino\nRhino.RhinoApp.ExecuteCommand(doc, '_New')", "Rhino.RhinoApp.ExecuteCommand(\"new\")")]
+    [InlineData("connector.Grasshopper.Save('/tmp/x.gh')", "Eichler.Connectors.Rhino.GrasshopperApi.Save")]
+    [InlineData("Connector.Grasshopper.Save('')", "Eichler.Connectors.Rhino.GrasshopperApi.Save")]
     public void Lifecycle_RequiresConfirmation(string script, string member)
     {
         var analysis = PythonScriptGuard.Analyze(script);

@@ -7,6 +7,8 @@ using Eichler.Connectors.Rhino;
 using Grasshopper.Kernel;
 using Grasshopper.Kernel.Special;
 using Grasshopper.Kernel.Types;
+using Grasshopper.Kernel.Undo;
+using Grasshopper.Kernel.Undo.Actions;
 using Rhino.MCPBridge.Core.Execution;
 
 namespace Rhino.MCPBridge.RhinoAdapter;
@@ -18,6 +20,11 @@ namespace Rhino.MCPBridge.RhinoAdapter;
 /// </summary>
 internal sealed class GrasshopperOperations : IGrasshopperOperations
 {
+    // The run-scoped Grasshopper undo record: every mutation in a run appends its before-state to this one
+    // record (per-run grouping), pushed as a single entry when the run ends. Runs serialise on the UI thread,
+    // so a single pending field is safe. Null between runs (and for a run with no bound definition).
+    private (GH_Document Doc, GH_UndoRecord Rec)? _pendingUndo;
+
     public GrasshopperComponent? Find(object grasshopperDocument, string nicknameOrGuid)
     {
         var obj = FindObject((GH_Document)grasshopperDocument, nicknameOrGuid);
@@ -26,9 +33,11 @@ internal sealed class GrasshopperOperations : IGrasshopperOperations
 
     public void Set(object grasshopperDocument, string nickname, object value)
     {
-        var obj = FindObject((GH_Document)grasshopperDocument, nickname)
+        var doc = (GH_Document)grasshopperDocument;
+        var obj = FindObject(doc, nickname)
             ?? throw new InvalidOperationException($"no Grasshopper object with nickname or id '{nickname}' is on the canvas.");
 
+        RecordObjectUndo(doc, obj);
         switch (obj)
         {
             case GH_NumberSlider slider:
@@ -52,13 +61,15 @@ internal sealed class GrasshopperOperations : IGrasshopperOperations
 
     public void Reference(object grasshopperDocument, string nickname, object? objectIds)
     {
-        var obj = FindObject((GH_Document)grasshopperDocument, nickname)
+        var doc = (GH_Document)grasshopperDocument;
+        var obj = FindObject(doc, nickname)
             ?? throw new InvalidOperationException($"no Grasshopper object with nickname or id '{nickname}' is on the canvas.");
         if (obj is not IGH_Param param)
         {
             throw new InvalidOperationException($"'{Nick(obj)}' is a {obj.Name}, not an input parameter that can reference document geometry.");
         }
 
+        RecordObjectUndo(doc, obj);
         var clearing = objectIds is null;
         var ids = clearing ? Array.Empty<Guid>() : ToGuids(objectIds!).ToArray();
         param.ClearData();
@@ -85,13 +96,13 @@ internal sealed class GrasshopperOperations : IGrasshopperOperations
             throw new InvalidOperationException($"'{Nick((IGH_DocumentObject)target)}' is an output-only control (a Number Slider, Boolean Toggle or Value List): it produces a value and cannot take a wired source. Use it as the wire's source instead.");
         }
 
-        // Idempotent: wiring the same pair twice is a no-op, not a duplicate source.
+        // Idempotent: wiring the same pair twice is a no-op, not a duplicate source (and records no undo).
         if (!target.Sources.Contains(source))
         {
+            RecordWireUndo(doc, target);
             target.AddSource(source);
+            target.ExpireSolution(recompute: false);
         }
-
-        target.ExpireSolution(recompute: false);
     }
 
     public void Disconnect(object grasshopperDocument, string sourceId, string sourceOutput, string targetId, string targetInput)
@@ -100,16 +111,104 @@ internal sealed class GrasshopperOperations : IGrasshopperOperations
         var source = ResolvePort(FindObjectOrThrow(doc, sourceId), sourceOutput, output: true);
         var target = ResolvePort(FindObjectOrThrow(doc, targetId), targetInput, output: false);
         // Removing a source that is not wired is a no-op, not an error (matches ClearReference's forgiving clear).
-        target.RemoveSource(source);
-        target.ExpireSolution(recompute: false);
+        if (target.Sources.Contains(source))
+        {
+            RecordWireUndo(doc, target);
+            target.RemoveSource(source);
+            target.ExpireSolution(recompute: false);
+        }
     }
 
     public void ClearSources(object grasshopperDocument, string targetId, string targetInput)
     {
         var doc = (GH_Document)grasshopperDocument;
         var target = ResolvePort(FindObjectOrThrow(doc, targetId), targetInput, output: false);
-        target.RemoveAllSources();
-        target.ExpireSolution(recompute: false);
+        if (target.SourceCount > 0)
+        {
+            RecordWireUndo(doc, target);
+            target.RemoveAllSources();
+            target.ExpireSolution(recompute: false);
+        }
+    }
+
+    public void Save(object grasshopperDocument, string path)
+    {
+        var doc = (GH_Document)grasshopperDocument;
+        var target = string.IsNullOrWhiteSpace(path) ? doc.FilePath : path;
+        if (string.IsNullOrWhiteSpace(target))
+        {
+            throw new InvalidOperationException("this definition has never been saved, so it has no current path; pass a file path to save it to (a .gh or .ghx).");
+        }
+
+        // GH_DocumentIO.SaveQuiet writes the file (extension picks .gh binary vs .ghx XML) but does NOT set
+        // the document's FilePath (verified live), so set it ourselves — otherwise a later Save() to the
+        // "current" path would fail and the canvas title would not reflect where it was saved.
+        var io = new GH_DocumentIO(doc);
+        if (!io.SaveQuiet(target))
+        {
+            throw new InvalidOperationException($"Grasshopper could not save the definition to '{target}'.");
+        }
+
+        doc.FilePath = target;
+    }
+
+    public IDisposable BeginUndoRecording(object? grasshopperDocument, string label)
+    {
+        if (grasshopperDocument is not GH_Document doc)
+        {
+            return NoOpUndoScope.Instance;
+        }
+
+        _pendingUndo = (doc, new GH_UndoRecord(string.IsNullOrWhiteSpace(label) ? "MCP run" : label));
+        return new UndoCommit(this, doc);
+    }
+
+    // Appends the object's full before-state to the run's undo record (for Set/Reference). No-op when no
+    // record is open or it belongs to another document.
+    private void RecordObjectUndo(GH_Document doc, IGH_DocumentObject obj)
+    {
+        if (_pendingUndo is { } p && ReferenceEquals(p.Doc, doc))
+        {
+            p.Rec.AddAction(new GH_GenericObjectAction(obj));
+        }
+    }
+
+    // Appends the target parameter's wire (source) before-state to the run's undo record (for Connect/
+    // Disconnect/ClearSources).
+    private void RecordWireUndo(GH_Document doc, IGH_Param target)
+    {
+        if (_pendingUndo is { } p && ReferenceEquals(p.Doc, doc))
+        {
+            p.Rec.AddAction(new GH_WireAction(target));
+        }
+    }
+
+    // Commits the run's accumulated undo record as ONE entry the user can revert in the Grasshopper editor,
+    // or drops it when nothing was recorded. Returned by BeginUndoRecording; disposed at run end.
+    private sealed class UndoCommit : IDisposable
+    {
+        private readonly GrasshopperOperations _ops;
+        private readonly GH_Document _doc;
+        public UndoCommit(GrasshopperOperations ops, GH_Document doc) { _ops = ops; _doc = doc; }
+
+        public void Dispose()
+        {
+            if (_ops._pendingUndo is { } p && ReferenceEquals(p.Doc, _doc))
+            {
+                if (p.Rec.ActionCount > 0)
+                {
+                    _doc.UndoServer.PushUndoRecord(p.Rec);
+                }
+
+                _ops._pendingUndo = null;
+            }
+        }
+    }
+
+    private sealed class NoOpUndoScope : IDisposable
+    {
+        public static readonly NoOpUndoScope Instance = new();
+        public void Dispose() { }
     }
 
     public void Solve(object grasshopperDocument, bool expireAll)

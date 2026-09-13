@@ -31,13 +31,21 @@ internal static class PythonScriptGuard
     private const string RhinoApp = "Rhino.RhinoApp";
     private const string RhinoInputCustom = "Rhino.Input.Custom.";
     private const string RhinoScriptSyntax = "rhinoscriptsyntax";
+    private const string GrasshopperApi = "Eichler.Connectors.Rhino.GrasshopperApi";
 
-    /// <summary>Bound globals and idioms that denote the document, mapped onto the RhinoDoc type.</summary>
-    private static readonly (string Prefix, string Type)[] DocumentPrefixes =
+    /// <summary>Bound globals and idioms mapped onto the .NET type they denote, so a member call on them is
+    /// gated by type just as the C# walk gates it by bound symbol. The document (<c>doc</c>/
+    /// <c>scriptcontext.doc</c>/<c>RhinoDoc.ActiveDoc</c> → RhinoDoc) and the connector's Grasshopper API
+    /// (<c>connector.Grasshopper</c> / <c>Connector.Grasshopper</c> → GrasshopperApi, so its <c>Save</c> is
+    /// lifecycle-gated). A receiver reached through an untracked alias slips this, as with the document — the
+    /// guard is against plausible mistakes, not a sandbox.</summary>
+    private static readonly (string Prefix, string Type)[] ReceiverPrefixes =
     {
         ("doc", RhinoDoc),
         ("scriptcontext.doc", RhinoDoc),
         (RhinoDoc + ".ActiveDoc", RhinoDoc),
+        ("connector.Grasshopper", GrasshopperApi),
+        ("Connector.Grasshopper", GrasshopperApi),
     };
 
     /// <summary>rhinoscriptsyntax functions that prompt on the command line or open a picker (the
@@ -161,6 +169,20 @@ internal static class PythonScriptGuard
             if (ScriptApiDenylist.LifecycleMembersByType[RhinoDoc].Contains(member) && seen.Add(RhinoDoc + "." + member))
             {
                 lifecycle.Add(RhinoDoc + "." + member);
+            }
+
+            return;
+        }
+
+        // Connector.Grasshopper.Save writes a file (gated the same as a Rhino document save). The receiver
+        // was normalised to the GrasshopperApi type by ReceiverPrefixes above.
+        if (qualified.StartsWith(GrasshopperApi + ".", StringComparison.Ordinal))
+        {
+            var member = Segment(qualified, GrasshopperApi);
+            if (ScriptApiDenylist.LifecycleMembersByType.TryGetValue(GrasshopperApi, out var ghLifecycle)
+                && ghLifecycle.Contains(member) && seen.Add(GrasshopperApi + "." + member))
+            {
+                lifecycle.Add(GrasshopperApi + "." + member);
             }
 
             return;
@@ -499,7 +521,7 @@ internal static class PythonScriptGuard
                 }
             }
 
-            foreach (var (prefix, type) in DocumentPrefixes)
+            foreach (var (prefix, type) in ReceiverPrefixes)
             {
                 if (resolved == prefix) return type;
                 if (resolved.StartsWith(prefix + ".", StringComparison.Ordinal)) return type + resolved.Substring(prefix.Length);

@@ -36,6 +36,7 @@ internal static class ScriptApiDenylist
 {
     private const string RhinoDoc = "Rhino.RhinoDoc";
     private const string RhinoApp = "Rhino.RhinoApp";
+    private const string GrasshopperApi = "Eichler.Connectors.Rhino.GrasshopperApi";
     private const string RhinoGet = "Rhino.Input.RhinoGet";
     private const string GetBaseClass = "Rhino.Input.Custom.GetBaseClass";
 
@@ -62,6 +63,10 @@ internal static class ScriptApiDenylist
         // are open); ReadFile/Import (content from outside the document). RhinoDoc has NO Close member -- a
         // document is closed with the _Close command, which the command-token table gates.
         [RhinoDoc] = new HashSet<string> { "Save", "SaveAs", "SaveAsTemplate", "Export", "ExportSelected", "Write3dmFile", "WriteFile", "Open", "OpenFile", "OpenHeadless", "Create", "CreateHeadless", "ReadFile", "Import" },
+        // Connector.Grasshopper.Save writes a .gh/.ghx to the filesystem — outside the run's undo, like a
+        // Rhino document save — so it is confirmation-gated too. (Python's name-based guard already gates a
+        // bare `.Save(` via the RhinoDoc set above; this covers the C# call, which binds to this type.)
+        [GrasshopperApi] = new HashSet<string> { "Save" },
     };
 
     /// <summary>Command tokens (lower-cased, leading `_`/`-` stripped) that make a RunScript/ExecuteCommand

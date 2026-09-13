@@ -156,12 +156,19 @@ With a definition bound (`gh_document_id`), a script reaches it two ways. **Dire
   connect), not only drive one. Objects by nickname/guid; a port by name or 0-based index, or `""` for the
   sole port (a slider/panel/bare parameter is its own). Expires the target — `Solve` after.
 - `Solve(expire_all=False)` — run a solution; the **solve report** rides the run result (below).
+- `Save(path)` — write the definition to a `.gh`/`.ghx` (`path` a full path to save-as, or `""` for its
+  current file). Writes the filesystem, so — like a Rhino document save — it needs `confirm_lifecycle_actions`;
+  a save-as changes the definition's `gh_document_id` (re-list to get the new one).
 - `Get(nickname)` → the object's current output items, flattened; `Data(nickname)` → the full data tree with
   branch paths and counts. Both summarise each item — numbers/text/booleans **verbatim**, geometry as
   **type + bounding box + a document handle**, never geometry inline (large trees stay within the response
   budget; `Truncated` — plus `Data`'s `Note` — says when a cap was hit). `Solve` first so the data is
   current, and note a
   definition computes volatile data only when it is **enabled**.
+
+Every `connector.Grasshopper` edit in a run is grouped into **one Grasshopper undo entry** (labelled for the
+run), on the Grasshopper editor's own undo stack — separate from Rhino's — so a person can revert your whole
+run with a single undo there.
 
 **Seeing what's on the canvas — `inspect_gh_definition`.** A tool (not a script call) that reads an open
 definition's structure: every object with its guid, nickname, type, canvas position (`pivot`/`bounds`), and

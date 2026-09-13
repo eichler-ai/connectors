@@ -109,10 +109,20 @@ internal sealed class UndoRunExecutor
             // subscription to the runner is inside the try; a failure becomes the run's outcome.
             IDisposable? subscription = null;
             IGrasshopperSolveScope? solves = null;
+            IDisposable? ghUndo = null;
             try
             {
                 subscription = _host.SubscribeChanges(document, mutations.Record, () => changed = true);
                 solves = _host.BeginGrasshopperSolves(grasshopperDocument);
+                // Group every Connector.Grasshopper edit this run makes into ONE Grasshopper undo entry, so
+                // the user can revert the agent's whole run with a single Ctrl+Z in the GH editor (the GH
+                // stack is separate from Rhino's, which the run command already wraps). Only when a
+                // definition is bound; committed (pushed) when the scope is disposed below.
+                if (grasshopperDocument is not null)
+                {
+                    ghUndo = _host.GrasshopperOperations?.BeginUndoRecording(grasshopperDocument, undoLabel);
+                }
+
                 var globals = new ScriptGlobals((RhinoDoc)document.Raw!, request.CancellationToken, _host.BridgeVersion, request.Label, grasshopperDocument, _host.GrasshopperOperations);
                 var runner = _runners.Get(request.Language) ?? throw new InvalidOperationException($"no runner for language '{request.Language}'");
                 outcome = runner.RunAsync(request.ScriptText, globals, request.CancellationToken, request.ConfirmLifecycleActions).GetAwaiter().GetResult();
@@ -126,6 +136,10 @@ internal sealed class UndoRunExecutor
                 // Build the solve report while still inside the command (all solves have ended), then release.
                 try { grasshopperReport = solves?.BuildReport(); } catch { }
                 try { solves?.Dispose(); } catch { }
+                // Commit the run's grouped Grasshopper undo entry (pushes it, or drops it if nothing was
+                // edited). Done even on failure: a partial GH edit is not auto-reverted (GH state is not
+                // Rhino's undo), so leaving it user-undoable is the safe outcome.
+                try { ghUndo?.Dispose(); } catch { }
                 try { subscription?.Dispose(); } catch { }
             }
         });

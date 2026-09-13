@@ -34,10 +34,10 @@ func TestSkillFileStaysWithinItsBudget(t *testing.T) {
 	const pessimisticBytesPerToken = 3
 	const ceilingTokens = 25000
 	// The Rhino guide covers phase 1 (execution, discovery, capture, undo) plus
-	// phase 4 (Grasshopper drive/read/inspect/frame/capture, plug-in management,
-	// restart) and the how-to corpus, and sits near 8k tokens. 34% of the host
-	// cap leaves ~400 tokens of room before the number is revisited on its merits.
-	const budgetTokens = ceilingTokens * 34 / 100
+	// phase 4 (Grasshopper drive/read/inspect/frame/capture/wire/save, plug-in
+	// management, restart) and the how-to corpus, and sits near 8.4k tokens. 35%
+	// of the host cap leaves ~350 tokens of room before it is revisited on merits.
+	const budgetTokens = ceilingTokens * 35 / 100
 	// The soft line sits ABOVE the file's current size so crossing it is
 	// information, not a warning that fires forever. t.Logf alone is dead code
 	// under `go test` (a passing package's output is discarded); the ci.yml
@@ -46,10 +46,10 @@ func TestSkillFileStaysWithinItsBudget(t *testing.T) {
 	// Raised 26%->29% when Phase 4 landed (Grasshopper drive/read + plug-in
 	// management + restart_rhino), then 29%->31% as the canvas work added the
 	// inspect_gh_definition/frame_canvas/canvas-capture sections, then 31%->33%
-	// when the how-to corpus added search_howtos/describe_howto (two steps: the
-	// file landed ~8.07k, so the soft line needed 33% to stay just above it and
-	// the ceiling 34% to keep headroom); per project_skill_md_token_budget.
-	const softBudgetTokens = ceilingTokens * 33 / 100
+	// when the how-to corpus added search_howtos/describe_howto, then 33%->34%
+	// when Grasshopper wiring (Connect) + Save + the undo note landed; each raise
+	// keeps the soft line just above the file, per project_skill_md_token_budget.
+	const softBudgetTokens = ceilingTokens * 34 / 100
 
 	// The footer get_skills appends at runtime is charged to the same reader's
 	// context, so measure what a caller receives, not what is on disk. Use the
