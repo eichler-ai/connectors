@@ -141,7 +141,8 @@ that section. What Rhino adds:
   `Connector.Grasshopper` mutators record their before-state into one run-scoped `GH_UndoRecord`
   (`GH_GenericObjectAction` for Set/Reference, `GH_WireAction` for wiring), pushed as one entry when the
   run ends — so a person reverts an agent's whole run with one Ctrl+Z in the GH editor. Capture the action
-  BEFORE mutating; record only on an actual change (an idempotent re-wire records nothing). `ghdoc.Undo()`
+  BEFORE mutating; the wiring ops skip recording a no-op (an idempotent re-wire records nothing), while
+  Set/Reference record unconditionally. `ghdoc.Undo()`
   IS callable from a script (unlike `RhinoDoc.Undo`, which the denylist refuses). Commit the record even on
   a failed run — a partial GH edit is not auto-reverted, so leaving it undoable is the safe outcome.
 - **Reading a component's ports means instantiating it — cheap, not the feared UI hang.** A proxy exposes
@@ -215,7 +216,8 @@ on every run.
 The Grasshopper authoring + how-to arc (2026-09-12/13) added: `gh_wire_test.go` (Connect/Disconnect/
 ClearSources — wire a slider→panel, prove the value flows and stops on disconnect; component ports by
 name and index; the error paths); `gh_undo_save_test.go` (one run = one GH undo entry reverting both a
-Set and a wire; Save writes the file + sets FilePath; unconfirmed Save refused in both languages);
+Set and a wire; Save writes the file + sets FilePath; an unconfirmed Save is refused — Python in this
+harness test, with both-language gating covered by the ScriptApiDenylist/PythonScriptGuard unit tests);
 `gh_catalog_test.go` (the `kind=grasshopper` discovery catalog — list/search/describe, now asserting the
 port-enriched signature); `gh_semsearch_rebuild_test.go` (open GH mid-session → the broker rebuilds its
 `search_functions` index within a tick, on ONE broker); and the `RhinoHowToSweep` (below).
