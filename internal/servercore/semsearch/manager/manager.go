@@ -126,6 +126,10 @@ type Manager struct {
 	byPrint    map[string]*built // ready indexes by fingerprint, oldest evicted first
 	printOrder []string
 	searches   []cachedSearch // most recent last, bounded by maxCachedSearches
+	// rebuilding marks instances with a background rebuild in flight (fingerprint
+	// changed), so RefreshIfChanged never starts a second one; the old index keeps
+	// serving until the rebuild swaps it in.
+	rebuilding map[string]struct{}
 }
 
 // New builds a Manager. embedder and reranker may be nil (lexical-only).
@@ -134,7 +138,7 @@ func New(src Source, embedder semsearch.Embedder, reranker semsearch.Reranker, l
 		logf = func(string, ...any) {}
 	}
 	return &Manager{src: src, embedder: embedder, reranker: reranker, logf: logf,
-		byInstance: map[string]*entry{}, byPrint: map[string]*built{}}
+		byInstance: map[string]*entry{}, byPrint: map[string]*built{}, rebuilding: map[string]struct{}{}}
 }
 
 // OnAttach starts (or reuses) the index build for instanceID. Idempotent:
@@ -168,6 +172,113 @@ func (m *Manager) OnDetach(instanceID string) {
 	m.mu.Lock()
 	delete(m.byInstance, instanceID)
 	m.mu.Unlock()
+}
+
+// RefreshAll cheaply re-checks every connected instance's corpus fingerprint and
+// rebuilds any whose corpus changed since its index was built (e.g. Grasshopper
+// was opened, or a plug-in loaded, after the index was first built). Meant to be
+// called periodically from the server's existing poll loop. Each check is one
+// small dump_members(0,1) round trip; a rebuild runs in the background while the
+// current index keeps serving.
+func (m *Manager) RefreshAll(ctx context.Context) {
+	m.mu.Lock()
+	ids := make([]string, 0, len(m.byInstance))
+	for id := range m.byInstance {
+		ids = append(ids, id)
+	}
+	m.mu.Unlock()
+	for _, id := range ids {
+		m.RefreshIfChanged(ctx, id)
+	}
+}
+
+// RefreshIfChanged polls instanceID's current corpus fingerprint and, if it
+// differs from the ready index's, starts a background rebuild. A no-op unless
+// the instance has a READY index, no rebuild is already in flight, and the
+// fingerprint actually changed — so it never disturbs a first build, a failed
+// build, or an unchanged corpus.
+func (m *Manager) RefreshIfChanged(ctx context.Context, instanceID string) {
+	m.mu.Lock()
+	e, ok := m.byInstance[instanceID]
+	_, busy := m.rebuilding[instanceID]
+	current := ""
+	if ok && isReady(e) {
+		current = e.fingerprint
+	}
+	if current == "" || busy {
+		m.mu.Unlock()
+		return // no ready index to refresh, or a rebuild is already running
+	}
+	m.mu.Unlock()
+
+	fp, ok := m.pollFingerprint(ctx, instanceID)
+	if !ok || fp == "" || fp == current {
+		return // poll failed, or the corpus is unchanged
+	}
+
+	m.mu.Lock()
+	// Re-check under the lock: the instance may have detached, rebuilt, or a
+	// rebuild may have started since the poll.
+	e, ok = m.byInstance[instanceID]
+	if _, busy = m.rebuilding[instanceID]; !ok || !isReady(e) || e.fingerprint == fp || busy {
+		m.mu.Unlock()
+		return
+	}
+	m.rebuilding[instanceID] = struct{}{}
+	m.mu.Unlock()
+	go m.rebuild(instanceID)
+}
+
+// rebuild pages and builds a fresh index for an instance whose corpus changed,
+// then swaps it in — keeping the old index serving until the swap, and dropping
+// the result if the instance detached meanwhile. Reuses a cached index when the
+// new fingerprint is one we already hold (buildCorpus checks byPrint).
+func (m *Manager) rebuild(instanceID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), buildTimeout)
+	defer cancel()
+	start := time.Now()
+	res, drec := m.buildCorpus(ctx, instanceID)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.rebuilding, instanceID)
+	if drec != nil {
+		m.logf("semsearch: rebuild for instance %s failed after %v: %s (keeping the previous index)", instanceID, time.Since(start).Round(time.Millisecond), drec.Message)
+		return
+	}
+	if _, still := m.byInstance[instanceID]; !still {
+		// Detached during the rebuild: the fresh index stays cached by fingerprint,
+		// but do not re-add the instance.
+		return
+	}
+	done := make(chan struct{})
+	close(done)
+	m.byInstance[instanceID] = &entry{built: res, done: done, attempts: 1}
+	m.logf("semsearch: rebuilt index for instance %s in %v (%d members, fingerprint %.12s, dense=%v)",
+		instanceID, time.Since(start).Round(time.Millisecond), res.members, res.fingerprint, res.dense)
+}
+
+// pollFingerprint fetches just the current corpus fingerprint (one member is
+// enough; the add-in computes the fingerprint independently of the page).
+func (m *Manager) pollFingerprint(ctx context.Context, instanceID string) (string, bool) {
+	raw, _, drec := m.src.DumpMembers(ctx, instanceID, 0, 1)
+	if drec != nil {
+		return "", false
+	}
+	var page dumpPage
+	if err := json.Unmarshal(raw, &page); err != nil {
+		return "", false
+	}
+	return page.Fingerprint, true
+}
+
+// isReady reports whether a build has finished successfully. Caller holds m.mu.
+func isReady(e *entry) bool {
+	select {
+	case <-e.done:
+		return e.err == nil
+	default:
+		return false
+	}
 }
 
 // Status reports the instance's index state.

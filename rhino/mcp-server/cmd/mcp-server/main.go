@@ -128,6 +128,10 @@ func run(appDataDir string, logger *log.Logger) error {
 					logger.Printf("registry: pruned silent instance %s", id)
 					dial.CloseInstance(id, epoch)
 				}
+				// Rebuild the search_functions index for any instance whose corpus changed since it was
+				// built (e.g. Grasshopper opened, or a plug-in loaded, after connect) so search reflects it
+				// without a fresh connection. Cheap (one dump_members(0,1) per instance); rebuild is async.
+				searchIndex.RefreshAll(ctx)
 			}
 		}
 	}()

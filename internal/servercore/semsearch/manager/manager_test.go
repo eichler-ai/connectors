@@ -210,6 +210,48 @@ func TestFingerprintChangeMidDumpFails(t *testing.T) {
 	}
 }
 
+func TestRefreshRebuildsWhenFingerprintChanges(t *testing.T) {
+	src := newFakeSource()
+	src.set("inst-1", "fp-a", corpus(10)) // Wall.Create at [0]; no "Sphere"
+	m := New(src, nil, nil, nil)
+	m.OnAttach("inst-1")
+	if st := waitReady(t, m, "inst-1"); st.Fingerprint != "fp-a" {
+		t.Fatalf("initial fingerprint = %q", st.Fingerprint)
+	}
+
+	// The corpus changes (e.g. Grasshopper opened): a new member appears and the fingerprint flips.
+	// Use a normal namespace: InNamespace("") deliberately excludes "Grasshopper" from unscoped search.
+	sphere := corpus(10)
+	sphere[0] = semsearch.Doc{MemberID: "M:Rhino.Geometry.Sphere.Create", Kind: "Method", Namespace: "Rhino.Geometry",
+		DeclaringType: "Rhino.Geometry.Sphere", Name: "Sphere", Summary: "Creates a sphere.", Core: true}
+	src.set("inst-1", "fp-b", sphere)
+
+	// Old index keeps serving until the async rebuild swaps in the new one.
+	m.RefreshIfChanged(context.Background(), "inst-1")
+	deadline := time.Now().Add(5 * time.Second)
+	for m.Status("inst-1").Fingerprint != "fp-b" {
+		if time.Now().After(deadline) {
+			t.Fatalf("index never rebuilt to fp-b (still %q)", m.Status("inst-1").Fingerprint)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	res, err := m.Search(context.Background(), "inst-1", "sphere", "")
+	if err != nil || len(res.Hits) == 0 || res.Hits[0].Doc.Name != "Sphere" || res.Fingerprint != "fp-b" {
+		t.Fatalf("after rebuild, search should find the new member: res=%+v err=%v", res, err)
+	}
+
+	// An unchanged corpus is a no-op: RefreshIfChanged neither rebuilds nor disturbs the ready index.
+	before := m.Status("inst-1")
+	m.RefreshIfChanged(context.Background(), "inst-1")
+	if after := m.Status("inst-1"); after.State != StateReady || after.Fingerprint != before.Fingerprint || after.BuiltAt != before.BuiltAt {
+		t.Fatalf("RefreshIfChanged on an unchanged corpus should be a no-op: before=%+v after=%+v", before, after)
+	}
+
+	// A refresh of an unknown instance must not panic and must do nothing.
+	m.RefreshIfChanged(context.Background(), "no-such-instance")
+}
+
 // flippingSource changes its fingerprint after the first page, simulating an
 // add-in re-sync mid-dump.
 type flippingSource struct{ *fakeSource }
