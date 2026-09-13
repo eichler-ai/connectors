@@ -63,8 +63,10 @@ public static class GrasshopperCatalog
             var built = RunOnUi(() => BuildBatch(batch));
             if (built is null)
             {
-                // A hop timed out: abandon this round with what we have; the sync loop retries later.
-                break;
+                // A hop timed out mid-enrichment. Discard the whole round (return empty) rather than the
+                // batches gathered so far: a partial list would be committed as the authoritative catalog and
+                // never re-synced until the next restart. Empty signals "not ready" so the sync loop retries.
+                return Array.Empty<GrasshopperCatalogEntry>();
             }
 
             entries.AddRange(built);
