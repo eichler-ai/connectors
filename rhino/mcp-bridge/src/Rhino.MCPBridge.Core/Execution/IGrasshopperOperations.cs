@@ -17,6 +17,14 @@ internal interface IGrasshopperOperations
     /// <summary><paramref name="objectIds"/> null clears the reference; otherwise it is a Guid, its string
     /// form, or a collection of either.</summary>
     void Reference(object grasshopperDocument, string nickname, object? objectIds);
+    /// <summary>Wires a source object's output port to a target object's input port. An empty port name
+    /// selects the sole port (or the object itself, for a free-floating parameter). Marks the target dirty
+    /// but does not solve.</summary>
+    void Connect(object grasshopperDocument, string sourceId, string sourceOutput, string targetId, string targetInput);
+    /// <summary>Removes the wire from a source's output to a target's input (a no-op when not wired).</summary>
+    void Disconnect(object grasshopperDocument, string sourceId, string sourceOutput, string targetId, string targetInput);
+    /// <summary>Removes every wire feeding a target's input port.</summary>
+    void ClearSources(object grasshopperDocument, string targetId, string targetInput);
     void Solve(object grasshopperDocument, bool expireAll);
     /// <summary>Reads an object's current output, flattened and budget-capped (the read half of Set).</summary>
     GrasshopperValue Get(object grasshopperDocument, string nickname);

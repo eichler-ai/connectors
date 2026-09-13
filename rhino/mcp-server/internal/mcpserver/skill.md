@@ -151,6 +151,10 @@ With a definition bound (`gh_document_id`), a script reaches it two ways. **Dire
 - `Reference(nickname, object_ids)` / `ClearReference(nickname)` — wire a Curve/Brep/Surface/Mesh/Point or a
   generic Geometry input to Rhino document objects **by reference** (one id or a list), so the definition
   consumes live document geometry that tracks the object. `ClearReference` unwires it.
+- `Connect(source, source_output, target, target_input)` / `Disconnect(…)` / `ClearSources(target, target_input)`
+  — wire one object's output to another's input, so you can **build** a definition (place via `ghdoc`, then
+  connect), not only drive one. Objects by nickname/guid; a port by name or 0-based index, or `""` for the
+  sole port (a slider/panel/bare parameter is its own). Expires the target — `Solve` after.
 - `Solve(expire_all=False)` — run a solution; the **solve report** rides the run result (below).
 - `Get(nickname)` → the object's current output items, flattened; `Data(nickname)` → the full data tree with
   branch paths and counts. Both summarise each item — numbers/text/booleans **verbatim**, geometry as

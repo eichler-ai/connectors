@@ -253,6 +253,32 @@ public sealed class UndoRunExecutorTests
     }
 
     [Fact]
+    public void ConnectorGrasshopperConnect_ForwardsToTheOps_WithTheBoundDefinition()
+    {
+        var host = HostWithBoundDefinition();
+        var outcome = new UndoRunExecutor(new ScriptRunners(Runner), host)
+            .Execute(Req("Connector.Grasshopper.Connect(\"slider\", \"\", \"circle\", \"Radius\"); return 1;", ghDocId: "gh-known"))!;
+        Assert.True(outcome.Success, outcome.Exception?.ToString());
+        var wire = Assert.Single(host.GrasshopperOps.Connects);
+        Assert.Same(host.GrasshopperDocumentStub, wire.Doc);
+        Assert.Equal(("slider", "", "circle", "Radius"), (wire.SourceId, wire.SourceOutput, wire.TargetId, wire.TargetInput));
+    }
+
+    [Fact]
+    public void ConnectorGrasshopperDisconnectAndClearSources_Forward()
+    {
+        var host = HostWithBoundDefinition();
+        var outcome = new UndoRunExecutor(new ScriptRunners(Runner), host)
+            .Execute(Req("Connector.Grasshopper.Disconnect(\"slider\", \"\", \"circle\", \"Radius\"); Connector.Grasshopper.ClearSources(\"circle\", \"Plane\"); return 1;", ghDocId: "gh-known"))!;
+        Assert.True(outcome.Success, outcome.Exception?.ToString());
+        var un = Assert.Single(host.GrasshopperOps.Disconnects);
+        Assert.Equal(("slider", "", "circle", "Radius"), (un.SourceId, un.SourceOutput, un.TargetId, un.TargetInput));
+        var cleared = Assert.Single(host.GrasshopperOps.ClearedSources);
+        Assert.Same(host.GrasshopperDocumentStub, cleared.Doc);
+        Assert.Equal(("circle", "Plane"), (cleared.TargetId, cleared.TargetInput));
+    }
+
+    [Fact]
     public void ConnectorGrasshopperSolve_ForwardsExpireAll()
     {
         var host = HostWithBoundDefinition();
