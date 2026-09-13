@@ -49,8 +49,13 @@ func TestEmbeddedCorpusIsValid(t *testing.T) {
 	if c.Len() != 3 {
 		t.Fatalf("expected 3 seed how-tos, got %d", c.Len())
 	}
-	if len(stamps) != 0 {
-		t.Errorf("seed corpus ships with no stamps yet, got %d", len(stamps))
+	// The seed corpus ships a harness stamp per doc (written by the sweep),
+	// verified on Rhino 8.
+	if len(stamps) != 3 {
+		t.Errorf("seed corpus ships a harness stamp per doc (3), got %d", len(stamps))
+	}
+	if len(ver.VerifiedOn) != 1 || ver.VerifiedOn[0] != "8" {
+		t.Errorf("seed corpus is verified on Rhino 8, got %v", ver.VerifiedOn)
 	}
 	if ver.Documents != 3 || ver.Hash == "" {
 		t.Errorf("version looks wrong: %+v", ver)
@@ -65,6 +70,11 @@ func TestEmbeddedCorpusIsValid(t *testing.T) {
 		}
 		if d.Verify == nil || d.Verify.ExpectObjectDelta == nil {
 			t.Errorf("%s: seed docs declare an expect_object_delta for the sweep", id)
+		}
+		// Every seed doc has a CURRENT passing stamp for Rhino 8 (hash-bound).
+		v := VerifiedOn(d, stamps)
+		if st, ok := v.ByVersion["8"]; !ok || st.Status != StampPassed || st.By != ByHarness {
+			t.Errorf("%s: expected a current passing harness stamp for Rhino 8, got %+v", id, v.ByVersion)
 		}
 	}
 }

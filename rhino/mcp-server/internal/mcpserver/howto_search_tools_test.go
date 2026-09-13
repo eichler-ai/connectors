@@ -63,11 +63,19 @@ func TestSearchHowTosOverEmbeddedCorpus(t *testing.T) {
 		t.Fatal("expected results for a seed task")
 	}
 	for _, r := range out.Results {
-		if r.VerifiedHere {
-			t.Errorf("%s: nothing is verified yet (no stamps ship), got verified_here=true", r.ID)
+		// The seed corpus ships verified on Rhino 8.
+		if !r.VerifiedHere {
+			t.Errorf("%s: seed docs are verified on Rhino 8, expected verified_here=true", r.ID)
 		}
 		if r.Source != "seed" {
 			t.Errorf("%s: source should be seed, got %q", r.ID, r.Source)
+		}
+	}
+	// On an unstamped version, nothing is verified_here.
+	unv := searchHowTos(context.Background(), deps, SearchHowTosIn{Query: "create a layer and draw a circle on it", RhinoVersion: "99"})
+	for _, r := range unv.Results {
+		if r.VerifiedHere {
+			t.Errorf("%s: must not be verified_here on an unstamped version", r.ID)
 		}
 	}
 }
@@ -94,8 +102,13 @@ func TestDescribeHowTo(t *testing.T) {
 	if out.Document.ScriptLang != "python" {
 		t.Errorf("script_language should be python, got %q", out.Document.ScriptLang)
 	}
-	if out.Verification != nil {
-		t.Error("no stamp ships yet, so verification should be nil")
+	// The seed corpus ships a passing Rhino 8 harness stamp.
+	if !out.VerifiedHere || out.Verification == nil || out.Verification.Status != "passed" || out.Verification.By != "harness" {
+		t.Errorf("expected a passing Rhino 8 harness verification, got verified_here=%v verification=%+v", out.VerifiedHere, out.Verification)
+	}
+	// On an unstamped version there is no verification.
+	if unv := describeHowTo(context.Background(), deps, DescribeHowToIn{ID: "add-a-sphere-to-the-document", RhinoVersion: "99"}); unv.Verification != nil || unv.VerifiedHere {
+		t.Errorf("an unstamped version should have no verification, got verified_here=%v verification=%+v", unv.VerifiedHere, unv.Verification)
 	}
 	// A missing id is a clean not-found, not a crash.
 	if miss := describeHowTo(context.Background(), deps, DescribeHowToIn{ID: "nope", RhinoVersion: "8"}); miss.Error == nil || miss.Error.Code != "howto-not-found" {
