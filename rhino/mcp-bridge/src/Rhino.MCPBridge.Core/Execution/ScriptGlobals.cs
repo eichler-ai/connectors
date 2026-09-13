@@ -57,6 +57,7 @@ public sealed class ScriptGlobals : IConnectorRuntime
     void IConnectorRuntime.GrasshopperConnect(string sourceId, string sourceOutput, string targetId, string targetInput) => Ops().Connect(RequireGrasshopperDocument(), sourceId, sourceOutput, targetId, targetInput);
     void IConnectorRuntime.GrasshopperDisconnect(string sourceId, string sourceOutput, string targetId, string targetInput) => Ops().Disconnect(RequireGrasshopperDocument(), sourceId, sourceOutput, targetId, targetInput);
     void IConnectorRuntime.GrasshopperClearSources(string targetId, string targetInput) => Ops().ClearSources(RequireGrasshopperDocument(), targetId, targetInput);
+    void IConnectorRuntime.GrasshopperSave(string path) => Ops().Save(RequireGrasshopperDocument(), path);
     void IConnectorRuntime.GrasshopperSolve(bool expireAll) => Ops().Solve(RequireGrasshopperDocument(), expireAll);
     GrasshopperValue IConnectorRuntime.GrasshopperGet(string nickname) => Ops().Get(RequireGrasshopperDocument(), nickname);
     GrasshopperData IConnectorRuntime.GrasshopperData(string nickname) => Ops().Data(RequireGrasshopperDocument(), nickname);

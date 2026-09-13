@@ -78,6 +78,13 @@ public sealed class GrasshopperApi
     /// not found or is not a parameter with a data tree.</summary>
     public GrasshopperData Data(string nickname) => _runtime.GrasshopperData(nickname);
 
+    /// <summary>Saves the definition to a Grasshopper file (PRD §10). <paramref name="path"/> a full path
+    /// (a <c>.gh</c> binary or <c>.ghx</c> XML) to save-as there; an empty string saves to the definition's
+    /// current file, and raises if it has never been saved. Writing a file escapes the run's undo, so — like
+    /// saving the Rhino document — a script that calls this needs <c>confirm_lifecycle_actions</c>, else it is
+    /// refused before it runs. Raises if the save fails.</summary>
+    public void Save(string path) => _runtime.GrasshopperSave(path);
+
     /// <summary>Runs a solution on the definition (PRD §10). <paramref name="expireAll"/> forces every
     /// object to recompute; otherwise only what has been expired since the last solve does. The solve is
     /// synchronous on the main thread, so a slow one makes the run <c>running</c>; the resulting solve

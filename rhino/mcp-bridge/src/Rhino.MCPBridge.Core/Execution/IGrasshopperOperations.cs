@@ -1,3 +1,4 @@
+using System;
 using Eichler.Connectors.Rhino;
 
 namespace Rhino.MCPBridge.Core.Execution;
@@ -25,7 +26,15 @@ internal interface IGrasshopperOperations
     void Disconnect(object grasshopperDocument, string sourceId, string sourceOutput, string targetId, string targetInput);
     /// <summary>Removes every wire feeding a target's input port.</summary>
     void ClearSources(object grasshopperDocument, string targetId, string targetInput);
+    /// <summary>Saves the definition to <paramref name="path"/>, or to its current file when path is empty
+    /// (raising when it has none). Writes the filesystem — gated by confirm_lifecycle_actions upstream.</summary>
+    void Save(object grasshopperDocument, string path);
     void Solve(object grasshopperDocument, bool expireAll);
+
+    /// <summary>Begins a run-scoped Grasshopper undo record: every mutation until the returned scope is
+    /// disposed is grouped into ONE entry (labelled <paramref name="label"/>) the user can revert in the
+    /// Grasshopper editor. A no-op scope when <paramref name="grasshopperDocument"/> is null.</summary>
+    IDisposable BeginUndoRecording(object? grasshopperDocument, string label);
     /// <summary>Reads an object's current output, flattened and budget-capped (the read half of Set).</summary>
     GrasshopperValue Get(object grasshopperDocument, string nickname);
     /// <summary>Serialises a parameter's full volatile data tree, budget-capped.</summary>

@@ -61,6 +61,8 @@ internal sealed class FakeRunHost : IRunHost
         public readonly List<(object Doc, string SourceId, string SourceOutput, string TargetId, string TargetInput)> Connects = new();
         public readonly List<(object Doc, string SourceId, string SourceOutput, string TargetId, string TargetInput)> Disconnects = new();
         public readonly List<(object Doc, string TargetId, string TargetInput)> ClearedSources = new();
+        public readonly List<(object Doc, string Path)> Saves = new();
+        public readonly List<(object? Doc, string Label)> UndoRecordings = new();
         public readonly List<(object Doc, bool ExpireAll)> Solves = new();
         public readonly List<(object Doc, string Nickname)> Gets = new();
         public readonly List<(object Doc, string Nickname)> Datas = new();
@@ -74,7 +76,11 @@ internal sealed class FakeRunHost : IRunHost
         public void Connect(object doc, string sourceId, string sourceOutput, string targetId, string targetInput) => Connects.Add((doc, sourceId, sourceOutput, targetId, targetInput));
         public void Disconnect(object doc, string sourceId, string sourceOutput, string targetId, string targetInput) => Disconnects.Add((doc, sourceId, sourceOutput, targetId, targetInput));
         public void ClearSources(object doc, string targetId, string targetInput) => ClearedSources.Add((doc, targetId, targetInput));
+        public void Save(object doc, string path) => Saves.Add((doc, path));
+        public IDisposable BeginUndoRecording(object? doc, string label) { UndoRecordings.Add((doc, label)); return new NoOp(); }
         public void Solve(object doc, bool expireAll) => Solves.Add((doc, expireAll));
+
+        private sealed class NoOp : IDisposable { public void Dispose() { } }
         public Eichler.Connectors.Rhino.GrasshopperValue Get(object doc, string nickname) { Gets.Add((doc, nickname)); return GetResult!; }
         public Eichler.Connectors.Rhino.GrasshopperData Data(object doc, string nickname) { Datas.Add((doc, nickname)); return DataResult!; }
     }
