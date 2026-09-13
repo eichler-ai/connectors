@@ -1,0 +1,349 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/eichler-ai/connectors/rhino/mcp-server/internal/howto/schema/howto-schema.json",
+  "title": "Rhino connector how-to document",
+  "description": "One task, the shortest correct path to doing it on a given Rhino version, and the mistakes that path avoids. Interchange format for the Rhino how-to corpus. One document per JSONL line. Unknown top-level fields are ALLOWED so an older broker can still read a newer corpus (it ignores what it does not know and reports the newer schema_version in guidance); the fields it does know are validated strictly. Cross-field rules the Go validator enforces beyond this schema: absorbs excludes own id; contributors[].rev <= rev; updated_at >= created_at; hit/miss query shape.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "schema_version",
+    "id",
+    "rev",
+    "kind",
+    "title",
+    "task",
+    "members",
+    "provenance",
+    "created_at",
+    "updated_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Schema revision this document was written against. A broker validates the fields it knows and ignores the rest; when the corpus declares a schema_version above the broker's, every response says so in guidance (howto-corpus-newer-than-broker)."
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{2,79}$",
+      "description": "Lineage id: a kebab-case slug chosen when the document is first created and never renamed. Edits keep the id and bump `rev`, so a reference (describe_howto, a link in another document) stays valid across revisions."
+    },
+    "kind": {
+      "type": "string",
+      "enum": [
+        "howto",
+        "negative",
+        "pitfall"
+      ],
+      "description": "howto: a working path to a task (the normal kind). pitfall: a single mistake and its fix, without a full task script. negative: reserved for 'the API cannot do this and there is no route'."
+    },
+    "title": {
+      "type": "string",
+      "minLength": 8,
+      "maxLength": 120,
+      "description": "Short noun phrase, the way a person would name the example."
+    },
+    "task": {
+      "type": "string",
+      "minLength": 20,
+      "maxLength": 600,
+      "description": "The task in agent language: one or two plain sentences naming the Rhino type, the operation, and the key member nouns of the answer. This is the primary search text, so every word should earn its place; no preamble, no rationale."
+    },
+    "queries": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Recorded phrasings from real sessions. Misses are the most valuable rows: they are where API search failed and this document earns its keep.",
+      "properties": {
+        "hit": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/query"
+          },
+          "maxItems": 20,
+          "description": "Phrasings that found the right member or this document."
+        },
+        "miss": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/query"
+          },
+          "maxItems": 20,
+          "description": "Phrasings that did NOT surface the answer, with what they surfaced instead."
+        }
+      }
+    },
+    "members": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 40,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Za-z_][A-Za-z0-9_]*(\\.[A-Za-z_][A-Za-z0-9_`]*){2,}(\\.#ctor)?$"
+      },
+      "description": "Fully-qualified Namespace.Type.Member names the script calls (describe_function's 'member' shape; constructors as Type.#ctor, generic arity with a backtick). Indexed for exact-name hits and used to cross-link API results."
+    },
+    "script": {
+      "type": "string",
+      "maxLength": 16384,
+      "description": "The complete, runnable script body in the language named by script_language, as execute_script takes it (Python returns its last expression or assigns `result`; a C# script returns a value). Comments in the script ARE the explanation: label setup as setup, number the steps, and say why at the step where it matters. There is no separate prose summary. Required for kind=howto. 16 KB bound; aim well under 3 KB.",
+      "minLength": 1
+    },
+    "script_language": {
+      "type": "string",
+      "enum": [
+        "python",
+        "csharp-script"
+      ],
+      "description": "Which execute_script language the script is written in. Required for kind=howto."
+    },
+    "pitfalls": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "symptom",
+          "cause",
+          "fix"
+        ],
+        "properties": {
+          "symptom": {
+            "type": "string",
+            "maxLength": 400,
+            "description": "What the agent sees: the error text, the wrong result, the silent nothing.",
+            "minLength": 8
+          },
+          "cause": {
+            "type": "string",
+            "maxLength": 600,
+            "minLength": 8
+          },
+          "fix": {
+            "type": "string",
+            "maxLength": 600,
+            "minLength": 8
+          },
+          "members": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "maxItems": 10,
+            "description": "Members this pitfall is about, when different from the document's. Free text."
+          }
+        }
+      },
+      "description": "One entry per mistake the path avoids. Indexed text."
+    },
+    "tags": {
+      "type": "array",
+      "maxItems": 12,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9][a-z0-9-]{1,31}$"
+      },
+      "description": "Facets (geometry, layers, document, grasshopper, capture). Indexed at low weight for search and returned on every hit; also used for browsing and de-duplication."
+    },
+    "api_since": {
+      "type": "string",
+      "pattern": "^[1-9][0-9]?$",
+      "description": "Declared hint: first Rhino major version whose API offers the members used. Not verification."
+    },
+    "api_until": {
+      "type": "string",
+      "pattern": "^[1-9][0-9]?$",
+      "description": "Declared hint: last Rhino major version before a used member was removed or deprecated."
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "harness",
+            "validation-corpus",
+            "maintainer"
+          ],
+          "description": "harness/validation-corpus: extracted from a repo test. maintainer: authored directly in the repo. (The Rhino corpus has no submission pipeline in v1.)"
+        },
+        "ref": {
+          "type": "string",
+          "maxLength": 300,
+          "description": "Where it came from: a test function name (harness), a PR or issue URL (maintainer)."
+        },
+        "reviewed_by": {
+          "type": "string",
+          "maxLength": 120,
+          "description": "GitHub login of the reviewer."
+        },
+        "reviewed_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$"
+        }
+      },
+      "description": "Maintainer-facing only: never returned by search_howtos or describe_howto, and never indexed. Credit lives in `contributors`, which is agent-visible."
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$"
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$"
+    },
+    "rev": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Revision of this lineage, from 1. The corpus file holds only the latest revision per id (git history keeps the rest); an improvement is the same id with rev+1 replacing the line. rev exists so references and verification stamps can name the revision they meant."
+    },
+    "contributors": {
+      "type": "array",
+      "maxItems": 50,
+      "description": "Credit, agent-visible: who authored and improved this lineage, accumulated across revisions (a new revision appends, never rewrites). Returned by describe_howto.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "handle",
+          "role",
+          "rev"
+        ],
+        "properties": {
+          "handle": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9 ._-]{0,38}$",
+            "description": "A GitHub login or a display name (letters, digits, space, dot, underscore, hyphen). Never an email (no @) or a machine/host name (no backslash or slash)."
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "author",
+              "contributor",
+              "reviewer"
+            ]
+          },
+          "rev": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "The revision this credit applies to; must not exceed the document's rev (validator check)."
+          },
+          "at": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$"
+          }
+        }
+      }
+    },
+    "absorbs": {
+      "type": "array",
+      "maxItems": 20,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9][a-z0-9-]{2,79}$"
+      },
+      "description": "Lineage MERGE record: ids of other lineages folded into this one. Their lines are deleted from the corpus; describe_howto on an absorbed id follows the pointer here. Must not contain this document's own id."
+    },
+    "verify": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "What the tier-2 sweep asserts beyond 'the script ran'. Rhino has no transaction mutation report, so the contract is the net change in the active document's object count and a substring the return value must contain. Maintainer-facing; never returned to an agent.",
+      "properties": {
+        "expect_object_delta": {
+          "type": "integer",
+          "description": "The net change in RhinoDoc.Objects.Count the run must produce: a how-to that adds one object expects 1, a read-only one 0, a create-then-undo one 0. Omit to not assert it."
+        },
+        "expect_return_contains": {
+          "type": "string",
+          "maxLength": 400,
+          "description": "A substring the run's return value must contain."
+        },
+        "execute": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "Extra execute_script arguments the sweep passes verbatim (e.g. confirm_lifecycle_actions: true)."
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "howto"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "script",
+          "script_language"
+        ]
+      }
+    }
+  ],
+  "$defs": {
+    "query": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "text"
+      ],
+      "properties": {
+        "text": {
+          "type": "string",
+          "maxLength": 300,
+          "description": "The query as sent to search_functions or search_howtos.",
+          "minLength": 1
+        },
+        "tool": {
+          "type": "string",
+          "enum": [
+            "search_functions",
+            "search_howtos"
+          ],
+          "default": "search_functions"
+        },
+        "rank": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "For hits: the rank the answer appeared at."
+        },
+        "surfaced": {
+          "type": "string",
+          "maxLength": 300,
+          "description": "For misses: what came back instead, in a few words."
+        },
+        "rhino_version": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]?$"
+        },
+        "ranker": {
+          "type": "string",
+          "enum": [
+            "semantic",
+            "semantic-no-rerank",
+            "lexical",
+            "keyword-fallback"
+          ],
+          "description": "The ranker value the response reported, so a recorded rank is read against the ranker that produced it."
+        }
+      },
+      "description": "A recorded phrasing. In queries.hit, rank is required and surfaced absent; in queries.miss, surfaced is required and rank absent (enforced by the validator)."
+    }
+  }
+}

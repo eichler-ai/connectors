@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "id": "create-a-layer-and-draw-a-circle-on-it",
+  "rev": 1,
+  "kind": "howto",
+  "title": "Create a layer and draw a circle on it",
+  "task": "Create a named layer (LayerTable.FindName then Add) and add a circle on it, setting ObjectAttributes.LayerIndex so the new object lands on that layer rather than the current one.",
+  "members": [
+    "Rhino.DocObjects.Tables.LayerTable.Add",
+    "Rhino.Geometry.Circle.#ctor",
+    "Rhino.DocObjects.Tables.ObjectTable.AddCircle",
+    "Rhino.DocObjects.ObjectAttributes.LayerIndex"
+  ],
+  "script": "# Task: create a named layer and draw a circle on that layer.\nimport System\nimport Rhino\nimport scriptcontext as sc\n\nname = \"MCP Circles\"\n\n# 1. Find the layer by name, add it if it is not there yet. FindName returns the\n#    Layer or None; Add(name, color) returns the new layer's index.\nlayer = sc.doc.Layers.FindName(name)\nif layer is not None:\n    index = layer.Index\nelse:\n    index = sc.doc.Layers.Add(name, System.Drawing.Color.Blue)\n\n# 2. Build a circle on the world XY plane, radius 10.\ncircle = Rhino.Geometry.Circle(Rhino.Geometry.Plane.WorldXY, 10.0)\n\n# 3. Pin the new object to our layer with ObjectAttributes. Without this the\n#    circle lands on whatever the current layer is, not the one we just made.\nattrs = Rhino.DocObjects.ObjectAttributes()\nattrs.LayerIndex = index\nguid = sc.doc.Objects.AddCircle(circle, attrs)\nif guid == System.Guid.Empty:\n    raise Exception(\"AddCircle returned an empty id\")\n\nsc.doc.Views.Redraw()\nresult = \"added circle %s on layer %s (index %d)\" % (guid, name, index)\n",
+  "script_language": "python",
+  "pitfalls": [
+    {
+      "symptom": "The circle is added to the document but ends up on the current layer, not the layer the script created.",
+      "cause": "AddCircle(circle) with no attributes uses the document's current layer; creating a layer does not make it current.",
+      "fix": "Pass a Rhino.DocObjects.ObjectAttributes with LayerIndex set to the target layer's index to AddCircle."
+    },
+    {
+      "symptom": "Calling Layers.Add for a name that already exists creates a duplicate or returns an unexpected index on re-runs.",
+      "cause": "Add always appends; it does not de-duplicate by name.",
+      "fix": "Look the layer up with FindName first and reuse its Index when it already exists."
+    }
+  ],
+  "tags": [
+    "layers",
+    "geometry",
+    "objects",
+    "attributes"
+  ],
+  "provenance": {
+    "kind": "maintainer",
+    "reviewed_by": "nchim",
+    "reviewed_at": "2026-09-12T00:00:00Z"
+  },
+  "verify": {
+    "expect_object_delta": 1,
+    "expect_return_contains": "added circle"
+  },
+  "created_at": "2026-09-12T00:00:00Z",
+  "updated_at": "2026-09-12T00:00:00Z"
+}
