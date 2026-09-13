@@ -76,6 +76,26 @@ public class GrasshopperComponentIndexerTests
         Assert.NotEqual(a, GrasshopperComponentIndexer.Build(fewer)!.Value.ContentHash);
     }
 
+    [Fact]
+    public void ContentHash_ChangesWhenPortsChange()
+    {
+        // Ports are part of the identity: a component whose inputs/outputs changed (a GH/plug-in update) must
+        // re-sync, so the same components with different ports must hash differently.
+        var withPorts = new[]
+        {
+            Entry("11111111-1111-1111-1111-111111111111", "Circle", "Curve", "Primitive", "d",
+                new[] { ("Plane", "Plane"), ("Radius", "Number") }, new[] { ("Circle", "Circle") }),
+        };
+        var portsChanged = new[]
+        {
+            Entry("11111111-1111-1111-1111-111111111111", "Circle", "Curve", "Primitive", "d",
+                new[] { ("Plane", "Plane"), ("Radius", "Number"), ("Angle", "Number") }, new[] { ("Circle", "Circle") }),
+        };
+        Assert.NotEqual(
+            GrasshopperComponentIndexer.Build(withPorts)!.Value.ContentHash,
+            GrasshopperComponentIndexer.Build(portsChanged)!.Value.ContentHash);
+    }
+
     private static DiscoveryCache SyncedCache()
     {
         var indexed = GrasshopperComponentIndexer.Build(Catalog())!.Value;

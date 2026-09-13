@@ -106,17 +106,34 @@ result = "loaded=%s docs=%d" % (loaded, Grasshopper.Instances.DocumentServer.Doc
 		t.Errorf("a Grasshopper search hit should have kind GrasshopperComponent, got %q", ghHit.Kind)
 	}
 
-	// describe_function resolves a component by its dotted member_id and returns a guid-based placement call.
-	desc, isErr := discCall[describeFunctionOut](t, c, "describe_function", map[string]any{"member": "Grasshopper.Curve.Circle"})
-	if isErr {
-		t.Fatalf("describe: %+v", desc.Error)
+	// describe_function resolves a component by its dotted member_id and returns a guid-based placement call
+	// plus its port-enriched signature. Poll: the namespace can already be present from a persistent cache
+	// (a pre-upgrade Desc-only entry), so the enriched signature (Circle's Plane + Radius inputs) may only
+	// appear once the fresh background sync — which instantiates proxies for ports — completes.
+	var sig, pc string
+	ddeadline := time.Now().Add(150 * time.Second)
+	for {
+		desc, isErr := discCall[describeFunctionOut](t, c, "describe_function", map[string]any{"member": "Grasshopper.Curve.Circle"})
+		if isErr {
+			t.Fatalf("describe: %+v", desc.Error)
+		}
+		if desc.Result != nil {
+			pc, _ = desc.Result["python_call"].(string)
+			sig, _ = desc.Result["signature"].(string)
+			if strings.Contains(sig, "Radius") && strings.Contains(sig, "Plane") {
+				if params, ok := desc.Result["parameters"].([]any); !ok || len(params) == 0 {
+					t.Errorf("describe should list the component's input ports as parameters, got %v", desc.Result["parameters"])
+				}
+				break
+			}
+		}
+		if time.Now().After(ddeadline) {
+			t.Fatalf("Circle's describe never showed its Plane/Radius input ports (port enrichment); last signature %q", sig)
+		}
+		time.Sleep(5 * time.Second)
 	}
-	if desc.Result == nil {
-		t.Fatalf("describe returned no result for Grasshopper.Curve.Circle")
-	}
-	pc, _ := desc.Result["python_call"].(string)
 	if !strings.Contains(pc, "EmitObject") {
 		t.Errorf("describe python_call should place the component by guid (EmitObject), got %q", pc)
 	}
-	t.Logf("describe Circle python_call: %s", pc)
+	t.Logf("describe Circle: python_call=%s signature=%s", pc, sig)
 }

@@ -189,8 +189,9 @@ usable from either language. Once a Grasshopper definition is open, its **compon
 under the `Grasshopper` namespace (one type per category). It is **kept out of the default search** so it does
 not crowd the RhinoCommon ranking — to find a component, either **browse** (`list_functions` with
 `namespace: "Grasshopper"`, then a category) or **search with `namespace: "Grasshopper"`**. `describe_function`
-then gives the component's description and a `python_call` that places it on a bound definition by guid. Use
-it to find which component to add when authoring a definition.
+then gives the component's description, its **input/output ports** (the signature — the port names you wire
+with `connector.Grasshopper.Connect`), and a `python_call` that places it on a bound definition by guid. Use
+it to find which component to add when authoring a definition, and how to wire it.
 
 - **`search_functions`** is the one to reach for. Give it a **plain task sentence** naming the
   operation and the type (`"add a circle to the document"`, `"closest point on a curve"`); ranking
