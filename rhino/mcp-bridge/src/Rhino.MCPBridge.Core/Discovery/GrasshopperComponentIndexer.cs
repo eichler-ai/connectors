@@ -90,7 +90,20 @@ public static class GrasshopperComponentIndexer
         foreach (var entry in components.OrderBy(c => c.Guid, StringComparer.Ordinal))
         {
             hashInput.Append(entry.Guid).Append('|').Append(entry.Name).Append('|').Append(entry.Category)
-                .Append('|').Append(entry.SubCategory).Append('|').Append(entry.Description ?? "").Append('\n');
+                .Append('|').Append(entry.SubCategory).Append('|').Append(entry.Description ?? "");
+            // Ports are part of the identity: a Grasshopper/plug-in update that changes a component's inputs
+            // or outputs must re-sync the catalog so describe_function reflects the new signature.
+            foreach (var p in entry.Inputs)
+            {
+                hashInput.Append("|i:").Append(p.Name).Append(':').Append(p.Type);
+            }
+
+            foreach (var p in entry.Outputs)
+            {
+                hashInput.Append("|o:").Append(p.Name).Append(':').Append(p.Type);
+            }
+
+            hashInput.Append('\n');
 
             var category = string.IsNullOrWhiteSpace(entry.Category) ? "Uncategorized" : entry.Category.Trim();
             if (!byCategory.TryGetValue(category, out var members))
