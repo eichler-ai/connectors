@@ -202,6 +202,21 @@ it to find which component to add when authoring a definition.
 the call asks you to name one (`ambiguous-instance-version`), since the API surface is
 version-specific. Pass it when instances have different plug-ins loaded, too — each indexes its own.
 
+## Worked examples — `search_howtos` / `describe_howto`
+
+Before writing a script from scratch, check whether a **worked, verified how-to** already exists. Each
+is one task with a complete `execute_script` body, the members it uses and the pitfalls it avoids, and
+every hit says whether it ran on **your Rhino version** (`verified_here`).
+
+- **`search_howtos`** — a plain task sentence, the same shape as `search_functions`. Pass exactly one
+  of `instance_id` (its version decides what counts as verified) or `rhino_version` (e.g. `"8"`). Hits
+  verified on your version lead; the others are usually still the right starting point.
+- **`describe_howto`** — the full document for one `id` from a result: the script, its `pitfalls`, and
+  the verification stamp for your version. Read the pitfalls, then run the script with `execute_script`.
+
+The corpus is small and grows with the connector; a miss means the topic is not covered yet, so fall
+back to `search_functions` and write the script yourself.
+
 ## What is refused, and what needs your confirmation
 
 The one test: **would the automatic undo actually revert this?** Anything that escapes that boundary
@@ -314,6 +329,8 @@ inspect the document rather than assuming it's clean.
 | `search_functions` | find a member by a plain task sentence (semantic) |
 | `list_functions` | browse the API tree: namespaces → types → members |
 | `describe_function` | one member's full detail + both call shapes |
+| `search_howtos` | find a verified worked example for a task before scripting |
+| `describe_howto` | one how-to in full: script, pitfalls, verification for your version |
 | `capture_view` | see a viewport (image) to debug |
 | `inspect_gh_definition` | read an open Grasshopper definition's objects, positions and wiring |
 | `frame_canvas` | pan/zoom the Grasshopper canvas to a neighbourhood of components |

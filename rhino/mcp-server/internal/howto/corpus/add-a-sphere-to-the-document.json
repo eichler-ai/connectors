@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "id": "add-a-sphere-to-the-document",
+  "rev": 1,
+  "kind": "howto",
+  "title": "Add a sphere to the document",
+  "task": "Add a sphere to the active Rhino document with RhinoDoc.Objects.AddSphere and return its object id. Build the Sphere from a centre point and radius, then redraw so it shows in the viewports.",
+  "members": [
+    "Rhino.Geometry.Sphere.#ctor",
+    "Rhino.DocObjects.Tables.ObjectTable.AddSphere",
+    "Rhino.RhinoDoc.Views"
+  ],
+  "script": "# Task: add a sphere to the active Rhino document and return its object id.\nimport System\nimport Rhino\nimport scriptcontext as sc\n\n# 1. Build the geometry: a sphere centred at the origin, radius 5 (model units).\nsphere = Rhino.Geometry.Sphere(Rhino.Geometry.Point3d(0, 0, 0), 5.0)\n\n# 2. Add it to the document. AddSphere bakes the sphere as a surface object and\n#    returns its System.Guid -- Guid.Empty means the add failed.\nguid = sc.doc.Objects.AddSphere(sphere)\nif guid == System.Guid.Empty:\n    raise Exception(\"AddSphere returned an empty id\")\n\n# 3. Redraw so the new object shows in the viewports (a script edit does not\n#    trigger a redraw on its own).\nsc.doc.Views.Redraw()\n\nresult = \"added sphere %s\" % guid\n",
+  "script_language": "python",
+  "pitfalls": [
+    {
+      "symptom": "AddSphere returns and the code runs, but the sphere is not visible in any viewport.",
+      "cause": "A script does not trigger a viewport redraw on its own; the new object is in the document but the views are stale.",
+      "fix": "Call sc.doc.Views.Redraw() after adding objects so the viewports repaint."
+    }
+  ],
+  "tags": [
+    "geometry",
+    "document",
+    "objects"
+  ],
+  "provenance": {
+    "kind": "maintainer",
+    "reviewed_by": "nchim",
+    "reviewed_at": "2026-09-12T00:00:00Z"
+  },
+  "verify": {
+    "expect_object_delta": 1,
+    "expect_return_contains": "added sphere"
+  },
+  "created_at": "2026-09-12T00:00:00Z",
+  "updated_at": "2026-09-12T00:00:00Z"
+}

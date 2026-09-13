@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "id": "read-document-units-and-object-count",
+  "rev": 1,
+  "kind": "howto",
+  "title": "Read the document's units and object count",
+  "task": "Read the active Rhino document's ModelUnitSystem and how many objects it holds (ObjectTable.Count), without changing anything. A read-only inspection of the document.",
+  "members": [
+    "Rhino.RhinoDoc.ModelUnitSystem",
+    "Rhino.DocObjects.Tables.ObjectTable.Count"
+  ],
+  "script": "# Task: read the active document's unit system and object count (read-only).\nimport scriptcontext as sc\n\n# 1. ModelUnitSystem is an enum (Millimeters, Inches, ...); str() it for text.\nunits = str(sc.doc.ModelUnitSystem)\n\n# 2. The object table's Count is every object in the model.\ncount = sc.doc.Objects.Count\n\nresult = \"units=%s objects=%d\" % (units, count)\n",
+  "script_language": "python",
+  "pitfalls": [
+    {
+      "symptom": "Formatting ModelUnitSystem into a string with %s gives an enum member like 'Millimeters' that looks odd concatenated, or raises when used as a number.",
+      "cause": "ModelUnitSystem is a Rhino.UnitSystem enum value, not a string or an int.",
+      "fix": "Wrap it in str() before building the message; compare it against Rhino.UnitSystem members, never an integer."
+    }
+  ],
+  "tags": [
+    "document",
+    "units",
+    "read-only"
+  ],
+  "provenance": {
+    "kind": "maintainer",
+    "reviewed_by": "nchim",
+    "reviewed_at": "2026-09-12T00:00:00Z"
+  },
+  "verify": {
+    "expect_object_delta": 0,
+    "expect_return_contains": "units="
+  },
+  "created_at": "2026-09-12T00:00:00Z",
+  "updated_at": "2026-09-12T00:00:00Z"
+}

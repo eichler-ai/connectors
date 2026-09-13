@@ -30,6 +30,7 @@ import (
 	"github.com/eichler-ai/connectors/rhino/mcp-server/internal/dialer"
 	"github.com/eichler-ai/connectors/rhino/mcp-server/internal/discovery"
 	"github.com/eichler-ai/connectors/rhino/mcp-server/internal/execution"
+	"github.com/eichler-ai/connectors/rhino/mcp-server/internal/howtosearch"
 	"github.com/eichler-ai/connectors/rhino/mcp-server/internal/mcpserver"
 	"github.com/eichler-ai/connectors/rhino/mcp-server/internal/registry"
 )
@@ -99,6 +100,9 @@ func run(appDataDir string, logger *log.Logger) error {
 	embedder, reranker := loadSearchModels(root, logger)
 	discoveryRouter := discovery.NewRouter(dial, reg)
 	searchIndex := manager.New(discoveryRouter, embedder, reranker, logger.Printf)
+	// The how-to corpus (read-side) is embedded in the broker and ranked by the
+	// same semsearch pipeline; its index builds lazily on the first call.
+	howToSearch := howtosearch.New(embedder, reranker, logger.Printf)
 	dial.OnAttach(func(id string, _ *transport.Conn, attached bool) {
 		if attached {
 			searchIndex.OnAttach(id)
@@ -136,6 +140,7 @@ func run(appDataDir string, logger *log.Logger) error {
 	mcpserver.RegisterUndoRedo(s, router)
 	mcpserver.RegisterSkills(s, version)
 	mcpserver.RegisterDiscovery(s, discoveryRouter, searchIndex)
+	mcpserver.RegisterHowTo(s, mcpserver.HowToDeps{Search: howToSearch, Router: discoveryRouter})
 	mcpserver.RegisterPlugins(s)
 	mcpserver.RegisterRestart(s, reg, router)
 	mcpserver.RegisterInspect(s, router)
