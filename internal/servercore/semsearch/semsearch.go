@@ -104,11 +104,19 @@ type QueryOf[T any] struct {
 // Query is a search over the API member index.
 type Query = QueryOf[Doc]
 
-// InNamespace is the API corpus's mask: exact namespace match, or every doc
-// when namespace is empty.
+// excludedFromDefaultNamespace is the namespace whose members are kept out of an
+// UNSCOPED search so they do not dilute the primary API ranking. The Rhino
+// connector indexes the Grasshopper component catalog under "Grasshopper"; those
+// entries are a secondary "what component exists" surface, found by browsing
+// (list_functions) or an explicit namespace="Grasshopper" scope, not by a bare
+// search. This is a no-op for corpuses (Revit, Excel) that have no such namespace.
+const excludedFromDefaultNamespace = "Grasshopper"
+
+// InNamespace is the API corpus's mask: exact namespace match when a namespace is
+// given, otherwise every doc EXCEPT the default-excluded namespace (above).
 func InNamespace(namespace string) func(Doc) bool {
 	if namespace == "" {
-		return nil
+		return func(d Doc) bool { return d.Namespace != excludedFromDefaultNamespace }
 	}
 	return func(d Doc) bool { return d.Namespace == namespace }
 }

@@ -88,7 +88,10 @@ public class GrasshopperComponentIndexerTests
     public void SyncSource_MakesComponentsSearchableAndListable()
     {
         var cache = SyncedCache();
-        var hit = cache.Search("circle", namespaceFilter: null).FirstOrDefault(s => s.Member.MemberId == "Grasshopper.Curve.Circle");
+        // GH components are excluded from the DEFAULT (unscoped) search so they do not dilute RhinoCommon;
+        // they are found by browsing or with an explicit namespace="Grasshopper" scope.
+        Assert.DoesNotContain(cache.Search("circle", namespaceFilter: null), s => s.Member.Namespace == "Grasshopper");
+        var hit = cache.Search("circle", namespaceFilter: "Grasshopper").FirstOrDefault(s => s.Member.MemberId == "Grasshopper.Curve.Circle");
         Assert.NotNull(hit.Member);
         Assert.Equal("Grasshopper", hit.Member.Namespace);
 

@@ -1178,6 +1178,14 @@ public sealed class DiscoveryCache : IDisposable
                 }
             }
 
+            // Grasshopper catalog entries are excluded from an UNSCOPED search so they do not dilute the
+            // primary RhinoCommon/rhinoscript ranking; they are found by browsing (list_functions) or an
+            // explicit namespace="Grasshopper" scope. Mirrors the broker semsearch mask (semsearch.InNamespace).
+            if (string.IsNullOrEmpty(namespaceFilter))
+            {
+                results = results.Where(r => r.Member.Namespace != GrasshopperComponentIndexer.Namespace).ToList();
+            }
+
             return results;
         }
     }
