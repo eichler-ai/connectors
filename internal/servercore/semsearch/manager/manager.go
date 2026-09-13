@@ -171,6 +171,7 @@ func (m *Manager) OnAttach(instanceID string) {
 func (m *Manager) OnDetach(instanceID string) {
 	m.mu.Lock()
 	delete(m.byInstance, instanceID)
+	delete(m.rebuilding, instanceID) // an in-flight rebuild won't swap now (identity check); clear for tidiness
 	m.mu.Unlock()
 }
 
@@ -226,14 +227,16 @@ func (m *Manager) RefreshIfChanged(ctx context.Context, instanceID string) {
 	}
 	m.rebuilding[instanceID] = struct{}{}
 	m.mu.Unlock()
-	go m.rebuild(instanceID)
+	go m.rebuild(instanceID, e)
 }
 
 // rebuild pages and builds a fresh index for an instance whose corpus changed,
 // then swaps it in — keeping the old index serving until the swap, and dropping
 // the result if the instance detached meanwhile. Reuses a cached index when the
 // new fingerprint is one we already hold (buildCorpus checks byPrint).
-func (m *Manager) rebuild(instanceID string) {
+func (m *Manager) rebuild(instanceID string, prev *entry) {
+	// Own build context (background + buildTimeout), like build(): a rebuild that started near shutdown may
+	// run up to buildTimeout after the server ctx cancels, but the process is exiting anyway.
 	ctx, cancel := context.WithTimeout(context.Background(), buildTimeout)
 	defer cancel()
 	start := time.Now()
@@ -245,9 +248,10 @@ func (m *Manager) rebuild(instanceID string) {
 		m.logf("semsearch: rebuild for instance %s failed after %v: %s (keeping the previous index)", instanceID, time.Since(start).Round(time.Millisecond), drec.Message)
 		return
 	}
-	if _, still := m.byInstance[instanceID]; !still {
-		// Detached during the rebuild: the fresh index stays cached by fingerprint,
-		// but do not re-add the instance.
+	// Swap only if the entry we set out to replace is still the current one: a detach (map entry gone) or a
+	// newer build/rebuild (different entry, e.g. a reconnect that built a fresh corpus) must NOT be clobbered
+	// by this now-possibly-stale result. The fresh index stays cached by fingerprint regardless.
+	if cur, still := m.byInstance[instanceID]; !still || cur != prev {
 		return
 	}
 	done := make(chan struct{})
