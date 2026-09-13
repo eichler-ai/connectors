@@ -64,8 +64,9 @@ internal static class ScriptApiDenylist
         // document is closed with the _Close command, which the command-token table gates.
         [RhinoDoc] = new HashSet<string> { "Save", "SaveAs", "SaveAsTemplate", "Export", "ExportSelected", "Write3dmFile", "WriteFile", "Open", "OpenFile", "OpenHeadless", "Create", "CreateHeadless", "ReadFile", "Import" },
         // Connector.Grasshopper.Save writes a .gh/.ghx to the filesystem — outside the run's undo, like a
-        // Rhino document save — so it is confirmation-gated too. (Python's name-based guard already gates a
-        // bare `.Save(` via the RhinoDoc set above; this covers the C# call, which binds to this type.)
+        // Rhino document save — so it is confirmation-gated too. This covers the C# call (which binds to this
+        // type); PythonScriptGuard gates the Python call by normalising connector.Grasshopper -> this type
+        // (its ReceiverPrefixes) and reusing this same set.
         [GrasshopperApi] = new HashSet<string> { "Save" },
     };
 

@@ -134,12 +134,15 @@ internal sealed class GrasshopperOperations : IGrasshopperOperations
     public void Save(object grasshopperDocument, string path)
     {
         var doc = (GH_Document)grasshopperDocument;
-        var target = string.IsNullOrWhiteSpace(path) ? doc.FilePath : path;
-        if (string.IsNullOrWhiteSpace(target))
+        var raw = string.IsNullOrWhiteSpace(path) ? doc.FilePath : path;
+        if (string.IsNullOrWhiteSpace(raw))
         {
             throw new InvalidOperationException("this definition has never been saved, so it has no current path; pass a file path to save it to (a .gh or .ghx).");
         }
 
+        // Resolve to an absolute path so a relative argument does not leave a relative FilePath (which a later
+        // Save("") would then resolve against whatever working directory Rhino happens to have).
+        var target = System.IO.Path.GetFullPath(raw);
         // GH_DocumentIO.SaveQuiet writes the file (extension picks .gh binary vs .ghx XML) but does NOT set
         // the document's FilePath (verified live), so set it ourselves — otherwise a later Save() to the
         // "current" path would fail and the canvas title would not reflect where it was saved.
@@ -195,12 +198,13 @@ internal sealed class GrasshopperOperations : IGrasshopperOperations
         {
             if (_ops._pendingUndo is { } p && ReferenceEquals(p.Doc, _doc))
             {
+                // Clear the field FIRST: if PushUndoRecord throws, the stale record must not leak into the
+                // next run (the executor swallows a dispose failure). Capturing then nulling makes that safe.
+                _ops._pendingUndo = null;
                 if (p.Rec.ActionCount > 0)
                 {
                     _doc.UndoServer.PushUndoRecord(p.Rec);
                 }
-
-                _ops._pendingUndo = null;
             }
         }
     }
