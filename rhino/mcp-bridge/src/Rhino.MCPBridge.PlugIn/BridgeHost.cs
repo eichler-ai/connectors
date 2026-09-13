@@ -128,6 +128,20 @@ internal sealed class BridgeHost : ISessionEnvironment
 
                     System.Threading.Thread.Sleep(5000);
                 }
+
+                // grasshopper catalog (PRD §09): unlike rhinoscript, Grasshopper loads only when the user opens
+                // it (its ComponentServer is empty until then), so there is no bounded warm-up window. Retry on
+                // a slow cadence until it loads, so the catalog appears whenever GH is opened without a restart;
+                // the loop ends on success, a genuine index error, or bridge shutdown.
+                while (!_stop.IsCancellationRequested)
+                {
+                    if (DiscoveryBootstrap.SyncGrasshopper(cache, _log))
+                    {
+                        break;
+                    }
+
+                    _stop.Token.WaitHandle.WaitOne(TimeSpan.FromSeconds(30));
+                }
             }
         }) { IsBackground = true, Name = "MCPBridge discovery build" }.Start();
     }
