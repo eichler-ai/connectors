@@ -72,6 +72,46 @@ internal sealed class GrasshopperOperations : IGrasshopperOperations
         param.ExpireSolution(recompute: false);
     }
 
+    public void Connect(object grasshopperDocument, string sourceId, string sourceOutput, string targetId, string targetInput)
+    {
+        var doc = (GH_Document)grasshopperDocument;
+        var source = ResolvePort(FindObjectOrThrow(doc, sourceId), sourceOutput, output: true);
+        var target = ResolvePort(FindObjectOrThrow(doc, targetId), targetInput, output: false);
+        // An output-only control (slider/toggle/value list) accepts AddSource at the kernel level but ignores
+        // it at solve — a silent no-op. Refuse it loudly (the connector's "never silently" rule), naming the
+        // fix, rather than let a script think it wired something.
+        if (IsSourceRejectingControl(target))
+        {
+            throw new InvalidOperationException($"'{Nick((IGH_DocumentObject)target)}' is an output-only control (a Number Slider, Boolean Toggle or Value List): it produces a value and cannot take a wired source. Use it as the wire's source instead.");
+        }
+
+        // Idempotent: wiring the same pair twice is a no-op, not a duplicate source.
+        if (!target.Sources.Contains(source))
+        {
+            target.AddSource(source);
+        }
+
+        target.ExpireSolution(recompute: false);
+    }
+
+    public void Disconnect(object grasshopperDocument, string sourceId, string sourceOutput, string targetId, string targetInput)
+    {
+        var doc = (GH_Document)grasshopperDocument;
+        var source = ResolvePort(FindObjectOrThrow(doc, sourceId), sourceOutput, output: true);
+        var target = ResolvePort(FindObjectOrThrow(doc, targetId), targetInput, output: false);
+        // Removing a source that is not wired is a no-op, not an error (matches ClearReference's forgiving clear).
+        target.RemoveSource(source);
+        target.ExpireSolution(recompute: false);
+    }
+
+    public void ClearSources(object grasshopperDocument, string targetId, string targetInput)
+    {
+        var doc = (GH_Document)grasshopperDocument;
+        var target = ResolvePort(FindObjectOrThrow(doc, targetId), targetInput, output: false);
+        target.RemoveAllSources();
+        target.ExpireSolution(recompute: false);
+    }
+
     public void Solve(object grasshopperDocument, bool expireAll)
     {
         ((GH_Document)grasshopperDocument).NewSolution(expireAll);
@@ -196,6 +236,84 @@ internal sealed class GrasshopperOperations : IGrasshopperOperations
             return null;
         }
     }
+
+    private static IGH_DocumentObject FindObjectOrThrow(GH_Document doc, string nicknameOrGuid) =>
+        FindObject(doc, nicknameOrGuid)
+        ?? throw new InvalidOperationException($"no Grasshopper object with nickname or id '{nicknameOrGuid}' is on the canvas.");
+
+    /// <summary>Resolves one of an object's ports to an <see cref="IGH_Param"/> for wiring. A free-floating
+    /// parameter (a slider, panel, or a bare Param_*) IS its own single port, so <paramref name="port"/> is
+    /// left empty for it. For a component, an empty port means its sole port (an error names the choices when
+    /// there is more than one), otherwise the port is matched by 0-based index or by name/nickname
+    /// (case-insensitive, first match wins). <paramref name="output"/> selects the output side (a wire's
+    /// source) or the input side (its target).</summary>
+    private static IGH_Param ResolvePort(IGH_DocumentObject obj, string port, bool output)
+    {
+        var side = output ? "output" : "input";
+        // A free-floating parameter is its own port; a named/indexed port only makes sense for a component.
+        if (obj is IGH_Param param && obj is not IGH_Component)
+        {
+            if (!string.IsNullOrEmpty(port) && port != "0" &&
+                !string.Equals(param.Name, port, StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(param.NickName, port, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException($"'{Nick(obj)}' is a parameter, not a component, so it has no {side} ports to address by name or index; pass \"\" as the {side} port.");
+            }
+
+            return param;
+        }
+
+        if (obj is IGH_Component comp)
+        {
+            var ports = output ? comp.Params.Output : comp.Params.Input;
+            if (ports.Count == 0)
+            {
+                throw new InvalidOperationException($"'{Nick(obj)}' ({obj.Name}) has no {side} ports.");
+            }
+
+            if (string.IsNullOrEmpty(port))
+            {
+                if (ports.Count == 1)
+                {
+                    return ports[0];
+                }
+
+                throw new InvalidOperationException($"'{Nick(obj)}' ({obj.Name}) has {ports.Count} {side} ports; name which one (by name or 0-based index): {PortNames(ports)}.");
+            }
+
+            if (int.TryParse(port, NumberStyles.Integer, CultureInfo.InvariantCulture, out var idx))
+            {
+                if (idx < 0 || idx >= ports.Count)
+                {
+                    throw new InvalidOperationException($"'{Nick(obj)}' ({obj.Name}) has {ports.Count} {side} ports (index 0..{ports.Count - 1}); {idx} is out of range.");
+                }
+
+                return ports[idx];
+            }
+
+            foreach (var p in ports)
+            {
+                if (string.Equals(p.Name, port, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(p.NickName, port, StringComparison.OrdinalIgnoreCase))
+                {
+                    return p;
+                }
+            }
+
+            throw new InvalidOperationException($"'{Nick(obj)}' ({obj.Name}) has no {side} port '{port}'; its {side} ports are: {PortNames(ports)}.");
+        }
+
+        throw new InvalidOperationException($"'{Nick(obj)}' ({obj.Name}) is neither a component nor a parameter, so it has no ports to wire.");
+    }
+
+    // Slider/toggle/value list are input controls a user edits, but wiring-wise they are output-only: their
+    // value comes from their own state, and a source added to them is ignored at solve. (A Panel, by contrast,
+    // does display a wired source, so it is not in this set.)
+    private static bool IsSourceRejectingControl(IGH_Param param) =>
+        param is GH_NumberSlider or GH_BooleanToggle or GH_ValueList;
+
+    private static string PortNames(IEnumerable<IGH_Param> ports) =>
+        string.Join(", ", ports.Select(p => "'" + (string.IsNullOrEmpty(p.NickName) ? p.Name : p.NickName) + "'"));
 
     private static IGH_DocumentObject? FindObject(GH_Document doc, string nicknameOrGuid)
     {

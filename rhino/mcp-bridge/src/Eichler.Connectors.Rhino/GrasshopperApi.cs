@@ -37,6 +37,29 @@ public sealed class GrasshopperApi
     /// expiring it.</summary>
     public void ClearReference(string nickname) => _runtime.GrasshopperReference(nickname, null);
 
+    /// <summary>Wires a source object's output to a target object's input, so building a definition
+    /// programmatically (place components, then connect them) needs nothing beyond the connector. Objects are
+    /// named by nickname (case-insensitive) or instance GUID, like <see cref="Find"/>. A port is named by its
+    /// name/nickname (case-insensitive) or its 0-based index; pass <c>""</c> for the sole port — or for a
+    /// free-floating parameter (a slider, panel, or a bare Curve/Number/… parameter), which is its own single
+    /// port. Idempotent (wiring a pair twice adds no duplicate) and marks the target dirty; call
+    /// <see cref="Solve"/> afterwards to recompute. Raises if an object or port is not found, or a component
+    /// with several matching ports is addressed with an empty port. Type mismatches and cycles are not caught
+    /// here — they surface in the solve report on the next <see cref="Solve"/>.</summary>
+    public void Connect(string sourceId, string sourceOutput, string targetId, string targetInput) =>
+        _runtime.GrasshopperConnect(sourceId, sourceOutput, targetId, targetInput);
+
+    /// <summary>Removes the wire from a source's output to a target's input (the inverse of
+    /// <see cref="Connect"/>; ports named the same way). Removing a wire that is not there is a no-op, not an
+    /// error. Marks the target dirty.</summary>
+    public void Disconnect(string sourceId, string sourceOutput, string targetId, string targetInput) =>
+        _runtime.GrasshopperDisconnect(sourceId, sourceOutput, targetId, targetInput);
+
+    /// <summary>Removes every wire feeding a target's input port (named as in <see cref="Connect"/>), leaving
+    /// the port unconnected. Marks the target dirty. The wiring counterpart of <see cref="ClearReference"/>.</summary>
+    public void ClearSources(string targetId, string targetInput) =>
+        _runtime.GrasshopperClearSources(targetId, targetInput);
+
     /// <summary>Reads a parameter's current output (PRD §10) — every output item across the data tree's
     /// branches, flattened into one list and capped to the response budget — as a <see cref="GrasshopperValue"/>.
     /// Numbers/text/booleans ride verbatim; geometry is summarised as type + bounding box + a document handle,

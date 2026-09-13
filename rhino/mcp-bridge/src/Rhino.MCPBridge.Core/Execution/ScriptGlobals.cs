@@ -54,6 +54,9 @@ public sealed class ScriptGlobals : IConnectorRuntime
     GrasshopperComponent? IConnectorRuntime.GrasshopperFind(string nicknameOrGuid) => Ops().Find(RequireGrasshopperDocument(), nicknameOrGuid);
     void IConnectorRuntime.GrasshopperSet(string nickname, object value) => Ops().Set(RequireGrasshopperDocument(), nickname, value);
     void IConnectorRuntime.GrasshopperReference(string nickname, object? objectIds) => Ops().Reference(RequireGrasshopperDocument(), nickname, objectIds);
+    void IConnectorRuntime.GrasshopperConnect(string sourceId, string sourceOutput, string targetId, string targetInput) => Ops().Connect(RequireGrasshopperDocument(), sourceId, sourceOutput, targetId, targetInput);
+    void IConnectorRuntime.GrasshopperDisconnect(string sourceId, string sourceOutput, string targetId, string targetInput) => Ops().Disconnect(RequireGrasshopperDocument(), sourceId, sourceOutput, targetId, targetInput);
+    void IConnectorRuntime.GrasshopperClearSources(string targetId, string targetInput) => Ops().ClearSources(RequireGrasshopperDocument(), targetId, targetInput);
     void IConnectorRuntime.GrasshopperSolve(bool expireAll) => Ops().Solve(RequireGrasshopperDocument(), expireAll);
     GrasshopperValue IConnectorRuntime.GrasshopperGet(string nickname) => Ops().Get(RequireGrasshopperDocument(), nickname);
     GrasshopperData IConnectorRuntime.GrasshopperData(string nickname) => Ops().Data(RequireGrasshopperDocument(), nickname);

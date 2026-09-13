@@ -19,6 +19,9 @@ internal interface IConnectorRuntime
     GrasshopperComponent? GrasshopperFind(string nicknameOrGuid);
     void GrasshopperSet(string nickname, object value);
     void GrasshopperReference(string nickname, object? objectIds);
+    void GrasshopperConnect(string sourceId, string sourceOutput, string targetId, string targetInput);
+    void GrasshopperDisconnect(string sourceId, string sourceOutput, string targetId, string targetInput);
+    void GrasshopperClearSources(string targetId, string targetInput);
     void GrasshopperSolve(bool expireAll);
     GrasshopperValue GrasshopperGet(string nickname);
     GrasshopperData GrasshopperData(string nickname);
