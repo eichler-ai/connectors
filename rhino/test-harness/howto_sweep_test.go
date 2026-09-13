@@ -32,6 +32,7 @@ type howtoDoc struct {
 		ExpectObjectDelta    *int           `json:"expect_object_delta"`
 		ExpectReturnContains string         `json:"expect_return_contains"`
 		Execute              map[string]any `json:"execute"`
+		Grasshopper          bool           `json:"grasshopper"`
 	} `json:"verify"`
 }
 
@@ -167,6 +168,54 @@ result = str(len(list(sc.doc.Objects.GetObjectList(s))))`
 	return n
 }
 
+// ghDocIDs is the set of Grasshopper definition ids currently open on the instance.
+func ghDocIDs(t *testing.T, c *mcpclient.Client, instanceID string) []string {
+	t.Helper()
+	var out []string
+	for _, i := range listInstances(t, c).Instances {
+		if i.InstanceID == instanceID {
+			for _, g := range i.GrasshopperDocuments {
+				out = append(out, g.GrasshopperDocumentID)
+			}
+		}
+	}
+	return out
+}
+
+// newBoundGrasshopperDoc gives a GH how-to a clean bound canvas: it removes every open Grasshopper
+// definition and creates exactly one fresh empty one, then returns its gh_document_id. Clearing first is
+// deliberate — an unsaved/empty definition's id is derived from its (empty) identity, so several collide on
+// one id; leaving exactly one makes the id unambiguous. (Sweep-only; runs against a scratch Rhino.)
+func newBoundGrasshopperDoc(t *testing.T, c *mcpclient.Client, instanceID, doc string) string {
+	t.Helper()
+	mk := callExecute(t, c, map[string]any{"instance_id": instanceID, "document_id": doc, "language": "python",
+		"script": `import Rhino, System
+Rhino.PlugIns.PlugIn.LoadPlugIn(System.Guid("b45a29b1-4343-4035-989e-044e8580d9cf"))
+import Grasshopper
+import Grasshopper.Kernel as ghk
+server = Grasshopper.Instances.DocumentServer
+for existing in list(server):
+    server.RemoveDocument(existing)
+d = ghk.GH_Document()
+d.Enabled = True
+try: server.AddDocument(d, True)
+except TypeError: server.AddDocument(d)
+result = "docs=%d" % server.DocumentCount`}, 60*time.Second)
+	if mk.Status != "success" {
+		t.Fatalf("could not create a Grasshopper fixture definition: %+v", mk.Error)
+	}
+	// Poll until exactly one definition is open (its id is then unambiguous) and return it.
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		if ids := ghDocIDs(t, c, instanceID); len(ids) == 1 {
+			return ids[0]
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	t.Fatalf("expected exactly one Grasshopper definition after clearing, got %d", len(ghDocIDs(t, c, instanceID)))
+	return ""
+}
+
 // sweepOne runs one document and returns "" on success or the failure
 // diagnostic.
 func sweepOne(t *testing.T, c *mcpclient.Client, instanceID, doc string, d *howtoDoc) string {
@@ -182,6 +231,11 @@ func sweepOne(t *testing.T, c *mcpclient.Client, instanceID, doc string, d *howt
 	before := activeObjectCount(t, c, instanceID, doc)
 
 	args := map[string]any{"instance_id": instanceID, "document_id": doc, "language": lang, "script": d.Script}
+	// A Grasshopper how-to drives connector.Grasshopper.*, which needs a bound definition: give it a fresh
+	// empty one to build on (the script places/wires what it needs).
+	if d.Verify != nil && d.Verify.Grasshopper {
+		args["gh_document_id"] = newBoundGrasshopperDoc(t, c, instanceID, doc)
+	}
 	if d.Verify != nil {
 		for k, v := range d.Verify.Execute {
 			args[k] = v

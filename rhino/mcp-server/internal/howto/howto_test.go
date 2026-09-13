@@ -46,18 +46,17 @@ func TestEmbeddedCorpusIsValid(t *testing.T) {
 	if err != nil {
 		t.Fatalf("embedded corpus did not load: %v", err)
 	}
-	if c.Len() != 3 {
-		t.Fatalf("expected 3 seed how-tos, got %d", c.Len())
+	if c.Len() < 3 {
+		t.Fatalf("expected the seed corpus to hold the seed how-tos, got %d", c.Len())
 	}
-	// The seed corpus ships a harness stamp per doc (written by the sweep),
-	// verified on Rhino 8.
-	if len(stamps) != 3 {
-		t.Errorf("seed corpus ships a harness stamp per doc (3), got %d", len(stamps))
+	// Every shipped how-to carries a harness stamp (written by the sweep), all on Rhino 8.
+	if len(stamps) != c.Len() {
+		t.Errorf("every seed how-to should ship a harness stamp: %d docs, %d stamps", c.Len(), len(stamps))
 	}
 	if len(ver.VerifiedOn) != 1 || ver.VerifiedOn[0] != "8" {
 		t.Errorf("seed corpus is verified on Rhino 8, got %v", ver.VerifiedOn)
 	}
-	if ver.Documents != 3 || ver.Hash == "" {
+	if ver.Documents != c.Len() || ver.Hash == "" {
 		t.Errorf("version looks wrong: %+v", ver)
 	}
 	for _, id := range c.IDs() {

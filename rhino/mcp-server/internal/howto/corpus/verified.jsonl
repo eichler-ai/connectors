@@ -1,3 +1,5 @@
-{"id":"add-a-sphere-to-the-document","rev":1,"script_sha256":"e8ff24437bf47f6b585c108536e6ce1001792ef530fb560ea367e9151927f0c2","rhino_version":"8","status":"passed","at":"2026-09-13T05:30:57Z","by":"harness"}
-{"id":"create-a-layer-and-draw-a-circle-on-it","rev":1,"script_sha256":"fd9770415c69c3bcd93ddc083a7f2f74d86f54327a0fb3bdce9dc791e32864c2","rhino_version":"8","status":"passed","at":"2026-09-13T05:30:58Z","by":"harness"}
-{"id":"read-document-units-and-object-count","rev":1,"script_sha256":"92af0235efd23e0beaaeacf23200b62c2d39064374c8d0067292a55690189774","rhino_version":"8","status":"passed","at":"2026-09-13T05:30:58Z","by":"harness"}
+{"id":"add-a-sphere-to-the-document","rev":1,"script_sha256":"e8ff24437bf47f6b585c108536e6ce1001792ef530fb560ea367e9151927f0c2","rhino_version":"8","status":"passed","at":"2026-09-13T14:37:42Z","by":"harness"}
+{"id":"build-a-slider-driven-grasshopper-circle","rev":1,"script_sha256":"5b0139b04578fcb0be9bbd0e3936bb4f0e99cbafc6ba0d66b2163abfea39b67e","rhino_version":"8","status":"passed","at":"2026-09-13T14:37:43Z","by":"harness"}
+{"id":"create-a-layer-and-draw-a-circle-on-it","rev":1,"script_sha256":"fd9770415c69c3bcd93ddc083a7f2f74d86f54327a0fb3bdce9dc791e32864c2","rhino_version":"8","status":"passed","at":"2026-09-13T14:37:43Z","by":"harness"}
+{"id":"read-document-units-and-object-count","rev":1,"script_sha256":"92af0235efd23e0beaaeacf23200b62c2d39064374c8d0067292a55690189774","rhino_version":"8","status":"passed","at":"2026-09-13T14:37:43Z","by":"harness"}
+{"id":"reference-a-rhino-object-into-a-grasshopper-definition","rev":1,"script_sha256":"a3e1ed022367da596be5f0f34c4954c3f6891655c7d5b07efac63bd39d74481d","rhino_version":"8","status":"passed","at":"2026-09-13T14:37:44Z","by":"harness"}

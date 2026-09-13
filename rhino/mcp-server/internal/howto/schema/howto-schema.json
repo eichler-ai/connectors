@@ -275,6 +275,10 @@
           "type": "object",
           "additionalProperties": true,
           "description": "Extra execute_script arguments the sweep passes verbatim (e.g. confirm_lifecycle_actions: true)."
+        },
+        "grasshopper": {
+          "type": "boolean",
+          "description": "The script drives a Grasshopper definition (connector.Grasshopper.*), so the sweep runs it against a fresh empty bound definition (ghdoc); the script builds what it needs on it. The object delta is still measured on the Rhino document."
         }
       }
     }

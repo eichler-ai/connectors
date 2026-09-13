@@ -17,8 +17,8 @@ func TestSearchFindsASeedDocument(t *testing.T) {
 	if len(res.Hits) == 0 {
 		t.Fatal("expected at least one hit for a task that is literally a seed title")
 	}
-	if res.Status.Documents != 3 {
-		t.Errorf("served corpus should be 3 docs, got %d", res.Status.Documents)
+	if res.Status.Documents < 3 {
+		t.Errorf("served corpus should hold the seed docs, got %d", res.Status.Documents)
 	}
 	found := false
 	for _, h := range res.Hits {

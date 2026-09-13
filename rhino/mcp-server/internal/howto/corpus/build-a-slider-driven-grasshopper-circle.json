@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "id": "build-a-slider-driven-grasshopper-circle",
+  "rev": 1,
+  "kind": "howto",
+  "title": "Build a slider-driven circle in Grasshopper",
+  "task": "Build a Grasshopper definition programmatically: place a Number Slider and a Circle component, wire the slider to the circle's Radius with connector.Grasshopper.Connect, drive it with Set, Solve, and read the circle from a free output parameter with Get.",
+  "members": [
+    "Grasshopper.Curve.Circle",
+    "Grasshopper.Instances.ComponentServer.EmitObject",
+    "Grasshopper.Kernel.GH_Document.AddObject"
+  ],
+  "script": "# Task: build a small Grasshopper definition \u2014 a Number Slider driving a Circle\n# component's radius \u2014 then read the resulting circle. Address the run with a\n# gh_document_id (from list_instances gh_documents); it binds the definition as\n# `ghdoc` and lets connector.Grasshopper.* drive it.\nimport Grasshopper\nimport Grasshopper.Kernel.Special as ghs\nimport Grasshopper.Kernel.Parameters as ghp\n\nserver = Grasshopper.Instances.ComponentServer\n\n# 1. Place objects on the definition with ghdoc (there is no connector \"place\"\n#    call). A Number Slider is a special param you can construct; a component\n#    (Circle) is emitted from the component server by guid \u2014 describe_function on\n#    a \"Grasshopper.*\" catalog member gives you exactly this EmitObject line.\nslider = ghs.GH_NumberSlider(); slider.NickName = \"Radius\"; slider.CreateAttributes(); ghdoc.AddObject(slider, False)\n\ndef guid_for(name):\n    for p in server.ObjectProxies:\n        try:\n            if p.Desc.Name == name and not p.Obsolete:\n                return p.Guid\n        except:\n            pass\n    raise Exception(\"no Grasshopper component named %r is installed\" % name)\n\ncircle = server.EmitObject(guid_for(\"Circle\")); circle.NickName = \"Circle\"; circle.CreateAttributes(); ghdoc.AddObject(circle, False)\n\n# A component's output cannot be read directly (Get needs a top-level parameter),\n# so add a free output parameter to read the circle from.\nresult_param = ghp.Param_Geometry(); result_param.NickName = \"Result\"; result_param.CreateAttributes(); ghdoc.AddObject(result_param, False)\n\n# 2. Wire it up. Connect names objects by nickname and a port by name or 0-based\n#    index; \"\" is the sole port (a slider is its own single output; the Circle\n#    component and the Result param each have one relevant port).\nconnector.Grasshopper.Connect(\"Radius\", \"\", \"Circle\", \"Radius\")\nconnector.Grasshopper.Connect(\"Circle\", \"\", \"Result\", \"\")\n\n# 3. Drive the slider and solve. Set clamps to the slider's range (default 0..1);\n#    widen the range first (via ghdoc) if you need a larger value.\nconnector.Grasshopper.Set(\"Radius\", 0.75)\nconnector.Grasshopper.Solve(True)\n\n# 4. Read the free output parameter. Geometry comes back as type + bounding box +\n#    a handle, never inline.\nout = connector.Grasshopper.Get(\"Result\")\nresult = \"items=%d type=%s\" % (out.Count, out.Items[0].Type if out.Count else \"none\")\n",
+  "script_language": "python",
+  "pitfalls": [
+    {
+      "symptom": "connector.Grasshopper.Get(\"Circle\") on a component raises 'is a <name>, not a parameter with a data tree'.",
+      "cause": "Get reads a top-level parameter; a component's output ports are its children, not addressable by nickname.",
+      "fix": "Wire the component's output into a free output parameter (a Param_Geometry/Param_Curve you add) and Get that parameter."
+    },
+    {
+      "symptom": "Set(\"Radius\", 5) leaves the slider at 1, not 5.",
+      "cause": "Set clamps to the slider's range, which defaults to 0..1.",
+      "fix": "Widen the slider's range on ghdoc (slider.Slider.Maximum = 100) before Set, or work within 0..1."
+    },
+    {
+      "symptom": "The definition you built is gone when the session ends \u2014 it was never written to disk.",
+      "cause": "A definition built programmatically lives only in memory until saved.",
+      "fix": "connector.Grasshopper.Save(path) writes a .gh/.ghx; it needs confirm_lifecycle_actions (it writes a file). Note a save-as changes the definition's gh_document_id."
+    }
+  ],
+  "tags": [
+    "grasshopper",
+    "wiring",
+    "components"
+  ],
+  "provenance": {
+    "kind": "maintainer",
+    "reviewed_by": "nchim",
+    "reviewed_at": "2026-09-13T00:00:00Z"
+  },
+  "verify": {
+    "expect_object_delta": 0,
+    "expect_return_contains": "items=1",
+    "grasshopper": true
+  },
+  "created_at": "2026-09-13T00:00:00Z",
+  "updated_at": "2026-09-13T00:00:00Z"
+}
