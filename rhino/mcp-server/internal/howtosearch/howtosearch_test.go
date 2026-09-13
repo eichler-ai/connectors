@@ -48,15 +48,20 @@ func TestDescribeByIDAndMiss(t *testing.T) {
 	}
 }
 
-func TestVerifiedOnIsFalseWithoutStamps(t *testing.T) {
+func TestVerifiedOnReflectsTheShippedStamps(t *testing.T) {
 	svc := New(nil, nil, nil)
 	res, err := svc.Search(context.Background(), "sphere", "8")
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, h := range res.Hits {
-		if h.Doc.VerifiedOn("8") {
-			t.Errorf("%s: no stamps ship yet, so nothing is verified_here", h.Doc.Doc.ID)
+		// The seed corpus ships a passing Rhino 8 stamp per doc...
+		if !h.Doc.VerifiedOn("8") {
+			t.Errorf("%s: the seed corpus is verified on Rhino 8", h.Doc.Doc.ID)
+		}
+		// ...and nothing claims an unstamped version.
+		if h.Doc.VerifiedOn("99") {
+			t.Errorf("%s: must not be verified on an unstamped version", h.Doc.Doc.ID)
 		}
 	}
 }
