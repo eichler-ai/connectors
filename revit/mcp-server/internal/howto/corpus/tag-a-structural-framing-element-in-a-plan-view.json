@@ -8,10 +8,12 @@
   "members": [
     "Autodesk.Revit.DB.FilteredElementCollector.OfCategory",
     "Autodesk.Revit.DB.FamilySymbol.Activate",
+    "Autodesk.Revit.DB.Line.CreateBound",
     "Autodesk.Revit.Creation.Document.NewFamilyInstance",
     "Autodesk.Revit.DB.Document.Regenerate",
     "Autodesk.Revit.DB.Reference.#ctor",
     "Autodesk.Revit.DB.IndependentTag.Create",
+    "Autodesk.Revit.DB.IndependentTag.GetTaggedLocalElementIds",
     "Eichler.Connectors.Revit.Connector.WithTransaction"
   ],
   "script_language": "csharp-script",
