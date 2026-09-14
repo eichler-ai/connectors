@@ -1,15 +1,18 @@
 ---
-description: Cut and publish a new release (bump version, tag, push, trigger the release pipeline)
+description: Cut and publish a new Revit connector (add-in + server) release (bump version, tag, push, trigger the release pipeline)
 ---
 
+This command releases the **Revit** connector (the Revit MCP Bridge add-in + Revit MCP Server). For the
+Rhino connector, use `/release-rhino-plugin` instead.
+
 This command takes one required argument: `major`, `minor`, or `patch` -- which part of the current
-version to bump (e.g. `/release minor`). If it's missing or isn't one of those three words, stop and
-ask for it.
+version to bump (e.g. `/release-revit-addin minor`). If it's missing or isn't one of those three words,
+stop and ask for it.
 
 Follow these steps in order. This is a real, publicly-visible, hard-to-reverse action (it publishes
 a real GitHub Release and triggers `.github/workflows/release.yml` on the self-hosted runner) --
-don't skip the confirmation step, and don't treat "the user asked for /release" as consent to push
-the tag itself.
+don't skip the confirmation step, and don't treat "the user asked for /release-revit-addin" as consent
+to push the tag itself.
 
 1. **Confirm the repo is in a releasable state.** Check that the current branch is `main`, the
    working tree is clean (`git status`), and `main` is up to date with `origin/main` (`git fetch`,
@@ -41,8 +44,9 @@ the tag itself.
    `v0.0.0`.
 
 5. **Compute the next version** by bumping the component named in the argument, resetting any lower
-   components to 0 (standard semver): e.g. current `v1.2.3`, `/release minor` -> `v1.3.0`; current
-   `v1.2.3`, `/release major` -> `v2.0.0`; current `v1.2.3`, `/release patch` -> `v1.2.4`.
+   components to 0 (standard semver): e.g. current `v1.2.3`, `/release-revit-addin minor` -> `v1.3.0`;
+   current `v1.2.3`, `/release-revit-addin major` -> `v2.0.0`; current `v1.2.3`,
+   `/release-revit-addin patch` -> `v1.2.4`.
 
 6. **Show the user a summary** before doing anything irreversible: current version -> new version,
    plus a change preview (`git log <last-tag>..HEAD --oneline`, or `git log --oneline` from the
