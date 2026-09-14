@@ -119,8 +119,15 @@ irm https://raw.githubusercontent.com/eichler-ai/connectors/main/rhino/install.p
 ```
 
 It downloads the latest release, installs the plug-in with Rhino's yak CLI, and registers the MCP
-server with both Claude clients; restart Rhino and your Claude client afterward. On macOS (no
-one-liner yet), download the `.yak` from the
+server with both Claude clients; restart Rhino and your Claude client afterward. On macOS, one line in
+Terminal does the same:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/eichler-ai/connectors/main/rhino/install.sh | bash
+```
+
+Either installer also uninstalls (`-Uninstall` / `--uninstall`). To install manually on either
+platform, download the `.yak` from the
 [latest release](https://github.com/eichler-ai/connectors/releases), `yak install` it (or drag it
 onto Rhino), and run **`MCPBridgeRegister`** in Rhino's command line. Publishing to the public package
 server (so `_PackageManager` finds it) is a later step (PRD §15); for now it is install-from-file.

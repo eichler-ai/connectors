@@ -30,14 +30,22 @@ irm https://raw.githubusercontent.com/eichler-ai/connectors/main/rhino/install.p
 
 It downloads the latest release, installs the plug-in with Rhino's yak CLI, and registers the MCP server with Claude Code **and** Claude Desktop (handling the Store/MSIX config path). Then restart Rhino to load the plug-in, and restart your Claude client to pick up the server. To remove it, run the downloaded script with `-Uninstall` (`powershell -ExecutionPolicy Bypass -File .\install.ps1 -Uninstall`), or uninstall from `_PackageManager` inside Rhino.
 
-**macOS, or a manual Windows install.** Download the `.yak` from the [latest release](https://github.com/eichler-ai/connectors/releases), install it with the yak CLI that ships with Rhino (or drag the `.yak` onto the Rhino window), then run **`MCPBridgeRegister`** in Rhino's command line to register with both Claude clients:
+**macOS — one line in Terminal:**
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/eichler-ai/connectors/main/rhino/install.sh | bash
+```
+
+Same thing on macOS: it downloads the latest release, installs the plug-in with the yak CLI that ships with Rhino 8, and registers the MCP server with Claude Code **and** Claude Desktop. Restart Rhino and your Claude client afterward. To remove it, download and run with `--uninstall` (`curl -fsSL https://raw.githubusercontent.com/eichler-ai/connectors/main/rhino/install.sh -o install.sh && bash install.sh --uninstall`), or uninstall from `_PackageManager` inside Rhino.
+
+**Manual install (either platform).** Download the `.yak` from the [latest release](https://github.com/eichler-ai/connectors/releases), install it with the yak CLI that ships with Rhino (or drag the `.yak` onto the Rhino window), then run **`MCPBridgeRegister`** in Rhino's command line to register with both Claude clients:
 
 ```sh
 # macOS ("C:\Program Files\Rhino 8\System\yak.exe" on Windows)
 "/Applications/Rhino 8.app/Contents/Resources/bin/yak" install ~/Downloads/rhino-mcp-bridge-*.yak
 ```
 
-`MCPBridgeStatus` shows the registration state per client. *(A macOS one-liner, and publishing to the public package server so `_PackageManager` finds it by search — plus Rhino's own auto-update — are later steps, PRD §15; for now the package is install-from-file.)*
+`MCPBridgeStatus` shows the registration state per client. *(Publishing to the public package server so `_PackageManager` finds it by search — plus Rhino's own auto-update — is a later step, PRD §15; for now the package is install-from-file.)*
 
 **From source** (for development, or before a release exists):
 
