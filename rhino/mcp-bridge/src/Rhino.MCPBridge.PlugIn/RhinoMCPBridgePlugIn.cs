@@ -73,6 +73,11 @@ public sealed class RhinoMCPBridgePlugIn : Rhino.PlugIns.PlugIn
             // events; watch its DocumentServer (once it loads) so an opened/closed .gh refreshes the
             // snapshot immediately (PRD §10, review of PR #304).
             GrasshopperWatcher.Start(() => CurrentHost?.PushRegisterRefresh(), LogConnection);
+
+            // Phase 7: if the server binary is installed beside us but the user's Claude config doesn't yet
+            // point at it, leave one notice in connection.log. We never edit the config on load — the user
+            // runs MCPBridgeRegister — so this is the "notice" half of the command+notice registration UX.
+            ScheduleRegistrationNotice();
             return LoadReturnCode.Success;
         }
         catch (Exception ex)
@@ -127,6 +132,42 @@ public sealed class RhinoMCPBridgePlugIn : Rhino.PlugIns.PlugIn
             {
                 LogConnection("force-load RhinoCodePlugin threw: " + ex.Message);
                 pythonHost.NoteRhinoCodeLoadFailed($"force-loading RhinoCodePlugin threw: {ex.Message} (issue #287)");
+            }
+        };
+        RhinoApp.Idle += onIdle;
+    }
+
+    /// <summary>One-shot, on the first Idle tick: if the server binary is installed beside the plug-in
+    /// (a yak install, not a dev build) but the user's Claude config does not register it, note it in
+    /// connection.log. Stays silent for a dev build with no binary beside us, so it does not nag the
+    /// harness loop (which registers by RHINO_MCP_SERVER_PATH out of band). PRD §15.</summary>
+    private static void ScheduleRegistrationNotice()
+    {
+        EventHandler? onIdle = null;
+        onIdle = (_, _) =>
+        {
+            RhinoApp.Idle -= onIdle;
+            try
+            {
+                // Only the packaged case: a binary sitting beside the plug-in. A dev build returns null here
+                // (no binary, and the env override is a path elsewhere), and stays quiet.
+                var name = Core.Registration.ServerBinaryNames.ForPlatform(AppDataPaths.PlatformName());
+                if (name is null) return;
+                var dir = Path.GetDirectoryName(typeof(RhinoMCPBridgePlugIn).Assembly.Location);
+                if (string.IsNullOrEmpty(dir)) return;
+                var server = Path.Combine(dir, name);
+                if (!File.Exists(server)) return;
+
+                var configPath = Core.Registration.ClientRegistration.UserConfigPath();
+                var config = File.Exists(configPath) ? File.ReadAllText(configPath) : null;
+                if (Core.Registration.ClientRegistration.StateFor(config, server) != Core.Registration.RegistrationState.Current)
+                {
+                    LogConnection("MCP server is installed but not registered with Claude — run MCPBridgeRegister in Rhino to connect a client.");
+                }
+            }
+            catch (Exception ex)
+            {
+                LogConnection("registration notice check failed: " + ex.Message);
             }
         };
         RhinoApp.Idle += onIdle;
