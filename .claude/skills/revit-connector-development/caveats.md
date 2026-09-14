@@ -186,6 +186,22 @@ journal over a clean-looking screenshot.
 **But a visible dialog is not automatically the cause.** See the misdiagnosis below — matching a
 symptom to a known pattern is a hypothesis, not a diagnosis.
 
+## Symptom: `submit_howto` saves the document but attaches no verification stamp
+
+The result carries `howto-script-not-run-this-session` and no `verified` block.
+
+| Cause | Definitive check |
+|---|---|
+| The submitted `script` text is not byte-identical to a successful `execute_script` run on that instance within the broker's window (~200 runs / ~10 min) — a comment or whitespace drift between the run and the submission is enough; the `label` is not hashed, only the script body | Re-run the EXACT submitted script text with `execute_script`, then call `submit_howto` again with the identical text; the stamp attaches on the matching `script_sha256`. Seen live: a filter how-to's run and submit differed by a trailing edit, so it saved unstamped until the verbatim re-run |
+
+## Symptom: `search_functions` does not surface an element-creation or export member for a task-phrased query
+
+Intent phrasing that names the element and the operation (the phrasing `search_functions` itself recommends) can miss the target member entirely, then rank it #1 the moment the member NAME is dropped into the query — the #80/#87 pattern, confirmed on the full semantic+rerank pipeline for creation and export (issue #341).
+
+| Cause | Definitive check |
+|---|---|
+| A generic member name + generic summary ranks low for domain intent. Confirmed absent from page 1 (Revit 2025, `ranker: semantic`): `Autodesk.Revit.Creation.*.NewFamilyInstance` (beam/column/brace via a `StructuralType` argument) for "create a structural beam…", and `Document.Export(string,string,IFCExportOptions)` for "export the model to IFC" — each reached rank 1 only with the member name in the query | Name the member in the query (`"NewFamilyInstance … level and structural type"`, `"Document.Export … IFCExportOptions"`); or reach for `search_howtos`, whose corpus records the working query in `queries.hit`, so it finds the recipe even when `search_functions` misses the raw member |
+
 ## Techniques index
 
 Where the recurring diagnostic techniques are actually written down. This is an index, not a second
