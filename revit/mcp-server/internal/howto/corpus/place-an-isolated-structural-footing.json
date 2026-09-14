@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "id": "place-an-isolated-structural-footing",
+  "rev": 1,
+  "kind": "howto",
+  "title": "Place an isolated structural footing at a point",
+  "task": "Place an isolated structural foundation footing at a point using Autodesk.Revit.Creation.ItemFactoryBase.NewFamilyInstance with an OST_StructuralFoundation FamilySymbol, a level and StructuralType.Footing. Covers structural footing modelling.",
+  "members": [
+    "Autodesk.Revit.DB.FilteredElementCollector.OfCategory",
+    "Autodesk.Revit.DB.FamilySymbol.Activate",
+    "Autodesk.Revit.Creation.ItemFactoryBase.NewFamilyInstance",
+    "Eichler.Connectors.Revit.Connector.WithTransaction",
+    "Autodesk.Revit.DB.FamilyInstance.StructuralType"
+  ],
+  "script_language": "csharp-script",
+  "script": "using System.Linq;\nusing Autodesk.Revit.DB;\nusing Autodesk.Revit.DB.Structure;\n\nvar doc = Document;\n// setup: an isolated structural foundation symbol and the lowest level\nvar symbol = new FilteredElementCollector(doc).OfCategory(BuiltInCategory.OST_StructuralFoundation).OfClass(typeof(FamilySymbol)).Cast<FamilySymbol>().First();\nvar level  = new FilteredElementCollector(doc).OfClass(typeof(Level)).Cast<Level>().OrderBy(l => l.Elevation).First();\nvar loc = new XYZ(40, 10, 0);\n\nElementId footId = null;\nConnector.WithTransaction(doc, () => {\n    if (!symbol.IsActive) symbol.Activate();\n    var foot = doc.Create.NewFamilyInstance(loc, symbol, level, StructuralType.Footing);\n    footId = foot.Id;\n});\n\nvar created = (FamilyInstance)doc.GetElement(footId);\nreturn new { footId = footId.ToString(), symbol = symbol.Name, level = level.Name, structuralType = created.StructuralType.ToString(), category = created.Category?.Name };",
+  "pitfalls": [
+    {
+      "symptom": "A task search 'place an isolated structural footing at a point' does not surface the creation member; top hits are FamilyInstance.StructuralUsage/StructuralType properties.",
+      "cause": "The creation member is Autodesk.Revit.Creation.ItemFactoryBase.NewFamilyInstance(XYZ, FamilySymbol, Level, StructuralType) (reached as doc.Create.NewFamilyInstance); its generic name/summary ranks poorly for structural intent (connector issue #341).",
+      "fix": "Search naming NewFamilyInstance; use the XYZ/FamilySymbol/Level/StructuralType overload with StructuralType.Footing.",
+      "members": [
+        "Autodesk.Revit.Creation.ItemFactoryBase.NewFamilyInstance"
+      ]
+    },
+    {
+      "symptom": "The placed foundation is a wall or slab foundation rather than an isolated footing.",
+      "cause": "OST_StructuralFoundation covers isolated footings, wall foundations and foundation slabs; the first symbol collected may not be an isolated (point-placed) footing.",
+      "fix": "Pick a point-placed isolated-footing FamilySymbol under OST_StructuralFoundation, activate it, and place with StructuralType.Footing.",
+      "members": [
+        "Autodesk.Revit.DB.Structure.StructuralType"
+      ]
+    }
+  ],
+  "tags": [
+    "structural",
+    "foundation",
+    "footing"
+  ],
+  "queries": {
+    "miss": [
+      {
+        "text": "place an isolated structural foundation footing family instance at a point on a level",
+        "tool": "search_functions",
+        "surfaced": "Autodesk.Revit.DB.FamilyInstance.StructuralUsage",
+        "revit_version": "2025",
+        "ranker": "semantic"
+      }
+    ]
+  },
+  "provenance": {
+    "kind": "maintainer",
+    "ref": "https://github.com/eichler-ai/connectors/issues/339",
+    "reviewed_by": "nchim"
+  },
+  "verify": {
+    "mutations": {
+      "by_category": {
+        "Structural Foundations": {
+          "net_created": 1
+        }
+      }
+    }
+  },
+  "created_at": "2026-09-14T00:00:00Z",
+  "updated_at": "2026-09-14T00:00:00Z"
+}

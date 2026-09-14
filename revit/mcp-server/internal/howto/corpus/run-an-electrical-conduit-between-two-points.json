@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "id": "run-an-electrical-conduit-between-two-points",
+  "rev": 1,
+  "kind": "howto",
+  "title": "Run an electrical conduit between two points on a level",
+  "task": "Create an electrical Conduit between two XYZ points on a level with Conduit.Create -- the arg order (conduit type first, then the two points, then the level) differs from Duct/Pipe.Create. Covers MEP conduit modelling.",
+  "members": [
+    "Autodesk.Revit.DB.FilteredElementCollector.OfClass",
+    "Autodesk.Revit.DB.Electrical.Conduit.Create",
+    "Eichler.Connectors.Revit.Connector.WithTransaction",
+    "Autodesk.Revit.DB.Document.GetElement",
+    "Autodesk.Revit.DB.Element.get_Parameter"
+  ],
+  "script_language": "csharp-script",
+  "script": "using System.Linq;\nusing Autodesk.Revit.DB;\nusing Autodesk.Revit.DB.Electrical;\n\nvar doc = Document;\n// setup: a conduit type and the lowest level (Conduit.Create takes the TYPE first, then points, then level)\nvar conduitType = new FilteredElementCollector(doc).OfClass(typeof(ConduitType)).Cast<ConduitType>().First();\nvar level = new FilteredElementCollector(doc).OfClass(typeof(Level)).Cast<Level>().OrderBy(l => l.Elevation).First();\nvar start = new XYZ(0, 10, 9);\nvar end   = new XYZ(20, 10, 9);\n\nElementId id = null;\nConnector.WithTransaction(doc, () => {\n    var c = Conduit.Create(doc, conduitType.Id, start, end, level.Id);\n    id = c.Id;\n});\n\nvar created = (Conduit)doc.GetElement(id);\nvar length = created.get_Parameter(BuiltInParameter.CURVE_ELEM_LENGTH)?.AsDouble();\nreturn new { id = id.ToString(), conduitType = conduitType.Name, level = level.Name, lengthFeet = length };",
+  "pitfalls": [
+    {
+      "symptom": "The conduit is created but mis-placed, or the call reads wrong, because arguments were passed in the Duct/Pipe order.",
+      "cause": "Conduit.Create's signature is (Document, ElementId conduitType, XYZ start, XYZ end, ElementId level) -- the TYPE is first and the LEVEL is last, unlike Duct.Create/Pipe.Create which take systemType, type, level, then the two points.",
+      "fix": "Pass conduitType.Id, start, end, level.Id in exactly that order.",
+      "members": [
+        "Autodesk.Revit.DB.Electrical.Conduit.Create"
+      ]
+    },
+    {
+      "symptom": "First() throws InvalidOperationException 'Sequence contains no elements' collecting ConduitType.",
+      "cause": "The document's template has no electrical/conduit content, so no ConduitType is loaded.",
+      "fix": "Confirm the ConduitType collector is non-empty before First(); use an electrical/systems template or load conduit families first.",
+      "members": [
+        "Autodesk.Revit.DB.Electrical.ConduitType"
+      ]
+    }
+  ],
+  "tags": [
+    "mep",
+    "conduit",
+    "electrical"
+  ],
+  "queries": {
+    "hit": [
+      {
+        "text": "create an electrical conduit between two points on a level",
+        "tool": "search_functions",
+        "rank": 1,
+        "revit_version": "2025",
+        "ranker": "semantic"
+      }
+    ]
+  },
+  "provenance": {
+    "kind": "maintainer",
+    "ref": "https://github.com/eichler-ai/connectors/issues/339",
+    "reviewed_by": "nchim"
+  },
+  "verify": {
+    "mutations": {
+      "by_category": {
+        "Conduits": {
+          "net_created": 1
+        }
+      }
+    }
+  },
+  "created_at": "2026-09-14T00:00:00Z",
+  "updated_at": "2026-09-14T00:00:00Z"
+}

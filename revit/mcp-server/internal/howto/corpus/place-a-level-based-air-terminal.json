@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "id": "place-a-level-based-air-terminal",
+  "rev": 1,
+  "kind": "howto",
+  "title": "Place a level-based air terminal at a point",
+  "task": "Place an air terminal at a point on a level with doc.Create.NewFamilyInstance, choosing an OST_DuctTerminal family symbol whose FamilyPlacementType is level- or work-plane-based so it needs no host face. Covers placing MEP fixtures.",
+  "members": [
+    "Autodesk.Revit.DB.FilteredElementCollector.OfCategory",
+    "Autodesk.Revit.DB.Family.FamilyPlacementType",
+    "Autodesk.Revit.DB.FamilySymbol.Activate",
+    "Autodesk.Revit.Creation.ItemFactoryBase.NewFamilyInstance",
+    "Eichler.Connectors.Revit.Connector.WithTransaction"
+  ],
+  "script_language": "csharp-script",
+  "script": "using System.Linq;\nusing Autodesk.Revit.DB;\nusing Autodesk.Revit.DB.Structure;\n\nvar doc = Document;\n// setup: an air terminal whose family places without a host (level- or work-plane-based),\n// so it can drop at a point -- a face-based terminal would need a host face.\nvar symbol = new FilteredElementCollector(doc).OfCategory(BuiltInCategory.OST_DuctTerminal).OfClass(typeof(FamilySymbol)).Cast<FamilySymbol>()\n    .First(s => s.Family.FamilyPlacementType == FamilyPlacementType.OneLevelBased\n             || s.Family.FamilyPlacementType == FamilyPlacementType.WorkPlaneBased);\nvar level = new FilteredElementCollector(doc).OfClass(typeof(Level)).Cast<Level>().OrderBy(l => l.Elevation).First();\n\nElementId id = null;\nConnector.WithTransaction(doc, () => {\n    if (!symbol.IsActive) symbol.Activate();\n    var at = doc.Create.NewFamilyInstance(new XYZ(5, 35, 10), symbol, level, StructuralType.NonStructural);\n    id = at.Id;\n});\n\nvar created = (FamilyInstance)doc.GetElement(id);\nreturn new { id = id.ToString(), symbol = symbol.Name, family = symbol.Family.Name, placement = symbol.Family.FamilyPlacementType.ToString(), category = created.Category?.Name };",
+  "pitfalls": [
+    {
+      "symptom": "NewFamilyInstance throws or the air terminal does not place, complaining it needs a host.",
+      "cause": "Many air terminal families are face-based (hosted on a ceiling or a duct face) and cannot be placed at a bare point.",
+      "fix": "Filter the OST_DuctTerminal FamilySymbols for Family.FamilyPlacementType OneLevelBased or WorkPlaneBased before placing, and activate the symbol first.",
+      "members": [
+        "Autodesk.Revit.DB.Family.FamilyPlacementType",
+        "Autodesk.Revit.DB.FamilySymbol.Activate"
+      ]
+    },
+    {
+      "symptom": "A task search 'place an air terminal at a point on a level' does not surface the placement member; top hits are FamilyInstance.HostParameter and other properties.",
+      "cause": "Autodesk.Revit.Creation.*.NewFamilyInstance ranks poorly for placement intent (connector issue #341).",
+      "fix": "Search naming the member (e.g. 'NewFamilyInstance place a family instance at a point with a level'); place with the XYZ/FamilySymbol/Level overload.",
+      "members": [
+        "Autodesk.Revit.Creation.ItemFactoryBase.NewFamilyInstance"
+      ]
+    }
+  ],
+  "tags": [
+    "mep",
+    "air-terminal",
+    "family-instances"
+  ],
+  "queries": {
+    "miss": [
+      {
+        "text": "place an air terminal family instance at a point on a level",
+        "tool": "search_functions",
+        "surfaced": "Autodesk.Revit.DB.FamilyInstance.HostParameter",
+        "revit_version": "2025",
+        "ranker": "semantic"
+      }
+    ]
+  },
+  "provenance": {
+    "kind": "maintainer",
+    "ref": "https://github.com/eichler-ai/connectors/issues/339",
+    "reviewed_by": "nchim"
+  },
+  "verify": {
+    "mutations": {
+      "by_category": {
+        "Air Terminals": {
+          "net_created": 1
+        }
+      }
+    }
+  },
+  "created_at": "2026-09-14T00:00:00Z",
+  "updated_at": "2026-09-14T00:00:00Z"
+}
