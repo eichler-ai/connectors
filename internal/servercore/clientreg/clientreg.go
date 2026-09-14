@@ -1,8 +1,8 @@
 // Package clientreg registers a connector's MCP server with the user's Claude clients — Claude Code and
-// Claude Desktop — from one place. It is the single source of truth each connector's registration drives:
-// the Rhino plug-in's MCPBridgeRegister command and both installers (Revit install.ps1, Rhino
-// install.ps1 / install.sh) shell `mcp-server register`, so "both clients, equally" is implemented once,
-// cross-platform, rather than duplicated in C# and PowerShell.
+// Claude Desktop — from one place. It is the single source of truth a connector's registration drives:
+// the caller (a connector's installer, or the Rhino plug-in's MCPBridgeRegister command) shells
+// `mcp-server register`, so "both clients, equally" is implemented once, cross-platform, rather than
+// duplicated in C# and PowerShell.
 //
 // It is connector-agnostic: the caller supplies a Config with the registration slug ("revit", "rhino")
 // and any extra server arguments (Revit registers its broker with "--mode local"; Rhino registers with

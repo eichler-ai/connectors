@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 )
 
@@ -196,7 +197,7 @@ func TestConfig_serverArgsFlowToBothClients(t *testing.T) {
 		t.Fatalf("register = %q (%s)", o.Action, o.Detail)
 	}
 	wantAdd := []string{"/pkg/mcp-server.exe", "--mode", "local"}
-	if got := *lastAdd; !equalStrings(got, wantAdd) {
+	if got := *lastAdd; !slices.Equal(got, wantAdd) {
 		t.Errorf("claude mcp add args after -- = %v, want %v", got, wantAdd)
 	}
 
@@ -225,18 +226,6 @@ func TestConfig_serverArgsFlowToBothClients(t *testing.T) {
 	if a, _ := json.Marshal(entry2["args"]); string(a) != `[]` {
 		t.Errorf("no-args desktop args = %s, want []", a)
 	}
-}
-
-func equalStrings(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }
 
 func TestCode_skippedWhenClaudeAbsent(t *testing.T) {
