@@ -151,15 +151,13 @@ public sealed class RhinoMCPBridgePlugIn : Rhino.PlugIns.PlugIn
             {
                 // Only the packaged case: a binary sitting beside the plug-in. A dev build returns null here
                 // (no binary; the env override is a path elsewhere) and stays quiet, so this never nags the
-                // harness loop.
+                // harness loop. `register --check` exits non-zero when no Claude client points at us.
                 var server = ServerBinaryLocator.LocatePackagedOnly();
                 if (server is null) return;
 
-                var configPath = Core.Registration.ClientRegistration.UserConfigPath();
-                var config = File.Exists(configPath) ? File.ReadAllText(configPath) : null;
-                if (Core.Registration.ClientRegistration.StateFor(config, server) != Core.Registration.RegistrationState.Current)
+                if (ServerRegistration.RunWith(server, "register", "--check").exitCode != 0)
                 {
-                    LogConnection("MCP server is installed but not registered with Claude — run MCPBridgeRegister in Rhino to connect a client.");
+                    LogConnection("MCP server is installed but not registered with a Claude client — run MCPBridgeRegister in Rhino to connect Claude Code and/or Claude Desktop.");
                 }
             }
             catch (Exception ex)
