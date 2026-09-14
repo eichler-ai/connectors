@@ -50,6 +50,7 @@ run_timeout() {
     local secs="$1"; shift
     "$@" & local pid=$!
     ( sleep "$secs"; kill "$pid" 2>/dev/null ) & local watcher=$!
+    disown "$watcher" 2>/dev/null || true   # so reaping the watcher prints no "Terminated" job message
     local rc=0; wait "$pid" 2>/dev/null || rc=$?
     kill "$watcher" 2>/dev/null || true
     return "$rc"
