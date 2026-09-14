@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "id": "tag-a-structural-framing-element-in-a-plan-view",
+  "rev": 1,
+  "kind": "howto",
+  "title": "Tag a structural framing element in a plan view",
+  "task": "Tag a structural framing element in a plan view with IndependentTag.Create, placing the tag in an Engineering (structural) ViewPlan at the element's level where framing is visible after doc.Regenerate. Covers annotation tags.",
+  "members": [
+    "Autodesk.Revit.DB.FilteredElementCollector.OfCategory",
+    "Autodesk.Revit.DB.FamilySymbol.Activate",
+    "Autodesk.Revit.Creation.Document.NewFamilyInstance",
+    "Autodesk.Revit.DB.Document.Regenerate",
+    "Autodesk.Revit.DB.Reference.#ctor",
+    "Autodesk.Revit.DB.IndependentTag.Create",
+    "Eichler.Connectors.Revit.Connector.WithTransaction"
+  ],
+  "script_language": "csharp-script",
+  "script": "using System.Linq;\nusing Autodesk.Revit.DB;\nusing Autodesk.Revit.DB.Structure;\n\nvar doc = Document;\nvar symbol  = new FilteredElementCollector(doc).OfCategory(BuiltInCategory.OST_StructuralFraming).OfClass(typeof(FamilySymbol)).Cast<FamilySymbol>().First();\nvar level   = new FilteredElementCollector(doc).OfClass(typeof(Level)).Cast<Level>().OrderBy(l => l.Elevation).First();\nvar tagType = new FilteredElementCollector(doc).OfCategory(BuiltInCategory.OST_StructuralFramingTags).OfClass(typeof(FamilySymbol)).Cast<FamilySymbol>().First();\n\nElementId beamId = null, tagId = null;\nstring viewName = null;\nConnector.WithTransaction(doc, () => {\n    if (!symbol.IsActive) symbol.Activate();\n    if (!tagType.IsActive) tagType.Activate();\n    var beam = doc.Create.NewFamilyInstance(Line.CreateBound(new XYZ(0, 25, 0), new XYZ(20, 25, 0)), symbol, level, StructuralType.Beam);\n    beamId = beam.Id;\n    doc.Regenerate();\n\n    // a plan at the beam's level where structural framing shows -- prefer a structural (Engineering) plan\n    var view = new FilteredElementCollector(doc).OfClass(typeof(ViewPlan)).Cast<ViewPlan>()\n                 .FirstOrDefault(v => !v.IsTemplate && v.ViewType == ViewType.EngineeringPlan && v.GenLevel != null && v.GenLevel.Id == level.Id)\n             ?? new FilteredElementCollector(doc).OfClass(typeof(ViewPlan)).Cast<ViewPlan>()\n                 .First(v => !v.IsTemplate && v.ViewType == ViewType.FloorPlan && v.GenLevel != null && v.GenLevel.Id == level.Id);\n    viewName = view.Name;\n\n    var tag = IndependentTag.Create(doc, tagType.Id, view.Id, new Reference(beam), false, TagOrientation.Horizontal, new XYZ(10, 27, 0));\n    tagId = tag.Id;\n});\n\nvar t = (IndependentTag)doc.GetElement(tagId);\nreturn new { beamId = beamId.ToString(), tagId = tagId.ToString(), tagType = tagType.Name, view = viewName, taggedCount = t.GetTaggedLocalElementIds().Count };",
+  "pitfalls": [
+    {
+      "symptom": "IndependentTag.Create throws that the element is not visible in the view, or the tag comes out empty.",
+      "cause": "A tag can only be placed where the element is actually visible; a just-created framing element shows in a structural-discipline plan and only after the document is regenerated.",
+      "fix": "Call doc.Regenerate() after creating the element, and place the tag in an Engineering (structural) ViewPlan at the element's level (fall back to a FloorPlan at that level).",
+      "members": [
+        "Autodesk.Revit.DB.Document.Regenerate",
+        "Autodesk.Revit.DB.IndependentTag.Create"
+      ]
+    },
+    {
+      "symptom": "A task search 'tag a structural framing beam in a view' surfaces IndependentTag properties (RotationAngle, TagOrientation, TagHeadPosition) above the IndependentTag.Create method.",
+      "cause": "The Create method ranks below the tag's own properties for tagging intent (connector issue #341-adjacent).",
+      "fix": "Name IndependentTag.Create in the search; its signature is (Document, ElementId tagTypeId, ElementId ownerViewId, Reference, bool addLeader, TagOrientation, XYZ tagHeadPoint).",
+      "members": [
+        "Autodesk.Revit.DB.IndependentTag.Create"
+      ]
+    }
+  ],
+  "tags": [
+    "annotation",
+    "tags",
+    "structural",
+    "framing"
+  ],
+  "queries": {
+    "hit": [
+      {
+        "text": "tag a structural framing beam in a view with an independent tag",
+        "tool": "search_functions",
+        "rank": 5,
+        "revit_version": "2025",
+        "ranker": "semantic"
+      }
+    ]
+  },
+  "provenance": {
+    "kind": "maintainer",
+    "ref": "https://github.com/eichler-ai/connectors/issues/339",
+    "reviewed_by": "nchim"
+  },
+  "verify": {
+    "mutations": {
+      "by_category": {
+        "Structural Framing": {
+          "net_created": 1
+        },
+        "Structural Framing Tags": {
+          "net_created": 1
+        }
+      }
+    }
+  },
+  "created_at": "2026-09-14T00:00:00Z",
+  "updated_at": "2026-09-14T00:00:00Z"
+}

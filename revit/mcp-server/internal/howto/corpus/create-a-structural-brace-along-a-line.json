@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "id": "create-a-structural-brace-along-a-line",
+  "rev": 1,
+  "kind": "howto",
+  "title": "Create a structural brace along a line",
+  "task": "Place a structural brace along a diagonal Line using Autodesk.Revit.Creation.Document.NewFamilyInstance with a structural framing FamilySymbol, a level and StructuralType.Brace. Covers structural brace modelling.",
+  "members": [
+    "Autodesk.Revit.DB.FilteredElementCollector.OfCategory",
+    "Autodesk.Revit.DB.Line.CreateBound",
+    "Autodesk.Revit.DB.FamilySymbol.Activate",
+    "Autodesk.Revit.Creation.Document.NewFamilyInstance",
+    "Eichler.Connectors.Revit.Connector.WithTransaction",
+    "Autodesk.Revit.DB.FamilyInstance.StructuralType"
+  ],
+  "script_language": "csharp-script",
+  "script": "using System.Linq;\nusing Autodesk.Revit.DB;\nusing Autodesk.Revit.DB.Structure;\n\nvar doc = Document;\n// setup: a structural framing symbol (braces use the framing family) and the lowest level\nvar symbol = new FilteredElementCollector(doc).OfCategory(BuiltInCategory.OST_StructuralFraming).OfClass(typeof(FamilySymbol)).Cast<FamilySymbol>().First();\nvar level  = new FilteredElementCollector(doc).OfClass(typeof(Level)).Cast<Level>().OrderBy(l => l.Elevation).First();\n// a diagonal line -- a brace rises from one point to another\nvar line = Line.CreateBound(new XYZ(0, 20, 0), new XYZ(10, 20, 10));\n\nElementId braceId = null;\nConnector.WithTransaction(doc, () => {\n    if (!symbol.IsActive) symbol.Activate();\n    var brace = doc.Create.NewFamilyInstance(line, symbol, level, StructuralType.Brace);\n    braceId = brace.Id;\n});\n\nvar created = (FamilyInstance)doc.GetElement(braceId);\nreturn new { braceId = braceId.ToString(), symbol = symbol.Name, level = level.Name, structuralType = created.StructuralType.ToString(), category = created.Category?.Name };",
+  "pitfalls": [
+    {
+      "symptom": "A task search 'create a structural brace between two points' does not surface the creation member; top hits are Structure.BracePlanRepresentation and the StructuralType.Brace enum field.",
+      "cause": "The creation member is Autodesk.Revit.Creation.Document.NewFamilyInstance(Curve, FamilySymbol, Level, StructuralType); its generic name/summary ranks poorly for structural intent (connector issue #341).",
+      "fix": "Search naming NewFamilyInstance; use the Curve/FamilySymbol/Level/StructuralType overload with StructuralType.Brace on a diagonal Line (braces use the structural framing family).",
+      "members": [
+        "Autodesk.Revit.Creation.Document.NewFamilyInstance"
+      ]
+    },
+    {
+      "symptom": "NewFamilyInstance creates the brace but it does not render, or an Autodesk exception mentions an inactive symbol.",
+      "cause": "The FamilySymbol was not activated before use.",
+      "fix": "Call symbol.Activate() inside the transaction when !symbol.IsActive before NewFamilyInstance.",
+      "members": [
+        "Autodesk.Revit.DB.FamilySymbol.Activate",
+        "Autodesk.Revit.DB.FamilySymbol.IsActive"
+      ]
+    }
+  ],
+  "tags": [
+    "structural",
+    "brace",
+    "framing"
+  ],
+  "queries": {
+    "miss": [
+      {
+        "text": "create a structural brace along a diagonal line between two points",
+        "tool": "search_functions",
+        "surfaced": "Autodesk.Revit.DB.Structure.BracePlanRepresentation.ParallelLine",
+        "revit_version": "2025",
+        "ranker": "semantic"
+      }
+    ]
+  },
+  "provenance": {
+    "kind": "maintainer",
+    "ref": "https://github.com/eichler-ai/connectors/issues/339",
+    "reviewed_by": "nchim"
+  },
+  "verify": {
+    "mutations": {
+      "by_category": {
+        "Structural Framing": {
+          "net_created": 1
+        }
+      }
+    }
+  },
+  "created_at": "2026-09-14T00:00:00Z",
+  "updated_at": "2026-09-14T00:00:00Z"
+}

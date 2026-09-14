@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "id": "run-a-cable-tray-between-two-points",
+  "rev": 1,
+  "kind": "howto",
+  "title": "Run a cable tray between two points on a level",
+  "task": "Create an electrical CableTray between two XYZ points on a level with CableTray.Create (cable tray type first, then the two points, then the level -- the same shape as Conduit.Create). Covers MEP cable-tray modelling.",
+  "members": [
+    "Autodesk.Revit.DB.FilteredElementCollector.OfClass",
+    "Autodesk.Revit.DB.Electrical.CableTray.Create",
+    "Eichler.Connectors.Revit.Connector.WithTransaction",
+    "Autodesk.Revit.DB.Document.GetElement",
+    "Autodesk.Revit.DB.Element.get_Parameter"
+  ],
+  "script_language": "csharp-script",
+  "script": "using System.Linq;\nusing Autodesk.Revit.DB;\nusing Autodesk.Revit.DB.Electrical;\n\nvar doc = Document;\n// setup: a cable tray type and the lowest level (Create takes the TYPE first, then points, then level)\nvar trayType = new FilteredElementCollector(doc).OfClass(typeof(CableTrayType)).Cast<CableTrayType>().First();\nvar level = new FilteredElementCollector(doc).OfClass(typeof(Level)).Cast<Level>().OrderBy(l => l.Elevation).First();\nvar start = new XYZ(0, 15, 9);\nvar end   = new XYZ(20, 15, 9);\n\nElementId id = null;\nConnector.WithTransaction(doc, () => {\n    var t = CableTray.Create(doc, trayType.Id, start, end, level.Id);\n    id = t.Id;\n});\n\nvar created = (CableTray)doc.GetElement(id);\nvar length = created.get_Parameter(BuiltInParameter.CURVE_ELEM_LENGTH)?.AsDouble();\nreturn new { id = id.ToString(), trayType = trayType.Name, level = level.Name, lengthFeet = length };",
+  "pitfalls": [
+    {
+      "symptom": "The cable tray is mis-placed because arguments were passed in the Duct/Pipe order.",
+      "cause": "CableTray.Create's signature is (Document, ElementId cabletrayType, XYZ start, XYZ end, ElementId level) -- type first, level last, like Conduit.Create and unlike Duct/Pipe.Create.",
+      "fix": "Pass trayType.Id, start, end, level.Id in that order.",
+      "members": [
+        "Autodesk.Revit.DB.Electrical.CableTray.Create"
+      ]
+    },
+    {
+      "symptom": "First() throws InvalidOperationException 'Sequence contains no elements' collecting CableTrayType.",
+      "cause": "The template has no cable-tray content loaded.",
+      "fix": "Confirm the CableTrayType collector is non-empty before First(); use an electrical/systems template or load cable-tray families first.",
+      "members": [
+        "Autodesk.Revit.DB.Electrical.CableTrayType"
+      ]
+    }
+  ],
+  "tags": [
+    "mep",
+    "cable-tray",
+    "electrical"
+  ],
+  "queries": {
+    "hit": [
+      {
+        "text": "create a cable tray run between two points on a level",
+        "tool": "search_functions",
+        "rank": 1,
+        "revit_version": "2025",
+        "ranker": "semantic"
+      }
+    ]
+  },
+  "provenance": {
+    "kind": "maintainer",
+    "ref": "https://github.com/eichler-ai/connectors/issues/339",
+    "reviewed_by": "nchim"
+  },
+  "verify": {
+    "mutations": {
+      "by_category": {
+        "Cable Trays": {
+          "net_created": 1
+        }
+      }
+    }
+  },
+  "created_at": "2026-09-14T00:00:00Z",
+  "updated_at": "2026-09-14T00:00:00Z"
+}
