@@ -73,6 +73,9 @@
       "by_category": {
         "Walls": {
           "net_created": 1
+        },
+        "(uncategorized)": {
+          "net_created": 1
         }
       }
     }

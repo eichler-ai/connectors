@@ -3,22 +3,33 @@
   "id": "export-the-model-to-an-ifc-file",
   "rev": 1,
   "kind": "howto",
-  "title": "Export the model to an IFC file",
-  "task": "Export the whole document to IFC using Document.Export with IFCExportOptions inside a transaction, and confirm the .ifc file was written. Covers IFC export and the transaction requirement that differs from DWG export.",
+  "title": "Export the model to an IFC file and publish it",
+  "task": "Export the whole document to IFC with Document.Export + IFCExportOptions inside a transaction, writing into the connector's ExportsDirectory, then Connector.Publish the .ifc so the caller can fetch it. Covers IFC export, its transaction requirement (the opposite of DWG export), and file publishing.",
   "members": [
     "Autodesk.Revit.DB.IFCExportOptions.#ctor",
+    "Eichler.Connectors.Revit.Connector.ExportsDirectory",
     "Eichler.Connectors.Revit.Connector.WithTransaction",
-    "Autodesk.Revit.DB.Document.Export"
+    "Autodesk.Revit.DB.Document.Export",
+    "Eichler.Connectors.Revit.Connector.Publish"
   ],
   "script_language": "csharp-script",
-  "script": "using System.IO;\nusing Autodesk.Revit.DB;\n\nvar doc = Document;\nvar dir = Path.Combine(Path.GetTempPath(), \"mcp-ifc-\" + System.Guid.NewGuid().ToString(\"N\").Substring(0, 8));\nDirectory.CreateDirectory(dir);\nvar name = \"model\";\nvar opts = new IFCExportOptions();\n\n// IFC export writes temporary data into the document, so it needs an open transaction\n// (unlike DWG export, which manages its own and must be called with none open).\nbool ok = false;\nConnector.WithTransaction(doc, () => {\n    ok = doc.Export(dir, name, opts);\n});\n\nvar file = Path.Combine(dir, name + \".ifc\");\nreturn new { ok, path = file, exists = File.Exists(file), sizeBytes = File.Exists(file) ? new FileInfo(file).Length : 0L };",
+  "script": "using System.IO;\nusing Autodesk.Revit.DB;\n\nvar doc = Document;\n// export into the connector's exports workspace so the file can be fetched by the caller\nvar dir = Connector.ExportsDirectory;\nvar name = \"model\";\nvar opts = new IFCExportOptions();\n\n// IFC export writes temporary data into the document, so it needs an open transaction\n// (unlike DWG export, which manages its own and must be called with none open).\nbool ok = false;\nConnector.WithTransaction(doc, () => {\n    ok = doc.Export(dir, name, opts);\n});\n\n// publish the written .ifc so it comes back to the caller (same pattern as the DWG how-to)\nvar file = Path.Combine(dir, name + \".ifc\");\nConnector.Publish(file);\n\nreturn new { ok, published = Path.GetFileName(file), exists = File.Exists(file), sizeBytes = File.Exists(file) ? new FileInfo(file).Length : 0L };",
   "pitfalls": [
     {
       "symptom": "doc.Export(folder, name, new IFCExportOptions()) called at top level (between blocks) fails with connector code script-write-outside-transaction / Autodesk ModificationOutsideTransactionException 'Modifying is forbidden because the document has no open transaction'.",
       "cause": "The IFC exporter writes temporary data into the document during export, so it requires an ambient transaction — the OPPOSITE of DWG export (Document.Export with DWGExportOptions), which manages its own transaction and must be called with none open.",
-      "fix": "Call the IFC Document.Export overload INSIDE a Connector.WithTransaction(doc, () => { ... }) block. The transaction commits nothing permanent (net mutations are zero); it only satisfies the exporter's requirement.",
+      "fix": "Call the IFC Document.Export overload INSIDE a Connector.WithTransaction(doc, () => { ... }) block. It leaves no net element change (the transaction only satisfies the exporter's requirement); the file itself comes back via Connector.Publish, not via the model.",
       "members": [
         "Autodesk.Revit.DB.Document.Export"
+      ]
+    },
+    {
+      "symptom": "The IFC file is written but the caller cannot retrieve it (it lands in a temp folder on the Revit machine).",
+      "cause": "Document.Export only writes a file on disk; nothing returns it to the agent unless it is published from the connector's exchange workspace.",
+      "fix": "Export into Connector.ExportsDirectory and call Connector.Publish(path) on the written file, exactly as the DWG export how-to does; the published file appears in the result's files[].",
+      "members": [
+        "Eichler.Connectors.Revit.Connector.ExportsDirectory",
+        "Eichler.Connectors.Revit.Connector.Publish"
       ]
     },
     {
@@ -33,7 +44,8 @@
   "tags": [
     "export",
     "ifc",
-    "interop"
+    "interop",
+    "files"
   ],
   "queries": {
     "hit": [
@@ -63,6 +75,7 @@
   "verify": {
     "mutations": {
       "net_created": 0,
+      "net_modified": 0,
       "net_deleted": 0
     }
   },

@@ -18,10 +18,10 @@
   "pitfalls": [
     {
       "symptom": "A task-phrased search like 'place a vertical structural column at a point on a level' does not surface the creation member; the top hit is the FamilyInstance.StructuralType property.",
-      "cause": "The creation member is Autodesk.Revit.Creation.Document.NewFamilyInstance(XYZ, FamilySymbol, Level, StructuralType); its generic name/summary ranks poorly for structural intent (connector issue #341).",
+      "cause": "The creation member is Autodesk.Revit.Creation.ItemFactoryBase.NewFamilyInstance(XYZ, FamilySymbol, Level, StructuralType), reached as doc.Create.NewFamilyInstance; its generic name/summary ranks poorly for structural intent (connector issue #341).",
       "fix": "Search with the member name, e.g. 'NewFamilyInstance place a family instance at a point with a level and structural type' (returns it at rank 1), then use the XYZ/FamilySymbol/Level/StructuralType overload with StructuralType.Column.",
       "members": [
-        "Autodesk.Revit.Creation.Document.NewFamilyInstance"
+        "Autodesk.Revit.Creation.ItemFactoryBase.NewFamilyInstance"
       ]
     },
     {
