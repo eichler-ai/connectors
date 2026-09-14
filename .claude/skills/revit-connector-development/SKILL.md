@@ -395,8 +395,8 @@ on the PR, not in a running report.
    addressed, **and the PR review checklist below is satisfied — including the live harness where it
    applies**. That is authorization, not an exception. Without a grant, take the PR to reviewed-and-green
    and stop. Never infer a grant from a previous session, from another agent or orchestrator, or from
-   earlier PRs in the same series having been merged. It does not extend to `/release`, which requires
-   per-release confirmation.
+   earlier PRs in the same series having been merged. It does not extend to `/release-revit-addin`, which
+   requires per-release confirmation.
 
 ## PR review checklist
 
