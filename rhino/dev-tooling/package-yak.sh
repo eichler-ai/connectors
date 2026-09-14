@@ -28,10 +28,12 @@ done
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"          # -> rhino/
 OUT_DIR="${OUT_DIR:-$ROOT/dist}"
+# Toolchain. The defaults suit a Homebrew dev Mac with a local Rhino; CI (phase 7 PR 3) has neither, so it
+# MUST provide its own .NET 8 (set DOTNET_ROOT, e.g. via actions/setup-dotnet) and a standalone yak CLI
+# (point RHINO_YAK_PATH at it) — there is no Rhino to borrow yak from on a runner.
 export DOTNET_ROOT="${DOTNET_ROOT:-/opt/homebrew/opt/dotnet@8/libexec}"
 export PATH="/opt/homebrew/opt/dotnet@8/bin:$PATH"
 YAK="${RHINO_YAK_PATH:-/Applications/Rhino 8.app/Contents/Resources/bin/yak}"
-SERVER_PKG="$ROOT/mcp-server/cmd/mcp-server"
 
 # Server binary names — MUST match Core/Registration/ServerBinaryNames.cs (the plug-in resolves these).
 WIN_SERVER="mcp-server-win-x64.exe"
@@ -83,7 +85,7 @@ YAML
 
 echo "==> yak build"
 ( cd "$PKG" && "$YAK" build )
-YAK_FILE="$(ls "$PKG"/*.yak | head -1)"
+YAK_FILE="$(ls "$PKG"/*.yak 2>/dev/null | head -1 || true)"
 [[ -n "$YAK_FILE" ]] || { echo "yak build produced no .yak" >&2; exit 1; }
 
 mkdir -p "$OUT_DIR"
