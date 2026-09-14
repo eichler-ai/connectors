@@ -49,6 +49,12 @@ echo "==> build plug-in (Release)"
 dotnet build "$ROOT/mcp-bridge/Rhino.MCPBridge.sln" -c Release -nologo -v q
 BIN="$ROOT/mcp-bridge/src/Rhino.MCPBridge.PlugIn/bin/Release"
 
+# The search_functions / how-to ranking models are go:embed'd from a gitignored assets dir (fetched,
+# not committed). Without this the server still builds but ships lexical-only search — and the package
+# is ~a quarter the size, which is how a modelless build slips through unnoticed. Idempotent (sha-pinned).
+echo "==> fetch search models (for go:embed)"
+"$ROOT/../internal/servercore/semsearch/models/fetch-models.sh"
+
 echo "==> build server binaries (cross-compiled, CGO-free)"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
