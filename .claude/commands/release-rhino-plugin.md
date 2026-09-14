@@ -112,7 +112,23 @@ Follow these steps in order.
     intentionally **not** part of this flow yet; if/when that lands it becomes a further step (`yak
     push` the same `.yak`, gated on the same confirmation).
 
-11. **Reflect, and refine this command if warranted.** After a successful release, compare how the run
+11. **Offer to delete old releases** (storage). A published `.yak` is ~178 MB, so superseded releases
+    add up. After the new release verifies, list what exists — `gh release list` (the Rhino ones are the
+    `rhino-v*` tags) — and **ask the user whether to delete any older `rhino-v*` releases**. Never delete
+    one without an explicit yes (a release is public and its removal is irreversible), and never delete
+    the release you just published. To delete one the user names:
+
+    ```
+    gh release delete rhino-vX.Y.Z --cleanup-tag --yes
+    ```
+
+    That removes the release, its `.yak` asset (freeing the storage), and the tag. Superseded
+    pre-dual-client releases are especially worth removing, since their old server can't be registered
+    by `install.ps1`. (The `rhino-package.yml` build-artifacts also hold ~178 MB each but auto-expire on
+    their retention window; GitHub's artifact list is eventually-consistent, so a DELETE that returns
+    204 may still appear in the list briefly.)
+
+12. **Reflect, and refine this command if warranted.** After a successful release, compare how the run
     actually went against these steps: what surprised you, what was missing, what was wrong, what you
     had to work out ad hoc (a filename/tag that didn't match, a flaky gate, a slow step, a manual
     workaround). If the prompt would be more accurate or more useful with a change, say so and — with
