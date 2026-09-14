@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -254,6 +255,26 @@ func TestSessionSurvivesPrimaryDeathAcrossProcesses(t *testing.T) {
 // answers; A is then killed. B promotes, and B's OWN mcp.Server must supply
 // the first -- and only -- initialize response the client sees, after which
 // the session is live.
+// waitStopped blocks until the process is actually in the OS "stopped" (T)
+// state. SIGSTOP delivery is asynchronous: Process.Signal returns before the
+// target is descheduled, so a request sent right after can still be answered in
+// the window before the stop takes effect -- the race that made the assertion
+// below ("B answered while A was frozen") flake on a loaded CI box. `ps` reports
+// state "T" for a stopped process on both Linux (CI) and macOS (dev); the only
+// caller skips on Windows, which has no SIGSTOP.
+func waitStopped(t *testing.T, pid int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		out, err := exec.Command("ps", "-o", "state=", "-p", strconv.Itoa(pid)).Output()
+		if err == nil && strings.HasPrefix(strings.TrimSpace(string(out)), "T") {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("process %d did not reach the stopped (T) state within 5s", pid)
+}
+
 func TestPromotedProcessAnswersAnInitializeTheDeadPrimaryNeverDid(t *testing.T) {
 	if testing.Short() {
 		t.Skip("spawns real mcp-server processes; skipped with -short")
@@ -277,6 +298,9 @@ func TestPromotedProcessAnswersAnInitializeTheDeadPrimaryNeverDid(t *testing.T) 
 	if err := a.cmd.Process.Signal(syscall.SIGSTOP); err != nil {
 		t.Fatal(err)
 	}
+	// Wait until A is truly stopped before sending B's initialize, so A cannot
+	// answer the in-flight request in the SIGSTOP-delivery window (the flake).
+	waitStopped(t, a.cmd.Process.Pid)
 	b.send(initLine)
 	select {
 	case l := <-b.lines:
