@@ -7,27 +7,50 @@ import (
 	"testing"
 )
 
+// testCfg is the connector config the tests register with (the Rhino slug, no extra args). Tests that
+// exercise extra server args (Revit-style) build their own Config.
+var testCfg = Config{ServerName: "rhino"}
+
 // mockCodeEnv returns an Env whose "claude" CLI is faked by maintaining ~/.claude.json directly, so
-// register/status round-trips are exercised without a real claude binary.
-func mockCodeEnv(t *testing.T, home string) Env {
+// register/status round-trips are exercised without a real claude binary. It captures both the server
+// path and any args passed after "--", so a Config with ServerArgs can be asserted.
+func mockCodeEnv(t *testing.T, home string) (Env, *[]string) {
 	t.Helper()
+	var lastAddArgs []string // the args recorded after "--" on the most recent `mcp add`
 	e := Env{GOOS: "linux", Home: home}
 	e.lookClaude = func() string { return "/fake/claude" }
 	e.runClaude = func(args ...string) (string, bool) {
 		if len(args) >= 2 && args[0] == "mcp" && args[1] == "add" {
-			cmd := args[len(args)-1] // the path after "--"
+			after := argsAfterDoubleDash(args)
+			lastAddArgs = after
+			var cmd string
+			var rest []string
+			if len(after) > 0 {
+				cmd, rest = after[0], after[1:] // <path> <serverArgs…>
+			}
 			cfg, _ := readJSONObject(e.CodeConfigPath())
-			_ = setMCPServer(cfg, ServerName, cmd)
+			// mcp add stores the name from the positional after "mcp add".
+			_ = setMCPServer(cfg, args[2], cmd, rest)
 			_ = writeJSON(e.CodeConfigPath(), cfg)
 		}
-		if len(args) >= 2 && args[0] == "mcp" && args[1] == "remove" {
+		if len(args) >= 3 && args[0] == "mcp" && args[1] == "remove" {
 			cfg, _ := readJSONObject(e.CodeConfigPath())
-			removeMCPServer(cfg, ServerName)
+			removeMCPServer(cfg, args[2])
 			_ = writeJSON(e.CodeConfigPath(), cfg)
 		}
 		return "", true
 	}
-	return e
+	return e, &lastAddArgs
+}
+
+// argsAfterDoubleDash returns the elements following the first "--" in args (nil if none).
+func argsAfterDoubleDash(args []string) []string {
+	for i, a := range args {
+		if a == "--" {
+			return args[i+1:]
+		}
+	}
+	return nil
 }
 
 func TestDesktopConfigPath_platformSelection(t *testing.T) {
@@ -75,13 +98,13 @@ func TestDesktop_registerMergesAndIsIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if o := e.registerDesktop("/pkg/mcp-server"); o.Action != "registered" {
+	if o := e.registerDesktop(testCfg, "/pkg/mcp-server"); o.Action != "registered" {
 		t.Fatalf("first register action = %q (%s)", o.Action, o.Detail)
 	}
 	cfg, _ := readJSONObject(cfgPath)
 	// rhino added...
-	if serverCommandIn(cfg, ServerName) != "/pkg/mcp-server" {
-		t.Errorf("rhino command = %q", serverCommandIn(cfg, ServerName))
+	if serverCommandIn(cfg, testCfg.ServerName) != "/pkg/mcp-server" {
+		t.Errorf("rhino command = %q", serverCommandIn(cfg, testCfg.ServerName))
 	}
 	// ...without disturbing the other server or the top-level key.
 	if serverCommandIn(cfg, "other") != "/keep/me" {
@@ -92,25 +115,25 @@ func TestDesktop_registerMergesAndIsIdempotent(t *testing.T) {
 	}
 	// Backup was taken once, capturing the pristine pre-install file (no rhino in it).
 	bak, err := readJSONObject(cfgPath + ".mcpbridge.bak")
-	if err != nil || serverCommandIn(bak, ServerName) != "" || serverCommandIn(bak, "other") != "/keep/me" {
+	if err != nil || serverCommandIn(bak, testCfg.ServerName) != "" || serverCommandIn(bak, "other") != "/keep/me" {
 		t.Errorf("backup should be the pristine pre-install config: %v (%v)", bak, err)
 	}
 
 	// Re-register at the SAME path → unchanged; DIFFERENT path → updated.
-	if o := e.registerDesktop("/pkg/mcp-server"); o.Action != "unchanged" {
+	if o := e.registerDesktop(testCfg, "/pkg/mcp-server"); o.Action != "unchanged" {
 		t.Errorf("re-register same path = %q, want unchanged", o.Action)
 	}
-	if o := e.registerDesktop("/new/mcp-server"); o.Action != "updated" {
+	if o := e.registerDesktop(testCfg, "/new/mcp-server"); o.Action != "updated" {
 		t.Errorf("re-register new path = %q, want updated", o.Action)
 	}
 }
 
 func TestDesktop_notInstalledWhenNoConfigDir(t *testing.T) {
 	e := Env{GOOS: "linux", Home: t.TempDir()} // config dir does NOT exist
-	if o := e.registerDesktop("/pkg/mcp-server"); o.Action != "not-installed" {
+	if o := e.registerDesktop(testCfg, "/pkg/mcp-server"); o.Action != "not-installed" {
 		t.Errorf("register with no Desktop dir = %q, want not-installed", o.Action)
 	}
-	if o := e.statusDesktop("/pkg/mcp-server"); o.Action != "not-installed" {
+	if o := e.statusDesktop(testCfg, "/pkg/mcp-server"); o.Action != "not-installed" {
 		t.Errorf("status with no Desktop dir = %q, want not-installed", o.Action)
 	}
 }
@@ -121,48 +144,104 @@ func TestDesktop_unregisterLeavesOthersIntact(t *testing.T) {
 	cfgPath := e.DesktopConfigPath()
 	_ = os.MkdirAll(filepath.Dir(cfgPath), 0o755)
 	_ = writeJSON(cfgPath, map[string]any{"mcpServers": map[string]any{"other": map[string]any{"command": "/keep"}}})
-	_ = e.registerDesktop("/pkg/mcp-server")
+	_ = e.registerDesktop(testCfg, "/pkg/mcp-server")
 
-	if o := e.unregisterDesktop(); o.Action != "removed" {
+	if o := e.unregisterDesktop(testCfg); o.Action != "removed" {
 		t.Fatalf("unregister = %q, want removed", o.Action)
 	}
 	cfg, _ := readJSONObject(cfgPath)
-	if serverCommandIn(cfg, ServerName) != "" {
+	if serverCommandIn(cfg, testCfg.ServerName) != "" {
 		t.Error("rhino should be gone")
 	}
 	if serverCommandIn(cfg, "other") != "/keep" {
 		t.Error("the 'other' server should remain")
 	}
 	// Second unregister is a no-op.
-	if o := e.unregisterDesktop(); o.Action != "unchanged" {
+	if o := e.unregisterDesktop(testCfg); o.Action != "unchanged" {
 		t.Errorf("second unregister = %q, want unchanged", o.Action)
 	}
 }
 
 func TestCode_registerStatusRoundTrip(t *testing.T) {
 	home := t.TempDir()
-	e := mockCodeEnv(t, home)
+	e, _ := mockCodeEnv(t, home)
 
-	if o := e.registerCode("/pkg/mcp-server"); o.Action != "registered" {
+	if o := e.registerCode(testCfg, "/pkg/mcp-server"); o.Action != "registered" {
 		t.Fatalf("register = %q (%s)", o.Action, o.Detail)
 	}
-	if o := e.statusCode("/pkg/mcp-server"); o.Action != "unchanged" {
+	if o := e.statusCode(testCfg, "/pkg/mcp-server"); o.Action != "unchanged" {
 		t.Errorf("status after register = %q, want unchanged (current)", o.Action)
 	}
-	if o := e.statusCode("/moved/mcp-server"); o.Action != "updated" {
+	if o := e.statusCode(testCfg, "/moved/mcp-server"); o.Action != "updated" {
 		t.Errorf("status at a different path = %q, want updated (stale)", o.Action)
 	}
-	if o := e.unregisterCode(); o.Action != "removed" {
+	if o := e.unregisterCode(testCfg); o.Action != "removed" {
 		t.Errorf("unregister = %q, want removed", o.Action)
 	}
-	if o := e.statusCode("/pkg/mcp-server"); o.Action != "not-registered" {
+	if o := e.statusCode(testCfg, "/pkg/mcp-server"); o.Action != "not-registered" {
 		t.Errorf("status after unregister = %q, want not-registered", o.Action)
 	}
 }
 
+// TestConfig_serverArgsFlowToBothClients proves the connector-agnostic extraction: a Config with extra
+// args (Revit registers its broker with "--mode local") lands after "--" on the Claude Code `mcp add`
+// line AND in the Claude Desktop entry's "args" array — while a Config with no args still writes "args": [].
+func TestConfig_serverArgsFlowToBothClients(t *testing.T) {
+	revit := Config{ServerName: "revit", ServerArgs: []string{"--mode", "local"}}
+
+	// Claude Code: the args after "--" are exactly <path> then the server args.
+	home := t.TempDir()
+	e, lastAdd := mockCodeEnv(t, home)
+	if o := e.registerCode(revit, "/pkg/mcp-server.exe"); o.Action != "registered" {
+		t.Fatalf("register = %q (%s)", o.Action, o.Detail)
+	}
+	wantAdd := []string{"/pkg/mcp-server.exe", "--mode", "local"}
+	if got := *lastAdd; !equalStrings(got, wantAdd) {
+		t.Errorf("claude mcp add args after -- = %v, want %v", got, wantAdd)
+	}
+
+	// Claude Desktop: the entry's args array carries the server args verbatim.
+	de := Env{GOOS: "linux", Home: t.TempDir()}
+	cfgPath := de.DesktopConfigPath()
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if o := de.registerDesktop(revit, "/pkg/mcp-server.exe"); o.Action != "registered" {
+		t.Fatalf("desktop register = %q (%s)", o.Action, o.Detail)
+	}
+	obj, _ := readJSONObject(cfgPath)
+	entry := obj["mcpServers"].(map[string]any)["revit"].(map[string]any)
+	gotArgs, _ := json.Marshal(entry["args"])
+	if string(gotArgs) != `["--mode","local"]` {
+		t.Errorf("desktop args = %s, want [\"--mode\",\"local\"]", gotArgs)
+	}
+
+	// A no-args Config still serializes args as [] (never null).
+	de2 := Env{GOOS: "linux", Home: t.TempDir()}
+	_ = os.MkdirAll(filepath.Dir(de2.DesktopConfigPath()), 0o755)
+	_ = de2.registerDesktop(testCfg, "/pkg/rhino")
+	obj2, _ := readJSONObject(de2.DesktopConfigPath())
+	entry2 := obj2["mcpServers"].(map[string]any)["rhino"].(map[string]any)
+	if a, _ := json.Marshal(entry2["args"]); string(a) != `[]` {
+		t.Errorf("no-args desktop args = %s, want []", a)
+	}
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func TestCode_skippedWhenClaudeAbsent(t *testing.T) {
 	e := Env{GOOS: "linux", Home: t.TempDir(), lookClaude: func() string { return "" }}
-	if o := e.registerCode("/pkg/mcp-server"); o.Action != "skipped" {
+	if o := e.registerCode(testCfg, "/pkg/mcp-server"); o.Action != "skipped" {
 		t.Errorf("register with no claude CLI = %q, want skipped", o.Action)
 	}
 }
@@ -171,7 +250,7 @@ func TestRegister_coversEveryClient(t *testing.T) {
 	// Register returns one outcome per known client, so a new client can't be silently forgotten.
 	e := Env{GOOS: "linux", Home: t.TempDir(), lookClaude: func() string { return "" }}
 	got := map[Client]bool{}
-	for _, o := range Register(e, "/pkg/mcp-server").Outcomes {
+	for _, o := range Register(e, testCfg, "/pkg/mcp-server").Outcomes {
 		got[o.Client] = true
 	}
 	for _, want := range []Client{ClaudeCode, ClaudeDesktop} {
@@ -195,7 +274,7 @@ func TestServerCommandIn_toleratesMalformed(t *testing.T) {
 		if err := json.Unmarshal([]byte(c), &m); err != nil {
 			t.Fatalf("test data not JSON: %s", c)
 		}
-		if cmd := serverCommandIn(m, ServerName); cmd != "" {
+		if cmd := serverCommandIn(m, testCfg.ServerName); cmd != "" {
 			t.Errorf("serverCommandIn(%s) = %q, want empty", c, cmd)
 		}
 	}
@@ -211,7 +290,7 @@ func TestDesktop_refusesNonObjectMcpServers(t *testing.T) {
 	original := `{"mcpServers": ["oops"]}`
 	_ = os.WriteFile(cfgPath, []byte(original), 0o644)
 
-	if o := e.registerDesktop("/pkg/mcp-server"); o.Action != "error" {
+	if o := e.registerDesktop(testCfg, "/pkg/mcp-server"); o.Action != "error" {
 		t.Fatalf("register onto non-object mcpServers = %q, want error", o.Action)
 	}
 	// The file is untouched — not overwritten with a fresh rhino-only config.
@@ -227,7 +306,7 @@ func TestDesktop_statusSurfacesMalformed(t *testing.T) {
 	cfgPath := e.DesktopConfigPath()
 	_ = os.MkdirAll(filepath.Dir(cfgPath), 0o755)
 	_ = os.WriteFile(cfgPath, []byte("{not json"), 0o644)
-	if o := e.statusDesktop("/pkg/mcp-server"); o.Action != "error" {
+	if o := e.statusDesktop(testCfg, "/pkg/mcp-server"); o.Action != "error" {
 		t.Errorf("status on malformed config = %q, want error (not a misleading not-registered)", o.Action)
 	}
 }
