@@ -27,6 +27,7 @@ import (
 	"github.com/eichler-ai/connectors/internal/servercore/semsearch/staticembed"
 	"github.com/eichler-ai/connectors/internal/servercore/transport"
 	"github.com/eichler-ai/connectors/rhino/mcp-server/internal/appdata"
+	"github.com/eichler-ai/connectors/rhino/mcp-server/internal/clientreg"
 	"github.com/eichler-ai/connectors/rhino/mcp-server/internal/dialer"
 	"github.com/eichler-ai/connectors/rhino/mcp-server/internal/discovery"
 	"github.com/eichler-ai/connectors/rhino/mcp-server/internal/execution"
@@ -44,6 +45,13 @@ var version = "dev"
 func versionLine() string { return version + " (" + buildinfo.Read().Summary() + ")" }
 
 func main() {
+	// Registration subcommands (PRD §15, phase 7): `register` / `unregister` / `register --check` point
+	// the user's Claude clients (Code + Desktop) at this server. They are CLI-only — the installer and the
+	// plug-in's MCPBridgeRegister shell them — never MCP tools, so the agent can't rewrite Claude configs.
+	if len(os.Args) > 1 && (os.Args[1] == "register" || os.Args[1] == "unregister") {
+		os.Exit(runClientReg(os.Args[1], os.Args[2:]))
+	}
+
 	appDataDir := flag.String("app-data-dir", os.Getenv("RHINO_MCP_APPDATA"), "override the connector's app-data root (instances/ is scanned under it); defaults to the platform directory, PRD §05")
 	showVersion := flag.Bool("version", false, "print this binary's version and source revision, then exit")
 	showSearchModels := flag.Bool("search-models", false, "print whether the search_functions ranking models are bundled in this binary, then exit")
@@ -66,6 +74,69 @@ func main() {
 	logger.Printf("starting %s", versionLine())
 	if err := run(*appDataDir, logger); err != nil {
 		logger.Fatalf("fatal: %v", err)
+	}
+}
+
+// runClientReg handles the `register` / `unregister` subcommands. It prints one line per Claude client
+// and returns a shell exit code: 0 when the connector is registered with at least one client (or cleanly
+// removed), non-zero when nothing could be registered or a client errored — so the installer and the
+// plug-in's MCPBridgeRegister can drive off the exit code.
+func runClientReg(cmd string, args []string) int {
+	fs := flag.NewFlagSet(cmd, flag.ExitOnError)
+	serverPath := fs.String("server-path", "", "path to the mcp-server binary to register (default: this executable)")
+	var check bool
+	if cmd == "register" {
+		fs.BoolVar(&check, "check", false, "report registration status instead of writing it")
+	}
+	_ = fs.Parse(args)
+
+	sp := *serverPath
+	if sp == "" {
+		if exe, err := os.Executable(); err == nil {
+			sp = exe
+		}
+	}
+
+	env := clientreg.CurrentEnv()
+	var res clientreg.Result
+	switch {
+	case cmd == "unregister":
+		res = clientreg.Unregister(env)
+	case check:
+		res = clientreg.Status(env, sp)
+	default:
+		res = clientreg.Register(env, sp)
+	}
+
+	hadError := false
+	for _, o := range res.Outcomes {
+		line := fmt.Sprintf("%-15s %s", string(o.Client)+":", o.Action)
+		if o.Command != "" && (o.Action == "unchanged" || o.Action == "updated" || o.Action == "not-registered") {
+			line += " → " + o.Command
+		}
+		if o.Path != "" {
+			line += "  (" + o.Path + ")"
+		}
+		if o.Detail != "" {
+			line += " — " + o.Detail
+		}
+		fmt.Println(line)
+		if o.Action == "error" {
+			hadError = true
+		}
+	}
+
+	switch {
+	case hadError:
+		return 1
+	case cmd == "unregister":
+		return 0
+	case res.Registered():
+		return 0
+	default:
+		// register/check with nothing configured anywhere — the caller should surface this.
+		fmt.Println("no Claude client was configured (is Claude Code or Claude Desktop installed for this user?)")
+		return 1
 	}
 }
 
