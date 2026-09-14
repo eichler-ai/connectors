@@ -71,6 +71,9 @@ function Get-PackageServerExe([string]$version) {
     $dir = if ($version -and (Test-Path (Join-Path $root $version))) {
         Join-Path $root $version
     } else {
+        # Fallback (e.g. -Uninstall, which passes no version): newest by mtime. The install path always
+        # yak-uninstalls the prior version first, so normally only one version dir exists here anyway;
+        # register/unregister behave the same across versions, so a stale pick is harmless if it occurs.
         Get-ChildItem $root -Directory | Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
     }
     if (-not $dir) { return $null }
@@ -90,6 +93,7 @@ if ($Uninstall) {
     }
     Write-Host 'Uninstalling the plug-in...'
     & $yak uninstall $PkgName
+    if ($LASTEXITCODE -ne 0) { throw 'yak uninstall failed (close Rhino if it is open, then re-run with -Uninstall).' }
     Write-Host 'Done. Restart Rhino to unload the plug-in.'
     return
 }
@@ -101,10 +105,15 @@ if (Get-Process Rhino -ErrorAction SilentlyContinue) {
 
 Write-Host 'Finding the latest Rhino release...'
 # NB: Invoke-RestMethod emits a JSON array as a SINGLE pipeline object, so do NOT wrap the assignment in
-# @() — that yields a one-element array holding the whole array, and the filter below then sees nothing.
+# @() -- that yields a one-element array holding the whole array, and the filter below then sees nothing.
 # Assign directly; piping into Where-Object enumerates the releases correctly.
-$allReleases = Invoke-RestMethod -Uri "https://api.github.com/repos/$RepoSlug/releases" -Headers @{ 'User-Agent' = 'rhino-mcp-install' }
-$rhinoReleases = @($allReleases | Where-Object { $_.tag_name -like 'rhino-v*' -and -not $_.draft })
+try {
+    # per_page=100 so a burst of Revit v* releases can't push the newest rhino-v* off the first page.
+    $allReleases = Invoke-RestMethod -Uri "https://api.github.com/repos/$RepoSlug/releases?per_page=100" -Headers @{ 'User-Agent' = 'rhino-mcp-install' }
+} catch {
+    throw "Could not fetch releases from GitHub: $($_.Exception.Message). The unauthenticated GitHub API allows 60 requests/hour; if you hit that, wait a few minutes and retry."
+}
+$rhinoReleases = @($allReleases | Where-Object { $_.tag_name -like 'rhino-v*' -and -not $_.draft -and -not $_.prerelease })
 if ($Version) {
     $release = $rhinoReleases | Where-Object { $_.tag_name -eq "rhino-v$Version" } | Select-Object -First 1
     if (-not $release) { throw "No release tagged rhino-v$Version was found." }
