@@ -1,15 +1,13 @@
-using System.Diagnostics;
 using Rhino.Commands;
-using Rhino.MCPBridge.Core.Registration;
 
 namespace Rhino.MCPBridge.PlugIn;
 
 /// <summary>
-/// PRD §15 (phase 7): register this connector's MCP server with the user's Claude client. Shells out to
-/// the <c>claude</c> CLI (<c>claude mcp add</c>) when it is found, and otherwise prints the config
-/// snippet to paste. The user runs this once after installing — <c>MCPBridgeStatus</c> says whether it
-/// is needed — and it is never run automatically, so the connector never edits the user's Claude config
-/// without being asked (the registration-UX decision for phase 7).
+/// PRD §15 (phase 7): register this connector's MCP server with the user's Claude clients — Claude Code
+/// AND Claude Desktop. A thin front end over the server's own <c>register</c> subcommand (the single
+/// cross-platform engine, shared with install.ps1); this command just locates the packaged server and
+/// runs it, relaying its per-client report. The user runs it once after installing — never automatically,
+/// so the connector never edits the user's Claude config unasked (the registration-UX decision).
 /// </summary>
 public sealed class MCPBridgeRegisterCommand : Command
 {
@@ -17,90 +15,23 @@ public sealed class MCPBridgeRegisterCommand : Command
 
     protected override Result RunCommand(RhinoDoc doc, RunMode mode)
     {
-        var server = ServerBinaryLocator.Locate();
-        if (server is null)
+        var result = ServerRegistration.Run("register");
+        if (result is null)
         {
             RhinoApp.WriteLine($"MCP Bridge: could not find the server binary beside the plug-in. "
                 + $"If this is a dev build, set {ServerBinaryLocator.OverrideEnvVar} to a built server; otherwise reinstall the yak package.");
             return Result.Failure;
         }
 
-        // A yak package built on Windows (CI) stores the Mac binary with no unix exec bit, so the file
-        // Claude will spawn must be made executable first — otherwise the launch fails with permission
-        // denied. No-op on Windows; best-effort (a failure surfaces when Claude tries to launch it).
-        EnsureExecutable(server);
-
-        var claude = ClaudeCliLocator.Locate();
-        if (claude is null)
+        foreach (var line in result.Value.output.Split('\n'))
         {
-            RhinoApp.WriteLine("MCP Bridge: the `claude` CLI was not found on PATH or in the usual locations. "
-                + "Add this to your Claude client's MCP config manually:");
-            RhinoApp.WriteLine(ClientRegistration.SnippetJson(server));
-            RhinoApp.WriteLine($"(Claude Code writes user-scope servers to {ClientRegistration.UserConfigPath()}.)");
-            return Result.Success;
+            RhinoApp.WriteLine(line.TrimEnd());
         }
-
-        // Remove-then-add so re-registering a moved path replaces the old entry rather than clashing on the name.
-        RunClaude(claude, ClientRegistration.RemoveArgv());
-        var (ok, output) = RunClaude(claude, ClientRegistration.AddArgv(server));
-        if (ok)
+        if (result.Value.exitCode == 0)
         {
-            RhinoApp.WriteLine($"MCP Bridge: registered with Claude as \"{ClientRegistration.ServerName}\" -> {server}.");
             RhinoApp.WriteLine("Reconnect the server in your client (Claude Code: /mcp) or restart the client to pick it up.");
             return Result.Success;
         }
-
-        RhinoApp.WriteLine("MCP Bridge: `claude mcp add` failed:");
-        if (!string.IsNullOrWhiteSpace(output)) RhinoApp.WriteLine(output);
-        RhinoApp.WriteLine("Add this to your Claude config manually instead:");
-        RhinoApp.WriteLine(ClientRegistration.SnippetJson(server));
         return Result.Failure;
-    }
-
-    /// <summary>Add the execute bits to a file on Unix (a yak package built on Windows loses them for the
-    /// Mac binary). No-op on Windows; swallows failures — a still-non-executable binary shows up when
-    /// Claude tries to launch it, which is no worse than not doing this.</summary>
-    private static void EnsureExecutable(string path)
-    {
-        if (OperatingSystem.IsWindows()) return;
-        try
-        {
-            var mode = File.GetUnixFileMode(path);
-            File.SetUnixFileMode(path, mode | UnixFileMode.UserExecute | UnixFileMode.GroupExecute | UnixFileMode.OtherExecute);
-        }
-        catch { /* best effort */ }
-    }
-
-    private static (bool ok, string output) RunClaude(string exe, IReadOnlyList<string> argv)
-    {
-        try
-        {
-            var psi = new ProcessStartInfo(exe)
-            {
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-            };
-            foreach (var a in argv) psi.ArgumentList.Add(a);
-
-            using var p = Process.Start(psi);
-            if (p is null) return (false, "could not start " + exe);
-            // Drain both pipes asynchronously and let WaitForExit be the one timeout gate: reading a pipe
-            // to end synchronously has no timeout and can deadlock if the child fills the other pipe.
-            var stdoutTask = p.StandardOutput.ReadToEndAsync();
-            var stderrTask = p.StandardError.ReadToEndAsync();
-            if (!p.WaitForExit(30_000))
-            {
-                try { p.Kill(entireProcessTree: true); } catch { /* best effort */ }
-                return (false, "`claude` did not finish within 30 s");
-            }
-            var output = (stdoutTask.GetAwaiter().GetResult() + stderrTask.GetAwaiter().GetResult()).Trim();
-            return (p.ExitCode == 0, output);
-        }
-        catch (Exception ex)
-        {
-            return (false, ex.Message);
-        }
     }
 }
