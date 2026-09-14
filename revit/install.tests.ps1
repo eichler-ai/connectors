@@ -496,194 +496,69 @@ Describe 'Add-in shared-payload dedup (issue B1)' {
     }
 }
 
-Describe 'Add-DesktopMcpServer / Remove-DesktopMcpServer' {
-    BeforeEach {
-        $script:cfgDir = Join-Path $TestDrive "claude-$([guid]::NewGuid())"
-        New-Item -ItemType Directory -Force -Path $cfgDir | Out-Null
-        $script:cfg = Join-Path $cfgDir 'claude_desktop_config.json'
-    }
-    It 'creates the config and adds a stdio server when none exists' {
-        Add-DesktopMcpServer $cfg 'revit' 'C:\x\mcp-server.exe' @('--mode', 'local') | Should -BeTrue
-        $j = Get-Content $cfg -Raw | ConvertFrom-Json
-        $j.mcpServers.revit.type | Should -Be 'stdio'
-        $j.mcpServers.revit.command | Should -Be 'C:\x\mcp-server.exe'
-        @($j.mcpServers.revit.args) | Should -Be @('--mode', 'local')
-    }
-    It 'merges without disturbing another server or a top-level key' {
-        @{ theme = 'dark'; mcpServers = @{ other = @{ command = 'other.exe' } } } | ConvertTo-Json -Depth 5 | Set-Content $cfg
-        Add-DesktopMcpServer $cfg 'revit' 'C:\x\mcp-server.exe' @('--mode', 'local') | Should -BeTrue
-        $j = Get-Content $cfg -Raw | ConvertFrom-Json
-        $j.mcpServers.other.command | Should -Be 'other.exe'
-        $j.mcpServers.revit.command | Should -Be 'C:\x\mcp-server.exe'
-        $j.theme | Should -Be 'dark'
-    }
-    It 'backs up an existing config and writes UTF-8 with no BOM' {
-        '{"mcpServers":{}}' | Set-Content $cfg
-        Add-DesktopMcpServer $cfg 'revit' 'C:\x\mcp-server.exe' @('--mode', 'local') | Should -BeTrue
-        Test-Path "$cfg.mcpbridge.bak" | Should -BeTrue
-        $bytes = [System.IO.File]::ReadAllBytes($cfg)
-        ($bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) | Should -BeFalse
-    }
-    It 'is a no-op (returns false) when Claude Desktop is not installed (config dir absent)' {
-        $absent = Join-Path $TestDrive 'no-such-dir\claude_desktop_config.json'
-        Add-DesktopMcpServer $absent 'revit' 'C:\x\mcp-server.exe' @('--mode', 'local') | Should -BeFalse
-        Test-Path $absent | Should -BeFalse
-    }
-    It 'Remove takes only our entry, leaving other servers intact' {
-        @{ mcpServers = @{ other = @{ command = 'other.exe' }; revit = @{ command = 'r.exe' } } } | ConvertTo-Json -Depth 5 | Set-Content $cfg
-        Remove-DesktopMcpServer $cfg 'revit' | Should -BeTrue
-        $j = Get-Content $cfg -Raw | ConvertFrom-Json
-        $j.mcpServers.PSObject.Properties['revit'] | Should -BeNullOrEmpty
-        $j.mcpServers.other.command | Should -Be 'other.exe'
-    }
-    It 'Remove is a no-op when the file, or the entry, is absent' {
-        Remove-DesktopMcpServer $cfg 'revit' | Should -BeFalse
-        '{"mcpServers":{}}' | Set-Content $cfg
-        Remove-DesktopMcpServer $cfg 'revit' | Should -BeFalse
-    }
-    It 'merges into a config whose mcpServers is null (does not throw)' {
-        '{"mcpServers":null}' | Set-Content $cfg
-        Add-DesktopMcpServer $cfg 'revit' 'C:\x\mcp-server.exe' @('--mode', 'local') | Should -BeTrue
-        $j = Get-Content $cfg -Raw | ConvertFrom-Json
-        $j.mcpServers.revit.command | Should -Be 'C:\x\mcp-server.exe'
-    }
-    It 'backs up only once, preserving the pristine pre-install backup across re-installs' {
-        '{"mcpServers":{"orig":true}}' | Set-Content $cfg
-        Add-DesktopMcpServer $cfg 'revit' 'C:\x\mcp-server.exe' @('--mode', 'local') | Should -BeTrue
-        (Get-Content "$cfg.mcpbridge.bak" -Raw) | Should -Match 'orig'
-        Add-DesktopMcpServer $cfg 'revit' 'C:\y\mcp-server.exe' @('--mode', 'local') | Should -BeTrue
-        # The backup still holds the ORIGINAL config, not the first install's rewrite.
-        (Get-Content "$cfg.mcpbridge.bak" -Raw) | Should -Match 'orig'
-        (Get-Content "$cfg.mcpbridge.bak" -Raw) | Should -Not -Match 'revit'
-    }
-    It 'throws on a malformed config so the installer falls back to printed instructions' {
-        'this is not json {' | Set-Content $cfg
-        { Add-DesktopMcpServer $cfg 'revit' 'C:\x\mcp-server.exe' @('--mode', 'local') } | Should -Throw
-    }
-}
+# The dual-client registration ENGINE -- the claude_desktop_config.json merge, the Store/MSIX config path,
+# and the `claude mcp add` wiring -- now lives in the broker (internal/servercore/clientreg) and is
+# unit-tested there in Go (clientreg_test.go). install.ps1 only shells `mcp-server register` /
+# `unregister` / `register --check`, so these tests pin that glue: the right subcommand, with the deployed
+# exe, and the -OnlyIfMissing check-then-register branch. Invoke-ServerSubcommand is mocked so nothing
+# real runs.
 
-Describe 'Get-DesktopConfigPath' {
-    BeforeEach {
-        $script:savedLocal = $env:LOCALAPPDATA
-        $script:savedApp = $env:APPDATA
-        $script:root = Join-Path $TestDrive "env-$([guid]::NewGuid())"
-        $env:LOCALAPPDATA = Join-Path $root 'Local'
-        $env:APPDATA = Join-Path $root 'Roaming'
-        New-Item -ItemType Directory -Force -Path $env:LOCALAPPDATA, $env:APPDATA | Out-Null
-    }
-    AfterEach {
-        $env:LOCALAPPDATA = $savedLocal
-        $env:APPDATA = $savedApp
-    }
-    It 'prefers the MSIX package config when a Claude package is present' {
-        $pkg = Join-Path $env:LOCALAPPDATA 'Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\Claude'
-        New-Item -ItemType Directory -Force -Path $pkg | Out-Null
-        Get-DesktopConfigPath | Should -Be (Join-Path $pkg 'claude_desktop_config.json')
-    }
-    It 'falls back to the standard %APPDATA% path when no Claude package exists' {
-        Get-DesktopConfigPath | Should -Be (Join-Path $env:APPDATA 'Claude\claude_desktop_config.json')
-    }
-}
-
-Describe 'Unregister-McpServer (uninstall deregistration, issue #37)' {
-    It 'deregisters via `claude mcp remove` with the args starting at remove (no doubled mcp subcommand)' {
-        Mock Get-Command { [pscustomobject]@{ Name = 'claude' } } -ParameterFilter { $Name -eq 'claude' }
-        Mock Invoke-ClaudeMcp { @{ ExitCode = 0; Output = @() } }
-        Mock Get-DesktopConfigPath { Join-Path $TestDrive 'no-desktop\claude_desktop_config.json' }
-        Mock Remove-DesktopMcpServer { $false }
-
-        Unregister-McpServer
-
-        # Invoke-ClaudeMcp already supplies the `mcp` root (& claude mcp @CliArgs), so the args must begin
-        # at `remove` -- an extra leading 'mcp' would run `claude mcp mcp remove` and silently no-op.
-        Should -Invoke Invoke-ClaudeMcp -Times 1 -Exactly -ParameterFilter { $CliArgs[0] -eq 'remove' -and ($CliArgs -contains 'revit') -and ($CliArgs -contains '--scope') }
-        Should -Invoke Invoke-ClaudeMcp -Times 0 -Exactly -ParameterFilter { $CliArgs[0] -eq 'mcp' }
-    }
-
-    It 'skips the CLI when claude is not installed but still clears the Claude Desktop config' {
-        Mock Get-Command { $null } -ParameterFilter { $Name -eq 'claude' }
-        Mock Invoke-ClaudeMcp { @{ ExitCode = 0; Output = @() } }
-        Mock Get-DesktopConfigPath { Join-Path $TestDrive 'no-desktop\claude_desktop_config.json' }
-        Mock Remove-DesktopMcpServer { $false }
-
-        Unregister-McpServer
-
-        Should -Invoke Invoke-ClaudeMcp -Times 0 -Exactly
-        Should -Invoke Remove-DesktopMcpServer -Times 1 -Exactly
-    }
-}
-
-Describe 'Register-McpServer' {
+Describe 'Register-McpServer (shells the broker register subcommand)' {
     BeforeEach {
         $script:dir = Join-Path $TestDrive "reg-$([guid]::NewGuid())"
         New-Item -ItemType Directory -Force -Path $dir | Out-Null
-        $script:cfg = Join-Path $dir 'claude_desktop_config.json'
         $script:fakeExe = Join-Path $dir 'mcp-server.exe'
         New-Item -ItemType File -Force -Path $fakeExe | Out-Null
-        # Isolate from the real machine: the Desktop config path is our TestDrive file, and the CLI half
-        # is treated as absent (no `claude` on PATH) so no real client is touched.
-        Mock Get-DesktopConfigPath { $script:cfg }
-        Mock Get-Command { $null } -ParameterFilter { $Name -eq 'claude' }
     }
-    It 'registers the Desktop server when none is configured' {
+    It 'shells `register` (without --check) on a normal install' {
+        Mock Invoke-ServerSubcommand { 0 }
         Register-McpServer $fakeExe 6>$null
-        $j = Get-Content $cfg -Raw | ConvertFrom-Json
-        $j.mcpServers.revit.command | Should -Be $fakeExe
+        Should -Invoke Invoke-ServerSubcommand -Times 1 -Exactly -ParameterFilter {
+            $ServerExe -like '*mcp-server.exe' -and $Arguments[0] -eq 'register' -and ($Arguments -notcontains '--check')
+        }
     }
-    It 'with -OnlyIfMissing leaves an already-registered Desktop entry untouched' {
-        @{ mcpServers = @{ revit = @{ type = 'stdio'; command = 'OLD.exe'; args = @('--mode', 'local') } } } | ConvertTo-Json -Depth 6 | Set-Content $cfg
-        Register-McpServer $fakeExe -OnlyIfMissing 6>$null
-        $j = Get-Content $cfg -Raw | ConvertFrom-Json
-        $j.mcpServers.revit.command | Should -Be 'OLD.exe'
-    }
-    It 'with -OnlyIfMissing adds the Desktop entry when it is absent (repairs lost wiring)' {
-        '{"mcpServers":{"other":{"command":"o.exe"}}}' | Set-Content $cfg
-        Register-McpServer $fakeExe -OnlyIfMissing 6>$null
-        $j = Get-Content $cfg -Raw | ConvertFrom-Json
-        $j.mcpServers.revit.command | Should -Be $fakeExe
-        $j.mcpServers.other.command | Should -Be 'o.exe'
-    }
-    It 'is a no-op when the server exe is absent' {
+    It 'is a no-op (shells nothing) when the server exe is absent' {
+        Mock Invoke-ServerSubcommand { 0 }
         Register-McpServer (Join-Path $dir 'no-such\mcp-server.exe') 6>$null
-        Test-Path $cfg | Should -BeFalse
+        Should -Invoke Invoke-ServerSubcommand -Times 0 -Exactly
+    }
+    It 'with -OnlyIfMissing runs `register --check` and, when already current (exit 0), does NOT re-register' {
+        Mock Invoke-ServerSubcommand { 0 }
+        Register-McpServer $fakeExe -OnlyIfMissing 6>$null
+        Should -Invoke Invoke-ServerSubcommand -Times 1 -Exactly -ParameterFilter { $Arguments -contains '--check' }
+        Should -Invoke Invoke-ServerSubcommand -Times 0 -Exactly -ParameterFilter { $Arguments[0] -eq 'register' -and ($Arguments -notcontains '--check') }
+    }
+    It 'with -OnlyIfMissing re-registers when `register --check` reports stale/absent (non-zero)' {
+        Mock Invoke-ServerSubcommand { 1 } -ParameterFilter { $Arguments -contains '--check' }
+        Mock Invoke-ServerSubcommand { 0 } -ParameterFilter { $Arguments -notcontains '--check' }
+        Register-McpServer $fakeExe -OnlyIfMissing 6>$null
+        Should -Invoke Invoke-ServerSubcommand -Times 1 -Exactly -ParameterFilter { $Arguments -contains '--check' }
+        Should -Invoke Invoke-ServerSubcommand -Times 1 -Exactly -ParameterFilter { $Arguments[0] -eq 'register' -and ($Arguments -notcontains '--check') }
+    }
+    It 'prints manual fallback instructions (and does not throw) when register fails' {
+        Mock Invoke-ServerSubcommand { 1 }
+        $out = Register-McpServer $fakeExe 6>&1
+        ($out -join "`n") | Should -Match 'claude mcp add --scope user revit'
     }
 }
 
-Describe 'Register-McpServer -- Claude Code CLI wiring' {
+Describe 'Unregister-McpServer (uninstall deregistration, shells unregister)' {
     BeforeEach {
-        $script:dir = Join-Path $TestDrive "cli-$([guid]::NewGuid())"
+        $script:dir = Join-Path $TestDrive "unreg-$([guid]::NewGuid())"
         New-Item -ItemType Directory -Force -Path $dir | Out-Null
         $script:fakeExe = Join-Path $dir 'mcp-server.exe'
         New-Item -ItemType File -Force -Path $fakeExe | Out-Null
-        # Desktop half is inert here (its own dir is absent -> Add returns $false); the CLI is "present".
-        Mock Get-DesktopConfigPath { Join-Path $dir 'no-desktop\claude_desktop_config.json' }
-        Mock Get-Command { [pscustomobject]@{ Name = 'claude' } } -ParameterFilter { $Name -eq 'claude' }
-        # Default: `add`/`remove` succeed; `list` is overridden per-test to say present/absent.
-        Mock Invoke-ClaudeMcp { @{ ExitCode = 0; Output = @('Added') } } -ParameterFilter { $CliArgs[0] -eq 'add' }
-        Mock Invoke-ClaudeMcp { @{ ExitCode = 0; Output = @() } } -ParameterFilter { $CliArgs[0] -eq 'remove' }
     }
-    It 'does NOT call `remove` when revit is absent (the fresh-install crash regression)' {
-        Mock Invoke-ClaudeMcp { @{ ExitCode = 0; Output = @() } } -ParameterFilter { $CliArgs[0] -eq 'list' }
-        Register-McpServer $fakeExe 6>$null
-        Should -Invoke Invoke-ClaudeMcp -Times 0 -Exactly -ParameterFilter { $CliArgs[0] -eq 'remove' }
-        Should -Invoke Invoke-ClaudeMcp -Times 1 -Exactly -ParameterFilter { $CliArgs[0] -eq 'add' }
+    It 'shells `unregister` with the server exe' {
+        Mock Invoke-ServerSubcommand { 0 }
+        Unregister-McpServer $fakeExe
+        Should -Invoke Invoke-ServerSubcommand -Times 1 -Exactly -ParameterFilter { $ServerExe -like '*mcp-server.exe' -and $Arguments[0] -eq 'unregister' }
     }
-    It 'removes then re-adds when revit is already present (a normal update)' {
-        Mock Invoke-ClaudeMcp { @{ ExitCode = 0; Output = @('revit: C:\old\mcp-server.exe --mode local') } } -ParameterFilter { $CliArgs[0] -eq 'list' }
-        Register-McpServer $fakeExe 6>$null
-        Should -Invoke Invoke-ClaudeMcp -Times 1 -Exactly -ParameterFilter { $CliArgs[0] -eq 'remove' }
-        Should -Invoke Invoke-ClaudeMcp -Times 1 -Exactly -ParameterFilter { $CliArgs[0] -eq 'add' }
-    }
-    It 'with -OnlyIfMissing leaves an already-present CLI registration completely untouched' {
-        Mock Invoke-ClaudeMcp { @{ ExitCode = 0; Output = @('revit: C:\x\mcp-server.exe --mode local') } } -ParameterFilter { $CliArgs[0] -eq 'list' }
-        Register-McpServer $fakeExe -OnlyIfMissing 6>$null
-        Should -Invoke Invoke-ClaudeMcp -Times 0 -Exactly -ParameterFilter { $CliArgs[0] -eq 'remove' }
-        Should -Invoke Invoke-ClaudeMcp -Times 0 -Exactly -ParameterFilter { $CliArgs[0] -eq 'add' }
-    }
-    It 'reports a manual step (does not throw) when `add` fails' {
-        Mock Invoke-ClaudeMcp { @{ ExitCode = 0; Output = @() } } -ParameterFilter { $CliArgs[0] -eq 'list' }
-        Mock Invoke-ClaudeMcp { @{ ExitCode = 1; Output = @('some CLI error') } } -ParameterFilter { $CliArgs[0] -eq 'add' }
-        { Register-McpServer $fakeExe 6>$null } | Should -Not -Throw
+    It 'warns (shells nothing) when the server exe is already gone' {
+        Mock Invoke-ServerSubcommand { 0 }
+        $warn = Unregister-McpServer (Join-Path $dir 'gone\mcp-server.exe') 3>&1
+        Should -Invoke Invoke-ServerSubcommand -Times 0 -Exactly
+        ($warn -join "`n") | Should -Match 'could not be cleared'
     }
 }
 
