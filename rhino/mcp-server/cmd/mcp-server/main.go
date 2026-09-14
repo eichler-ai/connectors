@@ -131,10 +131,18 @@ func runClientReg(cmd string, args []string) int {
 		return 1
 	case cmd == "unregister":
 		return 0
+	case check:
+		// A stale (updated) or absent registration must exit non-zero so the installer / on-load notice
+		// re-register rather than treating a wrong path as fine.
+		if res.CheckOK() {
+			return 0
+		}
+		fmt.Println("not registered with a current path on any Claude client — run MCPBridgeRegister (or install.ps1) to (re-)register")
+		return 1
 	case res.Registered():
 		return 0
 	default:
-		// register/check with nothing configured anywhere — the caller should surface this.
+		// register with nothing configured anywhere — the caller should surface this.
 		fmt.Println("no Claude client was configured (is Claude Code or Claude Desktop installed for this user?)")
 		return 1
 	}
