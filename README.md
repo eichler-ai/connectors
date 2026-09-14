@@ -111,19 +111,20 @@ topology, is in [`revit/install.md`](./revit/install.md); installing an unreleas
 the [quickstart](./revit/docs/quickstart.md).
 
 **Rhino connector**, on Windows or macOS with Rhino 8. The connector ships as one cross-platform
-**yak** package (the plug-in plus both platforms' MCP server binaries). Download the `.yak` from the
-[latest release](https://github.com/eichler-ai/connectors/releases) and install it with the yak CLI
-bundled with Rhino (or drag it onto the Rhino window):
+**yak** package (the plug-in plus both platforms' MCP server binaries) and registers with **both
+Claude Code and Claude Desktop**. On Windows, one line in PowerShell:
 
-```sh
-# macOS ("C:\Program Files\Rhino 8\System\yak.exe" on Windows)
-"/Applications/Rhino 8.app/Contents/Resources/bin/yak" install ~/Downloads/rhino-mcp-bridge-*.yak
+```powershell
+irm https://raw.githubusercontent.com/eichler-ai/connectors/main/rhino/install.ps1 | iex
 ```
 
-Restart Rhino, then run **`MCPBridgeRegister`** in Rhino's command line to register the server with
-Claude. Publishing to the public package server (so `_PackageManager` finds it) is a later step
-(PRD §15); for now it is install-from-file. Building from source and cutting a release are in
-[`rhino/README.md`](./rhino/README.md).
+It downloads the latest release, installs the plug-in with Rhino's yak CLI, and registers the MCP
+server with both Claude clients; restart Rhino and your Claude client afterward. On macOS (no
+one-liner yet), download the `.yak` from the
+[latest release](https://github.com/eichler-ai/connectors/releases), `yak install` it (or drag it
+onto Rhino), and run **`MCPBridgeRegister`** in Rhino's command line. Publishing to the public package
+server (so `_PackageManager` finds it) is a later step (PRD §15); for now it is install-from-file.
+Building from source and cutting a release are in [`rhino/README.md`](./rhino/README.md).
 
 ## Contributing & security
 

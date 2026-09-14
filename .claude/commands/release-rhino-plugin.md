@@ -93,9 +93,12 @@ Follow these steps in order.
    - `git tag rhino-vX.Y.Z <release-commit> && git push origin rhino-vX.Y.Z`.
    - `gh release create rhino-vX.Y.Z <path-to-.yak> --title "Rhino MCP connector X.Y.Z" --notes-file <notes>`.
      Write curated notes (use `--notes-file`, not `--generate-notes` — with no prior `rhino-v` tag the
-     latter dumps every commit in history): the **install** steps (download the `.yak`, `yak install
-     <file>` or drag onto Rhino, restart Rhino, run `MCPBridgeRegister`), **"Rhino 8 required"** (it
-     compensates for the `any-any` tag), a short what's-inside, the **honest verification result**
+     latter dumps every commit in history): the **install** steps — Windows one-liner
+     (`irm https://raw.githubusercontent.com/eichler-ai/connectors/main/rhino/install.ps1 | iex`, which
+     installs and registers **both Claude Code and Claude Desktop**), and the macOS/manual path
+     (download the `.yak`, `yak install <file>` or drag onto Rhino, restart Rhino, run
+     `MCPBridgeRegister`) — **"Rhino 8 required"** (it compensates for the `any-any` tag), a short
+     what's-inside, the **honest verification result**
      (which platforms were live-checked and which weren't), and a **Known issues** section (the
      `any-any` tag; not yet on the public Package Manager; macOS notarization deferred). The 178 MB
      asset upload is slow — expect the `gh release create` call to run for a few minutes.
