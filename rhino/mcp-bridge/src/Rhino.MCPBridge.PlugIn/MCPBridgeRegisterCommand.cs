@@ -25,6 +25,11 @@ public sealed class MCPBridgeRegisterCommand : Command
             return Result.Failure;
         }
 
+        // A yak package built on Windows (CI) stores the Mac binary with no unix exec bit, so the file
+        // Claude will spawn must be made executable first — otherwise the launch fails with permission
+        // denied. No-op on Windows; best-effort (a failure surfaces when Claude tries to launch it).
+        EnsureExecutable(server);
+
         var claude = ClaudeCliLocator.Locate();
         if (claude is null)
         {
@@ -50,6 +55,20 @@ public sealed class MCPBridgeRegisterCommand : Command
         RhinoApp.WriteLine("Add this to your Claude config manually instead:");
         RhinoApp.WriteLine(ClientRegistration.SnippetJson(server));
         return Result.Failure;
+    }
+
+    /// <summary>Add the execute bits to a file on Unix (a yak package built on Windows loses them for the
+    /// Mac binary). No-op on Windows; swallows failures — a still-non-executable binary shows up when
+    /// Claude tries to launch it, which is no worse than not doing this.</summary>
+    private static void EnsureExecutable(string path)
+    {
+        if (OperatingSystem.IsWindows()) return;
+        try
+        {
+            var mode = File.GetUnixFileMode(path);
+            File.SetUnixFileMode(path, mode | UnixFileMode.UserExecute | UnixFileMode.GroupExecute | UnixFileMode.OtherExecute);
+        }
+        catch { /* best effort */ }
     }
 
     private static (bool ok, string output) RunClaude(string exe, IReadOnlyList<string> argv)

@@ -18,10 +18,12 @@ set -euo pipefail
 
 VERSION="0.0.1-dev"
 OUT_DIR=""
+STAGE_DIR=""   # --stage-only: build + stage the package folder here and STOP before `yak build`.
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --version) VERSION="$2"; shift 2 ;;
     --out) OUT_DIR="$2"; shift 2 ;;
+    --stage-only) STAGE_DIR="$2"; shift 2 ;;   # for CI: stage on macOS (needs lipo), yak build on Windows
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -39,7 +41,9 @@ YAK="${RHINO_YAK_PATH:-/Applications/Rhino 8.app/Contents/Resources/bin/yak}"
 WIN_SERVER="mcp-server-win-x64.exe"
 MAC_SERVER="mcp-server-mac"
 
-for tool in "$YAK" lipo go; do command -v "$tool" >/dev/null 2>&1 || [[ -x "$tool" ]] || { echo "missing: $tool" >&2; exit 1; }; done
+# yak is only needed for the build step, which --stage-only skips (CI stages on macOS, yak-builds on Windows).
+TOOLS=(lipo go); [[ -z "$STAGE_DIR" ]] && TOOLS+=("$YAK")
+for tool in "${TOOLS[@]}"; do command -v "$tool" >/dev/null 2>&1 || [[ -x "$tool" ]] || { echo "missing: $tool" >&2; exit 1; }; done
 
 echo "==> build plug-in (Release)"
 dotnet build "$ROOT/mcp-bridge/Rhino.MCPBridge.sln" -c Release -nologo -v q
@@ -55,7 +59,10 @@ trap 'rm -rf "$WORK"' EXIT
 lipo -create "$WORK/mac-arm64" "$WORK/mac-amd64" -output "$WORK/$MAC_SERVER"
 
 echo "==> stage the package"
-PKG="$WORK/pkg"; mkdir -p "$PKG"
+# --stage-only puts the staged folder at STAGE_DIR (it must survive for the Windows yak-build job);
+# otherwise it lives under WORK and is cleaned after yak build.
+if [[ -n "$STAGE_DIR" ]]; then PKG="$STAGE_DIR"; rm -rf "$PKG"; fi
+PKG="${PKG:-$WORK/pkg}"; mkdir -p "$PKG"
 cp "$BIN"/*.rhp "$BIN"/*.dll "$BIN"/*.deps.json "$PKG"/            # *.dll includes the flat win e_sqlite3.dll
 cp "$BIN"/*.xml "$PKG"/ 2>/dev/null || true
 # Universal Mac SQLite native, replacing the single-arch flattened one, so the plug-in loads on both Macs.
@@ -82,6 +89,12 @@ keywords:
   - automation
   - grasshopper
 YAML
+
+if [[ -n "$STAGE_DIR" ]]; then
+  echo "==> staged (no yak build): $PKG"
+  echo "    run \`$YAK build\` in that folder on Windows to produce the .yak"
+  exit 0
+fi
 
 echo "==> yak build"
 ( cd "$PKG" && "$YAK" build )

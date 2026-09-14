@@ -32,6 +32,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   mcp-server:
@@ -354,3 +355,62 @@ jobs:
       # it here catches a CGO regression without needing Docker.
       - name: go build (static, as the Dockerfile does)
         run: CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /tmp/hub ./hub/cmd/hub
+
+  # ── Distribution: the cross-platform yak package (PRD §15, phase 7 PR 3) ──────────────────────────
+  # Built in two stages because the pieces live on different OSes: the UNIVERSAL Mac binaries need
+  # `lipo` (macOS), and `yak build` needs the yak CLI, which McNeel ships standalone only as yak.exe
+  # (Windows). Not run on PRs — it produces a large (~190 MB) artifact; it runs on main pushes and manual
+  # dispatch. No `yak push`: the artifact is install-from-file (the chosen distribution posture for now).
+  rhino-package-stage:
+    name: Rhino package — stage (macOS)
+    if: github.event_name != 'pull_request'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: rhino/mcp-server/go.mod
+          cache-dependency-path: rhino/mcp-server/go.sum
+      # setup-dotnet exports DOTNET_ROOT, which package-yak.sh honours over its Homebrew default; go and
+      # lipo are already present on the runner. --stage-only skips yak build (done on Windows below).
+      - name: stage the package (plug-in + both server binaries, universal Mac)
+        run: rhino/dev-tooling/package-yak.sh --version "0.0.0-ci.${{ github.run_number }}" --stage-only "$RUNNER_TEMP/stage"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rhino-package-staged
+          path: ${{ runner.temp }}/stage
+          retention-days: 1
+
+  rhino-package-yak:
+    name: Rhino package — yak build (Windows)
+    if: github.event_name != 'pull_request'
+    needs: rhino-package-stage
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: rhino-package-staged
+          path: stage
+      - name: fetch the standalone yak CLI
+        run: Invoke-WebRequest https://files.mcneel.com/yak/tools/latest/yak.exe -OutFile yak.exe
+      - name: yak build
+        run: |
+          $yak = Join-Path $PWD 'yak.exe'
+          Push-Location stage
+          & $yak build
+          if ($LASTEXITCODE -ne 0) { throw "yak build failed ($LASTEXITCODE)" }
+          $y = Get-ChildItem *.yak | Select-Object -First 1
+          Pop-Location
+          if (-not $y) { throw "yak build produced no .yak" }
+          Write-Host ("built {0} ({1:N1} MB)" -f $y.Name, ($y.Length/1MB))
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rhino-yak-package
+          path: stage/*.yak
+          retention-days: 14
