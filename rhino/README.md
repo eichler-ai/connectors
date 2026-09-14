@@ -7,7 +7,7 @@ Two components (`CONVENTIONS.md` "Bridge + Server"):
 - [`mcp-bridge/`](./mcp-bridge/) — the Rhino MCP Bridge, a Rhino plug-in (.NET 8, `Rhino.MCPBridge.*`). Listens on loopback and publishes `instances/<pid>.json`.
 - [`mcp-server/`](./mcp-server/) — the Rhino MCP Server, a Go process that speaks MCP over stdio and dials in to every running Rhino. No singleton: each server process is independent.
 
-Plus [`test-harness/`](./test-harness/) (live tier-2 suite) and [`dev-tooling/`](./dev-tooling/) (`deploy-plugin.sh` / `deploy-plugin-windows.ps1`: build, yak-package, install, restart Rhino).
+Plus [`test-harness/`](./test-harness/) (live tier-2 suite) and [`dev-tooling/`](./dev-tooling/): `deploy-plugin.sh` / `deploy-plugin-windows.ps1` build and install into the local Rhino for the dev loop, and `package-yak.sh` builds the distributable cross-platform yak package (the plug-in plus both platforms' server binaries).
 
 ## What an agent can do
 
