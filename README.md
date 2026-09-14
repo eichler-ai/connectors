@@ -1,7 +1,7 @@
 # Connectors
 
-MCP-based connectors that let Claude and other agents drive host applications directly — a desktop
-app like Revit, or a web app like Excel.
+MCP-based connectors that let Claude and other agents drive host applications directly — desktop
+apps like Revit and Rhino, or a web app like Excel.
 
 Each connector follows the same two-component pattern (see [`CONVENTIONS.md`](./CONVENTIONS.md)):
 an in-process **Bridge** (a plugin/add-in inside the host app) plus an agent-facing **MCP Server**
@@ -33,6 +33,19 @@ Cloud Run service that serves the MCP endpoint, the WebSocket the add-in dials, 
   line** (see [Install](#install) below), or build from source — the
   [quickstart](./revit/docs/quickstart.md). Design:
   [`revit/docs/PRD.md`](./revit/docs/PRD.md); per-phase status: PRD §15.
+
+- [`rhino/`](./rhino/) — **Rhino connector** (Rhino MCP Bridge + Rhino MCP Server). The same
+  bet as Revit — `execute_script` plus API discovery instead of a fixed tool catalog — but the
+  script runs in **Python 3 or C#** against a live Rhino 8 document, and Grasshopper is
+  first-class: an agent opens, edits, wires, drives and reads Grasshopper definitions, and sees
+  the result through `capture_view` (a viewport or the canvas, returned inline as an image). The
+  server dials in to every running Rhino, so there is no singleton to elect. Built and
+  live-verified against Rhino 8 on macOS and Windows: the core execution loop, undo/rollback,
+  multi-instance addressing, API discovery, Grasshopper, viewport capture and a version-verified
+  how-to corpus. Distribution is the current phase — a one-package **yak** install (plug-in +
+  server) was just proven end to end on Windows but is not shipped yet, so for now **build from
+  source** ([`rhino/README.md`](./rhino/README.md)). Design:
+  [`rhino/docs/PRD.md`](./rhino/docs/PRD.md); per-phase status: PRD §18.
 
 ## Install
 
@@ -95,6 +108,13 @@ Releases are **self-signed** for now, so Windows shows an "Unknown Publisher" pr
 a CA-issued certificate is a later step (PRD §12). More detail, including the Mac + Parallels dev
 topology, is in [`revit/install.md`](./revit/install.md); installing an unreleased local build is in
 the [quickstart](./revit/docs/quickstart.md).
+
+**Rhino connector** — **not yet distributed.** Build and install from source on macOS or Windows
+(Rhino 8) per [`rhino/README.md`](./rhino/README.md), then register the server with
+`claude mcp add rhino <path-to-server>`. A one-line **yak**-package install (plug-in + server in one
+package, updated by Rhino's own Package Manager) is the current phase — the Windows end to end is
+proven ([`rhino/docs/spikes/phase-7-windows-distribution.md`](./rhino/docs/spikes/phase-7-windows-distribution.md),
+PRD §15) — but it has not shipped.
 
 ## Contributing & security
 
