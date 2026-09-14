@@ -286,6 +286,52 @@ off `doc.Path` (e.g. `restart_rhino`'s reopen list): a real user document opened
 and reopens; a `SaveAs`-in-script artifact does not. To get a path-associated doc in a test, write the
 file then `RhinoApp.RunScript('_-Open "…"', False)`.
 
+## Symptom: `GH_DocumentIO.SaveQuiet(path)` returns True but `ghdoc.FilePath` stays None
+
+Same shape as the RhinoDoc `SaveAs` trap above, for Grasshopper: `SaveQuiet` (and `Save`) writes the
+`.gh`/`.ghx` but does **not** set the document's `FilePath`. Set it yourself after a successful save
+(`Connector.Grasshopper.Save` does), or a later save-to-current has no path and the canvas title never
+reflects where it went. Note a **save-as changes the definition's `gh_document_id`** — identity is
+path-derived once saved (`GrasshopperIdentity` uses `FilePath`) — so re-list after saving; an id captured
+before the save is stale.
+
+## Symptom: two Grasshopper definitions have the same `gh_document_id`, or binding hits the wrong one
+
+An **unsaved/empty** GH document's `gh_document_id` is derived from its (empty, "unnamed") identity, not
+its unique `DocumentID` guid, so **every empty definition collides on one id** (verified: three empties
+all `gh-5ad96cc89746`). Binding to that id is then ambiguous. To get a cleanly-bindable fresh definition
+(as the how-to sweep does), remove the others and create exactly one — with a single GH doc open, its id
+is unambiguous whatever the collision. A definition with content, or one saved to a path, gets a distinct
+id.
+
+## Symptom: an object-count delta is wrong — an add or delete isn't reflected
+
+`RhinoDoc.Objects.Count` **includes recently-deleted (undo-buffered) objects**, so it does not drop when
+you delete and can read higher than what's visibly in the document. Measure a real active-object delta with
+an explicit enumerator — `Rhino.DocObjects.ObjectEnumeratorSettings{ DeletedObjects=false, NormalObjects=true }`
+via `doc.Objects.GetObjectList(s)` — not `.Count`. The how-to sweep's `expect_object_delta` uses this.
+
+## Symptom: `search_functions`/`describe_function` serve stale catalog data after a plug-in upgrade
+
+The discovery cache is **SQLite on disk** (`~/Library/Application Support/Connectors/Rhino/<ver>/discovery-cache.db`),
+so it survives restarts and a namespace/entry from a previous build shows up immediately at connect — before
+the fresh background sync has re-read the corpus. It is **eventually consistent**: the sync (Grasshopper on a
+30s retry cadence once a GH doc is open; ports enrichment; etc.) updates the cache, and the broker's
+`search_functions` index rebuilds within a tick of the fingerprint changing. When a live test asserts freshly
+-synced data, **poll** for it rather than reading once. To see what the sync actually wrote, query the db
+directly: `sqlite3 discovery-cache.db "select signature from members where member_id='Grasshopper.Curve.Circle'"`.
+
+## Symptom: a Python script called a lifecycle/denied member and it wasn't gated
+
+`PythonScriptGuard` is a token walk that gates a member **only when the receiver chain normalises to a known
+type** — `doc`/`scriptcontext.doc`/`RhinoDoc.ActiveDoc` → `RhinoDoc`, and `connector.Grasshopper` →
+`GrasshopperApi` (its `ReceiverPrefixes`). It does **not** gate a bare `.Save(` by member name (the earlier
+belief; a live save via `connector.Grasshopper.Save` was silently un-gated until this was added). A new
+gated connector method must be registered in BOTH `ScriptApiDenylist.LifecycleMembersByType` (the C#/Roslyn
+walk binds it by symbol) **and** `PythonScriptGuard` (add a `ReceiverPrefixes` mapping so the Python token
+walk normalises the receiver to the type). A receiver reached through an untracked alias still slips — the
+guard is against plausible mistakes, not a sandbox.
+
 ## A wedged Rhino ignores the restart helper's quit
 
 The helper's polite `quit` AppleEvent needs the main thread. After the destructive harness case (or
