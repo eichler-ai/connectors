@@ -47,7 +47,7 @@ type Result struct {
 	Outcomes []Outcome `json:"outcomes"`
 }
 
-// Registered reports whether at least one client now points at serverPath.
+// Registered reports whether at least one client now points at serverPath (used by `register`).
 func (r Result) Registered() bool {
 	for _, o := range r.Outcomes {
 		if o.Action == "registered" || o.Action == "updated" || o.Action == "unchanged" {
@@ -55,6 +55,23 @@ func (r Result) Registered() bool {
 		}
 	}
 	return false
+}
+
+// CheckOK reports whether `register --check` should exit success: at least one client points at exactly
+// this server path (unchanged) and none is stale (updated) or errored. A stale or broken registration is
+// "needs attention", so the installer and the plug-in's on-load notice re-register rather than reading it
+// as fine — the case a plain "is it present?" check would miss.
+func (r Result) CheckOK() bool {
+	anyCurrent := false
+	for _, o := range r.Outcomes {
+		switch o.Action {
+		case "unchanged":
+			anyCurrent = true
+		case "updated", "error":
+			return false
+		}
+	}
+	return anyCurrent
 }
 
 // Env is the filesystem/OS context, injectable so tests can point at temp dirs and exercise every
@@ -280,7 +297,10 @@ func (e Env) registerDesktop(serverPath string) Outcome {
 		return o
 	}
 	prev := serverCommandIn(cfg, ServerName)
-	setMCPServer(cfg, ServerName, serverPath)
+	if err := setMCPServer(cfg, ServerName, serverPath); err != nil {
+		o.Action, o.Detail = "error", err.Error()
+		return o
+	}
 	backupOnce(path)
 	if err := writeJSON(path, cfg); err != nil {
 		o.Action, o.Detail = "error", err.Error()
@@ -330,7 +350,11 @@ func (e Env) statusDesktop(serverPath string) Outcome {
 		o.Action, o.Detail = "not-installed", "no Claude Desktop config directory for this user"
 		return o
 	}
-	cfg, _ := readJSONObject(path)
+	cfg, err := readJSONObject(path)
+	if err != nil {
+		o.Action, o.Detail = "error", err.Error()
+		return o
+	}
 	cmd := serverCommandIn(cfg, ServerName)
 	o.Command = cmd
 	o.Action = classify(cmd, serverPath)
@@ -360,7 +384,10 @@ func pathsEqual(a, b string) bool {
 }
 
 // readServerCommand reads mcpServers.<name>.command from a config file, or "" (never errors — a missing
-// or malformed file, or a non-string command, reads as "not registered").
+// or malformed file, or a non-string command, reads as "not registered"). For Claude Code's
+// ~/.claude.json this is the TOP-LEVEL mcpServers, where `--scope user` servers live; project-scoped
+// servers (under projects/<path>/mcpServers) are intentionally not consulted, since we register at user
+// scope.
 func readServerCommand(path, name string) string {
 	cfg, err := readJSONObject(path)
 	if err != nil {
@@ -383,14 +410,21 @@ func serverCommandIn(cfg map[string]any, name string) string {
 }
 
 // setMCPServer merges a stdio server for name→command, creating mcpServers if absent/null and leaving
-// every other server and top-level key intact.
-func setMCPServer(cfg map[string]any, name, command string) {
+// every other server and top-level key intact. It refuses (errors) if mcpServers is present but is not a
+// JSON object — a hand-corrupted config — rather than silently replacing whatever was there.
+func setMCPServer(cfg map[string]any, name, command string) error {
+	if existing, present := cfg["mcpServers"]; present && existing != nil {
+		if _, ok := existing.(map[string]any); !ok {
+			return fmt.Errorf("mcpServers is present but not a JSON object; refusing to overwrite it")
+		}
+	}
 	servers, ok := cfg["mcpServers"].(map[string]any)
 	if !ok || servers == nil {
 		servers = map[string]any{}
 		cfg["mcpServers"] = servers
 	}
 	servers[name] = map[string]any{"type": "stdio", "command": command, "args": []any{}}
+	return nil
 }
 
 func removeMCPServer(cfg map[string]any, name string) {
@@ -422,7 +456,9 @@ func readJSONObject(path string) (map[string]any, error) {
 	return m, nil
 }
 
-// writeJSON writes indented JSON (no BOM), creating parent dirs, preserving 2-space style clients expect.
+// writeJSON writes indented JSON (no BOM, 2-space, the style these clients use), atomically: a temp file
+// in the same directory then a rename, so a crash or a full disk can never leave a half-written config.
+// A symlinked config is resolved to its target so the rename replaces the target, not the link.
 func writeJSON(path string, cfg map[string]any) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
@@ -431,7 +467,26 @@ func writeJSON(path string, cfg map[string]any) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, append(b, '\n'), 0o644)
+	b = append(b, '\n')
+
+	target := path
+	if resolved, rerr := filepath.EvalSymlinks(path); rerr == nil {
+		target = resolved // existing symlink → write through to its target
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(target), ".mcpbridge-*.json")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) // harmless no-op once the rename has moved it
+	if _, err := tmp.Write(b); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, target)
 }
 
 // backupOnce copies path to path.mcpbridge.bak the first time only, so a re-register never overwrites the

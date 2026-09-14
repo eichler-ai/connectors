@@ -17,7 +17,7 @@ func mockCodeEnv(t *testing.T, home string) Env {
 		if len(args) >= 2 && args[0] == "mcp" && args[1] == "add" {
 			cmd := args[len(args)-1] // the path after "--"
 			cfg, _ := readJSONObject(e.CodeConfigPath())
-			setMCPServer(cfg, ServerName, cmd)
+			_ = setMCPServer(cfg, ServerName, cmd)
 			_ = writeJSON(e.CodeConfigPath(), cfg)
 		}
 		if len(args) >= 2 && args[0] == "mcp" && args[1] == "remove" {
@@ -198,6 +198,90 @@ func TestServerCommandIn_toleratesMalformed(t *testing.T) {
 		if cmd := serverCommandIn(m, ServerName); cmd != "" {
 			t.Errorf("serverCommandIn(%s) = %q, want empty", c, cmd)
 		}
+	}
+}
+
+func TestDesktop_refusesNonObjectMcpServers(t *testing.T) {
+	home := t.TempDir()
+	e := Env{GOOS: "linux", Home: home}
+	cfgPath := e.DesktopConfigPath()
+	_ = os.MkdirAll(filepath.Dir(cfgPath), 0o755)
+	// A corrupted config where mcpServers is an array, not an object. Valid JSON, so it parses — the
+	// engine must refuse rather than clobber the array.
+	original := `{"mcpServers": ["oops"]}`
+	_ = os.WriteFile(cfgPath, []byte(original), 0o644)
+
+	if o := e.registerDesktop("/pkg/mcp-server"); o.Action != "error" {
+		t.Fatalf("register onto non-object mcpServers = %q, want error", o.Action)
+	}
+	// The file is untouched — not overwritten with a fresh rhino-only config.
+	got, _ := os.ReadFile(cfgPath)
+	if string(got) != original {
+		t.Errorf("config was modified despite the refusal:\n%s", got)
+	}
+}
+
+func TestDesktop_statusSurfacesMalformed(t *testing.T) {
+	home := t.TempDir()
+	e := Env{GOOS: "linux", Home: home}
+	cfgPath := e.DesktopConfigPath()
+	_ = os.MkdirAll(filepath.Dir(cfgPath), 0o755)
+	_ = os.WriteFile(cfgPath, []byte("{not json"), 0o644)
+	if o := e.statusDesktop("/pkg/mcp-server"); o.Action != "error" {
+		t.Errorf("status on malformed config = %q, want error (not a misleading not-registered)", o.Action)
+	}
+}
+
+func TestCheckOK(t *testing.T) {
+	mk := func(actions ...string) Result {
+		var r Result
+		for _, a := range actions {
+			r.Outcomes = append(r.Outcomes, Outcome{Action: a})
+		}
+		return r
+	}
+	cases := []struct {
+		name string
+		r    Result
+		want bool
+	}{
+		{"current on one, other absent", mk("unchanged", "not-installed"), true},
+		{"stale path fails", mk("unchanged", "updated"), false},
+		{"none registered fails", mk("not-registered", "not-installed"), false},
+		{"error fails", mk("unchanged", "error"), false},
+		{"both current", mk("unchanged", "unchanged"), true},
+	}
+	for _, c := range cases {
+		if got := c.r.CheckOK(); got != c.want {
+			t.Errorf("%s: CheckOK = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+func TestWriteJSON_replacesSymlinkTarget(t *testing.T) {
+	if os.Getenv("GOOS") == "windows" {
+		t.Skip("symlink semantics differ on Windows")
+	}
+	dir := t.TempDir()
+	target := filepath.Join(dir, "real.json")
+	link := filepath.Join(dir, "link.json")
+	if err := os.WriteFile(target, []byte(`{"old":true}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	if err := writeJSON(link, map[string]any{"new": true}); err != nil {
+		t.Fatal(err)
+	}
+	// The link is still a symlink (not replaced by a regular file), and its target now has the new content.
+	fi, _ := os.Lstat(link)
+	if fi.Mode()&os.ModeSymlink == 0 {
+		t.Error("the symlink was replaced by a regular file; the target should have been written through")
+	}
+	m, _ := readJSONObject(target)
+	if m["new"] != true {
+		t.Errorf("target content = %v, want the new object", m)
 	}
 }
 
