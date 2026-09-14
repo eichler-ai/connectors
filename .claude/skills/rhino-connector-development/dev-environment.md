@@ -262,5 +262,6 @@ the only bridge was the Parallels share `\\Mac\Home`, which exposes just `Deskto
 |---|---|
 | `rhino/dev-tooling/deploy-plugin.sh [--no-restart]` | Build, package, install, restart (Mac). |
 | `rhino/dev-tooling/deploy-plugin-windows.ps1 [-NoRestart]` | Build, package, yak-install, restart, and open a document (Windows). Kills Rhino first (DLL lock), waits for the #287 RhinoCode force-load + python warm-up, then materialises a document via `rhinocode` (#289 — a programmatic launch may open none). |
+| `rhino/dev-tooling/package-yak.sh [--version X.Y.Z] [--out DIR]` | Build the **distributable** cross-platform `-any` yak package to `rhino/dist/` (phase 7 PR 2): the plug-in + both server binaries (`mcp-server-win-x64.exe`, universal `mcp-server-mac`) + a universal `libe_sqlite3.dylib`, named per `Core/Registration/ServerBinaryNames.cs`. Runs on macOS (dotnet@8 + go + lipo + yak); server binaries cross-compile CGO-free. This is the release artifact, not a local-install dev loop. |
 | `rhino/docs/spikes/phase-1a/rhino-restart.sh` | Quit-discard-relaunch-new-model (Mac). |
 | `rhino/docs/spikes/phase-1a/*.py` | The CLI probes from the spikes; templates for a new probe. |
