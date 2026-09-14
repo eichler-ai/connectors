@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "id": "create-a-structural-framing-beam-along-a-line",
+  "rev": 1,
+  "kind": "howto",
+  "title": "Create a structural framing beam along a line",
+  "task": "Place a structural framing beam along a Line using Autodesk.Revit.Creation.Document.NewFamilyInstance with a structural framing FamilySymbol, a level and StructuralType.Beam. Covers structural beam modelling.",
+  "members": [
+    "Autodesk.Revit.DB.FilteredElementCollector.OfCategory",
+    "Autodesk.Revit.DB.Line.CreateBound",
+    "Autodesk.Revit.DB.FamilySymbol.Activate",
+    "Autodesk.Revit.Creation.Document.NewFamilyInstance",
+    "Eichler.Connectors.Revit.Connector.WithTransaction",
+    "Autodesk.Revit.DB.FamilyInstance.StructuralType"
+  ],
+  "script_language": "csharp-script",
+  "script": "using System.Linq;\nusing Autodesk.Revit.DB;\nusing Autodesk.Revit.DB.Structure;\n\nvar doc = Document;\n// setup: a structural framing (beam) symbol and the lowest level\nvar symbol = new FilteredElementCollector(doc).OfCategory(BuiltInCategory.OST_StructuralFraming).OfClass(typeof(FamilySymbol)).Cast<FamilySymbol>().First();\nvar level  = new FilteredElementCollector(doc).OfClass(typeof(Level)).Cast<Level>().OrderBy(l => l.Elevation).First();\nvar line   = Line.CreateBound(new XYZ(0, 0, 0), new XYZ(20, 0, 0));\n\nElementId beamId = null;\n// step 1: activate the symbol, then place the beam along the line as StructuralType.Beam\nConnector.WithTransaction(doc, () => {\n    if (!symbol.IsActive) symbol.Activate();\n    var beam = doc.Create.NewFamilyInstance(line, symbol, level, StructuralType.Beam);\n    beamId = beam.Id;\n});\n\nvar created = (FamilyInstance)doc.GetElement(beamId);\nreturn new { beamId = beamId.ToString(), symbol = symbol.Name, level = level.Name, structuralType = created.StructuralType.ToString(), category = created.Category?.Name };",
+  "pitfalls": [
+    {
+      "symptom": "A task-phrased search like 'create a structural framing beam along a line' does not surface the creation member; top hits are StructuralFramingUtils.SetEndReference/FlipEnds and BeamSystem.Create.",
+      "cause": "The creation member is Autodesk.Revit.Creation.Document.NewFamilyInstance(Curve, FamilySymbol, Level, StructuralType); its generic name and summary rank poorly for structural intent (connector issue #341).",
+      "fix": "Search with the member name, e.g. 'NewFamilyInstance place a beam from a curve with a family symbol level and structural type' (returns it at rank 1), then use the Curve/FamilySymbol/Level/StructuralType overload with StructuralType.Beam.",
+      "members": [
+        "Autodesk.Revit.Creation.Document.NewFamilyInstance"
+      ]
+    },
+    {
+      "symptom": "NewFamilyInstance creates the instance but it does not render, or an autodesk exception mentions an inactive symbol.",
+      "cause": "The FamilySymbol was not activated before use.",
+      "fix": "Call symbol.Activate() inside the transaction when !symbol.IsActive before NewFamilyInstance.",
+      "members": [
+        "Autodesk.Revit.DB.FamilySymbol.Activate",
+        "Autodesk.Revit.DB.FamilySymbol.IsActive"
+      ]
+    }
+  ],
+  "tags": [
+    "structural",
+    "beam",
+    "framing"
+  ],
+  "queries": {
+    "hit": [
+      {
+        "text": "NewFamilyInstance place a beam from a curve with a family symbol level and structural type",
+        "tool": "search_functions",
+        "rank": 1,
+        "revit_version": "2025",
+        "ranker": "semantic"
+      }
+    ],
+    "miss": [
+      {
+        "text": "create a structural framing beam along a line with a family symbol on a level",
+        "tool": "search_functions",
+        "surfaced": "Autodesk.Revit.DB.Structure.StructuralFramingUtils.SetEndReference",
+        "revit_version": "2025",
+        "ranker": "semantic"
+      }
+    ]
+  },
+  "provenance": {
+    "kind": "maintainer",
+    "ref": "https://github.com/eichler-ai/connectors/issues/339",
+    "reviewed_by": "nchim"
+  },
+  "verify": {
+    "mutations": {
+      "by_category": {
+        "Structural Framing": {
+          "net_created": 1
+        }
+      }
+    }
+  },
+  "created_at": "2026-09-14T00:00:00Z",
+  "updated_at": "2026-09-14T00:00:00Z"
+}

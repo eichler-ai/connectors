@@ -397,6 +397,23 @@ re-resolve rather than hardcoding either. `robocopy` from `cmd /c` mangles a `\\
   way regardless of native-vs-cross-compiled (real Revit document-lifecycle latency dominates it, see
   `revit/test-harness/README.md`'s "Fast subset" section), but native-on-Mac is still strictly faster
   for the round trip and is what makes iterating on one bundle at a time practical at all.
+- **`TestHowToSweep` stamps a new corpus doc with NO broker rebuild or swap.** The harness reads each
+  document's script from disk (`revit/mcp-server/internal/howto/corpus/*.json`) and runs it via
+  `execute_script` through a proxying *secondary* broker, so a freshly added how-to is verified and
+  stamped without rebuilding the primary or displacing this session's own `revit` MCP — point
+  `-broker-exe` at any working `mcp-server-mac` (its compiled-in corpus is irrelevant; scripts come
+  from disk) and match the running primary's `broker.json` (`-broker-mode remote -broker-bind <mac IP>
+  -broker-app-data-dir <shared root>`). Both-version stamping is just two runs: `-revit-version 2025`
+  then `-revit-version 2027` selects the connected instance of that version when both are up
+  (`-howto-only <ids> -howto-stamps` writes `verified.jsonl`). Measured: 2025 leg ~85s, cold 2027 leg
+  ~145s, the live MCP session intact throughout. Corollary: the hazardous broker-swap dance above is
+  unnecessary for corpus-only work — reserve it for a Go/broker-code or compiled-in-content change.
+- **The VM's default project template is comprehensive**, so a blank harness fixture
+  (`Connector.CreateProjectDocument()` / `createBlankFixtureDocument`) already carries MEP system/duct/
+  pipe types and structural framing/column symbols alongside the architectural content. Template-
+  dependent how-tos (MEP, structural) therefore sweep cleanly on a blank fixture here, even though an
+  end user's bare architectural template would lack those — which those how-tos document as their own
+  pitfall.
 
 ## Scripts
 

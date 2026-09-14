@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "id": "hide-a-category-in-a-view-with-a-rule-based-filter",
+  "rev": 1,
+  "kind": "howto",
+  "title": "Hide a category in a view with a rule-based filter",
+  "task": "Create a ParameterFilterElement over a category using a filterable parameter (from ParameterFilterUtilities.GetFilterableParametersInCommon) and switch it off with View.SetFilterVisibility to hide that category in the view. Covers filter-based visibility control.",
+  "members": [
+    "Autodesk.Revit.DB.FilteredElementCollector.OfClass",
+    "Autodesk.Revit.DB.ParameterFilterUtilities.GetFilterableParametersInCommon",
+    "Autodesk.Revit.DB.ParameterFilterRuleFactory.CreateHasValueParameterRule",
+    "Autodesk.Revit.DB.ElementParameterFilter",
+    "Autodesk.Revit.DB.ParameterFilterElement.Create",
+    "Autodesk.Revit.DB.View.SetFilterVisibility",
+    "Eichler.Connectors.Revit.Connector.WithTransaction",
+    "Autodesk.Revit.DB.View.GetFilterVisibility"
+  ],
+  "script_language": "csharp-script",
+  "script": "using System.Linq;\nusing System.Collections.Generic;\nusing Autodesk.Revit.DB;\n\nvar doc = Document;\n// setup: a floor plan with no view template (filters editable)\nvar view = new FilteredElementCollector(doc).OfClass(typeof(ViewPlan)).Cast<ViewPlan>()\n    .First(v => !v.IsTemplate && v.ViewType == ViewType.FloorPlan && v.ViewTemplateId == ElementId.InvalidElementId);\nvar cats = new List<ElementId> { new ElementId(BuiltInCategory.OST_Furniture) };\n\n// a filter rule's parameter must be one that is FILTERABLE for the chosen categories\nvar filterable = ParameterFilterUtilities.GetFilterableParametersInCommon(doc, cats);\nvar comments = new ElementId(BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS);\nvar paramId = filterable.Contains(comments) ? comments : filterable.First();\nvar rule = ParameterFilterRuleFactory.CreateHasValueParameterRule(paramId);\nvar ef = new ElementParameterFilter(rule);\n\nElementId filterId = null;\n// step 1: create a category filter on a filterable parameter and hide it in the view\nConnector.WithTransaction(doc, () => {\n    var pfe = ParameterFilterElement.Create(doc, \"MCP Hide Furniture \" + System.Guid.NewGuid().ToString(\"N\").Substring(0, 4), cats, ef);\n    filterId = pfe.Id;\n    view.SetFilterVisibility(filterId, false);   // auto-adds the filter, then hides matched elements\n});\n\n// verify: the filter is on the view and its visibility is off\nvar onView = view.GetFilters().Contains(filterId);\nvar vis = view.GetFilterVisibility(filterId);\nreturn new { filterId = filterId.ToString(), viewName = view.Name, ruleParameterId = paramId.ToString(), filterOnView = onView, filterVisibility = vis, filterableParamCount = filterable.Count };",
+  "pitfalls": [
+    {
+      "symptom": "ParameterFilterElement.Create throws ArgumentException 'One of the given rules refers to a parameter that does not apply to this filter's categories' (e.g. when using ELEM_FAMILY_AND_TYPE_PARAM).",
+      "cause": "Not every parameter is filterable for a given category; the rule parameter must be in the category's filterable set.",
+      "fix": "Choose the rule parameter from ParameterFilterUtilities.GetFilterableParametersInCommon(doc, categories) before building the rule.",
+      "members": [
+        "Autodesk.Revit.DB.ParameterFilterUtilities.GetFilterableParametersInCommon"
+      ]
+    },
+    {
+      "symptom": "SetFilterVisibility appears to have no effect in the view.",
+      "cause": "The view's Filters are controlled by its view template, so filter changes on the view itself are ignored.",
+      "fix": "Use a view with no template, or set the filter visibility inside the view template so every view it controls hides the category.",
+      "members": [
+        "Autodesk.Revit.DB.View.ViewTemplateId"
+      ]
+    }
+  ],
+  "tags": [
+    "view-filters",
+    "visibility",
+    "views",
+    "standards"
+  ],
+  "queries": {
+    "hit": [
+      {
+        "text": "hide a category of elements in a view using a filter visibility toggle",
+        "tool": "search_functions",
+        "rank": 1,
+        "revit_version": "2025",
+        "ranker": "semantic"
+      }
+    ]
+  },
+  "provenance": {
+    "kind": "maintainer",
+    "ref": "https://github.com/eichler-ai/connectors/issues/339",
+    "reviewed_by": "nchim"
+  },
+  "verify": {
+    "mutations": {
+      "net_created": 1
+    }
+  },
+  "created_at": "2026-09-14T00:00:00Z",
+  "updated_at": "2026-09-14T00:00:00Z"
+}

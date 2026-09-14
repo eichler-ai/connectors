@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "id": "create-a-view-template-from-a-view-and-bulk-assign-it-to-other-views",
+  "rev": 1,
+  "kind": "howto",
+  "title": "Create a view template from a view and bulk-assign it to other views",
+  "task": "Snapshot a tuned view's settings into a view template with View.CreateViewTemplate, then standardise many views at once by setting each target view's View.ViewTemplateId to it. Covers view templates and bulk standards application.",
+  "members": [
+    "Autodesk.Revit.DB.FilteredElementCollector.OfClass",
+    "Autodesk.Revit.DB.View.IsViewValidForTemplateCreation",
+    "Eichler.Connectors.Revit.Connector.WithTransaction",
+    "Autodesk.Revit.DB.View.CreateViewTemplate",
+    "Autodesk.Revit.DB.View.IsValidViewTemplate",
+    "Autodesk.Revit.DB.View.ViewTemplateId",
+    "Autodesk.Revit.DB.View.IsTemplate"
+  ],
+  "script_language": "csharp-script",
+  "script": "using System.Linq;\nusing System.Collections.Generic;\nusing Autodesk.Revit.DB;\n\nvar doc = Document;\n// setup: floor plan views that are not templates\nvar plans = new FilteredElementCollector(doc).OfClass(typeof(ViewPlan)).Cast<ViewPlan>()\n    .Where(v => !v.IsTemplate && v.ViewType == ViewType.FloorPlan).ToList();\nvar source  = plans.First(v => v.IsViewValidForTemplateCreation());\nvar targets = plans.Where(v => v.Id != source.Id).Take(2).ToList();\n\nElementId tplId = null;\nvar applied = new List<string>();\n// step 1: snapshot the source view's settings into a template, then assign it to the targets\nConnector.WithTransaction(doc, () => {\n    var tpl = source.CreateViewTemplate();\n    tpl.Name = \"MCP Standard Floor Plan \" + System.Guid.NewGuid().ToString(\"N\").Substring(0, 4);\n    tplId = tpl.Id;\n    foreach (var t in targets) {\n        if (t.IsValidViewTemplate(tplId)) { t.ViewTemplateId = tplId; applied.Add(t.Name); }\n    }\n});\n\n// verify: the template is a template, and each target now points at it\nvar tplView = (View)doc.GetElement(tplId);\nvar assignedNow = targets.Select(t => new { name = t.Name, templateId = ((View)doc.GetElement(t.Id)).ViewTemplateId.ToString() }).ToList();\nreturn new {\n    templateId = tplId.ToString(),\n    templateName = tplView.Name,\n    isTemplate = tplView.IsTemplate,\n    source = source.Name,\n    targetCount = targets.Count,\n    appliedTo = applied,\n    assignedNow\n};",
+  "pitfalls": [
+    {
+      "symptom": "Setting View.ViewTemplateId appears to do nothing, or the template does not apply to a target view.",
+      "cause": "The template must be valid for the target view's type (a floor-plan template only controls plan views).",
+      "fix": "Call View.IsValidViewTemplate(templateId) on each target before assigning, and skip the ones it returns false for.",
+      "members": [
+        "Autodesk.Revit.DB.View.IsValidViewTemplate"
+      ]
+    },
+    {
+      "symptom": "After assigning a template, later edits to a target view (scale, filters, V/G overrides) are silently ignored.",
+      "cause": "Those properties are now controlled by the view template, so the view itself is read-only for them.",
+      "fix": "Edit the template (or the source view then re-create it), or leave a property uncontrolled in the template's Include settings so views keep their own value.",
+      "members": [
+        "Autodesk.Revit.DB.View.ViewTemplateId"
+      ]
+    }
+  ],
+  "tags": [
+    "view-templates",
+    "views",
+    "standards",
+    "drawings"
+  ],
+  "queries": {
+    "hit": [
+      {
+        "text": "create a view template from a view and assign it to another view",
+        "tool": "search_functions",
+        "rank": 1,
+        "revit_version": "2025",
+        "ranker": "semantic"
+      }
+    ]
+  },
+  "provenance": {
+    "kind": "maintainer",
+    "ref": "https://github.com/eichler-ai/connectors/issues/339",
+    "reviewed_by": "nchim"
+  },
+  "verify": {
+    "mutations": {
+      "by_category": {
+        "Views": {
+          "net_created": 1
+        }
+      }
+    }
+  },
+  "created_at": "2026-09-14T00:00:00Z",
+  "updated_at": "2026-09-14T00:00:00Z"
+}
