@@ -278,11 +278,11 @@ func (nopCloseWriter) Close() error { return nil }
 
 func main() {
 	// Registration subcommands: `register` / `unregister` / `register --check` point the user's Claude
-	// clients (Code + Desktop) at this server binary. They are CLI-only — install.ps1 shells them — never
-	// MCP tools, so the agent can't rewrite Claude configs. Intercepted before flag parsing so the
-	// subcommand's own flags don't collide with the broker's. Registration is implemented once, for both
-	// connectors, in internal/servercore/clientreg (Revit registers under "revit" with `--mode local`,
-	// the args the broker needs when a Claude client spawns it locally).
+	// clients (Code + Desktop) at this server binary. They are CLI-only — meant to be shelled by
+	// install.ps1 — never MCP tools, so the agent can't rewrite Claude configs. Intercepted before flag
+	// parsing so the subcommand's own flags don't collide with the broker's. Registration is implemented
+	// once, for both connectors, in internal/servercore/clientreg (Revit registers under "revit" with
+	// `--mode local`, the args the broker needs when a Claude client spawns it locally).
 	if len(os.Args) > 1 && (os.Args[1] == "register" || os.Args[1] == "unregister") {
 		os.Exit(runClientReg(os.Args[1], os.Args[2:]))
 	}
@@ -356,16 +356,12 @@ func main() {
 	}
 }
 
-// revitClientReg is the Revit connector's registration identity: the "revit" slug, and the broker started
-// with `--mode local` (the topology a Claude client uses when it spawns the server itself — install.ps1
-// registers only local mode; the Mac remote-dev topology is wired by hand via install-mac.sh).
-var revitClientReg = clientreg.Config{ServerName: "revit", ServerArgs: []string{"--mode", "local"}}
-
 // runClientReg handles the `register` / `unregister` subcommands. It prints one line per Claude client and
 // returns a shell exit code: 0 when the connector is registered with at least one client (or cleanly
 // removed / a `--check` that finds a current registration), non-zero when nothing could be registered, a
 // client errored, or `--check` found a stale or absent registration — so install.ps1 can drive off the
-// exit code (its repair path runs `register --check` and only re-registers when that is non-zero).
+// exit code once it is rewired to shell these (its repair path will run `register --check` and re-register
+// only when that is non-zero).
 func runClientReg(cmd string, args []string) int {
 	fs := flag.NewFlagSet(cmd, flag.ExitOnError)
 	serverPath := fs.String("server-path", "", "path to the mcp-server binary to register (default: this executable)")
@@ -383,14 +379,17 @@ func runClientReg(cmd string, args []string) int {
 	}
 
 	env := clientreg.CurrentEnv()
+	// Revit registers under the "revit" slug with `--mode local` — the topology a Claude client uses when
+	// it spawns the server itself (the Mac remote-dev topology is wired by hand via install-mac.sh).
+	cfg := clientreg.Config{ServerName: "revit", ServerArgs: []string{"--mode", "local"}}
 	var res clientreg.Result
 	switch {
 	case cmd == "unregister":
-		res = clientreg.Unregister(env, revitClientReg)
+		res = clientreg.Unregister(env, cfg)
 	case check:
-		res = clientreg.Status(env, revitClientReg, sp)
+		res = clientreg.Status(env, cfg, sp)
 	default:
-		res = clientreg.Register(env, revitClientReg, sp)
+		res = clientreg.Register(env, cfg, sp)
 	}
 
 	hadError := false
@@ -427,6 +426,7 @@ func runClientReg(cmd string, args []string) int {
 	case res.Registered():
 		return 0
 	default:
+		// register with nothing configured anywhere — the caller should surface this.
 		fmt.Println("no Claude client was configured (is Claude Code or Claude Desktop installed for this user?)")
 		return 1
 	}
