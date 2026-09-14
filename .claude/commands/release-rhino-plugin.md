@@ -41,8 +41,9 @@ Follow these steps in order.
    (`gh run watch <id> --exit-status`), and require **both** jobs (`stage (macOS)`, `yak build
    (Windows)`) to succeed. Then download the artifact:
    `gh run download <id> -n rhino-yak-package -D <tmp>`. Sanity-check the `.yak` is the full package
-   (~190 MB, not ~48 MB — a small one means the go:embed search models were not fetched; investigate
-   before releasing). The filename is `rhino-mcp-bridge-<X.Y.Z>-rh8_*-any.yak`.
+   (**~177 MB** — the size the on-demand workflow has actually produced; a ~48 MB package means the
+   go:embed search models were not fetched, so investigate before releasing). The filename is
+   `rhino-mcp-bridge-<X.Y.Z>-rh8_*-any.yak`.
 
 6. **Live-verify the package against a real Rhino** — the release gate (the tier-1 suites don't
    exercise install/load/register). Use the Windows dev VM (see the `rhino-connector-development`
@@ -54,11 +55,16 @@ Follow these steps in order.
    - Launch Rhino (open a document via a copied template `.3dm` file-arg — a headless launch opens
      none, #289), confirm the plug-in loads (`instances/<pid>.json`, `bridge_version` matches this
      build) with a clean `startup-errors.log`.
-   - Run `MCPBridgeRegister` (drive it over the MCP socket with a C# `execute_script`
-     `RhinoApp.RunScript("_MCPBridgeRegister", true)` — the headless VM doesn't pump `RhinoApp.Idle`,
-     so `rhinocode`/Python/`/runscript` don't work there) and confirm `claude mcp get rhino` shows
-     **Connected** at the packaged binary path. Clean up afterward (`claude mcp remove rhino
-     --scope user`, `yak uninstall rhino-mcp-bridge`, remove scratch).
+   - Run `MCPBridgeRegister`. Let Rhino finish warming up first — wait for the `python warm-up done`
+     line in `connection.log` (the #287 `RhinoCode` force-load runs on the first `RhinoApp.Idle` tick,
+     which the VM does fire, and `rhinocode` can't reach Rhino until then), then drive the command with
+     `rhinocode command MCPBridgeRegister`. If `rhinocode` is uncooperative, the fallback that the
+     phase-7 PRs actually used is to drive it over the MCP socket with a C# `execute_script` calling
+     `RhinoApp.RunScript("_MCPBridgeRegister", true)`. Either way, confirm `claude mcp get rhino` shows
+     **Connected** at the packaged binary path, then clean up (`claude mcp remove rhino --scope user`,
+     `yak uninstall rhino-mcp-bridge`, remove scratch). *(Note: `MCPBridgeRegister`'s command-line
+     invocation is only proven via the phase-7 PR verification — the first real release exercises it
+     end to end, so watch this step.)*
    - If a Mac is available, install the `.yak` there too and confirm the plug-in loads and the
      universal `mcp-server-mac` runs (`lipo -info` shows `x86_64 arm64`). If you can't verify Mac,
      say so explicitly in the release notes rather than implying it was checked.
