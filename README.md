@@ -40,9 +40,9 @@ Cloud Run service that serves the MCP endpoint, the WebSocket the add-in dials, 
   first-class: an agent opens, edits, wires, drives and reads Grasshopper definitions, and sees
   the result through `capture_view` (a viewport or the canvas, returned inline as an image). The
   server dials in to every running Rhino, so there is no singleton to elect. Built and
-  live-verified against Rhino 8 on macOS and Windows: the core execution loop, undo/rollback,
-  multi-instance addressing, API discovery, Grasshopper, viewport capture and a version-verified
-  how-to corpus. Distribution is the current phase — a one-package **yak** install (plug-in +
+  live-verified against Rhino 8 — the core execution loop, undo/rollback, multi-instance
+  addressing, API discovery, Grasshopper, viewport capture and a version-verified how-to corpus —
+  on macOS per PR, with Windows covered by the release gate. Distribution is the current phase — a one-package **yak** install (plug-in +
   server) was just proven end to end on Windows but is not shipped yet, so for now **build from
   source** ([`rhino/README.md`](./rhino/README.md)). Design:
   [`rhino/docs/PRD.md`](./rhino/docs/PRD.md); per-phase status: PRD §18.

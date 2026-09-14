@@ -14,8 +14,8 @@ Plus [`test-harness/`](./test-harness/) (live tier-2 suite) and [`dev-tooling/`]
 - **Run code against the live document** — `execute_script` in **Python 3** or **C#**, with `poll_execution` / `cancel_execution`; every run is one Undo entry and a failed run is rolled back.
 - **Reach every instance** — `list_instances` shows every running Rhino, its open documents, and its Grasshopper definitions; each call is addressed by `{instance_id, document_id}`, and several agents can drive at once.
 - **Learn the API on demand** — `list_functions` / `search_functions` / `describe_function` over RhinoCommon, `rhinoscriptsyntax` and Grasshopper, in both call shapes; plus a version-verified how-to corpus (`search_howtos` / `describe_howto`).
-- **Drive Grasshopper** — open, inspect, edit, wire (`Connector.Grasshopper`), set inputs, solve, and read a component's outputs and errors; `inspect_definition` and the component catalog make a definition discoverable.
-- **See the result** — `capture_view` returns a viewport or the Grasshopper canvas inline as a PNG (and `frame_canvas` frames it).
+- **Drive Grasshopper** — open, inspect, edit, wire (`Connector.Grasshopper`), set inputs, solve, and read a component's outputs and errors; `inspect_gh_definition` and the component catalog make a definition discoverable.
+- **See the result** — `capture_view` returns a viewport or the Grasshopper canvas inline as an image (JPEG by default) (and `frame_canvas` frames it).
 - **Manage plug-ins** — Yak-backed `search_plugins` / `install_plugin` / `uninstall_plugin`, and `restart_rhino` to load a freshly installed one.
 
 ## Install
@@ -28,7 +28,7 @@ Plus [`test-harness/`](./test-harness/) (live tier-2 suite) and [`dev-tooling/`]
 brew install dotnet@8                          # once; the deploy script sets DOTNET_ROOT itself
 rhino/dev-tooling/deploy-plugin.sh             # build + yak install + restart Rhino (discards unsaved work)
 cd rhino/mcp-server && go build -o mcp-server-mac ./cmd/mcp-server
-claude mcp add rhino "$(pwd)/mcp-server-mac"   # register the server with Claude
+claude mcp add rhino -- "$(pwd)/mcp-server-mac"   # register the server with Claude
 ```
 
 **Windows** (Rhino 8):
@@ -36,7 +36,7 @@ claude mcp add rhino "$(pwd)/mcp-server-mac"   # register the server with Claude
 ```powershell
 powershell -ExecutionPolicy Bypass -File rhino\dev-tooling\deploy-plugin-windows.ps1   # build + yak install + restart
 cd rhino\mcp-server; go build -o mcp-server.exe ./cmd/mcp-server
-claude mcp add rhino (Resolve-Path .\mcp-server.exe)
+claude mcp add rhino -- (Resolve-Path .\mcp-server.exe).Path
 ```
 
 When distribution ships this collapses to a single **Package Manager** (`_PackageManager`) install plus one register command, with updates handled by Rhino's own package auto-update (PRD §15).
@@ -50,7 +50,7 @@ When distribution ships this collapses to a single **Package Manager** (`_Packag
 
 ## Status
 
-Built and live-verified against Rhino 8 on macOS (per PR) and Windows (release gate): the core execution loop (Python 3 + C#), undo/rollback and the confirmation gate, multi-instance addressing with `list_instances`, viewport capture, API discovery, first-class **Grasshopper** (open / edit / wire / drive / read / observe, canvas capture, Yak-backed plug-in management), and the **how-to corpus** (`search_howtos` / `describe_howto`, seeded from the harness and version-stamped). **Distribution** (phase 7) is next — the Windows yak-package path is proven ([`docs/spikes/phase-7-windows-distribution.md`](./docs/spikes/phase-7-windows-distribution.md)) but a one-line install is not shipped yet. See the PRD's Phased Roadmap (§18) for authoritative per-phase status.
+Built and live-verified against Rhino 8 on macOS (per PR) and Windows (release gate): the core execution loop (Python 3 + C#), undo/rollback and the confirmation gate, multi-instance addressing with `list_instances`, viewport capture, API discovery, first-class **Grasshopper** (open / edit / wire / drive / read / observe, canvas capture, Yak-backed plug-in management), and the **how-to corpus** (`search_howtos` / `describe_howto`, seeded from the harness and version-stamped). **Distribution** (phase 7) is the current phase — the Windows yak-package path is proven ([`docs/spikes/phase-7-windows-distribution.md`](./docs/spikes/phase-7-windows-distribution.md)) but a one-line install is not shipped yet. See the PRD's Phased Roadmap (§18) for authoritative per-phase status.
 
 ## Tests
 
