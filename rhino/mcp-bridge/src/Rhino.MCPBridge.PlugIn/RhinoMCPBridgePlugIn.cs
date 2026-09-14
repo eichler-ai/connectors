@@ -150,13 +150,10 @@ public sealed class RhinoMCPBridgePlugIn : Rhino.PlugIns.PlugIn
             try
             {
                 // Only the packaged case: a binary sitting beside the plug-in. A dev build returns null here
-                // (no binary, and the env override is a path elsewhere), and stays quiet.
-                var name = Core.Registration.ServerBinaryNames.ForPlatform(AppDataPaths.PlatformName());
-                if (name is null) return;
-                var dir = Path.GetDirectoryName(typeof(RhinoMCPBridgePlugIn).Assembly.Location);
-                if (string.IsNullOrEmpty(dir)) return;
-                var server = Path.Combine(dir, name);
-                if (!File.Exists(server)) return;
+                // (no binary; the env override is a path elsewhere) and stays quiet, so this never nags the
+                // harness loop.
+                var server = ServerBinaryLocator.LocatePackagedOnly();
+                if (server is null) return;
 
                 var configPath = Core.Registration.ClientRegistration.UserConfigPath();
                 var config = File.Exists(configPath) ? File.ReadAllText(configPath) : null;

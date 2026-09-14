@@ -17,7 +17,14 @@ internal static class ServerBinaryLocator
     {
         var overridePath = Environment.GetEnvironmentVariable(OverrideEnvVar);
         if (!string.IsNullOrWhiteSpace(overridePath) && File.Exists(overridePath)) return overridePath;
+        return LocatePackagedOnly();
+    }
 
+    /// <summary>Only the packaged binary beside the plug-in assembly — no <see cref="OverrideEnvVar"/>.
+    /// The on-load notice uses this so a dev build (binary elsewhere, reached via the override) stays
+    /// silent instead of nagging the harness loop.</summary>
+    internal static string? LocatePackagedOnly()
+    {
         var name = ServerBinaryNames.ForPlatform(AppDataPaths.PlatformName());
         if (name is null) return null;
         var dir = Path.GetDirectoryName(typeof(ServerBinaryLocator).Assembly.Location);

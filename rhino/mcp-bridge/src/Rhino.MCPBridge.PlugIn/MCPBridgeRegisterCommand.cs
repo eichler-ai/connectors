@@ -67,14 +67,17 @@ public sealed class MCPBridgeRegisterCommand : Command
 
             using var p = Process.Start(psi);
             if (p is null) return (false, "could not start " + exe);
-            var stdout = p.StandardOutput.ReadToEnd();
-            var stderr = p.StandardError.ReadToEnd();
+            // Drain both pipes asynchronously and let WaitForExit be the one timeout gate: reading a pipe
+            // to end synchronously has no timeout and can deadlock if the child fills the other pipe.
+            var stdoutTask = p.StandardOutput.ReadToEndAsync();
+            var stderrTask = p.StandardError.ReadToEndAsync();
             if (!p.WaitForExit(30_000))
             {
                 try { p.Kill(entireProcessTree: true); } catch { /* best effort */ }
                 return (false, "`claude` did not finish within 30 s");
             }
-            return (p.ExitCode == 0, (stdout + stderr).Trim());
+            var output = (stdoutTask.GetAwaiter().GetResult() + stderrTask.GetAwaiter().GetResult()).Trim();
+            return (p.ExitCode == 0, output);
         }
         catch (Exception ex)
         {

@@ -69,7 +69,9 @@ public static class ClientRegistration
             var root = JsonNode.Parse(configJson) as JsonObject;
             if (root?["mcpServers"] is not JsonObject servers) return null;
             if (servers[ServerName] is not JsonObject server) return null;
-            return server["command"]?.GetValue<string>();
+            // Read through a JsonValue string check — a non-string `command` (number, array, object,
+            // bool: a hand-edited or foreign-schema config) reads as "no registration", never throws.
+            return (server["command"] as JsonValue)?.TryGetValue<string>(out var command) == true ? command : null;
         }
         catch (JsonException)
         {

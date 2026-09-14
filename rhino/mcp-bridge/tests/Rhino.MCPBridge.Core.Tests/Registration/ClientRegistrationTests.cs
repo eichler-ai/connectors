@@ -62,6 +62,16 @@ public class ClientRegistrationTests
     [InlineData("{}")]
     [InlineData("""{"mcpServers":{}}""")]
     [InlineData("""{"mcpServers":{"revit":{"command":"/x"}}}""")] // a different connector, not rhino
+    // A rhino entry whose command is not a string (hand-edited / foreign schema) must read as "no
+    // registration", not throw — GetValue<string> would throw InvalidOperationException on these.
+    [InlineData("""{"mcpServers":{"rhino":{"command":123}}}""")]
+    [InlineData("""{"mcpServers":{"rhino":{"command":[]}}}""")]
+    [InlineData("""{"mcpServers":{"rhino":{"command":{}}}}""")]
+    [InlineData("""{"mcpServers":{"rhino":{"command":true}}}""")]
+    [InlineData("""{"mcpServers":{"rhino":{"command":null}}}""")]
+    [InlineData("""{"mcpServers":{"rhino":{"type":"stdio"}}}""")] // no command key at all
+    // A project-scoped server is intentionally ignored: this reads the user scope (--scope user).
+    [InlineData("""{"projects":{"/p":{"mcpServers":{"rhino":{"command":"/x"}}}}}""")]
     public void RegisteredCommand_isNullWhenAbsentOrMalformed(string? config)
     {
         Assert.Null(ClientRegistration.RegisteredCommand(config));
