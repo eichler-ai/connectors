@@ -1,0 +1,82 @@
+{
+  "schema_version": 1,
+  "id": "colour-elements-by-a-parameter-with-a-rule-based-view-filter",
+  "rev": 1,
+  "kind": "howto",
+  "title": "Colour elements by a parameter with a rule-based view filter",
+  "task": "Create a rule-based ParameterFilterElement over a category (rule from ParameterFilterRuleFactory), add it to a view and override its graphics (e.g. red projection lines) with View.SetFilterOverrides and OverrideGraphicSettings. Covers rule-based view filters and graphic overrides for QA and standards.",
+  "members": [
+    "Autodesk.Revit.DB.FilteredElementCollector.OfClass",
+    "Autodesk.Revit.DB.Wall.Create",
+    "Autodesk.Revit.DB.ParameterFilterRuleFactory.CreateEqualsRule",
+    "Autodesk.Revit.DB.ElementParameterFilter",
+    "Autodesk.Revit.DB.ParameterFilterElement.Create",
+    "Autodesk.Revit.DB.OverrideGraphicSettings.SetProjectionLineColor",
+    "Autodesk.Revit.DB.View.SetFilterOverrides",
+    "Eichler.Connectors.Revit.Connector.WithTransaction",
+    "Autodesk.Revit.DB.View.GetFilterOverrides"
+  ],
+  "script_language": "csharp-script",
+  "script": "using System.Linq;\nusing System.Collections.Generic;\nusing Autodesk.Revit.DB;\n\nvar doc = Document;\n// setup: a floor plan with no view template (so its filters are editable)\nvar view = new FilteredElementCollector(doc).OfClass(typeof(ViewPlan)).Cast<ViewPlan>()\n    .First(v => !v.IsTemplate && v.ViewType == ViewType.FloorPlan && v.ViewTemplateId == ElementId.InvalidElementId);\nvar cats = new List<ElementId> { new ElementId(BuiltInCategory.OST_Walls) };\nvar commentsParam = new ElementId(BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS);\n\nElementId filterId = null;\nint flaggedWalls = 0;\n// step 1: create a flagged wall, a rule-based filter matching it, and a red override\nConnector.WithTransaction(doc, () => {\n    var level = new FilteredElementCollector(doc).OfClass(typeof(Level)).Cast<Level>().OrderBy(l => l.Elevation).First();\n    var wallType = new FilteredElementCollector(doc).OfClass(typeof(WallType)).Cast<WallType>().First(wt => wt.Kind == WallKind.Basic);\n    var w = Wall.Create(doc, Line.CreateBound(new XYZ(0, 40, 0), new XYZ(20, 40, 0)), wallType.Id, level.Id, 10, 0, false, false);\n    w.get_Parameter(BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS).Set(\"QA-FLAG\");\n\n    var rule = ParameterFilterRuleFactory.CreateEqualsRule(commentsParam, \"QA-FLAG\");\n    var ef = new ElementParameterFilter(rule);\n    var pfe = ParameterFilterElement.Create(doc, \"MCP QA Walls \" + System.Guid.NewGuid().ToString(\"N\").Substring(0, 4), cats, ef);\n    filterId = pfe.Id;\n\n    var ogs = new OverrideGraphicSettings();\n    ogs.SetProjectionLineColor(new Color(255, 0, 0));\n    ogs.SetSurfaceForegroundPatternColor(new Color(255, 0, 0));\n    view.SetFilterOverrides(filterId, ogs);   // auto-adds the filter to the view\n\n    flaggedWalls = new FilteredElementCollector(doc).OfCategory(BuiltInCategory.OST_Walls).WhereElementIsNotElementType()\n        .Count(e => e.get_Parameter(BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS)?.AsString() == \"QA-FLAG\");\n});\n\n// verify: the filter is on the view and its override colour reads back\nvar filtersOnView = view.GetFilters().Select(id => doc.GetElement(id).Name).ToList();\nvar ov = view.GetFilterOverrides(filterId);\nvar c = ov.ProjectionLineColor;\nreturn new {\n    filterId = filterId.ToString(),\n    viewName = view.Name,\n    flaggedWalls,\n    filtersOnView,\n    projectionLineColor = c.IsValid ? $\"{c.Red},{c.Green},{c.Blue}\" : \"invalid\"\n};",
+  "pitfalls": [
+    {
+      "symptom": "ParameterFilterElement.Create throws ArgumentException 'One of the given rules refers to a parameter that does not apply to this filter's categories'.",
+      "cause": "The rule's parameter must be one of the categories' filterable parameters, not any parameter.",
+      "fix": "Pick the rule parameter from ParameterFilterUtilities.GetFilterableParametersInCommon(doc, categories), or use a broadly-filterable instance parameter like ALL_MODEL_INSTANCE_COMMENTS.",
+      "members": [
+        "Autodesk.Revit.DB.ParameterFilterUtilities.GetFilterableParametersInCommon"
+      ]
+    },
+    {
+      "symptom": "View.SetFilterOverrides has no visible effect on the view.",
+      "cause": "The view's Filters are controlled by its view template, so filter edits on the view itself are ignored.",
+      "fix": "Apply filters to a view with no template (View.ViewTemplateId == ElementId.InvalidElementId), or add the filter to the template instead.",
+      "members": [
+        "Autodesk.Revit.DB.View.ViewTemplateId"
+      ]
+    },
+    {
+      "symptom": "A task-phrased search like 'create a rule-based parameter filter and override element color' surfaces the ParameterFilterRuleFactory rules but not ParameterFilterElement.Create or View.SetFilterOverrides.",
+      "cause": "The filter-create and override-apply members rank below the rule factory for filter intent (connector issue #341 family).",
+      "fix": "The rule factory is the anchor; from a FilterRule, wrap it in ElementParameterFilter, build the filter with ParameterFilterElement.Create, and apply graphics with View.SetFilterOverrides(filterId, OverrideGraphicSettings).",
+      "members": [
+        "Autodesk.Revit.DB.ParameterFilterElement.Create",
+        "Autodesk.Revit.DB.View.SetFilterOverrides"
+      ]
+    }
+  ],
+  "tags": [
+    "view-filters",
+    "graphic-overrides",
+    "views",
+    "qa",
+    "standards"
+  ],
+  "queries": {
+    "miss": [
+      {
+        "text": "create a rule-based parameter filter and override element color and lineweight in a view",
+        "tool": "search_functions",
+        "surfaced": "Autodesk.Revit.DB.ParameterFilterRuleFactory.CreateHasValueParameterRule",
+        "revit_version": "2025",
+        "ranker": "semantic"
+      }
+    ]
+  },
+  "provenance": {
+    "kind": "maintainer",
+    "ref": "https://github.com/eichler-ai/connectors/issues/339",
+    "reviewed_by": "nchim"
+  },
+  "verify": {
+    "mutations": {
+      "by_category": {
+        "Walls": {
+          "net_created": 1
+        }
+      }
+    }
+  },
+  "created_at": "2026-09-14T00:00:00Z",
+  "updated_at": "2026-09-14T00:00:00Z"
+}

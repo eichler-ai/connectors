@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "id": "export-the-model-to-an-ifc-file",
+  "rev": 1,
+  "kind": "howto",
+  "title": "Export the model to an IFC file",
+  "task": "Export the whole document to IFC using Document.Export with IFCExportOptions inside a transaction, and confirm the .ifc file was written. Covers IFC export and the transaction requirement that differs from DWG export.",
+  "members": [
+    "Autodesk.Revit.DB.IFCExportOptions.#ctor",
+    "Eichler.Connectors.Revit.Connector.WithTransaction",
+    "Autodesk.Revit.DB.Document.Export"
+  ],
+  "script_language": "csharp-script",
+  "script": "using System.IO;\nusing Autodesk.Revit.DB;\n\nvar doc = Document;\nvar dir = Path.Combine(Path.GetTempPath(), \"mcp-ifc-\" + System.Guid.NewGuid().ToString(\"N\").Substring(0, 8));\nDirectory.CreateDirectory(dir);\nvar name = \"model\";\nvar opts = new IFCExportOptions();\n\n// IFC export writes temporary data into the document, so it needs an open transaction\n// (unlike DWG export, which manages its own and must be called with none open).\nbool ok = false;\nConnector.WithTransaction(doc, () => {\n    ok = doc.Export(dir, name, opts);\n});\n\nvar file = Path.Combine(dir, name + \".ifc\");\nreturn new { ok, path = file, exists = File.Exists(file), sizeBytes = File.Exists(file) ? new FileInfo(file).Length : 0L };",
+  "pitfalls": [
+    {
+      "symptom": "doc.Export(folder, name, new IFCExportOptions()) called at top level (between blocks) fails with connector code script-write-outside-transaction / Autodesk ModificationOutsideTransactionException 'Modifying is forbidden because the document has no open transaction'.",
+      "cause": "The IFC exporter writes temporary data into the document during export, so it requires an ambient transaction — the OPPOSITE of DWG export (Document.Export with DWGExportOptions), which manages its own transaction and must be called with none open.",
+      "fix": "Call the IFC Document.Export overload INSIDE a Connector.WithTransaction(doc, () => { ... }) block. The transaction commits nothing permanent (net mutations are zero); it only satisfies the exporter's requirement.",
+      "members": [
+        "Autodesk.Revit.DB.Document.Export"
+      ]
+    },
+    {
+      "symptom": "A task-phrased search like 'export the model to an IFC file' does not surface the export method; top hits are Application.ExportIFCCategoryTable and IFCExportOptions properties.",
+      "cause": "Document.Export(string folder, string name, IFCExportOptions options) ranks poorly for IFC intent (connector issue #341); PDF export by contrast surfaces at rank 3.",
+      "fix": "Search naming the member, e.g. 'Document.Export the model to an IFC file with IFCExportOptions' (returns the correct overload at rank 1).",
+      "members": [
+        "Autodesk.Revit.DB.Document.Export"
+      ]
+    }
+  ],
+  "tags": [
+    "export",
+    "ifc",
+    "interop"
+  ],
+  "queries": {
+    "hit": [
+      {
+        "text": "Document.Export the model to an IFC file with IFCExportOptions",
+        "tool": "search_functions",
+        "rank": 1,
+        "revit_version": "2025",
+        "ranker": "semantic"
+      }
+    ],
+    "miss": [
+      {
+        "text": "export the model to an IFC file",
+        "tool": "search_functions",
+        "surfaced": "Autodesk.Revit.ApplicationServices.Application.ExportIFCCategoryTable",
+        "revit_version": "2025",
+        "ranker": "semantic"
+      }
+    ]
+  },
+  "provenance": {
+    "kind": "maintainer",
+    "ref": "https://github.com/eichler-ai/connectors/issues/339",
+    "reviewed_by": "nchim"
+  },
+  "verify": {
+    "mutations": {
+      "net_created": 0,
+      "net_deleted": 0
+    }
+  },
+  "created_at": "2026-09-14T00:00:00Z",
+  "updated_at": "2026-09-14T00:00:00Z"
+}

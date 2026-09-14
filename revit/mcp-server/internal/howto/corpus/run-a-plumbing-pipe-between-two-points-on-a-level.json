@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "id": "run-a-plumbing-pipe-between-two-points-on-a-level",
+  "rev": 1,
+  "kind": "howto",
+  "title": "Run a plumbing pipe between two points on a level",
+  "task": "Create a plumbing Pipe between two XYZ points on a level, using Pipe.Create with a PipingSystemType and a PipeType, and read its length back. Covers MEP pipe modelling.",
+  "members": [
+    "Autodesk.Revit.DB.FilteredElementCollector.OfClass",
+    "Autodesk.Revit.DB.Plumbing.Pipe.Create",
+    "Eichler.Connectors.Revit.Connector.WithTransaction",
+    "Autodesk.Revit.DB.Document.GetElement",
+    "Autodesk.Revit.DB.Element.get_Parameter"
+  ],
+  "script_language": "csharp-script",
+  "script": "using System.Linq;\nusing Autodesk.Revit.DB;\nusing Autodesk.Revit.DB.Plumbing;\n\nvar doc = Document;\n// setup: a piping system type, a pipe type, and the lowest level\nvar systemType = new FilteredElementCollector(doc).OfClass(typeof(PipingSystemType)).Cast<PipingSystemType>().First();\nvar pipeType   = new FilteredElementCollector(doc).OfClass(typeof(PipeType)).Cast<PipeType>().First();\nvar level      = new FilteredElementCollector(doc).OfClass(typeof(Level)).Cast<Level>().OrderBy(l => l.Elevation).First();\nvar start = new XYZ(0, 5, 9);\nvar end   = new XYZ(20, 5, 9);\n\nElementId pipeId = null;\n// step 1: create the pipe from two points inside the connector's transaction\nConnector.WithTransaction(doc, () => {\n    var pipe = Pipe.Create(doc, systemType.Id, pipeType.Id, level.Id, start, end);\n    pipeId = pipe.Id;\n});\n\nvar created = (Pipe)doc.GetElement(pipeId);\nvar length  = created.get_Parameter(BuiltInParameter.CURVE_ELEM_LENGTH)?.AsDouble();\nreturn new { pipeId = pipeId.ToString(), pipeType = pipeType.Name, systemType = systemType.Name, level = level.Name, lengthFeet = length };",
+  "pitfalls": [
+    {
+      "symptom": "First() throws InvalidOperationException 'Sequence contains no elements' when collecting PipingSystemType or PipeType.",
+      "cause": "The open document was created from a template with no plumbing/piping content loaded.",
+      "fix": "Confirm the FilteredElementCollector for PipingSystemType and PipeType is non-empty before First(); use a Plumbing/Systems template or load pipe families first.",
+      "members": [
+        "Autodesk.Revit.DB.Plumbing.PipingSystemType",
+        "Autodesk.Revit.DB.Plumbing.PipeType"
+      ]
+    }
+  ],
+  "tags": [
+    "mep",
+    "pipe",
+    "plumbing"
+  ],
+  "queries": {
+    "hit": [
+      {
+        "text": "create a plumbing pipe between two points on a level",
+        "tool": "search_functions",
+        "rank": 1,
+        "revit_version": "2025",
+        "ranker": "semantic"
+      }
+    ]
+  },
+  "provenance": {
+    "kind": "maintainer",
+    "ref": "https://github.com/eichler-ai/connectors/issues/339",
+    "reviewed_by": "nchim"
+  },
+  "verify": {
+    "mutations": {
+      "by_category": {
+        "Pipes": {
+          "net_created": 1
+        },
+        "Piping Systems": {
+          "net_created": 1
+        }
+      }
+    }
+  },
+  "created_at": "2026-09-14T00:00:00Z",
+  "updated_at": "2026-09-14T00:00:00Z"
+}

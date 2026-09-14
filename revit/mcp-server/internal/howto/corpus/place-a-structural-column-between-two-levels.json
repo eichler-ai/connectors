@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "id": "place-a-structural-column-between-two-levels",
+  "rev": 1,
+  "kind": "howto",
+  "title": "Place a structural column between two levels",
+  "task": "Place a vertical structural column at a point using Autodesk.Revit.Creation.Document.NewFamilyInstance with a structural column FamilySymbol, a base level and StructuralType.Column, then set its top level. Covers structural column modelling.",
+  "members": [
+    "Autodesk.Revit.DB.FilteredElementCollector.OfCategory",
+    "Autodesk.Revit.DB.FamilySymbol.Activate",
+    "Autodesk.Revit.Creation.ItemFactoryBase.NewFamilyInstance",
+    "Autodesk.Revit.DB.Element.get_Parameter",
+    "Autodesk.Revit.DB.Parameter.Set",
+    "Eichler.Connectors.Revit.Connector.WithTransaction"
+  ],
+  "script_language": "csharp-script",
+  "script": "using System.Linq;\nusing Autodesk.Revit.DB;\nusing Autodesk.Revit.DB.Structure;\n\nvar doc = Document;\n// setup: a structural column symbol; base = lowest level, top = highest level\nvar symbol = new FilteredElementCollector(doc).OfCategory(BuiltInCategory.OST_StructuralColumns).OfClass(typeof(FamilySymbol)).Cast<FamilySymbol>().First();\nvar levels = new FilteredElementCollector(doc).OfClass(typeof(Level)).Cast<Level>().OrderBy(l => l.Elevation).ToList();\nvar baseLevel = levels.First();\nvar topLevel  = levels.Last();\nvar loc = new XYZ(30, 0, 0);\n\nElementId colId = null;\n// step 1: activate the symbol; place a vertical column at the point, then set its top level\nConnector.WithTransaction(doc, () => {\n    if (!symbol.IsActive) symbol.Activate();\n    var col = doc.Create.NewFamilyInstance(loc, symbol, baseLevel, StructuralType.Column);\n    var topParam = col.get_Parameter(BuiltInParameter.FAMILY_TOP_LEVEL_PARAM);\n    if (topParam != null && topLevel.Id != baseLevel.Id) topParam.Set(topLevel.Id);\n    colId = col.Id;\n});\n\nvar created = (FamilyInstance)doc.GetElement(colId);\nvar topLevelName = created.get_Parameter(BuiltInParameter.FAMILY_TOP_LEVEL_PARAM) is Parameter p && p.AsElementId() != ElementId.InvalidElementId\n    ? (doc.GetElement(p.AsElementId()) as Level)?.Name : null;\nreturn new { colId = colId.ToString(), symbol = symbol.Name, baseLevel = baseLevel.Name, topLevel = topLevelName, structuralType = created.StructuralType.ToString(), category = created.Category?.Name };",
+  "pitfalls": [
+    {
+      "symptom": "A task-phrased search like 'place a vertical structural column at a point on a level' does not surface the creation member; the top hit is the FamilyInstance.StructuralType property.",
+      "cause": "The creation member is Autodesk.Revit.Creation.Document.NewFamilyInstance(XYZ, FamilySymbol, Level, StructuralType); its generic name/summary ranks poorly for structural intent (connector issue #341).",
+      "fix": "Search with the member name, e.g. 'NewFamilyInstance place a family instance at a point with a level and structural type' (returns it at rank 1), then use the XYZ/FamilySymbol/Level/StructuralType overload with StructuralType.Column.",
+      "members": [
+        "Autodesk.Revit.Creation.Document.NewFamilyInstance"
+      ]
+    },
+    {
+      "symptom": "The column is created but has zero height, or warns about coincident base and top.",
+      "cause": "Only a base level was given; the top constraint defaults to the base level.",
+      "fix": "Set BuiltInParameter.FAMILY_TOP_LEVEL_PARAM to a higher level's Id after creation, guarding that the top level differs from the base.",
+      "members": [
+        "Autodesk.Revit.DB.BuiltInParameter.FAMILY_TOP_LEVEL_PARAM"
+      ]
+    }
+  ],
+  "tags": [
+    "structural",
+    "column"
+  ],
+  "queries": {
+    "hit": [
+      {
+        "text": "NewFamilyInstance place a family instance at a point with a level and structural type",
+        "tool": "search_functions",
+        "rank": 1,
+        "revit_version": "2025",
+        "ranker": "semantic"
+      }
+    ],
+    "miss": [
+      {
+        "text": "place a vertical structural column family instance at a point on a level",
+        "tool": "search_functions",
+        "surfaced": "Autodesk.Revit.DB.FamilyInstance.StructuralType",
+        "revit_version": "2025",
+        "ranker": "semantic"
+      }
+    ]
+  },
+  "provenance": {
+    "kind": "maintainer",
+    "ref": "https://github.com/eichler-ai/connectors/issues/339",
+    "reviewed_by": "nchim"
+  },
+  "verify": {
+    "mutations": {
+      "by_category": {
+        "Structural Columns": {
+          "net_created": 1
+        }
+      }
+    }
+  },
+  "created_at": "2026-09-14T00:00:00Z",
+  "updated_at": "2026-09-14T00:00:00Z"
+}

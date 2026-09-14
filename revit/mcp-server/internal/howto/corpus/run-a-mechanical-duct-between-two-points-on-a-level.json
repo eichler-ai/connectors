@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "id": "run-a-mechanical-duct-between-two-points-on-a-level",
+  "rev": 1,
+  "kind": "howto",
+  "title": "Run a mechanical duct between two points on a level",
+  "task": "Create a mechanical Duct between two XYZ points on a level, using Duct.Create with a MechanicalSystemType and a DuctType, and read its length back. Covers MEP duct modelling.",
+  "members": [
+    "Autodesk.Revit.DB.FilteredElementCollector.OfClass",
+    "Autodesk.Revit.DB.Mechanical.Duct.Create",
+    "Eichler.Connectors.Revit.Connector.WithTransaction",
+    "Autodesk.Revit.DB.Document.GetElement",
+    "Autodesk.Revit.DB.Element.get_Parameter"
+  ],
+  "script_language": "csharp-script",
+  "script": "using System.Linq;\nusing Autodesk.Revit.DB;\nusing Autodesk.Revit.DB.Mechanical;\n\nvar doc = Document;\n// setup: a mechanical system type, a duct type, and the lowest level\nvar systemType = new FilteredElementCollector(doc).OfClass(typeof(MechanicalSystemType)).Cast<MechanicalSystemType>().First();\nvar ductType   = new FilteredElementCollector(doc).OfClass(typeof(DuctType)).Cast<DuctType>().First();\nvar level      = new FilteredElementCollector(doc).OfClass(typeof(Level)).Cast<Level>().OrderBy(l => l.Elevation).First();\nvar start = new XYZ(0, 0, 10);\nvar end   = new XYZ(20, 0, 10);\n\nElementId ductId = null;\n// step 1: create the duct from two points inside the connector's transaction\nConnector.WithTransaction(doc, () => {\n    var duct = Duct.Create(doc, systemType.Id, ductType.Id, level.Id, start, end);\n    ductId = duct.Id;\n});\n\n// verify: read the created duct's length back\nvar created = (Duct)doc.GetElement(ductId);\nvar length  = created.get_Parameter(BuiltInParameter.CURVE_ELEM_LENGTH)?.AsDouble();\nreturn new {\n    ductId = ductId.ToString(),\n    ductType = ductType.Name,\n    systemType = systemType.Name,\n    level = level.Name,\n    lengthFeet = length\n};",
+  "pitfalls": [
+    {
+      "symptom": "First() throws InvalidOperationException 'Sequence contains no elements' when collecting MechanicalSystemType or DuctType.",
+      "cause": "The open document was created from a template with no MEP content, so it has no mechanical system types or duct types loaded.",
+      "fix": "Confirm the FilteredElementCollector for MechanicalSystemType and DuctType is non-empty before calling First(); use a Mechanical/Systems template or load MEP families first.",
+      "members": [
+        "Autodesk.Revit.DB.Mechanical.MechanicalSystemType",
+        "Autodesk.Revit.DB.Mechanical.DuctType"
+      ]
+    }
+  ],
+  "tags": [
+    "mep",
+    "duct",
+    "mechanical"
+  ],
+  "queries": {
+    "hit": [
+      {
+        "text": "create a mechanical duct between two points on a level",
+        "tool": "search_functions",
+        "rank": 1,
+        "revit_version": "2025",
+        "ranker": "semantic"
+      }
+    ]
+  },
+  "provenance": {
+    "kind": "maintainer",
+    "ref": "https://github.com/eichler-ai/connectors/issues/339",
+    "reviewed_by": "nchim"
+  },
+  "verify": {
+    "mutations": {
+      "by_category": {
+        "Ducts": {
+          "net_created": 1
+        },
+        "Duct Systems": {
+          "net_created": 1
+        }
+      }
+    }
+  },
+  "created_at": "2026-09-14T00:00:00Z",
+  "updated_at": "2026-09-14T00:00:00Z"
+}
