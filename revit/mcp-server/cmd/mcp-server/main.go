@@ -36,6 +36,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/eichler-ai/connectors/internal/servercore/buildinfo"
+	"github.com/eichler-ai/connectors/internal/servercore/clientreg"
 	"github.com/eichler-ai/connectors/internal/servercore/selfcheck"
 	"github.com/eichler-ai/connectors/internal/servercore/semsearch"
 	"github.com/eichler-ai/connectors/internal/servercore/semsearch/crossenc"
@@ -276,6 +277,16 @@ type nopCloseWriter struct{ io.Writer }
 func (nopCloseWriter) Close() error { return nil }
 
 func main() {
+	// Registration subcommands: `register` / `unregister` / `register --check` point the user's Claude
+	// clients (Code + Desktop) at this server binary. They are CLI-only — install.ps1 shells them — never
+	// MCP tools, so the agent can't rewrite Claude configs. Intercepted before flag parsing so the
+	// subcommand's own flags don't collide with the broker's. Registration is implemented once, for both
+	// connectors, in internal/servercore/clientreg (Revit registers under "revit" with `--mode local`,
+	// the args the broker needs when a Claude client spawns it locally).
+	if len(os.Args) > 1 && (os.Args[1] == "register" || os.Args[1] == "unregister") {
+		os.Exit(runClientReg(os.Args[1], os.Args[2:]))
+	}
+
 	mode := flag.String("mode", envOr("REVIT_MCP_MODE", "local"), "connection topology: \"local\" (127.0.0.1 only, default) or \"remote\" (bind a configured non-loopback interface) — PRD §05")
 	bindAddr := flag.String("bind", envOr("REVIT_MCP_BIND", ""), "non-loopback bind address, required when -mode=remote (e.g. the Parallels shared-network host adapter address)")
 	port := flag.Int("port", envIntOr("REVIT_MCP_PORT", 0), "TCP port for the add-in-facing listener; 0 picks an ephemeral port (discovered via broker.json)")
@@ -342,6 +353,82 @@ func main() {
 
 	if err := run(*mode, *bindAddr, *port, *appDataDir, *sharedRoot, logger); err != nil {
 		logger.Fatalf("fatal: %v", err)
+	}
+}
+
+// revitClientReg is the Revit connector's registration identity: the "revit" slug, and the broker started
+// with `--mode local` (the topology a Claude client uses when it spawns the server itself — install.ps1
+// registers only local mode; the Mac remote-dev topology is wired by hand via install-mac.sh).
+var revitClientReg = clientreg.Config{ServerName: "revit", ServerArgs: []string{"--mode", "local"}}
+
+// runClientReg handles the `register` / `unregister` subcommands. It prints one line per Claude client and
+// returns a shell exit code: 0 when the connector is registered with at least one client (or cleanly
+// removed / a `--check` that finds a current registration), non-zero when nothing could be registered, a
+// client errored, or `--check` found a stale or absent registration — so install.ps1 can drive off the
+// exit code (its repair path runs `register --check` and only re-registers when that is non-zero).
+func runClientReg(cmd string, args []string) int {
+	fs := flag.NewFlagSet(cmd, flag.ExitOnError)
+	serverPath := fs.String("server-path", "", "path to the mcp-server binary to register (default: this executable)")
+	var check bool
+	if cmd == "register" {
+		fs.BoolVar(&check, "check", false, "report registration status instead of writing it")
+	}
+	_ = fs.Parse(args)
+
+	sp := *serverPath
+	if sp == "" {
+		if exe, err := os.Executable(); err == nil {
+			sp = exe
+		}
+	}
+
+	env := clientreg.CurrentEnv()
+	var res clientreg.Result
+	switch {
+	case cmd == "unregister":
+		res = clientreg.Unregister(env, revitClientReg)
+	case check:
+		res = clientreg.Status(env, revitClientReg, sp)
+	default:
+		res = clientreg.Register(env, revitClientReg, sp)
+	}
+
+	hadError := false
+	for _, o := range res.Outcomes {
+		line := fmt.Sprintf("%-15s %s", string(o.Client)+":", o.Action)
+		if o.Command != "" && (o.Action == "unchanged" || o.Action == "updated" || o.Action == "not-registered") {
+			line += " → " + o.Command
+		}
+		if o.Path != "" {
+			line += "  (" + o.Path + ")"
+		}
+		if o.Detail != "" {
+			line += " — " + o.Detail
+		}
+		fmt.Println(line)
+		if o.Action == "error" {
+			hadError = true
+		}
+	}
+
+	switch {
+	case hadError:
+		return 1
+	case cmd == "unregister":
+		return 0
+	case check:
+		// A stale (updated) or absent registration must exit non-zero so install.ps1 re-registers rather
+		// than treating a wrong path as fine.
+		if res.CheckOK() {
+			return 0
+		}
+		fmt.Println("not registered with a current path on any Claude client — run install.ps1 to (re-)register")
+		return 1
+	case res.Registered():
+		return 0
+	default:
+		fmt.Println("no Claude client was configured (is Claude Code or Claude Desktop installed for this user?)")
+		return 1
 	}
 }
 
