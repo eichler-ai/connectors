@@ -136,8 +136,58 @@ unnamed Eto controls, so `pkill -9` + relaunch + click New Model is the recovery
 Nothing here is a development loop; it is the release gate the plan requires (implementation-plan.md
 phase 2 and "Tiers"). The **first Windows live pass ran 2026-09-11** (phase 2) on a Windows 11 **ARM64**
 VM running Rhino 8.35 **as x64 under emulation**; the results below are what it found, and the loop it
-established. There is no Windows deploy script — the steps are run by hand (or a session driving them),
-because there is no VM topology to automate (PRD §05) and the Mac's `deploy-plugin.sh` is macOS-only.
+established. `deploy-plugin-windows.ps1` automates the on-VM build/package/install/restart, but it runs
+*on* the VM — the piece that was missing was a clean way to reach the VM from the Mac, which the SSH
+setup below provides.
+
+### Reaching the Windows VM from the Mac — SSH (set up 2026-09-13)
+
+The VM is a Parallels guest named **`Windows 11`**, on the Parallels shared network at **`10.211.55.3`**
+(the Mac host is `10.211.55.2` on `bridge100`). Two channels reach it, and **which one matters**:
+
+- **`prlctl exec "Windows 11" powershell -EncodedCommand <b64>`** runs as **`NT AUTHORITY\SYSTEM`** — a
+  *service* context, not the logged-in user. Its `$env:APPDATA` is `C:\Windows\system32\config\systemprofile\…`,
+  so yak would install to the **wrong** package folder, `claude mcp add` would write the **wrong**
+  `~/.claude.json`, and it can't touch the console desktop. Use it **only** for one-time admin bootstrap
+  (installing sshd, below). It has admin rights, which is why it can. Pass PowerShell as a UTF-16LE base64
+  `-EncodedCommand` — `cmd.exe` quoting through `prlctl` is unreliable; PowerShell returns stdout, `cmd` often doesn't.
+- **`ssh rhino-vm`** runs as the interactive user **`nicholas`** with the real profile
+  (`C:\Users\nicholas`, `…\packages\8.0` under it). **This is the phase-2-equivalent driver — use it for
+  everything real**: build, yak install, `claude mcp add`, harness. Caveat: an SSH session is **not** the
+  console session (session 1), so GUI apps launched over SSH don't appear on the console desktop; drive
+  Rhino through the plug-in listener + `rhinocode`, not the GUI (as the loop already does).
+
+**One-time sshd install** (run via `prlctl exec` as SYSTEM — it has the admin rights the install needs):
+
+1. `Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0` (a Feature-on-Demand download; **slow
+   under ARM emulation** — run it backgrounded, ~minutes).
+2. `Set-Service sshd -StartupType Automatic; Start-Service sshd`.
+3. **Firewall — the gotcha that cost a round:** the auto-created `OpenSSH-Server-In-TCP` rule is scoped to
+   the **Private** profile, but the VM's network classifies as **Public**, so 22 (and ICMP) stay blocked
+   and the connection just times out. Fix: `Set-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -Profile Any
+   -Enabled True` (and optionally `Set-NetConnectionProfile -InterfaceAlias Ethernet -NetworkCategory Private`).
+4. **Authorized key — the second gotcha:** `nicholas` is a **local admin**, so OpenSSH ignores
+   `~\.ssh\authorized_keys` and reads **`C:\ProgramData\ssh\administrators_authorized_keys`** instead. Write
+   the Mac's public key there, then lock it down or sshd rejects it: `icacls <file> /inheritance:r; icacls
+   <file> /grant 'Administrators:F' /grant 'SYSTEM:F'`.
+5. Optional niceties: `HKLM:\SOFTWARE\OpenSSH\DefaultShell` → `…\powershell.exe` (so `ssh rhino-vm` lands
+   in PowerShell, not `cmd`); `Set-Service ssh-agent -StartupType Automatic`.
+
+**Mac side:** the public key is `~/.ssh/id_ed25519.pub`; add a `~/.ssh/config` block so `ssh rhino-vm`
+just works:
+
+```
+Host rhino-vm
+    HostName 10.211.55.3
+    User nicholas
+    StrictHostKeyChecking accept-new
+```
+
+**File transfer:** `scp <file> rhino-vm:C:/path/` works now that SSH is up (the best channel). Before SSH,
+the only bridge was the Parallels share `\\Mac\Home`, which exposes just `Desktop/Documents/Downloads`
+(not `dev/`) and is readable even by SYSTEM — a fallback if SSH is down. The Windows Go binary itself
+**cross-compiles from the Mac**: `GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o mcp-server.exe
+./cmd/mcp-server` (the semsearch/ONNX stack is pure-Go, no CGO), so a native Windows Go build is optional.
 
 - **Headline result — the `net8.0` plug-in loads on Windows Rhino 8** (the phase-1a §2 open question,
   now closed on Windows). It yak-installs, loads `AtStartup`, binds loopback, and writes
