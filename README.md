@@ -42,10 +42,11 @@ Cloud Run service that serves the MCP endpoint, the WebSocket the add-in dials, 
   server dials in to every running Rhino, so there is no singleton to elect. Built and
   live-verified against Rhino 8 — the core execution loop, undo/rollback, multi-instance
   addressing, API discovery, Grasshopper, viewport capture and a version-verified how-to corpus —
-  on macOS per PR, with Windows covered by the release gate. Distribution is the current phase — a one-package **yak** install (plug-in +
-  server) was just proven end to end on Windows but is not shipped yet, so for now **build from
-  source** ([`rhino/README.md`](./rhino/README.md)). Design:
-  [`rhino/docs/PRD.md`](./rhino/docs/PRD.md); per-phase status: PRD §18.
+  on macOS per PR, with Windows covered by the release gate. It installs as a single cross-platform
+  **yak** package (plug-in + both platforms' server binaries) — download the `.yak` and `yak install`
+  it (see [Install](#install)), then `MCPBridgeRegister` to connect it to Claude; publishing to the
+  public package server is a later step. Design: [`rhino/docs/PRD.md`](./rhino/docs/PRD.md); per-phase
+  status: PRD §18.
 
 ## Install
 
@@ -109,12 +110,20 @@ a CA-issued certificate is a later step (PRD §12). More detail, including the M
 topology, is in [`revit/install.md`](./revit/install.md); installing an unreleased local build is in
 the [quickstart](./revit/docs/quickstart.md).
 
-**Rhino connector** — **not yet distributed.** Build and install from source on macOS or Windows
-(Rhino 8) per [`rhino/README.md`](./rhino/README.md), then register the server with
-`claude mcp add rhino <path-to-server>`. A one-line **yak**-package install (plug-in + server in one
-package, updated by Rhino's own Package Manager) is the current phase — the Windows end to end is
-proven ([`rhino/docs/spikes/phase-7-windows-distribution.md`](./rhino/docs/spikes/phase-7-windows-distribution.md),
-PRD §15) — but it has not shipped.
+**Rhino connector**, on Windows or macOS with Rhino 8. The connector ships as one cross-platform
+**yak** package (the plug-in plus both platforms' MCP server binaries). Download the `.yak` from the
+[latest release](https://github.com/eichler-ai/connectors/releases) and install it with the yak CLI
+bundled with Rhino (or drag it onto the Rhino window):
+
+```sh
+# macOS ("C:\Program Files\Rhino 8\System\yak.exe" on Windows)
+"/Applications/Rhino 8.app/Contents/Resources/bin/yak" install ~/Downloads/rhino-mcp-bridge-*.yak
+```
+
+Restart Rhino, then run **`MCPBridgeRegister`** in Rhino's command line to register the server with
+Claude. Publishing to the public package server (so `_PackageManager` finds it) is a later step
+(PRD §15); for now it is install-from-file. Building from source and cutting a release are in
+[`rhino/README.md`](./rhino/README.md).
 
 ## Contributing & security
 

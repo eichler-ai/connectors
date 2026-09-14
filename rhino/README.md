@@ -20,26 +20,40 @@ Plus [`test-harness/`](./test-harness/) (live tier-2 suite) and [`dev-tooling/`]
 
 ## Install
 
-**Not yet distributed** — a one-line install is the current phase (PRD §18 phase 7; the Windows end to end was just proven, [`docs/spikes/phase-7-windows-distribution.md`](./docs/spikes/phase-7-windows-distribution.md)). Until a **yak** package ships, build and install from source.
+The connector ships as one cross-platform **yak** package — the plug-in plus both platforms' MCP server binaries — so a single file installs and runs on Windows and macOS (PRD §15).
 
-**macOS:**
+**From a release (recommended).** Download the `.yak` from the [latest release](https://github.com/eichler-ai/connectors/releases), then install it with the yak CLI that ships with Rhino (or drag the `.yak` onto the Rhino window):
 
 ```sh
+# macOS
+"/Applications/Rhino 8.app/Contents/Resources/bin/yak" install ~/Downloads/rhino-mcp-bridge-*.yak
+```
+```powershell
+# Windows
+& "C:\Program Files\Rhino 8\System\yak.exe" install $HOME\Downloads\rhino-mcp-bridge-*.yak
+```
+
+**Restart Rhino** to load the plug-in, then run **`MCPBridgeRegister`** in Rhino's command line to register the server with your Claude client — it runs `claude mcp add`, or prints a config snippet to paste if the `claude` CLI isn't found. `MCPBridgeStatus` shows whether a (re-)register is still owed. *(Publishing to the public package server so `_PackageManager` finds it by search — and Rhino's own auto-update — is a later step, PRD §15; for now the package is install-from-file.)*
+
+**From source** (for development, or before a release exists):
+
+```sh
+# macOS
 brew install dotnet@8                          # once; the deploy script sets DOTNET_ROOT itself
 rhino/dev-tooling/deploy-plugin.sh             # build + yak install + restart Rhino (discards unsaved work)
 cd rhino/mcp-server && go build -o mcp-server-mac ./cmd/mcp-server
 claude mcp add rhino -- "$(pwd)/mcp-server-mac"   # register the server with Claude
 ```
-
-**Windows** (Rhino 8):
-
 ```powershell
+# Windows (Rhino 8)
 powershell -ExecutionPolicy Bypass -File rhino\dev-tooling\deploy-plugin-windows.ps1   # build + yak install + restart
 cd rhino\mcp-server; go build -o mcp-server.exe ./cmd/mcp-server
 claude mcp add rhino -- (Resolve-Path .\mcp-server.exe).Path
 ```
 
-When distribution ships this collapses to a single **Package Manager** (`_PackageManager`) install plus one register command, with updates handled by Rhino's own package auto-update (PRD §15).
+## Releasing
+
+Maintainers cut a release with the **`/release-rhino-plugin`** Claude command (`major` | `minor` | `patch`): it builds the cross-platform `.yak` on demand ([`.github/workflows/rhino-package.yml`](../.github/workflows/rhino-package.yml)), live-verifies it against a real Rhino, tags `rhino-vX.Y.Z`, and publishes a GitHub Release with the `.yak` attached. The process is spelled out in [`.claude/commands/release-rhino-plugin.md`](../.claude/commands/release-rhino-plugin.md). The package builds only on demand (never on push), so trigger it via that command or `gh workflow run rhino-package.yml -f version=<X.Y.Z>`.
 
 ## Design & docs
 
