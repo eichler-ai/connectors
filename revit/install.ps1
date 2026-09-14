@@ -827,6 +827,13 @@ function Register-McpServer([string]$ServerExe, [switch]$OnlyIfMissing) {
     # first ask `register --check` (read-only; exit 0 = already registered at THIS exact path on some
     # client and none stale) and re-register only when that is non-zero -- so a healthy up-to-date re-run
     # neither rewrites a config nor prints noise.
+    #
+    # Deliberate scope change from the old per-client PowerShell repair: `--check` passes as long as ONE
+    # client is current and none is stale, so the up-to-date short-circuit no longer re-adds a *single*
+    # client whose entry was manually deleted while the other stayed correct (clientreg.CheckOK). That
+    # edge is covered elsewhere -- a stale path still forces a full re-register, and any real install/
+    # update run (not this short-circuit) re-registers every client -- so it isn't worth reintroducing
+    # per-client bookkeeping here or widening the shared engine's check.
     if (-not (Test-Path $ServerExe)) { return }
     if ($OnlyIfMissing) {
         if ((Invoke-ServerSubcommand $ServerExe @('register', '--check')) -eq 0) { return }
