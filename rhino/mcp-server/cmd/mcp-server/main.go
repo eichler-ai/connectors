@@ -20,6 +20,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/eichler-ai/connectors/internal/servercore/buildinfo"
+	"github.com/eichler-ai/connectors/internal/servercore/clientreg"
 	"github.com/eichler-ai/connectors/internal/servercore/semsearch"
 	"github.com/eichler-ai/connectors/internal/servercore/semsearch/crossenc"
 	"github.com/eichler-ai/connectors/internal/servercore/semsearch/manager"
@@ -27,7 +28,6 @@ import (
 	"github.com/eichler-ai/connectors/internal/servercore/semsearch/staticembed"
 	"github.com/eichler-ai/connectors/internal/servercore/transport"
 	"github.com/eichler-ai/connectors/rhino/mcp-server/internal/appdata"
-	"github.com/eichler-ai/connectors/rhino/mcp-server/internal/clientreg"
 	"github.com/eichler-ai/connectors/rhino/mcp-server/internal/dialer"
 	"github.com/eichler-ai/connectors/rhino/mcp-server/internal/discovery"
 	"github.com/eichler-ai/connectors/rhino/mcp-server/internal/execution"
@@ -98,14 +98,16 @@ func runClientReg(cmd string, args []string) int {
 	}
 
 	env := clientreg.CurrentEnv()
+	// Rhino registers under the "rhino" slug with no extra server args (the broker needs none).
+	cfg := clientreg.Config{ServerName: "rhino"}
 	var res clientreg.Result
 	switch {
 	case cmd == "unregister":
-		res = clientreg.Unregister(env)
+		res = clientreg.Unregister(env, cfg)
 	case check:
-		res = clientreg.Status(env, sp)
+		res = clientreg.Status(env, cfg, sp)
 	default:
-		res = clientreg.Register(env, sp)
+		res = clientreg.Register(env, cfg, sp)
 	}
 
 	hadError := false

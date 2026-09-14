@@ -1,8 +1,12 @@
-// Package clientreg registers this connector's MCP server with the user's Claude clients — Claude Code
-// and Claude Desktop — from one place (PRD §15, phase 7). It is the single source of truth the plug-in's
-// MCPBridgeRegister command and the install.ps1 installer both drive (they shell `mcp-server register`),
-// so "both clients, equally" is implemented once, cross-platform, rather than duplicated in C# and
-// PowerShell.
+// Package clientreg registers a connector's MCP server with the user's Claude clients — Claude Code and
+// Claude Desktop — from one place. It is the single source of truth a connector's registration drives:
+// the caller (a connector's installer, or the Rhino plug-in's MCPBridgeRegister command) shells
+// `mcp-server register`, so "both clients, equally" is implemented once, cross-platform, rather than
+// duplicated in C# and PowerShell.
+//
+// It is connector-agnostic: the caller supplies a Config with the registration slug ("revit", "rhino")
+// and any extra server arguments (Revit registers its broker with "--mode local"; Rhino registers with
+// none). The package lives in the shared servercore module so every connector's server reuses it.
 //
 // Claude Code keeps user-scope MCP servers in ~/.claude.json and has its own `claude mcp add`, so that is
 // what we drive for it. Claude Desktop (and Cowork, which reads the same file) has no CLI, so we merge the
@@ -22,8 +26,14 @@ import (
 	"strings"
 )
 
-// ServerName is the MCP registration slug (CONVENTIONS.md): the connector registers as "rhino".
-const ServerName = "rhino"
+// Config is the connector-specific registration identity. ServerName is the MCP registration slug
+// (CONVENTIONS.md) — "revit", "rhino" — and ServerArgs are the arguments appended after the server path
+// on both clients (the Claude Code `claude mcp add … -- <path> <args…>` line and the Claude Desktop
+// entry's "args"). Revit passes {"--mode", "local"}; Rhino passes none.
+type Config struct {
+	ServerName string
+	ServerArgs []string
+}
 
 // Client identifies a Claude client we can register with.
 type Client string
@@ -154,9 +164,9 @@ func isDir(p string) bool {
 // (e.g. the Codex CLI, which keeps MCP servers in ~/.codex/config.toml) is added by writing one adapter
 // and appending it to clients() below — nothing else here, in main.go, or in the installer changes.
 type client interface {
-	Register(e Env, serverPath string) Outcome
-	Unregister(e Env) Outcome
-	Status(e Env, serverPath string) Outcome
+	Register(e Env, cfg Config, serverPath string) Outcome
+	Unregister(e Env, cfg Config) Outcome
+	Status(e Env, cfg Config, serverPath string) Outcome
 }
 
 // clients is the ordered set of known registration targets. Extend it to support another client.
@@ -165,20 +175,20 @@ func clients() []client {
 	// e.g. append codexClient{} here once its adapter lands.
 }
 
-// Register points every installed client at serverPath. Idempotent.
-func Register(e Env, serverPath string) Result {
-	return each(func(c client) Outcome { return c.Register(e, serverPath) })
+// Register points every installed client at serverPath (with cfg.ServerArgs). Idempotent.
+func Register(e Env, cfg Config, serverPath string) Result {
+	return each(func(c client) Outcome { return c.Register(e, cfg, serverPath) })
 }
 
-// Unregister removes ServerName from every client.
-func Unregister(e Env) Result {
-	return each(func(c client) Outcome { return c.Unregister(e) })
+// Unregister removes cfg.ServerName from every client.
+func Unregister(e Env, cfg Config) Result {
+	return each(func(c client) Outcome { return c.Unregister(e, cfg) })
 }
 
 // Status reports each client's state relative to serverPath (unchanged=current, updated=stale path,
 // not-registered / not-installed / skipped otherwise).
-func Status(e Env, serverPath string) Result {
-	return each(func(c client) Outcome { return c.Status(e, serverPath) })
+func Status(e Env, cfg Config, serverPath string) Result {
+	return each(func(c client) Outcome { return c.Status(e, cfg, serverPath) })
 }
 
 func each(fn func(client) Outcome) Result {
@@ -193,21 +203,27 @@ func each(fn func(client) Outcome) Result {
 
 type claudeCodeClient struct{}
 
-func (claudeCodeClient) Register(e Env, serverPath string) Outcome { return e.registerCode(serverPath) }
-func (claudeCodeClient) Unregister(e Env) Outcome                  { return e.unregisterCode() }
-func (claudeCodeClient) Status(e Env, serverPath string) Outcome   { return e.statusCode(serverPath) }
+func (claudeCodeClient) Register(e Env, cfg Config, serverPath string) Outcome {
+	return e.registerCode(cfg, serverPath)
+}
+func (claudeCodeClient) Unregister(e Env, cfg Config) Outcome { return e.unregisterCode(cfg) }
+func (claudeCodeClient) Status(e Env, cfg Config, serverPath string) Outcome {
+	return e.statusCode(cfg, serverPath)
+}
 
-func (e Env) registerCode(serverPath string) Outcome {
+func (e Env) registerCode(cfg Config, serverPath string) Outcome {
 	o := Outcome{Client: ClaudeCode, Path: e.CodeConfigPath()}
 	claude := e.lookClaude()
 	if claude == "" {
 		o.Action, o.Detail = "skipped", "the `claude` CLI was not found on PATH or in ~/.local/bin"
 		return o
 	}
-	prev := readServerCommand(e.CodeConfigPath(), ServerName)
+	prev := readServerCommand(e.CodeConfigPath(), cfg.ServerName)
 	// remove-then-add so a moved path replaces cleanly rather than clashing on the name.
-	e.runClaude("mcp", "remove", ServerName, "--scope", "user")
-	if out, ok := e.runClaude("mcp", "add", ServerName, "--scope", "user", "--", serverPath); !ok {
+	e.runClaude("mcp", "remove", cfg.ServerName, "--scope", "user")
+	// `claude mcp add <name> --scope user -- <path> <serverArgs…>`
+	addArgs := append([]string{"mcp", "add", cfg.ServerName, "--scope", "user", "--", serverPath}, cfg.ServerArgs...)
+	if out, ok := e.runClaude(addArgs...); !ok {
 		o.Action, o.Detail = "error", strings.TrimSpace(out)
 		return o
 	}
@@ -223,25 +239,25 @@ func (e Env) registerCode(serverPath string) Outcome {
 	return o
 }
 
-func (e Env) unregisterCode() Outcome {
+func (e Env) unregisterCode(cfg Config) Outcome {
 	o := Outcome{Client: ClaudeCode, Path: e.CodeConfigPath()}
 	claude := e.lookClaude()
 	if claude == "" {
 		o.Action, o.Detail = "skipped", "the `claude` CLI was not found"
 		return o
 	}
-	if readServerCommand(e.CodeConfigPath(), ServerName) == "" {
+	if readServerCommand(e.CodeConfigPath(), cfg.ServerName) == "" {
 		o.Action = "unchanged"
 		return o
 	}
-	e.runClaude("mcp", "remove", ServerName, "--scope", "user")
+	e.runClaude("mcp", "remove", cfg.ServerName, "--scope", "user")
 	o.Action = "removed"
 	return o
 }
 
-func (e Env) statusCode(serverPath string) Outcome {
+func (e Env) statusCode(cfg Config, serverPath string) Outcome {
 	o := Outcome{Client: ClaudeCode, Path: e.CodeConfigPath()}
-	cmd := readServerCommand(e.CodeConfigPath(), ServerName)
+	cmd := readServerCommand(e.CodeConfigPath(), cfg.ServerName)
 	o.Command = cmd
 	o.Action = classify(cmd, serverPath)
 	return o
@@ -276,33 +292,33 @@ func (e Env) execClaude(args ...string) (string, bool) {
 
 type claudeDesktopClient struct{}
 
-func (claudeDesktopClient) Register(e Env, serverPath string) Outcome {
-	return e.registerDesktop(serverPath)
+func (claudeDesktopClient) Register(e Env, cfg Config, serverPath string) Outcome {
+	return e.registerDesktop(cfg, serverPath)
 }
-func (claudeDesktopClient) Unregister(e Env) Outcome { return e.unregisterDesktop() }
-func (claudeDesktopClient) Status(e Env, serverPath string) Outcome {
-	return e.statusDesktop(serverPath)
+func (claudeDesktopClient) Unregister(e Env, cfg Config) Outcome { return e.unregisterDesktop(cfg) }
+func (claudeDesktopClient) Status(e Env, cfg Config, serverPath string) Outcome {
+	return e.statusDesktop(cfg, serverPath)
 }
 
-func (e Env) registerDesktop(serverPath string) Outcome {
+func (e Env) registerDesktop(cfg Config, serverPath string) Outcome {
 	path := e.DesktopConfigPath()
 	o := Outcome{Client: ClaudeDesktop, Path: path}
 	if !isDir(filepath.Dir(path)) {
 		o.Action, o.Detail = "not-installed", "no Claude Desktop config directory for this user"
 		return o
 	}
-	cfg, err := readJSONObject(path)
+	obj, err := readJSONObject(path)
 	if err != nil {
 		o.Action, o.Detail = "error", err.Error()
 		return o
 	}
-	prev := serverCommandIn(cfg, ServerName)
-	if err := setMCPServer(cfg, ServerName, serverPath); err != nil {
+	prev := serverCommandIn(obj, cfg.ServerName)
+	if err := setMCPServer(obj, cfg.ServerName, serverPath, cfg.ServerArgs); err != nil {
 		o.Action, o.Detail = "error", err.Error()
 		return o
 	}
 	backupOnce(path)
-	if err := writeJSON(path, cfg); err != nil {
+	if err := writeJSON(path, obj); err != nil {
 		o.Action, o.Detail = "error", err.Error()
 		return o
 	}
@@ -318,24 +334,24 @@ func (e Env) registerDesktop(serverPath string) Outcome {
 	return o
 }
 
-func (e Env) unregisterDesktop() Outcome {
+func (e Env) unregisterDesktop(cfg Config) Outcome {
 	path := e.DesktopConfigPath()
 	o := Outcome{Client: ClaudeDesktop, Path: path}
 	if _, err := os.Stat(path); err != nil {
 		o.Action = "unchanged" // no file → nothing to remove
 		return o
 	}
-	cfg, err := readJSONObject(path)
+	obj, err := readJSONObject(path)
 	if err != nil {
 		o.Action, o.Detail = "error", err.Error()
 		return o
 	}
-	if serverCommandIn(cfg, ServerName) == "" {
+	if serverCommandIn(obj, cfg.ServerName) == "" {
 		o.Action = "unchanged"
 		return o
 	}
-	removeMCPServer(cfg, ServerName)
-	if err := writeJSON(path, cfg); err != nil {
+	removeMCPServer(obj, cfg.ServerName)
+	if err := writeJSON(path, obj); err != nil {
 		o.Action, o.Detail = "error", err.Error()
 		return o
 	}
@@ -343,19 +359,19 @@ func (e Env) unregisterDesktop() Outcome {
 	return o
 }
 
-func (e Env) statusDesktop(serverPath string) Outcome {
+func (e Env) statusDesktop(cfg Config, serverPath string) Outcome {
 	path := e.DesktopConfigPath()
 	o := Outcome{Client: ClaudeDesktop, Path: path}
 	if !isDir(filepath.Dir(path)) {
 		o.Action, o.Detail = "not-installed", "no Claude Desktop config directory for this user"
 		return o
 	}
-	cfg, err := readJSONObject(path)
+	obj, err := readJSONObject(path)
 	if err != nil {
 		o.Action, o.Detail = "error", err.Error()
 		return o
 	}
-	cmd := serverCommandIn(cfg, ServerName)
+	cmd := serverCommandIn(obj, cfg.ServerName)
 	o.Command = cmd
 	o.Action = classify(cmd, serverPath)
 	return o
@@ -409,10 +425,11 @@ func serverCommandIn(cfg map[string]any, name string) string {
 	return cmd
 }
 
-// setMCPServer merges a stdio server for name→command, creating mcpServers if absent/null and leaving
-// every other server and top-level key intact. It refuses (errors) if mcpServers is present but is not a
-// JSON object — a hand-corrupted config — rather than silently replacing whatever was there.
-func setMCPServer(cfg map[string]any, name, command string) error {
+// setMCPServer merges a stdio server for name→command (with args) into cfg, creating mcpServers if
+// absent/null and leaving every other server and top-level key intact. It refuses (errors) if mcpServers
+// is present but is not a JSON object — a hand-corrupted config — rather than silently replacing whatever
+// was there.
+func setMCPServer(cfg map[string]any, name, command string, args []string) error {
 	if existing, present := cfg["mcpServers"]; present && existing != nil {
 		if _, ok := existing.(map[string]any); !ok {
 			return fmt.Errorf("mcpServers is present but not a JSON object; refusing to overwrite it")
@@ -423,7 +440,13 @@ func setMCPServer(cfg map[string]any, name, command string) error {
 		servers = map[string]any{}
 		cfg["mcpServers"] = servers
 	}
-	servers[name] = map[string]any{"type": "stdio", "command": command, "args": []any{}}
+	// A []any (not []string) so the value marshals to a JSON array; always non-nil so it serializes as
+	// [] rather than null when there are no args.
+	jsonArgs := make([]any, 0, len(args))
+	for _, a := range args {
+		jsonArgs = append(jsonArgs, a)
+	}
+	servers[name] = map[string]any{"type": "stdio", "command": command, "args": jsonArgs}
 	return nil
 }
 
