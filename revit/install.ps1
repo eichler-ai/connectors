@@ -791,6 +791,11 @@ function Invoke-ServerSubcommand([string]$ServerExe, [string[]]$Arguments) {
     if (-not (Test-Path $ServerExe)) { return -1 }
     try {
         $p = Start-Process -FilePath $ServerExe -ArgumentList $Arguments -NoNewWindow -PassThru
+        # Touch .Handle NOW to retain the native process handle: a Start-Process -PassThru object drops it
+        # once the child exits, leaving $p.ExitCode $null afterwards (confirmed live on the VM). Caching the
+        # handle first keeps the exit code readable after WaitForExit. Without this, `register --check`'s
+        # exit code reads as null, so -OnlyIfMissing never skips and register "failure" is misdetected.
+        $null = $p.Handle
         if (-not $p.WaitForExit(60000)) {
             try { $p.Kill() } catch { }
             Write-Warning "'$($Arguments -join ' ')' did not finish in 60s; the installed MCP server may predate this installer -- update to a newer release."
