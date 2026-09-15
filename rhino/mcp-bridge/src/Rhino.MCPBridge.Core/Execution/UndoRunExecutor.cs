@@ -188,6 +188,14 @@ internal sealed class UndoRunExecutor
             // A skipped rollback leaves the run's entry on the stack: the ledger must know the run changed
             // the document, so the undo tool the notice points at can act on it.
             entryRemains = rollback.Code == "script-rollback-skipped";
+            // RDK render-content changes (materials/environments/textures) are not on Rhino's undo stack, so
+            // _Undo reports success yet leaves them in the document (verified live, #349). When the render
+            // fingerprint still differs after a rollback, say so plainly rather than let script-rolled-back
+            // imply the render change was reverted.
+            if (rollback.Code == "script-rolled-back" && renderBefore != _host.RenderContentFingerprint(document))
+            {
+                notices.Add(RenderContentNotReverted(request.ExecutionId));
+            }
         }
 
         var failed = outcome.WasCancelled
@@ -225,6 +233,12 @@ internal sealed class UndoRunExecutor
             $"execution {executionId} failed after changing the document; the run's undo entry was reverted ({report.NetAdded} added, {report.NetModified} modified, {report.NetDeleted} deleted objects undone, plus any layer/attribute/table changes). Changes outside the document -- files written, commands with external effects -- are not undone by this.",
             detail, null);
     }
+
+    private static DiagnosticRecord RenderContentNotReverted(string executionId) =>
+        DiagnosticRecord.Create(DiagnosticSeverity.Warning, "script-render-content-not-reverted", DiagnosticSource.Execution,
+            $"execution {executionId} failed, and a render-content change it made (a material, environment or texture) is not on Rhino's undo stack, so it was NOT reverted and remains in the document -- unlike the object changes above.",
+            new Dictionary<string, object?> { ["execution_id"] = executionId },
+            new[] { "Remove the leftover render content by hand (the Materials or Rendering panel) if it matters, or start from a clean document." });
 
     private DiagnosticRecord DocumentNotFound(Request request)
     {

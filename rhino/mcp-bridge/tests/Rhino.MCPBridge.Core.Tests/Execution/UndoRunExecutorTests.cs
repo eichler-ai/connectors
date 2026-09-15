@@ -98,11 +98,25 @@ public sealed class UndoRunExecutorTests
     }
 
     [Fact]
-    public void Throw_AfterARenderContentChange_IsStillUndone()
+    public void Throw_AfterARenderContentChange_RollsBack_AndReportsWhatUndoCannotRevert()
     {
-        // The correctness tail of #349: a failed run that changed only render content must still roll back,
-        // not leave the change in the document. The fingerprint delta drives the rollback like any change.
-        var host = new FakeRunHost { RenderContentChangeDuringRun = true };
+        // The correctness tail of #349: a failed run that changed only render content drives the rollback
+        // like any change (the fingerprint delta is detected). But RDK render content is not on Rhino's
+        // undo stack, so _Undo leaves it -- verified live. The executor must report that honestly rather
+        // than let script-rolled-back imply the render change was reverted.
+        var host = new FakeRunHost { RenderContentChangeDuringRun = true }; // _Undo does NOT revert it (default)
+        var outcome = new UndoRunExecutor(new ScriptRunners(Runner), host).Execute(Req("throw new System.Exception(\"x\");"))!;
+        Assert.False(outcome.Success);
+        Assert.Equal(1, host.UndoCalls);
+        Assert.Contains(outcome.Notices, n => n.Code == "script-rolled-back");
+        Assert.Contains(outcome.Notices, n => n.Code == "script-render-content-not-reverted");
+    }
+
+    [Fact]
+    public void Throw_AfterARenderContentChange_UndoReverts_HasNoLeftoverNotice()
+    {
+        // When Rhino's undo does revert the render change, there is nothing left to warn about.
+        var host = new FakeRunHost { RenderContentChangeDuringRun = true, RenderContentRevertedByUndo = true };
         var outcome = new UndoRunExecutor(new ScriptRunners(Runner), host).Execute(Req("throw new System.Exception(\"x\");"))!;
         Assert.False(outcome.Success);
         Assert.Equal(1, host.UndoCalls);

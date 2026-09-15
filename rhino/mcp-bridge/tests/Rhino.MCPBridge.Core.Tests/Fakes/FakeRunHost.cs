@@ -137,6 +137,9 @@ internal sealed class FakeRunHost : IRunHost
     /// through SubscribeChanges: the fingerprint moves across the run so the executor detects it via
     /// RenderContentFingerprint rather than onAnyChange (issue #349).</summary>
     public bool RenderContentChangeDuringRun { get; set; }
+    /// <summary>Whether _Undo restores the render fingerprint. Default false mirrors real Rhino: RDK render
+    /// content is not on the undo stack, so a failed run's material change is left behind (verified live).</summary>
+    public bool RenderContentRevertedByUndo { get; set; }
     private long _renderFingerprint = 1000;
     public long RenderContentFingerprint(RunDocument document) => _renderFingerprint;
 
@@ -152,7 +155,14 @@ internal sealed class FakeRunHost : IRunHost
         return true;
     }
 
-    public bool UndoLast(RunDocument document) { UndoCalls++; return UndoSucceeds; }
+    public bool UndoLast(RunDocument document)
+    {
+        UndoCalls++;
+        // Only restore the render fingerprint if this fake is set to model an undoable render change; by
+        // default it stays put, so the executor sees the change persisted (the real RDK behaviour).
+        if (RenderContentRevertedByUndo && RenderContentChangeDuringRun) _renderFingerprint--;
+        return UndoSucceeds;
+    }
 
     public bool LastCommandWasOurs() => LastWasOurs;
     public int RedoCalls { get; private set; }
