@@ -100,7 +100,9 @@ named `result`** and it comes back as `return_value`. `print` goes to `output`.
 (stdout), `notices[]` (everything else the run wants to tell you, on failed runs too), and on a run
 that changed the document **`mutations`**: `net_added`/`net_modified`/`net_deleted` plus
 `by_object_type` and `by_layer`. Net, not activity — exactly what one Undo of the run would revert.
-A successful read-only run carries no `mutations`. Skip any read-after-write check.
+A successful read-only run carries no `mutations`. Skip any read-after-write check, and trust
+`mutations` for what changed rather than a count you tallied inside the script — it is the
+document's actual net change, and the two can disagree.
 
 **Long scripts.** Past `timeout_ms` you get `{"status":"running","execution_id":...}`; call
 `poll_execution` with that id until a terminal status. `cancel_execution` requests a stop, but
