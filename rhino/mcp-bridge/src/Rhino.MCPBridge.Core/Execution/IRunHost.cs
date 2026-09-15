@@ -94,6 +94,15 @@ internal interface IRunHost
     /// definitions, dimension styles, lights, document properties -- because the rollback decision must
     /// key off "did the run change the document", not off the subset the report can count (review of #282).</summary>
     IDisposable SubscribeChanges(RunDocument document, Action<DocumentChange> onChange, Action onAnyChange);
+
+    /// <summary>A cheap fingerprint of the document's render-content tables (materials, environments,
+    /// textures) -- their counts plus each content's render hash, so it moves on an add/remove AND on an
+    /// in-place edit. The executor samples it before and after the run and treats a change as a document
+    /// change (issue #349): the RDK does not raise its <c>RenderMaterialsTableEvent</c> synchronously
+    /// during a run, so <see cref="SubscribeChanges"/>' onAnyChange never fires for a material assignment
+    /// and the change would otherwise escape both the mutation report and changed_document -- and, on a
+    /// failed run, escape rollback. Returns 0 for a null/unresolvable document (nothing to compare).</summary>
+    long RenderContentFingerprint(RunDocument document);
 }
 
 /// <summary>

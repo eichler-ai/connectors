@@ -374,6 +374,38 @@ internal sealed class RhinoRunHost : IRunHost
         return Subscribe(d => d is not null && d.RuntimeSerialNumber == serial, onChange, _ => onAnyChange());
     }
 
+    public long RenderContentFingerprint(RunDocument run)
+    {
+        // The RDK render-content tables do not raise RenderMaterialsTableEvent (or the environment/texture
+        // ones) synchronously during a run, so a material assignment fires none of Subscribe's handlers
+        // (verified live, issue #349). Sampling this fingerprint before and after the run is how the change
+        // is caught. Counts move on add/remove; RenderHash moves on an in-place edit (it hashes the
+        // content's rendered state), so the pair catches both. Called on the main thread; never throws into
+        // the executor (a broken read must not turn a good run into an error).
+        if (run.Raw is not RhinoDoc doc) return 0;
+        try
+        {
+            unchecked
+            {
+                long h = 17;
+                h = h * 31 + doc.RenderMaterials.Count;
+                h = h * 31 + doc.RenderEnvironments.Count;
+                h = h * 31 + doc.RenderTextures.Count;
+                foreach (var c in doc.RenderMaterials) h = h * 31 + c.RenderHash;
+                foreach (var c in doc.RenderEnvironments) h = h * 31 + c.RenderHash;
+                foreach (var c in doc.RenderTextures) h = h * 31 + c.RenderHash;
+                return h;
+            }
+        }
+        catch (Exception ex)
+        {
+            // A consistent sentinel: before == after, so a read failure reports "no change" rather than a
+            // spurious one. No worse than the pre-#349 behaviour, which saw render changes not at all.
+            _log("render-content fingerprint: " + ex.Message);
+            return 0;
+        }
+    }
+
     public IDisposable MonitorChanges(Action<string> onChange)
     {
         // For the life of the plug-in, on every object event: the id is memoised per document serial
