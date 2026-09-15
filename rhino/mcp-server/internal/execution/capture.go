@@ -22,11 +22,13 @@ type CaptureOptions struct {
 	Format                string // "jpeg" (default) | "png"
 }
 
-// maxCaptureBytes bounds one call's decoded image payload. Base64 inflates by 4/3
-// and the client's MCP output ceiling is finite (Revit PRD §09 measured ~500k
-// chars); a default 1024 px JPEG is ~100 KB, so this is generous for `all`
-// while refusing a run-away.
-const maxCaptureBytes = 4 << 20
+// maxCaptureBytes is a hard transport/OOM ceiling on one call's decoded image
+// payload -- not the inline limit. Whether a capture is small enough to return
+// INLINE (base64 inflates 4/3; the client's MCP output ceiling is ~500k chars,
+// Revit PRD §09) is decided in the capture_view handler, which can instead write
+// the image to disk (file_path) when it is too large to inline. This cap only
+// stops a pathological capture from being buffered in memory at all.
+const maxCaptureBytes = 64 << 20
 
 // CapturedImage is one image as the plug-in returned it, decoded from base64.
 type CapturedImage struct {
@@ -123,7 +125,7 @@ func (r *Router) CaptureView(ctx context.Context, instanceID string, opts Captur
 		total += len(b)
 		if total > maxCaptureBytes {
 			return nil, diag.New(diag.SeverityError, "capture-too-large", source,
-				fmt.Sprintf("the capture's images total more than %d MB decoded; the client cannot carry that in one result", maxCaptureBytes>>20)).
+				fmt.Sprintf("the capture's images total more than %d MB decoded; that is too large to transport at all", maxCaptureBytes>>20)).
 				WithRemedy("capture one viewport at a time, pass a smaller width, or use format jpeg (the default) rather than png")
 		}
 		res.Images = append(res.Images, CapturedImage{Viewport: img.Viewport, Width: img.Width, Height: img.Height, MIMEType: mime, Bytes: b})
