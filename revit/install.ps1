@@ -774,166 +774,88 @@ function Remove-StaleAddinVersions([string]$AppDir) {
 }
 
 # --- Claude client MCP registration -----------------------------------------------------------------
-# The broker is a local stdio MCP server; the Claude clients need a config entry pointing at it. Claude
-# Code CLI has its own `claude mcp add`; Claude Desktop (and Cowork, which reads the same file) has no
-# CLI, so its JSON config is edited directly here. These are functions so install.tests.ps1 can prove
-# the merge preserves other servers and the removal takes only ours.
+# The broker is a local stdio MCP server; the Claude clients (Claude Code + Claude Desktop, which is what
+# Cowork reads) need a config entry pointing at it. That dual-client wiring -- driving `claude mcp add`
+# for Code, and merging into claude_desktop_config.json for Desktop, INCLUDING the Store/MSIX virtualized
+# config path -- now lives once, cross-platform, in the broker itself: `mcp-server.exe register` /
+# `unregister` / `register --check` (internal/servercore/clientreg, shared with the Rhino connector).
+# The installer just shells those subcommands, rather than reimplementing the JSON surgery in PowerShell.
 
-function Get-DesktopConfigPath {
-    # Claude Desktop / Cowork on Windows. The standard .exe build reads %APPDATA%\Claude; the Microsoft
-    # Store / MSIX build virtualizes that path, so a write to %APPDATA%\Claude is SILENTLY IGNORED there
-    # and the real config lives under the package's LocalCache (confirmed live: this project's own VM has
-    # the Store build, at Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\Claude). Prefer the MSIX
-    # location when a Claude package is present (its Roaming\Claude directory exists), else the standard
-    # path.
-    $pkg = Get-ChildItem (Join-Path $env:LOCALAPPDATA 'Packages') -Filter 'Claude*' -Directory -ErrorAction SilentlyContinue |
-        Where-Object { Test-Path (Join-Path $_.FullName 'LocalCache\Roaming\Claude') -ErrorAction SilentlyContinue } |
-        Select-Object -First 1
-    if ($pkg) { return (Join-Path $pkg.FullName 'LocalCache\Roaming\Claude\claude_desktop_config.json') }
-    return (Join-Path $env:APPDATA 'Claude\claude_desktop_config.json')
-}
-
-function Add-DesktopMcpServer([string]$ConfigPath, [string]$Name, [string]$Command, [string[]]$Arguments) {
-    # Merge one stdio server into Claude Desktop's config WITHOUT disturbing any other server or
-    # top-level key. $false (a no-op) when Claude Desktop is not installed for this user (its config
-    # directory is absent). Backs the file up first. Writes UTF-8 with NO BOM -- a leading BOM breaks
-    # some JSON parsers and the file is strict JSON.
-    $dir = Split-Path $ConfigPath
-    if (-not (Test-Path $dir)) { return $false }
-    $cfg = if (Test-Path $ConfigPath) { (Get-Content $ConfigPath -Raw) | ConvertFrom-Json } else { [pscustomobject]@{} }
-    # Create mcpServers when it is absent OR present-but-null (a config with `"mcpServers": null` would
-    # otherwise pass the property check and then throw on the Add-Member below).
-    if (-not $cfg.PSObject.Properties['mcpServers'] -or $null -eq $cfg.mcpServers) {
-        $cfg | Add-Member -NotePropertyName 'mcpServers' -NotePropertyValue ([pscustomobject]@{}) -Force
-    }
-    $entry = [pscustomobject][ordered]@{ type = 'stdio'; command = $Command; args = @($Arguments) }
-    $cfg.mcpServers | Add-Member -NotePropertyName $Name -NotePropertyValue $entry -Force
-    # Back up only once, so a re-install never overwrites the pristine pre-install backup.
-    if ((Test-Path $ConfigPath) -and -not (Test-Path "$ConfigPath.mcpbridge.bak")) { Copy-Item $ConfigPath "$ConfigPath.mcpbridge.bak" -Force }
-    [System.IO.File]::WriteAllText($ConfigPath, ($cfg | ConvertTo-Json -Depth 20), (New-Object System.Text.UTF8Encoding($false)))
-    return $true
-}
-
-function Remove-DesktopMcpServer([string]$ConfigPath, [string]$Name) {
-    # Remove one server from Claude Desktop's config, leaving every other server and key intact. No-op
-    # (and $false) when the file, the mcpServers key, or the named entry is absent.
-    if (-not (Test-Path $ConfigPath)) { return $false }
-    $cfg = (Get-Content $ConfigPath -Raw) | ConvertFrom-Json
-    if (-not $cfg.PSObject.Properties['mcpServers'] -or -not $cfg.mcpServers.PSObject.Properties[$Name]) { return $false }
-    $cfg.mcpServers.PSObject.Properties.Remove($Name)
-    [System.IO.File]::WriteAllText($ConfigPath, ($cfg | ConvertTo-Json -Depth 20), (New-Object System.Text.UTF8Encoding($false)))
-    return $true
-}
-
-function Invoke-ClaudeMcp([string[]]$CliArgs) {
-    # Thin, mockable wrapper around `claude mcp ...`. Returns @{ ExitCode; Output } and NEVER throws:
-    # under $ErrorActionPreference='Stop' a native non-zero exit OR a line on stderr (even with a
-    # redirect) can surface as a terminating error -- notably `claude mcp remove revit` when nothing is
-    # registered prints "No MCP server named 'revit' in user scope" and exits non-zero. Neutralize EAP
-    # locally and report the exit code so callers drive off it instead of being aborted.
-    $savedEap = $ErrorActionPreference
-    $ErrorActionPreference = 'Continue'
+function Invoke-ServerSubcommand([string]$ServerExe, [string[]]$Arguments) {
+    # Run `mcp-server.exe <Arguments>` with a timeout and return its exit code (one status line per Claude
+    # client goes straight to the console). Returns -1 if the exe is missing, fails to launch, or times
+    # out. The timeout guards the version-skew hang: a broker old enough to predate these subcommands
+    # treats `register` as an unknown positional, falls through to its stdio server loop, and would block
+    # the installer forever. On the normal install path the freshly deployed exe always has them; the
+    # guard is for the pathological stale-exe case (see the Rhino installer, which does the same).
+    if (-not (Test-Path $ServerExe)) { return -1 }
     try {
-        $out = & claude mcp @CliArgs 2>&1
-        return @{ ExitCode = $LASTEXITCODE; Output = $out }
+        $p = Start-Process -FilePath $ServerExe -ArgumentList $Arguments -NoNewWindow -PassThru
+        # Touch .Handle NOW to retain the native process handle: a Start-Process -PassThru object drops it
+        # once the child exits, leaving $p.ExitCode $null afterwards (confirmed live on the VM). Caching the
+        # handle first keeps the exit code readable after WaitForExit. Without this, `register --check`'s
+        # exit code reads as null, so -OnlyIfMissing never skips and register "failure" is misdetected.
+        $null = $p.Handle
+        if (-not $p.WaitForExit(60000)) {
+            try { $p.Kill() } catch { }
+            Write-Warning "'$($Arguments -join ' ')' did not finish in 60s; the installed MCP server may predate this installer -- update to a newer release."
+            return -1
+        }
+        return $p.ExitCode
     } catch {
-        return @{ ExitCode = -1; Output = $_.Exception.Message }
-    } finally {
-        $ErrorActionPreference = $savedEap
+        Write-Warning "Could not run the MCP server to (de)register with your Claude clients: $($_.Exception.Message)"
+        return -1
     }
 }
 
-function Unregister-McpServer {
-    # Uninstall-time deregistration, the twin of Register-McpServer: drop the broker entry from the Claude
-    # clients install registered it with -- Claude Code CLI at the same user scope, and Claude Desktop's
-    # config (Cowork reads the same file) -- leaving any other MCP servers there intact. Via Invoke-ClaudeMcp
-    # (never throws): a raw `& claude mcp remove` under this script's $ErrorActionPreference='Stop' can abort
-    # the whole uninstall when nothing is registered (stderr + non-zero exit, even with 2>$null) -- the #37
-    # residual. Invoke-ClaudeMcp already supplies the `mcp` subcommand root, so the args start at `remove`
-    # (matching Register-McpServer's own remove call). A function so install.tests.ps1 can pin that shape.
-    if (Get-Command claude -ErrorAction SilentlyContinue) {
-        Invoke-ClaudeMcp @('remove', 'revit', '--scope', 'user') | Out-Null
+function Unregister-McpServer([string]$ServerExe) {
+    # Uninstall-time deregistration, the twin of Register-McpServer: shell `mcp-server unregister`, which
+    # drops the "revit" entry from Claude Code (user scope) and Claude Desktop, leaving other MCP servers
+    # intact. Idempotent (a no-op if nothing is registered). MUST run while the exe still exists -- the
+    # uninstall calls this BEFORE it removes the app dir. If the exe is already gone (a re-run after a
+    # partial uninstall, or a client held it and it was then removed), there is no PowerShell fallback any
+    # more, so warn with the manual removal rather than leave a dangling entry silently.
+    if (Test-Path $ServerExe) {
+        Invoke-ServerSubcommand $ServerExe @('unregister') | Out-Null
+    } else {
+        Write-Warning ("The MCP server was already removed, so the `"revit`" entry could not be cleared from your Claude clients automatically. To remove it: run ``claude mcp remove revit --scope user`` (Claude Code), and delete the `"revit`" entry under `"mcpServers`" in your Claude Desktop config (claude_desktop_config.json).")
     }
-    try { Remove-DesktopMcpServer (Get-DesktopConfigPath) 'revit' | Out-Null } catch { }
 }
 
 function Register-McpServer([string]$ServerExe, [switch]$OnlyIfMissing) {
-    # Connect the broker (a local stdio MCP server, mcp-server.exe --mode local -- PRD §05) to this
-    # user's Claude clients: Claude Code CLI, and Claude Desktop (which is also what Cowork reads).
-    # Prints exact manual instructions for whatever couldn't be done automatically. Called on BOTH the
-    # fresh/update path AND the "already up to date" short-circuit -- the add-in being current does not
-    # imply the MCP wiring is present (a prior run may have deployed the DLL but never reached
-    # registration), so re-running must be able to repair just the wiring. With -OnlyIfMissing it leaves
-    # an already-registered client untouched and silent, so a healthy up-to-date re-run says nothing.
+    # Connect the broker (a local stdio MCP server, mcp-server.exe --mode local -- PRD §05) to this user's
+    # Claude clients by shelling its own `register` subcommand, which handles Claude Code AND Claude
+    # Desktop (Store/MSIX path included) in one place. The subcommand prints one status line per client.
+    # Called on BOTH the fresh/update path AND the "already up to date" short-circuit -- the add-in being
+    # current does not imply the MCP wiring is present (a prior run may have deployed the DLL but never
+    # reached registration), so re-running must be able to repair just the wiring. With -OnlyIfMissing we
+    # first ask `register --check` (read-only; exit 0 = already registered at THIS exact path on some
+    # client and none stale) and re-register only when that is non-zero -- so a healthy up-to-date re-run
+    # neither rewrites a config nor prints noise.
+    #
+    # Deliberate scope change from the old per-client PowerShell repair: `--check` passes as long as ONE
+    # client is current and none is stale, so the up-to-date short-circuit no longer re-adds a *single*
+    # client whose entry was manually deleted while the other stayed correct (clientreg.CheckOK). That
+    # edge is covered elsewhere -- a stale path still forces a full re-register, and any real install/
+    # update run (not this short-circuit) re-registers every client -- so it isn't worth reintroducing
+    # per-client bookkeeping here or widening the shared engine's check.
     if (-not (Test-Path $ServerExe)) { return }
-    $registered = @()
-    $todo = @()
-    $didWork = $false
-
-    # Claude Code CLI: `claude mcp add` at USER scope, so it is available in EVERY project (the default
-    # `local` scope binds it to the current project only). Only `remove` when the entry is actually
-    # present -- removing an absent server errors, and (see Invoke-ClaudeMcp) that error would otherwise
-    # abort the whole install on a fresh machine.
-    if (Get-Command claude -ErrorAction SilentlyContinue) {
-        $listRes = Invoke-ClaudeMcp @('list')
-        $cliPresent = (($listRes.Output -join "`n") -match '(?im)^\s*revit[\s:]')
-        if (-not ($OnlyIfMissing -and $cliPresent)) {
-            if ($cliPresent) { Invoke-ClaudeMcp @('remove', 'revit', '--scope', 'user') | Out-Null }
-            $addRes = Invoke-ClaudeMcp @('add', '--scope', 'user', 'revit', '--', $ServerExe, '--mode', 'local')
-            if ($addRes.ExitCode -eq 0) {
-                $registered += 'Claude Code CLI (user scope, every project)'; $didWork = $true
-            } else {
-                $addTail = ($addRes.Output | Select-Object -Last 1)
-                $todo += "Claude Code CLI: automatic registration failed ($addTail). Update the claude CLI, then run: claude mcp add --scope user revit -- `"$ServerExe`" --mode local"
-            }
-        }
-    } elseif (-not $OnlyIfMissing) {
-        $todo += "Claude Code CLI (when its CLI is on PATH): claude mcp add --scope user revit -- `"$ServerExe`" --mode local"
+    if ($OnlyIfMissing) {
+        if ((Invoke-ServerSubcommand $ServerExe @('register', '--check')) -eq 0) { return }
     }
-
-    # Claude Desktop + Cowork: merge the entry into claude_desktop_config.json (no CLI edits it). Both
-    # the path probe and the merge run inside one try/catch so an unreadable Packages\ dir or a
-    # hand-corrupted config falls to printed instructions instead of aborting.
-    $desktopCfg = $null
-    $desktopOk = $false
-    $desktopErr = $null
-    $desktopPresent = $false
-    try {
-        $desktopCfg = Get-DesktopConfigPath
-        if ($OnlyIfMissing -and (Test-Path $desktopCfg)) {
-            $existing = (Get-Content $desktopCfg -Raw) | ConvertFrom-Json
-            $desktopPresent = ($existing.PSObject.Properties['mcpServers'] -and $existing.mcpServers -and $existing.mcpServers.PSObject.Properties['revit'])
-        }
-        if (-not ($OnlyIfMissing -and $desktopPresent)) {
-            $desktopOk = Add-DesktopMcpServer $desktopCfg 'revit' $ServerExe @('--mode', 'local')
-        }
-    } catch { $desktopOk = $false; $desktopErr = $_.Exception.Message }
-    if ($desktopOk) {
-        $registered += 'Claude Desktop / Cowork (restart Claude Desktop to load it)'; $didWork = $true
-    } elseif (-not ($OnlyIfMissing -and $desktopPresent)) {
-        $cfgHint = if ($desktopCfg) { $desktopCfg } else { '%APPDATA%\Claude\claude_desktop_config.json (or your Claude Desktop config)' }
+    $rc = Invoke-ServerSubcommand $ServerExe @('register')
+    if ($rc -ne 0) {
+        # register exits non-zero when no client could be configured (or one errored). The subcommand
+        # already printed the per-client detail; add the exact manual commands as a fallback.
         $jsonExe = $ServerExe.Replace('\', '\\')
-        $jsonNote = if ($desktopErr -and $desktopErr -match 'JSON|Convert|parse|token') { "your existing config at $cfgHint isn't valid JSON ($desktopErr) -- fix that first, then " } else { '' }
-        $todo += "Claude Desktop / Cowork: ${jsonNote}add this under `"mcpServers`" in $cfgHint, then restart Claude Desktop:`n      `"revit`": { `"type`": `"stdio`", `"command`": `"$jsonExe`", `"args`": [`"--mode`", `"local`"] }"
-    }
-
-    # One client (and the trailing note) per line -- crammed onto one line with '; ' separators and
-    # inline parentheticals it was hard to read at a glance.
-    if ($registered.Count -gt 0) {
         Write-Host ''
-        Write-Host 'Connected the revit MCP server to:'
-        foreach ($r in $registered) { Write-Host "  - $r" }
+        Write-Host 'The revit MCP server could not be registered with any Claude client automatically. To finish by hand:'
+        Write-Host "  - Claude Code CLI:      claude mcp add --scope user revit -- `"$ServerExe`" --mode local"
+        Write-Host "  - Claude Desktop / Cowork: add this under `"mcpServers`" in your claude_desktop_config.json, then restart Claude Desktop:"
+        Write-Host "        `"revit`": { `"type`": `"stdio`", `"command`": `"$jsonExe`", `"args`": [`"--mode`", `"local`"] }"
     }
-    if ($todo.Count -gt 0) {
-        Write-Host ''
-        Write-Host 'To finish connecting it:'
-        foreach ($t in $todo) { Write-Host "  - $t" }
-    }
-    if ($didWork -or $todo.Count -gt 0) {
-        Write-Host ''
-        Write-Host "It runs as: `"$ServerExe`" --mode local"
-        Write-Host 'Restart any Claude client that was open when this ran so it reloads its MCP config -- the "revit" server will not appear in an already-open client until you do.'
-    }
+    Write-Host ''
+    Write-Host 'Restart any Claude client that was open when this ran so it reloads its MCP config -- the "revit" server will not appear in an already-open client until you do.'
 }
 
 if ($LoadFunctionsOnly) { return }
@@ -1000,6 +922,11 @@ if ($Uninstall) {
         # reliable signal.
         if (Test-Path (Join-Path $dir 'MCPBridge.Shim.dll')) { $leftoverVersions += $version }
     }
+    # Deregister the broker from the Claude clients (Claude Code CLI + Claude Desktop config, leaving other
+    # MCP servers intact) BEFORE removing the app dir -- the deregistration shells `mcp-server unregister`,
+    # so the exe must still exist. Unconditional: the server is going regardless, so a dangling entry
+    # pointing at a deleted exe must not be left behind.
+    Unregister-McpServer (Join-Path $appDir 'mcp-server.exe')
     # Servers an MCP client still runs from this install (issue #215): the exe image and broker.lock
     # they hold will survive the removals below. Counted BEFORE removing, while their .Path still
     # resolves cleanly; never stopped -- they belong to a live client session (Get-BrokerProcess).
@@ -1044,11 +971,8 @@ if ($Uninstall) {
     if ($appDirSurvivors.Count -gt 0) { $removedRoots += $appDir }
     if ($leftoverVersions.Count -eq 0) { $removedRoots += $dataRoot }
     $survivingPaths = Get-SurvivingPaths $removedRoots
-    # Deregister the broker from the Claude clients (Claude Code CLI + Claude Desktop config, leaving other
-    # MCP servers intact). Unconditional -- the server is going regardless, so a dangling entry pointing at
-    # a deleted exe must not be left behind. See Unregister-McpServer for the $ErrorActionPreference='Stop'
-    # hazard it neutralizes (issue #37 residual).
-    Unregister-McpServer
+    # (Claude-client deregistration ran earlier, above Remove-AppDirExceptSelf, while the server exe still
+    # existed -- `mcp-server unregister` needs it.)
     # #240: the uninstall is complete when nothing is left holding on -- no Revit-locked shim
     # ($leftoverVersions), no client-held server ($runningServers), and nothing under $appDir but the
     # preserved script ($survivingPaths). Only then drop the preserved re-run script, the now-empty app
