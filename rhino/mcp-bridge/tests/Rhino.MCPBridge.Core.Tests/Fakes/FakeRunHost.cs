@@ -64,8 +64,8 @@ internal sealed class FakeRunHost : IRunHost
         public readonly List<(object Doc, string Path)> Saves = new();
         public readonly List<(object? Doc, string Label)> UndoRecordings = new();
         public readonly List<(object Doc, bool ExpireAll)> Solves = new();
-        public readonly List<(object Doc, string Nickname)> Gets = new();
-        public readonly List<(object Doc, string Nickname)> Datas = new();
+        public readonly List<(object Doc, string Nickname, string Output)> Gets = new();
+        public readonly List<(object Doc, string Nickname, string Output)> Datas = new();
         public Eichler.Connectors.Rhino.GrasshopperComponent? FindResult { get; set; }
         public Eichler.Connectors.Rhino.GrasshopperValue? GetResult { get; set; }
         public Eichler.Connectors.Rhino.GrasshopperData? DataResult { get; set; }
@@ -81,8 +81,8 @@ internal sealed class FakeRunHost : IRunHost
         public void Solve(object doc, bool expireAll) => Solves.Add((doc, expireAll));
 
         private sealed class NoOp : IDisposable { public void Dispose() { } }
-        public Eichler.Connectors.Rhino.GrasshopperValue Get(object doc, string nickname) { Gets.Add((doc, nickname)); return GetResult!; }
-        public Eichler.Connectors.Rhino.GrasshopperData Data(object doc, string nickname) { Datas.Add((doc, nickname)); return DataResult!; }
+        public Eichler.Connectors.Rhino.GrasshopperValue Get(object doc, string nickname, string output) { Gets.Add((doc, nickname, output)); return GetResult!; }
+        public Eichler.Connectors.Rhino.GrasshopperData Data(object doc, string nickname, string output) { Datas.Add((doc, nickname, output)); return DataResult!; }
     }
 
     private sealed class StubSolveScope : IGrasshopperSolveScope

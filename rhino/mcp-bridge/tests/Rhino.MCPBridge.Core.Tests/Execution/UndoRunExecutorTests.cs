@@ -403,6 +403,21 @@ public sealed class UndoRunExecutorTests
         var get = Assert.Single(host.GrasshopperOps.Gets);
         Assert.Same(host.GrasshopperDocumentStub, get.Doc);
         Assert.Equal("slider", get.Nickname);
+        Assert.Equal("", get.Output); // the sole-output default when no selector is passed
+    }
+
+    [Fact]
+    public void ConnectorGrasshopperGet_ForwardsTheOutputSelector()
+    {
+        // #351: read a specific output of a multi-output component by name.
+        var host = HostWithBoundDefinition();
+        host.GrasshopperOps.GetResult = new Eichler.Connectors.Rhino.GrasshopperValue("Faces", "Faces", 0, System.Array.Empty<Eichler.Connectors.Rhino.GrasshopperItem>(), false);
+        var outcome = new UndoRunExecutor(new ScriptRunners(Runner), host)
+            .Execute(Req("Connector.Grasshopper.Get(\"Deconstruct Brep\", \"Faces\"); return \"ok\";", ghDocId: "gh-known"))!;
+        Assert.True(outcome.Success, outcome.Exception?.ToString());
+        var get = Assert.Single(host.GrasshopperOps.Gets);
+        Assert.Equal("Deconstruct Brep", get.Nickname);
+        Assert.Equal("Faces", get.Output);
     }
 
     [Fact]

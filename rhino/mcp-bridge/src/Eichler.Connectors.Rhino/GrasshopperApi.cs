@@ -65,18 +65,21 @@ public sealed class GrasshopperApi
     /// Numbers/text/booleans ride verbatim; geometry is summarised as type + bounding box + a document handle,
     /// never inline. The read half of <see cref="Set"/>: call <see cref="Solve"/> first so the value is current.
     /// Returns an empty value (<c>Count</c> 0) when the parameter computed nothing — usually because the
-    /// definition is disabled or has not solved. Raises if the object is not found or is not a parameter with a
-    /// data tree (address a component's output parameter by nickname). For the full tree with branch paths use
-    /// <see cref="Data"/>.</summary>
-    public GrasshopperValue Get(string nickname) => _runtime.GrasshopperGet(nickname);
+    /// definition is disabled or has not solved. <paramref name="nickname"/> may name a parameter directly
+    /// (a slider, panel, or a bare Param_*) or a <b>component</b>, in which case its output is read:
+    /// <paramref name="output"/> picks which one by name or 0-based index, and defaults to the component's
+    /// sole output (an error names the choices when there is more than one). For the full tree with branch
+    /// paths use <see cref="Data"/>.</summary>
+    public GrasshopperValue Get(string nickname, string output = "") => _runtime.GrasshopperGet(nickname, output);
 
     /// <summary>Serialises a parameter's full volatile data tree (PRD §10) as a <see cref="GrasshopperData"/>:
     /// the branches with their paths, item counts, and per-item summaries (numbers/text verbatim, geometry as
     /// type + bounding box + a document handle — never full geometry inline), bounded so a large tree stays
     /// within the response budget (<see cref="GrasshopperData.Truncated"/>/<see cref="GrasshopperData.Note"/>
-    /// say when a cap was hit). Call <see cref="Solve"/> first so the data is current. Raises if the object is
-    /// not found or is not a parameter with a data tree.</summary>
-    public GrasshopperData Data(string nickname) => _runtime.GrasshopperData(nickname);
+    /// say when a cap was hit). Call <see cref="Solve"/> first so the data is current. <paramref name="nickname"/>
+    /// may name a parameter or a component; <paramref name="output"/> picks a component's output parameter, as
+    /// in <see cref="Get"/>. Raises if the object is not found, or has no readable output.</summary>
+    public GrasshopperData Data(string nickname, string output = "") => _runtime.GrasshopperData(nickname, output);
 
     /// <summary>Saves the definition to a Grasshopper file (PRD §10). <paramref name="path"/> a full path
     /// (a <c>.gh</c> binary or <c>.ghx</c> XML) to save-as there; an empty string saves to the definition's
