@@ -35,9 +35,9 @@ func TestSkillFileStaysWithinItsBudget(t *testing.T) {
 	const ceilingTokens = 25000
 	// The Rhino guide covers phase 1 (execution, discovery, capture, undo) plus
 	// phase 4 (Grasshopper drive/read/inspect/frame/capture/wire/save, plug-in
-	// management, restart) and the how-to corpus, and sits near 8.4k tokens. 35%
-	// of the host cap leaves ~350 tokens of room before it is revisited on merits.
-	const budgetTokens = ceilingTokens * 35 / 100
+	// management, restart) and the how-to corpus, and sits near 8.8k tokens. 36%
+	// of the host cap leaves ~175 tokens of room before it is revisited on merits.
+	const budgetTokens = ceilingTokens * 36 / 100
 	// The soft line sits ABOVE the file's current size so crossing it is
 	// information, not a warning that fires forever. t.Logf alone is dead code
 	// under `go test` (a passing package's output is discarded); the ci.yml
@@ -47,9 +47,12 @@ func TestSkillFileStaysWithinItsBudget(t *testing.T) {
 	// management + restart_rhino), then 29%->31% as the canvas work added the
 	// inspect_gh_definition/frame_canvas/canvas-capture sections, then 31%->33%
 	// when the how-to corpus added search_howtos/describe_howto, then 33%->34%
-	// when Grasshopper wiring (Connect) + Save + the undo note landed; each raise
-	// keeps the soft line just above the file, per project_skill_md_token_budget.
-	const softBudgetTokens = ceilingTokens * 34 / 100
+	// when Grasshopper wiring (Connect) + Save + the undo note landed, then
+	// 34%->35% when by-name creation (Add/AddSlider/SetSliderRange, #350) + the
+	// read-a-component's-output note (#351) + the mutations-vs-self-count note
+	// (#354) landed; each raise keeps the soft line just above the file, per
+	// project_skill_md_token_budget.
+	const softBudgetTokens = ceilingTokens * 35 / 100
 
 	// The footer get_skills appends at runtime is charged to the same reader's
 	// context, so measure what a caller receives, not what is on disk. Use the
