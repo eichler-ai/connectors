@@ -421,13 +421,13 @@ func runClientReg(cmd string, args []string) int {
 		if res.CheckOK() {
 			return 0
 		}
-		fmt.Println("not registered with a current path on any Claude client — run install.ps1 to (re-)register")
+		fmt.Println("not registered with a current path on any AI client — run install.ps1 to (re-)register")
 		return 1
 	case res.Registered():
 		return 0
 	default:
 		// register with nothing configured anywhere — the caller should surface this.
-		fmt.Println("no Claude client was configured (is Claude Code or Claude Desktop installed for this user?)")
+		fmt.Println("no AI client was configured (is Claude Code, Claude Desktop, or Codex installed for this user?)")
 		return 1
 	}
 }

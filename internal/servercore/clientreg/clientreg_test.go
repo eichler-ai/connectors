@@ -44,6 +44,47 @@ func mockCodeEnv(t *testing.T, home string) (Env, *[]string) {
 	return e, &lastAddArgs
 }
 
+// mockCodexEnv returns an Env whose "codex" CLI is faked by an in-memory name→command map, exercising the
+// `codex mcp add/remove/get --json` round-trip the adapter drives without a real codex binary. The returned
+// pointer captures the args after "--" on the most recent `mcp add`, so a Config with ServerArgs can be
+// asserted (as the Claude mock does).
+func mockCodexEnv(t *testing.T) (Env, *[]string) {
+	t.Helper()
+	servers := map[string]string{} // name → registered stdio command
+	var lastAddArgs []string
+	e := Env{GOOS: "linux", Home: t.TempDir()}
+	e.lookCodex = func() string { return "/fake/codex" }
+	e.runCodex = func(args ...string) (string, bool) {
+		switch {
+		case len(args) >= 3 && args[0] == "mcp" && args[1] == "add":
+			after := argsAfterDoubleDash(args)
+			lastAddArgs = after
+			if len(after) > 0 {
+				servers[args[2]] = after[0] // <path> is the command; further args are launcher args
+			}
+			return "", true
+		case len(args) >= 3 && args[0] == "mcp" && args[1] == "remove":
+			if _, ok := servers[args[2]]; !ok {
+				return "Error: No MCP server named '" + args[2] + "' found.", false
+			}
+			delete(servers, args[2])
+			return "", true
+		case len(args) >= 4 && args[0] == "mcp" && args[1] == "get" && args[3] == "--json":
+			cmd, ok := servers[args[2]]
+			if !ok {
+				return "Error: No MCP server named '" + args[2] + "' found.", false
+			}
+			js, _ := json.Marshal(map[string]any{
+				"name":      args[2],
+				"transport": map[string]any{"type": "stdio", "command": cmd},
+			})
+			return string(js), true
+		}
+		return "", false
+	}
+	return e, &lastAddArgs
+}
+
 // argsAfterDoubleDash returns the elements following the first "--" in args (nil if none).
 func argsAfterDoubleDash(args []string) []string {
 	for i, a := range args {
@@ -187,6 +228,64 @@ func TestCode_registerStatusRoundTrip(t *testing.T) {
 // TestConfig_serverArgsFlowToBothClients proves the connector-agnostic extraction: a Config with extra
 // args (Revit registers its broker with "--mode local") lands after "--" on the Claude Code `mcp add`
 // line AND in the Claude Desktop entry's "args" array — while a Config with no args still writes "args": [].
+func TestCodex_registerStatusRoundTrip(t *testing.T) {
+	e, _ := mockCodexEnv(t)
+
+	if o := e.registerCodex(testCfg, "/pkg/mcp-server"); o.Action != "registered" {
+		t.Fatalf("register = %q (%s)", o.Action, o.Detail)
+	}
+	if o := e.statusCodex(testCfg, "/pkg/mcp-server"); o.Action != "unchanged" {
+		t.Errorf("status after register = %q, want unchanged (current)", o.Action)
+	}
+	if o := e.statusCodex(testCfg, "/moved/mcp-server"); o.Action != "updated" {
+		t.Errorf("status at a different path = %q, want updated (stale)", o.Action)
+	}
+	// Re-register at the same path → unchanged; at a different path → updated (remove-then-add replaces).
+	if o := e.registerCodex(testCfg, "/pkg/mcp-server"); o.Action != "unchanged" {
+		t.Errorf("re-register same path = %q, want unchanged", o.Action)
+	}
+	if o := e.registerCodex(testCfg, "/new/mcp-server"); o.Action != "updated" {
+		t.Errorf("re-register new path = %q, want updated", o.Action)
+	}
+	if o := e.unregisterCodex(testCfg); o.Action != "removed" {
+		t.Errorf("unregister = %q, want removed", o.Action)
+	}
+	if o := e.statusCodex(testCfg, "/new/mcp-server"); o.Action != "not-registered" {
+		t.Errorf("status after unregister = %q, want not-registered", o.Action)
+	}
+	// Second unregister is a no-op.
+	if o := e.unregisterCodex(testCfg); o.Action != "unchanged" {
+		t.Errorf("second unregister = %q, want unchanged", o.Action)
+	}
+}
+
+func TestCodex_skippedWhenCodexAbsent(t *testing.T) {
+	e := Env{GOOS: "linux", Home: t.TempDir(), lookCodex: func() string { return "" }}
+	if o := e.registerCodex(testCfg, "/pkg/mcp-server"); o.Action != "skipped" {
+		t.Errorf("register with no codex CLI = %q, want skipped", o.Action)
+	}
+	if o := e.statusCodex(testCfg, "/pkg/mcp-server"); o.Action != "skipped" {
+		t.Errorf("status with no codex CLI = %q, want skipped", o.Action)
+	}
+	if o := e.unregisterCodex(testCfg); o.Action != "skipped" {
+		t.Errorf("unregister with no codex CLI = %q, want skipped", o.Action)
+	}
+}
+
+// TestCodex_serverArgsFlowToAdd proves a Config's extra args (Revit's "--mode local") land after "--" on
+// the `codex mcp add` line, exactly as they do for the Claude clients.
+func TestCodex_serverArgsFlowToAdd(t *testing.T) {
+	revit := Config{ServerName: "revit", ServerArgs: []string{"--mode", "local"}}
+	e, lastAdd := mockCodexEnv(t)
+	if o := e.registerCodex(revit, "/pkg/mcp-server.exe"); o.Action != "registered" {
+		t.Fatalf("register = %q (%s)", o.Action, o.Detail)
+	}
+	wantAdd := []string{"/pkg/mcp-server.exe", "--mode", "local"}
+	if got := *lastAdd; !slices.Equal(got, wantAdd) {
+		t.Errorf("codex mcp add args after -- = %v, want %v", got, wantAdd)
+	}
+}
+
 func TestConfig_serverArgsFlowToBothClients(t *testing.T) {
 	revit := Config{ServerName: "revit", ServerArgs: []string{"--mode", "local"}}
 
@@ -242,7 +341,7 @@ func TestRegister_coversEveryClient(t *testing.T) {
 	for _, o := range Register(e, testCfg, "/pkg/mcp-server").Outcomes {
 		got[o.Client] = true
 	}
-	for _, want := range []Client{ClaudeCode, ClaudeDesktop} {
+	for _, want := range []Client{ClaudeCode, ClaudeDesktop, Codex} {
 		if !got[want] {
 			t.Errorf("Register produced no outcome for %s", want)
 		}

@@ -1,7 +1,7 @@
-// Package clientreg registers a connector's MCP server with the user's Claude clients — Claude Code and
-// Claude Desktop — from one place. It is the single source of truth a connector's registration drives:
+// Package clientreg registers a connector's MCP server with the user's AI clients — Claude Code, Claude
+// Desktop, and Codex — from one place. It is the single source of truth a connector's registration drives:
 // the caller (a connector's installer, or the Rhino plug-in's MCPBridgeRegister command) shells
-// `mcp-server register`, so "both clients, equally" is implemented once, cross-platform, rather than
+// `mcp-server register`, so "every client, equally" is implemented once, cross-platform, rather than
 // duplicated in C# and PowerShell.
 //
 // It is connector-agnostic: the caller supplies a Config with the registration slug ("revit", "rhino")
@@ -12,7 +12,10 @@
 // what we drive for it. Claude Desktop (and Cowork, which reads the same file) has no CLI, so we merge the
 // server into its claude_desktop_config.json directly — taking care with the Microsoft Store / MSIX build,
 // whose real config is virtualized under the package's LocalCache (a write to %APPDATA%\Claude is silently
-// ignored there — confirmed live on this project's VM).
+// ignored there — confirmed live on this project's VM). Codex keeps its MCP servers in ~/.codex/config.toml
+// — shared by its CLI, desktop app, and IDE extension, so one `codex mcp add` registers all three at once —
+// and we drive its `codex mcp add/remove/get` CLI (Codex owns the TOML merge, so other servers and
+// hand-written keys are preserved and we need no TOML writer).
 package clientreg
 
 import (
@@ -41,6 +44,7 @@ type Client string
 const (
 	ClaudeCode    Client = "claude-code"
 	ClaudeDesktop Client = "claude-desktop"
+	Codex         Client = "codex"
 )
 
 // Outcome is what happened for one client.
@@ -95,6 +99,10 @@ type Env struct {
 	lookClaude func() string
 	// runClaude runs `claude` with args, returning combined output and success. Overridable in tests.
 	runClaude func(args ...string) (string, bool)
+	// lookCodex finds the `codex` CLI, or "" if absent. Overridable in tests.
+	lookCodex func() string
+	// runCodex runs `codex` with args, returning combined output and success. Overridable in tests.
+	runCodex func(args ...string) (string, bool)
 }
 
 // CurrentEnv is the real environment.
@@ -107,6 +115,8 @@ func CurrentEnv() Env {
 	}
 	e.lookClaude = e.findClaude
 	e.runClaude = e.execClaude
+	e.lookCodex = e.findCodex
+	e.runCodex = e.execCodex
 	return e
 }
 
@@ -160,9 +170,9 @@ func isDir(p string) bool {
 	return err == nil && fi.IsDir()
 }
 
-// client is one registration target. Claude Code and Claude Desktop are the two today; a new client
-// (e.g. the Codex CLI, which keeps MCP servers in ~/.codex/config.toml) is added by writing one adapter
-// and appending it to clients() below — nothing else here, in main.go, or in the installer changes.
+// client is one registration target. Claude Code, Claude Desktop, and Codex are the three today; a new
+// client is added by writing one adapter and appending it to clients() below — nothing else here, in
+// main.go, or in the installer changes.
 type client interface {
 	Register(e Env, cfg Config, serverPath string) Outcome
 	Unregister(e Env, cfg Config) Outcome
@@ -171,8 +181,7 @@ type client interface {
 
 // clients is the ordered set of known registration targets. Extend it to support another client.
 func clients() []client {
-	return []client{claudeCodeClient{}, claudeDesktopClient{}}
-	// e.g. append codexClient{} here once its adapter lands.
+	return []client{claudeCodeClient{}, claudeDesktopClient{}, codexClient{}}
 }
 
 // Register points every installed client at serverPath (with cfg.ServerArgs). Idempotent.
@@ -375,6 +384,142 @@ func (e Env) statusDesktop(cfg Config, serverPath string) Outcome {
 	o.Command = cmd
 	o.Action = classify(cmd, serverPath)
 	return o
+}
+
+// ---- Codex (via the codex CLI, ~/.codex/config.toml) ----
+
+// codexClient registers with Codex. Codex's CLI, desktop app, and IDE extension all read one shared
+// ~/.codex/config.toml, so a single `codex mcp add` covers all three surfaces at once (unlike Claude,
+// whose Code and Desktop are two separate configs and two adapters). We drive the `codex` CLI rather than
+// editing the TOML: Codex owns the merge, so every other server and hand-written key is preserved and we
+// need no TOML writer. When the `codex` CLI is not on PATH the adapter skips — a Codex desktop app with no
+// CLI installed is not reached by this path (a documented v1 limitation, symmetric with Claude Code, which
+// we likewise drive only through its CLI).
+type codexClient struct{}
+
+func (codexClient) Register(e Env, cfg Config, serverPath string) Outcome {
+	return e.registerCodex(cfg, serverPath)
+}
+func (codexClient) Unregister(e Env, cfg Config) Outcome { return e.unregisterCodex(cfg) }
+func (codexClient) Status(e Env, cfg Config, serverPath string) Outcome {
+	return e.statusCodex(cfg, serverPath)
+}
+
+// CodexConfigPath is the config every Codex surface (CLI, app, IDE) shares.
+func (e Env) CodexConfigPath() string { return filepath.Join(e.Home, ".codex", "config.toml") }
+
+func (e Env) registerCodex(cfg Config, serverPath string) Outcome {
+	o := Outcome{Client: Codex, Path: e.CodexConfigPath()}
+	if e.lookCodexCLI() == "" {
+		o.Action, o.Detail = "skipped", "the `codex` CLI was not found on PATH or in ~/.local/bin"
+		return o
+	}
+	prev := e.codexServerCommand(cfg.ServerName)
+	// remove-then-add so a moved path replaces cleanly rather than clashing on the name.
+	e.runCodexCLI("mcp", "remove", cfg.ServerName)
+	// `codex mcp add <name> -- <path> <serverArgs…>` — the stdio launcher form.
+	addArgs := append([]string{"mcp", "add", cfg.ServerName, "--", serverPath}, cfg.ServerArgs...)
+	if out, ok := e.runCodexCLI(addArgs...); !ok {
+		o.Action, o.Detail = "error", strings.TrimSpace(out)
+		return o
+	}
+	o.Command = serverPath
+	switch prev {
+	case "":
+		o.Action = "registered"
+	case serverPath:
+		o.Action = "unchanged"
+	default:
+		o.Action = "updated"
+	}
+	return o
+}
+
+func (e Env) unregisterCodex(cfg Config) Outcome {
+	o := Outcome{Client: Codex, Path: e.CodexConfigPath()}
+	if e.lookCodexCLI() == "" {
+		o.Action, o.Detail = "skipped", "the `codex` CLI was not found"
+		return o
+	}
+	if e.codexServerCommand(cfg.ServerName) == "" {
+		o.Action = "unchanged"
+		return o
+	}
+	e.runCodexCLI("mcp", "remove", cfg.ServerName)
+	o.Action = "removed"
+	return o
+}
+
+func (e Env) statusCodex(cfg Config, serverPath string) Outcome {
+	o := Outcome{Client: Codex, Path: e.CodexConfigPath()}
+	if e.lookCodexCLI() == "" {
+		o.Action, o.Detail = "skipped", "the `codex` CLI was not found"
+		return o
+	}
+	cmd := e.codexServerCommand(cfg.ServerName)
+	o.Command = cmd
+	o.Action = classify(cmd, serverPath)
+	return o
+}
+
+// codexServerCommand returns the stdio command Codex currently has registered for name, or "" if name is
+// not registered (or Codex cannot be queried). `codex mcp get <name> --json` exits non-zero for an unknown
+// server and otherwise prints the server config, whose transport.command is the launcher we set.
+func (e Env) codexServerCommand(name string) string {
+	out, ok := e.runCodexCLI("mcp", "get", name, "--json")
+	if !ok {
+		return "" // unknown server → non-zero exit → not registered
+	}
+	var got struct {
+		Transport struct {
+			Command string `json:"command"`
+		} `json:"transport"`
+	}
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		return ""
+	}
+	return got.Transport.Command
+}
+
+// lookCodexCLI / runCodexCLI are nil-safe wrappers so an Env built by hand (without CurrentEnv wiring the
+// codex funcs) skips Codex rather than panicking.
+func (e Env) lookCodexCLI() string {
+	if e.lookCodex == nil {
+		return ""
+	}
+	return e.lookCodex()
+}
+
+func (e Env) runCodexCLI(args ...string) (string, bool) {
+	if e.runCodex == nil {
+		return "", false
+	}
+	return e.runCodex(args...)
+}
+
+func (e Env) findCodex() string {
+	name := "codex"
+	if e.GOOS == "windows" {
+		name = "codex.exe"
+	}
+	if p, err := exec.LookPath(name); err == nil {
+		return p
+	}
+	// Like the claude CLI, codex installs to ~/.local/bin, which a GUI-launched process may miss on PATH.
+	cand := filepath.Join(e.Home, ".local", "bin", name)
+	if _, err := os.Stat(cand); err == nil {
+		return cand
+	}
+	return ""
+}
+
+func (e Env) execCodex(args ...string) (string, bool) {
+	codex := e.findCodex()
+	if codex == "" {
+		return "", false
+	}
+	out, err := exec.Command(codex, args...).CombinedOutput()
+	return string(out), err == nil
 }
 
 // ---- shared config helpers ----
