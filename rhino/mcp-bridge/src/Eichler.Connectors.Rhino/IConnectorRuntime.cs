@@ -24,6 +24,6 @@ internal interface IConnectorRuntime
     void GrasshopperClearSources(string targetId, string targetInput);
     void GrasshopperSave(string path);
     void GrasshopperSolve(bool expireAll);
-    GrasshopperValue GrasshopperGet(string nickname);
-    GrasshopperData GrasshopperData(string nickname);
+    GrasshopperValue GrasshopperGet(string nickname, string output);
+    GrasshopperData GrasshopperData(string nickname, string output);
 }

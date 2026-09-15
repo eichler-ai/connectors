@@ -227,9 +227,9 @@ internal sealed class GrasshopperOperations : IGrasshopperOperations
     private const int MaxBranches = 50;
     private const int MaxItemsPerBranch = 200;
 
-    public GrasshopperValue Get(object grasshopperDocument, string nickname)
+    public GrasshopperValue Get(object grasshopperDocument, string nickname, string output)
     {
-        var param = RequireParam((GH_Document)grasshopperDocument, nickname, out var obj);
+        var param = RequireReadParam((GH_Document)grasshopperDocument, nickname, output, out var obj);
         var data = param.VolatileData;
         var total = data.DataCount;
         var items = new List<GrasshopperItem>();
@@ -242,9 +242,9 @@ internal sealed class GrasshopperOperations : IGrasshopperOperations
         return new GrasshopperValue(Nick(obj), obj.Name ?? obj.GetType().Name, total, items.ToArray(), items.Count < total);
     }
 
-    public GrasshopperData Data(object grasshopperDocument, string nickname)
+    public GrasshopperData Data(object grasshopperDocument, string nickname, string output)
     {
-        var param = RequireParam((GH_Document)grasshopperDocument, nickname, out var obj);
+        var param = RequireReadParam((GH_Document)grasshopperDocument, nickname, output, out var obj);
         var data = param.VolatileData;
         var branchCount = data.PathCount;
         var itemCount = data.DataCount;
@@ -280,12 +280,16 @@ internal sealed class GrasshopperOperations : IGrasshopperOperations
 
     // ---- helpers ----
 
-    private static IGH_Param RequireParam(GH_Document doc, string nickname, out IGH_DocumentObject obj)
+    // Resolves the parameter to read from: a free-floating parameter is its own data source, and a component
+    // resolves to one of its OUTPUT parameters -- its sole output when `output` is empty, otherwise the one
+    // named by `output` (name or 0-based index). ResolvePort(output:true) already carries exactly these rules
+    // and the errors that name the choices, so a component can be read directly instead of failing with
+    // "not a parameter" (issue #349's sibling, #351: "Robot Output is a component, not a parameter").
+    private static IGH_Param RequireReadParam(GH_Document doc, string nickname, string output, out IGH_DocumentObject obj)
     {
         obj = FindObject(doc, nickname)
             ?? throw new InvalidOperationException($"no Grasshopper object with nickname or id '{nickname}' is on the canvas.");
-        return obj as IGH_Param
-            ?? throw new InvalidOperationException($"'{Nick(obj)}' is a {obj.Name}, not a parameter with a data tree; address a parameter (or a component's output parameter) by nickname to read its data.");
+        return ResolvePort(obj, output, output: true);
     }
 
     /// <summary>Summarises one goo for the read half: numbers/text/booleans verbatim, geometry as its type

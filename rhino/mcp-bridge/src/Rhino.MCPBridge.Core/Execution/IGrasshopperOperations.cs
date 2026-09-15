@@ -35,8 +35,11 @@ internal interface IGrasshopperOperations
     /// disposed is grouped into ONE entry (labelled <paramref name="label"/>) the user can revert in the
     /// Grasshopper editor. A no-op scope when <paramref name="grasshopperDocument"/> is null.</summary>
     IDisposable BeginUndoRecording(object? grasshopperDocument, string label);
-    /// <summary>Reads an object's current output, flattened and budget-capped (the read half of Set).</summary>
-    GrasshopperValue Get(object grasshopperDocument, string nickname);
-    /// <summary>Serialises a parameter's full volatile data tree, budget-capped.</summary>
-    GrasshopperData Data(object grasshopperDocument, string nickname);
+    /// <summary>Reads an object's current output, flattened and budget-capped (the read half of Set). When
+    /// <paramref name="nickname"/> names a component, <paramref name="output"/> picks which output parameter
+    /// to read (by name or 0-based index; empty means its sole output, or an error naming the choices).</summary>
+    GrasshopperValue Get(object grasshopperDocument, string nickname, string output);
+    /// <summary>Serialises a parameter's full volatile data tree, budget-capped. <paramref name="output"/>
+    /// picks a component's output parameter, as in <see cref="Get"/>.</summary>
+    GrasshopperData Data(object grasshopperDocument, string nickname, string output);
 }

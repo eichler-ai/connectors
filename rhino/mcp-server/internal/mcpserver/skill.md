@@ -161,11 +161,13 @@ With a definition bound (`gh_document_id`), a script reaches it two ways. **Dire
 - `Save(path)` — write the definition to a `.gh`/`.ghx` (`path` a full path to save-as, or `""` for its
   current file). Writes the filesystem, so — like a Rhino document save — it needs `confirm_lifecycle_actions`;
   a save-as changes the definition's `gh_document_id` (re-list to get the new one).
-- `Get(nickname)` → the object's current output items, flattened; `Data(nickname)` → the full data tree with
-  branch paths and counts. Both summarise each item — numbers/text/booleans **verbatim**, geometry as
-  **type + bounding box + a document handle**, never geometry inline (large trees stay within the response
-  budget; `Truncated` — plus `Data`'s `Note` — says when a cap was hit). `Solve` first so the data is
-  current, and note a
+- `Get(nickname[, output])` → the object's current output items, flattened; `Data(nickname[, output])` → the
+  full data tree with branch paths and counts. `nickname` may be a parameter (slider, panel, bare `Param_*`)
+  **or a component** — for a component the output is read, `output` picking which one by name or 0-based index
+  (omit it for the sole output; an error names the choices when there is more than one). Both summarise each
+  item — numbers/text/booleans **verbatim**, geometry as **type + bounding box + a document handle**, never
+  geometry inline (large trees stay within the response budget; `Truncated` — plus `Data`'s `Note` — says when
+  a cap was hit). `Solve` first so the data is current, and note a
   definition computes volatile data only when it is **enabled**.
 
 Every `connector.Grasshopper` edit in a run is grouped into **one Grasshopper undo entry** (labelled for the
