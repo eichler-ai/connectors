@@ -158,14 +158,38 @@ func semanticGuidance(returned, total int, dense, reranked bool) string {
 	return how + tail
 }
 
+// codeDiscoveryUnavailable is the wire code the add-in returns while its
+// discovery cache is still building -- the cold-start window after an instance
+// connects, and before a Grasshopper document is open (the component catalog is
+// indexed only once one is). A build that failed for this reason is transient:
+// the manager retries it, so the steer is "retry", not "it failed".
+const codeDiscoveryUnavailable = "discovery-unavailable"
+
+// buildFailedTransiently reports whether a StateFailed build failed only because
+// the add-in's discovery cache was not ready yet (cause discovery-unavailable),
+// as opposed to a real, sticky build failure. buildFailed carries the wire cause
+// in the notice's detail["cause"].
+func buildFailedTransiently(st manager.Status) bool {
+	if st.Err == nil {
+		return false
+	}
+	cause, _ := st.Err.Detail["cause"].(*diag.Record)
+	return cause != nil && cause.Code == codeDiscoveryUnavailable
+}
+
 // fallbackGuidance explains why the plug-in's keyword ranker answered instead
 // of the broker index, and what to do. The structured reason travels in
 // notices[] (fallbackNotice); this is the prose hint beside it.
 func fallbackGuidance(st manager.Status) string {
-	switch st.State {
-	case manager.StateBuilding:
+	switch {
+	case st.State == manager.StateBuilding:
 		return "The semantic search index for this Rhino instance is still building (it usually takes a few seconds after the instance connects); this result came from the plug-in's keyword ranker. Retry shortly for semantic ranking. "
-	case manager.StateFailed:
+	case st.State == manager.StateFailed && buildFailedTransiently(st):
+		// A cold-start race, not a dead index: discovery was not ready when the
+		// build ran, and the manager will retry it. Steer toward a retry so the
+		// agent does not treat keyword-only results as permanent.
+		return "The semantic search index for this Rhino instance is still warming up (the add-in's discovery cache builds for a few seconds after the instance connects, and the Grasshopper component catalog appears once a Grasshopper document is open); this result came from the plug-in's keyword ranker. Retry shortly for semantic ranking. "
+	case st.State == manager.StateFailed:
 		return "The semantic search index for this Rhino instance failed to build (see notices); this result came from the plug-in's keyword ranker, which matches tokens only. "
 	default:
 		return "The semantic search index is not available for this Rhino instance; this result came from the plug-in's keyword ranker, which matches tokens only. "
