@@ -133,12 +133,22 @@ internal sealed class FakeRunHost : IRunHost
         return FrameResult;
     }
 
+    /// <summary>Simulates a render-content change (a material assigned, say) that the RDK does NOT report
+    /// through SubscribeChanges: the fingerprint moves across the run so the executor detects it via
+    /// RenderContentFingerprint rather than onAnyChange (issue #349).</summary>
+    public bool RenderContentChangeDuringRun { get; set; }
+    private long _renderFingerprint = 1000;
+    public long RenderContentFingerprint(RunDocument document) => _renderFingerprint;
+
     public bool RunInCommand(RunDocument document, string undoLabel, Action body)
     {
         if (RefuseCommands) return false;
         CommandsRun++;
         UndoLabels.Add(undoLabel);
         body();
+        // Move the fingerprint AFTER the body, so the executor's before-sample and after-sample differ --
+        // exactly what a real render-content edit inside the run would do.
+        if (RenderContentChangeDuringRun) _renderFingerprint++;
         return true;
     }
 

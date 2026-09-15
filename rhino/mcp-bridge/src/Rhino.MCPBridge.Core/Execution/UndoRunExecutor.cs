@@ -100,6 +100,11 @@ internal sealed class UndoRunExecutor
         var undoLabel = UndoLabel.For(request.Label);
         var mutations = new MutationTracker();
         var changed = false;
+        // Render-content changes (a material assigned, an environment edited) do not raise their table event
+        // synchronously during the run, so the subscription below never sees them (issue #349). Bracket the
+        // run with a fingerprint of the render-content tables and treat a delta as a document change -- so it
+        // reaches changed_document, the undo tool's gate, and (on failure) rollback, like any other change.
+        var renderBefore = _host.RenderContentFingerprint(document);
         GrasshopperReport? grasshopperReport = null;
         ScriptExecutionOutcome? outcome = null;
         var started = _host.RunInCommand(document, undoLabel, () =>
@@ -146,6 +151,13 @@ internal sealed class UndoRunExecutor
         if (!started)
         {
             return null;
+        }
+
+        // The command has fully returned (script done, subscription disposed): a render-content delta now
+        // counts as a change, alongside anything the subscription caught.
+        if (renderBefore != _host.RenderContentFingerprint(document))
+        {
+            changed = true;
         }
 
         if (outcome is null)

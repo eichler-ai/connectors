@@ -85,6 +85,40 @@ public sealed class UndoRunExecutorTests
     }
 
     [Fact]
+    public void Success_AfterARenderContentChange_ReportsChangedDocument()
+    {
+        // issue #349: assigning a render material raises no document event (the RDK table event is not
+        // synchronous), so the change is caught by the before/after render-content fingerprint. No object
+        // event fired, so there is no mutation report -- but the document did change.
+        var host = new FakeRunHost { RenderContentChangeDuringRun = true };
+        var outcome = new UndoRunExecutor(new ScriptRunners(Runner), host).Execute(Req("return 1;"))!;
+        Assert.True(outcome.Success);
+        Assert.Null(outcome.Mutations);
+        Assert.True(outcome.ChangedDocument);
+    }
+
+    [Fact]
+    public void Throw_AfterARenderContentChange_IsStillUndone()
+    {
+        // The correctness tail of #349: a failed run that changed only render content must still roll back,
+        // not leave the change in the document. The fingerprint delta drives the rollback like any change.
+        var host = new FakeRunHost { RenderContentChangeDuringRun = true };
+        var outcome = new UndoRunExecutor(new ScriptRunners(Runner), host).Execute(Req("throw new System.Exception(\"x\");"))!;
+        Assert.False(outcome.Success);
+        Assert.Equal(1, host.UndoCalls);
+        Assert.Equal("script-rolled-back", Assert.Single(outcome.Notices).Code);
+    }
+
+    [Fact]
+    public void Success_WithNoRenderContentChange_DoesNotReportChangedDocument()
+    {
+        // Guard against a false positive: a run that touches no render content leaves the fingerprint put.
+        var outcome = new UndoRunExecutor(new ScriptRunners(Runner), new FakeRunHost()).Execute(Req("return 1;"))!;
+        Assert.True(outcome.Success);
+        Assert.False(outcome.ChangedDocument);
+    }
+
+    [Fact]
     public void AnExceptionInsideTheCommandBody_BecomesAFailedOutcome_NeverEscapes()
     {
         // review of #282: the body runs inside Rhino's native command dispatcher; a throw there is a crash class.
