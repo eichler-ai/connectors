@@ -437,6 +437,53 @@ public sealed class UndoRunExecutorTests
     }
 
     [Fact]
+    public void ConnectorGrasshopperAdd_ForwardsNameAndPosition_AndReturnsTheDescriptor()
+    {
+        // #350: place a component by name.
+        var host = HostWithBoundDefinition();
+        host.GrasshopperOps.AddResult = new Eichler.Connectors.Rhino.GrasshopperComponent("the-guid", "Cir", "Circle");
+        var outcome = new UndoRunExecutor(new ScriptRunners(Runner), host)
+            .Execute(Req("var c = Connector.Grasshopper.Add(\"Circle\", 200, 100); return c.Nickname;", ghDocId: "gh-known"))!;
+        Assert.True(outcome.Success, outcome.Exception?.ToString());
+        Assert.Equal("Cir", outcome.ReturnValue);
+        var add = Assert.Single(host.GrasshopperOps.Adds);
+        Assert.Same(host.GrasshopperDocumentStub, add.Doc);
+        Assert.Equal("Circle", add.Name);
+        Assert.Equal(200, add.X);
+        Assert.Equal(100, add.Y);
+    }
+
+    [Fact]
+    public void ConnectorGrasshopperAddSlider_ForwardsRangeValueAndPrecision()
+    {
+        // #350: create a slider with a range and precision (not just a value).
+        var host = HostWithBoundDefinition();
+        var outcome = new UndoRunExecutor(new ScriptRunners(Runner), host)
+            .Execute(Req("Connector.Grasshopper.AddSlider(0, 10, 2.5, 2); return \"ok\";", ghDocId: "gh-known"))!;
+        Assert.True(outcome.Success, outcome.Exception?.ToString());
+        var s = Assert.Single(host.GrasshopperOps.AddSliders);
+        Assert.Equal(0, s.Min);
+        Assert.Equal(10, s.Max);
+        Assert.Equal(2.5, s.Value);
+        Assert.Equal(2, s.Decimals);
+    }
+
+    [Fact]
+    public void ConnectorGrasshopperSetSliderRange_Forwards()
+    {
+        // #350: set an existing slider's range/precision.
+        var host = HostWithBoundDefinition();
+        var outcome = new UndoRunExecutor(new ScriptRunners(Runner), host)
+            .Execute(Req("Connector.Grasshopper.SetSliderRange(\"r\", -5, 5, 1); return \"ok\";", ghDocId: "gh-known"))!;
+        Assert.True(outcome.Success, outcome.Exception?.ToString());
+        var r = Assert.Single(host.GrasshopperOps.SliderRanges);
+        Assert.Equal("r", r.Nickname);
+        Assert.Equal(-5, r.Min);
+        Assert.Equal(5, r.Max);
+        Assert.Equal(1, r.Decimals);
+    }
+
+    [Fact]
     public void ConnectorGrasshopper_WithoutABoundDefinition_FailsClearly_WithoutRunningTheOp()
     {
         var host = new FakeRunHost();

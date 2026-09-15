@@ -61,6 +61,9 @@ public sealed class ScriptGlobals : IConnectorRuntime
     void IConnectorRuntime.GrasshopperSolve(bool expireAll) => Ops().Solve(RequireGrasshopperDocument(), expireAll);
     GrasshopperValue IConnectorRuntime.GrasshopperGet(string nickname, string output) => Ops().Get(RequireGrasshopperDocument(), nickname, output);
     GrasshopperData IConnectorRuntime.GrasshopperData(string nickname, string output) => Ops().Data(RequireGrasshopperDocument(), nickname, output);
+    GrasshopperComponent IConnectorRuntime.GrasshopperAdd(string name, double x, double y) => Ops().Add(RequireGrasshopperDocument(), name, x, y);
+    GrasshopperComponent IConnectorRuntime.GrasshopperAddSlider(double min, double max, double value, int decimals, double x, double y) => Ops().AddSlider(RequireGrasshopperDocument(), min, max, value, decimals, x, y);
+    void IConnectorRuntime.GrasshopperSetSliderRange(string nickname, double min, double max, int decimals) => Ops().SetSliderRange(RequireGrasshopperDocument(), nickname, min, max, decimals);
 
     private IGrasshopperOperations Ops() => _grasshopperOps
         ?? throw new InvalidOperationException("Grasshopper is not available in this run (the plug-in exposed no Grasshopper operations).");

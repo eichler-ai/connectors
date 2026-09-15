@@ -153,8 +153,15 @@ With a definition bound (`gh_document_id`), a script reaches it two ways. **Dire
 - `Reference(nickname, object_ids)` / `ClearReference(nickname)` — wire a Curve/Brep/Surface/Mesh/Point or a
   generic Geometry input to Rhino document objects **by reference** (one id or a list), so the definition
   consumes live document geometry that tracks the object. `ClearReference` unwires it.
+- `Add(name[, x, y])` — **place a component by name** (no GUID hunting): `name` is the component's name
+  (`"Circle"`), a component GUID, or `"Category/Name"` to disambiguate a shared name (an error names the
+  choices, or points at `search_functions` when nothing matches). Auto-placed when x,y omitted. Returns a
+  descriptor — address it afterwards by its `Guid`/`Nickname`.
+- `AddSlider(min, max, value[, decimals, x, y])` — create a Number Slider with a **range and precision**
+  (not just a value), value clamped into the range; `SetSliderRange(nickname, min, max[, decimals])` changes
+  an existing slider's range (the complement of `Set`, which sets the value). Returns the slider's descriptor.
 - `Connect(source, source_output, target, target_input)` / `Disconnect(…)` / `ClearSources(target, target_input)`
-  — wire one object's output to another's input, so you can **build** a definition (place via `ghdoc`, then
+  — wire one object's output to another's input, so you can **build** a definition (`Add` the components, then
   connect), not only drive one. Objects by nickname/guid; a port by name or 0-based index, or `""` for the
   sole port (a slider/panel/bare parameter is its own). Expires the target — `Solve` after.
 - `Solve(expire_all=False)` — run a solution; the **solve report** rides the run result (below).
