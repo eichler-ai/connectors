@@ -234,6 +234,35 @@ and driving them has traps separate from add-in deployment:
   flat), `%LOCALAPPDATA%\Programs\MCPBridge` (versioned add-in payloads), `%LOCALAPPDATA%\Connectors\Revit`,
   and the `HKU\<sid>\...\Uninstall\` MCPBridge key — spelling the interactive user's paths out in
   full, since SYSTEM's `%LOCALAPPDATA%` and `HKCU` are the wrong hive — then fresh-install.
+- **Claude-client registration is the broker's job now (PR #345), not PowerShell's.** `install.ps1`
+  shells `mcp-server.exe register` / `unregister` / `register --check` — the shared, cross-platform
+  `internal/servercore/clientreg` engine (also used by Rhino), which owns the `claude mcp add` call and
+  the Claude Desktop `claude_desktop_config.json` merge (Store/MSIX path included). The JSON/MSIX logic
+  is unit-tested in Go (`clientreg_test.go`); `install.ps1`'s glue (`Register-McpServer` /
+  `Unregister-McpServer` / `Invoke-ServerSubcommand`) is Pester-tested with the subcommand mocked, so
+  **the actual shelling behaviour and the real MSIX write are only exercised live.** To verify a
+  registration change from the Mac without a full install:
+  - **Build the exe on the VM** — it has Go at `C:\Program Files\Go`, and `go build` succeeds without
+    fetching the ranking models (the register path doesn't use them; the binary just ranks keyword-only).
+    Copy the two modules (`revit/mcp-server` + `internal/servercore`) to a local VM dir preserving the
+    `../../internal/servercore` replace layout so `go build -C` has a real local cwd — a UNC cwd can't be
+    a native process working dir. Building from a worktree share is fine as the *source*.
+  - **Drive it as the interactive user.** The MSIX Desktop config, `~/.claude.json`, and the `claude` CLI
+    are all the interactive user's, so registration must run in that profile. When the launcher agent is
+    running, use a `*.runexe` signal. When it is not (its scheduled task can be missing entirely),
+    `clientreg` keys off `%USERPROFILE%`/`%APPDATA%`/`%LOCALAPPDATA%`/`PATH` and **never process
+    identity** — so a `prlctl exec` (SYSTEM) run with those four env vars pointed at `C:\Users\<user>`
+    makes it scan that user's MSIX Claude package and write their real Desktop + Code configs, exactly as
+    a real install would. `Start-Process` (inside `Invoke-ServerSubcommand`) inherits that env, so the
+    child exe sees it too. Snapshot both config files first and restore them in a `finally` — this
+    rewrites the machine's real `revit` registration.
+  - **`Start-Process -PassThru` drops the child's handle at exit, so `$p.ExitCode` reads `$null`
+    afterward** — even after `WaitForExit` returns. Touch `$p.Handle` right after `Start-Process` to pin
+    it, or the exit code is lost. `Invoke-ServerSubcommand` needs that code (for `register --check` and
+    failure detection), and this bit it live: the first VM run had `register --check` returning null, so
+    `-OnlyIfMissing` never skipped and a successful register misreported as failure. The Pester tier
+    cannot catch it (the function is mocked there), which is exactly why the live run is mandatory for an
+    installer registration change.
 
 ## Assembly loading under Revit's plugin model
 
