@@ -66,6 +66,10 @@ internal sealed class FakeRunHost : IRunHost
         public readonly List<(object Doc, bool ExpireAll)> Solves = new();
         public readonly List<(object Doc, string Nickname, string Output)> Gets = new();
         public readonly List<(object Doc, string Nickname, string Output)> Datas = new();
+        public readonly List<(object Doc, string Name, double X, double Y)> Adds = new();
+        public readonly List<(object Doc, double Min, double Max, double Value, int Decimals, double X, double Y)> AddSliders = new();
+        public readonly List<(object Doc, string Nickname, double Min, double Max, int Decimals)> SliderRanges = new();
+        public Eichler.Connectors.Rhino.GrasshopperComponent? AddResult { get; set; }
         public Eichler.Connectors.Rhino.GrasshopperComponent? FindResult { get; set; }
         public Eichler.Connectors.Rhino.GrasshopperValue? GetResult { get; set; }
         public Eichler.Connectors.Rhino.GrasshopperData? DataResult { get; set; }
@@ -83,6 +87,9 @@ internal sealed class FakeRunHost : IRunHost
         private sealed class NoOp : IDisposable { public void Dispose() { } }
         public Eichler.Connectors.Rhino.GrasshopperValue Get(object doc, string nickname, string output) { Gets.Add((doc, nickname, output)); return GetResult!; }
         public Eichler.Connectors.Rhino.GrasshopperData Data(object doc, string nickname, string output) { Datas.Add((doc, nickname, output)); return DataResult!; }
+        public Eichler.Connectors.Rhino.GrasshopperComponent Add(object doc, string name, double x, double y) { Adds.Add((doc, name, x, y)); return AddResult ?? new Eichler.Connectors.Rhino.GrasshopperComponent("guid", name, name); }
+        public Eichler.Connectors.Rhino.GrasshopperComponent AddSlider(object doc, double min, double max, double value, int decimals, double x, double y) { AddSliders.Add((doc, min, max, value, decimals, x, y)); return AddResult ?? new Eichler.Connectors.Rhino.GrasshopperComponent("guid", "Slider", "Number Slider"); }
+        public void SetSliderRange(object doc, string nickname, double min, double max, int decimals) => SliderRanges.Add((doc, nickname, min, max, decimals));
     }
 
     private sealed class StubSolveScope : IGrasshopperSolveScope

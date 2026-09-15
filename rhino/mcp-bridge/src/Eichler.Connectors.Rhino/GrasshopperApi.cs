@@ -93,6 +93,29 @@ public sealed class GrasshopperApi
     /// synchronous on the main thread, so a slow one makes the run <c>running</c>; the resulting solve
     /// report rides the run's result (the <c>grasshopper</c> field).</summary>
     public void Solve(bool expireAll = false) => _runtime.GrasshopperSolve(expireAll);
+
+    /// <summary>Places a component or parameter on the bound definition **by name** — no GUID hunting (PRD §10).
+    /// <paramref name="name"/> is the component's name (case-insensitive, e.g. <c>"Circle"</c>), a component
+    /// GUID, or <c>"Category/Name"</c> to disambiguate a name shared by several components; an error names the
+    /// choices when it is ambiguous, or points at <c>search_functions</c> when nothing matches. It is placed at
+    /// canvas (<paramref name="x"/>,<paramref name="y"/>), or auto-offset when both are 0. Returns its
+    /// descriptor (address it afterwards by the returned <c>Guid</c> or <c>Nickname</c> with
+    /// <see cref="Connect"/>/<see cref="Set"/>/<see cref="Get"/>). <see cref="Solve"/> after wiring it up.</summary>
+    public GrasshopperComponent Add(string name, double x = 0, double y = 0) => _runtime.GrasshopperAdd(name, x, y);
+
+    /// <summary>Creates a Number Slider on the bound definition (PRD §10) with range
+    /// [<paramref name="min"/>,<paramref name="max"/>], <paramref name="decimals"/> decimal places, and an
+    /// initial <paramref name="value"/> (clamped into the range), at canvas (<paramref name="x"/>,
+    /// <paramref name="y"/>) or auto-offset when both are 0. Returns its descriptor; feed it into an input with
+    /// <see cref="Connect"/>, and change its value later with <see cref="Set"/>.</summary>
+    public GrasshopperComponent AddSlider(double min, double max, double value, int decimals = 0, double x = 0, double y = 0) =>
+        _runtime.GrasshopperAddSlider(min, max, value, decimals, x, y);
+
+    /// <summary>Sets an existing Number Slider's range and precision (the complement of <see cref="Set"/>, which
+    /// sets only its value), keeping the current value inside the new range. Raises if the object is not a
+    /// Number Slider.</summary>
+    public void SetSliderRange(string nickname, double min, double max, int decimals = 0) =>
+        _runtime.GrasshopperSetSliderRange(nickname, min, max, decimals);
 }
 
 /// <summary>One Grasshopper object as <see cref="GrasshopperApi.Find"/> reports it.</summary>

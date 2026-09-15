@@ -220,6 +220,49 @@ internal sealed class GrasshopperOperations : IGrasshopperOperations
         ((GH_Document)grasshopperDocument).NewSolution(expireAll);
     }
 
+    public GrasshopperComponent Add(object grasshopperDocument, string name, double x, double y)
+    {
+        var doc = (GH_Document)grasshopperDocument;
+        var proxy = ResolveProxy(name);
+        var obj = Grasshopper.Instances.ComponentServer.EmitObject(proxy.Guid)
+            ?? throw new InvalidOperationException($"Grasshopper could not create '{name}' (its component failed to emit).");
+        doc.AddObject(obj, false);
+        PlaceAndRecordAdd(doc, obj, x, y);
+        obj.ExpireSolution(recompute: false);
+        return Describe(obj);
+    }
+
+    public GrasshopperComponent AddSlider(object grasshopperDocument, double min, double max, double value, int decimals, double x, double y)
+    {
+        var doc = (GH_Document)grasshopperDocument;
+        var slider = new GH_NumberSlider();
+        // Add first: a freshly constructed slider has no Params and null canvas attributes until it is in a
+        // document (the tester hit exactly this), so range/value/placement must all follow the AddObject.
+        doc.AddObject(slider, false);
+        ApplySliderRange(slider, min, max, decimals);
+        slider.SetSliderValue(ClampToRange((decimal)value, slider));
+        PlaceAndRecordAdd(doc, slider, x, y);
+        slider.ExpireSolution(recompute: false);
+        return Describe(slider);
+    }
+
+    public void SetSliderRange(object grasshopperDocument, string nickname, double min, double max, int decimals)
+    {
+        var doc = (GH_Document)grasshopperDocument;
+        var obj = FindObject(doc, nickname)
+            ?? throw new InvalidOperationException($"no Grasshopper object with nickname or id '{nickname}' is on the canvas.");
+        if (obj is not GH_NumberSlider slider)
+        {
+            throw new InvalidOperationException($"'{Nick(obj)}' is a {obj.Name}, not a Number Slider; SetSliderRange sets a slider's range and precision.");
+        }
+
+        RecordObjectUndo(doc, slider);
+        var current = slider.CurrentValue;
+        ApplySliderRange(slider, min, max, decimals);
+        slider.SetSliderValue(ClampToRange(current, slider)); // keep the value inside the new range
+        slider.ExpireSolution(recompute: false);
+    }
+
     // Budget caps for the read half (PRD §10): keep a large data tree within the response budget. The char
     // ceiling is enforced downstream when a script returns the DTO (ReturnValueFormatter); these bound how
     // much we materialise in the first place, and each true total is reported so nothing is hidden silently.
@@ -435,6 +478,89 @@ internal sealed class GrasshopperOperations : IGrasshopperOperations
         }
 
         return null;
+    }
+
+    // Places a freshly-added object on the canvas (creating its attributes if the emit did not) and records
+    // its creation in the run's grouped GH undo entry, so one Ctrl+Z removes everything the run added. When x
+    // and y are both 0 the object is auto-offset by the current canvas population, so successive adds do not
+    // stack exactly on top of each other.
+    private void PlaceAndRecordAdd(GH_Document doc, IGH_DocumentObject obj, double x, double y)
+    {
+        if (obj.Attributes == null) obj.CreateAttributes();
+        if (x == 0 && y == 0)
+        {
+            var n = doc.ObjectCount;
+            x = 120 + (n % 8) * 40;
+            y = 120 + (n / 8) * 40;
+        }
+
+        obj.Attributes!.Pivot = new System.Drawing.PointF((float)x, (float)y);
+        if (_pendingUndo is { } p && ReferenceEquals(p.Doc, doc))
+        {
+            p.Rec.AddAction(new GH_AddObjectAction(obj));
+        }
+    }
+
+    private static void ApplySliderRange(GH_NumberSlider slider, double min, double max, int decimals)
+    {
+        if (max < min) (min, max) = (max, min); // tolerate a swapped range rather than produce an empty one
+        slider.Slider.Minimum = (decimal)min;
+        slider.Slider.Maximum = (decimal)max;
+        slider.Slider.DecimalPlaces = decimals < 0 ? 0 : decimals;
+    }
+
+    private static decimal ClampToRange(decimal value, GH_NumberSlider slider) =>
+        value < slider.Slider.Minimum ? slider.Slider.Minimum
+        : value > slider.Slider.Maximum ? slider.Slider.Maximum
+        : value;
+
+    // Resolves an Add target to a catalog proxy: a component/parameter name (case-insensitive), a GUID, or a
+    // "Category/Name" when a bare name is shared by more than one component. Obsolete proxies are skipped so a
+    // deprecated duplicate never wins.
+    private static IGH_ObjectProxy ResolveProxy(string name)
+    {
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            throw new InvalidOperationException("Add needs a component name (e.g. \"Circle\") or a component GUID.");
+        }
+
+        var server = Grasshopper.Instances.ComponentServer;
+        if (Guid.TryParse(name, out var g))
+        {
+            foreach (var p in server.ObjectProxies)
+            {
+                if (p != null && p.Guid == g) return p;
+            }
+
+            throw new InvalidOperationException($"no Grasshopper component has the GUID '{name}'.");
+        }
+
+        string? category = null;
+        var wanted = name;
+        var slash = name.IndexOf('/');
+        if (slash > 0)
+        {
+            category = name.Substring(0, slash).Trim();
+            wanted = name.Substring(slash + 1).Trim();
+        }
+
+        var matches = new List<IGH_ObjectProxy>();
+        foreach (var p in server.ObjectProxies)
+        {
+            if (p?.Desc == null || p.Obsolete) continue;
+            if (!string.Equals(p.Desc.Name, wanted, StringComparison.OrdinalIgnoreCase)) continue;
+            if (category != null && !string.Equals(p.Desc.Category, category, StringComparison.OrdinalIgnoreCase)) continue;
+            matches.Add(p);
+        }
+
+        if (matches.Count == 1) return matches[0];
+        if (matches.Count == 0)
+        {
+            throw new InvalidOperationException($"no Grasshopper component named '{name}' was found; search for its exact name with search_functions (namespace \"Grasshopper\").");
+        }
+
+        var choices = string.Join(", ", matches.Select(m => $"\"{m.Desc.Category}/{m.Desc.Name}\"").Distinct());
+        throw new InvalidOperationException($"'{name}' is ambiguous ({matches.Count} components share it); qualify it as Category/Name — one of: {choices}.");
     }
 
     private static GrasshopperComponent Describe(IGH_DocumentObject obj) =>

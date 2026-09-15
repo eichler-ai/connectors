@@ -26,4 +26,7 @@ internal interface IConnectorRuntime
     void GrasshopperSolve(bool expireAll);
     GrasshopperValue GrasshopperGet(string nickname, string output);
     GrasshopperData GrasshopperData(string nickname, string output);
+    GrasshopperComponent GrasshopperAdd(string name, double x, double y);
+    GrasshopperComponent GrasshopperAddSlider(double min, double max, double value, int decimals, double x, double y);
+    void GrasshopperSetSliderRange(string nickname, double min, double max, int decimals);
 }

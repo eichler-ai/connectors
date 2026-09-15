@@ -31,6 +31,17 @@ internal interface IGrasshopperOperations
     void Save(object grasshopperDocument, string path);
     void Solve(object grasshopperDocument, bool expireAll);
 
+    /// <summary>Places a component (or parameter) named <paramref name="name"/> — resolved against the
+    /// component catalog, or a GUID, or "Category/Name" — on the bound definition at canvas
+    /// (<paramref name="x"/>,<paramref name="y"/>), auto-offset when both are 0. Returns its descriptor.</summary>
+    GrasshopperComponent Add(object grasshopperDocument, string name, double x, double y);
+    /// <summary>Creates a Number Slider with range [<paramref name="min"/>,<paramref name="max"/>],
+    /// <paramref name="decimals"/> precision and initial <paramref name="value"/> (clamped), at
+    /// (<paramref name="x"/>,<paramref name="y"/>). Returns its descriptor.</summary>
+    GrasshopperComponent AddSlider(object grasshopperDocument, double min, double max, double value, int decimals, double x, double y);
+    /// <summary>Sets an existing Number Slider's range and precision, keeping its value inside the new range.</summary>
+    void SetSliderRange(object grasshopperDocument, string nickname, double min, double max, int decimals);
+
     /// <summary>Begins a run-scoped Grasshopper undo record: every mutation until the returned scope is
     /// disposed is grouped into ONE entry (labelled <paramref name="label"/>) the user can revert in the
     /// Grasshopper editor. A no-op scope when <paramref name="grasshopperDocument"/> is null.</summary>
