@@ -221,6 +221,37 @@ func TestHealthAndStatic(t *testing.T) {
 	}
 }
 
+func TestSDKGoImportMetadata(t *testing.T) {
+	f := newFixture(t, "https://connectors.example")
+	want := `<meta name="go-import" content="eichler.ai/sdk git https://github.com/eichler-ai/sdk">`
+	for _, path := range []string{"/sdk?go-get=1", "/sdk/engine?go-get=1", "/sdk/gen/eichler/v1?go-get=1"} {
+		resp, err := http.Get(f.http.URL + path)
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		body, readErr := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if readErr != nil {
+			t.Fatalf("read %s: %v", path, readErr)
+		}
+		if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), want) {
+			t.Errorf("GET %s = %d %q, want 200 with %q", path, resp.StatusCode, body, want)
+		}
+		if got := resp.Header.Get("Content-Type"); got != "text/html; charset=utf-8" {
+			t.Errorf("GET %s Content-Type = %q", path, got)
+		}
+	}
+
+	resp, err := http.Get(f.http.URL + "/sdk/engine")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("GET /sdk/engine without go-get = %d, want 404", resp.StatusCode)
+	}
+}
+
 func TestManifestUnchangedInDevMode(t *testing.T) {
 	f := newFixture(t, "")
 	resp, _ := http.Get(f.http.URL + "/stub/manifest.xml")

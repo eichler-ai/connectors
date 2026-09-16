@@ -152,6 +152,11 @@ URL, `hub` at `https://connectors.eichler.ai`. Both run one instance (min = max 
 affinity and a 60-minute request timeout, so the WebSocket bridge survives. Re-running the script is
 safe — it reuses the existing secret and service, and only creates what's missing.
 
+The apex `eichler.ai` domain is also mapped to the production hub for the Microsoft publisher-domain
+document. The same public handler serves Go discovery requests below `/sdk` for the private
+`eichler.ai/sdk` module; ordinary `/sdk` requests remain 404. Keep this route when changing the hub's
+domain mappings, and verify `https://eichler.ai/sdk/engine?go-get=1` after a production deploy.
+
 ```sh
 hub/deploy/deploy.sh staging
 hub/deploy/deploy.sh prod

@@ -154,6 +154,12 @@ func NewServer(opts Options) (*Server, error) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(wellknown.MicrosoftIdentityAssociation)
 	})
+	// The apex eichler.ai domain is mapped to this service for Microsoft's
+	// publisher-domain document above. It also owns the SDK's Go vanity path,
+	// so serve discovery metadata here rather than coupling module resolution
+	// to the product Core's independently deployed service.
+	mux.HandleFunc("GET /sdk", serveSDKGoImport)
+	mux.HandleFunc("GET /sdk/", serveSDKGoImport)
 	s := &Server{opts: opts, host: host, handler: mux, servers: map[string]*mcp.Server{}, uploads: newUploadLimiter()}
 	if opts.AuthServer != nil {
 		opts.AuthServer.Routes(mux)
@@ -208,6 +214,18 @@ func NewServer(opts Options) (*Server, error) {
 		}
 	}
 	return s, nil
+}
+
+const sdkGoImportPage = `<!doctype html><html><head><meta name="go-import" content="eichler.ai/sdk git https://github.com/eichler-ai/sdk"></head></html>`
+
+func serveSDKGoImport(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Query().Get("go-get") != "1" {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "public, max-age=3600")
+	_, _ = w.Write([]byte(sdkGoImportPage))
 }
 
 // Handler is the hub's whole HTTP surface.
